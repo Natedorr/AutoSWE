@@ -1,0 +1,16 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "## Available commands",
+      "/plan",
+      "/fix"
+    ]
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "suppress_welcome": true
+    }
+  }
+]

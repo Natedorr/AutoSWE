@@ -1,0 +1,9 @@
+{
+  "kind": "plan",
+  "slug": "gh:owner_repo_42",
+  "plan_branch": "autoswe/issue-42",
+  "user_reply_text": "Please also add support for dark mode.",
+  "attempt_count": 1,
+  "resume_session_id": "session-plan-42",
+  "triggering_comment_id": null
+}

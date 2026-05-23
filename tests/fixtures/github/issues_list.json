@@ -1,0 +1,45 @@
+[
+  {
+    "number": 42,
+    "title": "Fix authentication bug in login flow",
+    "body": "Users are unable to login after the latest update. The auth middleware throws a 500 error.\n\n/fix with focus on session handling\n",
+    "labels": [
+      {"name": "bug", "color": "d73a4a", "default": true},
+      {"name": "autoswe:pending", "color": "0075ca", "default": false, "description": "Ready to dispatch"}
+    ],
+    "state": "open",
+    "assignees": [],
+    "created_at": "2026-05-01T02:01:14Z",
+    "updated_at": "2026-05-01T03:10:05Z",
+    "closed_at": null,
+    "user": {"login": "Natedorr"}
+  },
+  {
+    "number": 43,
+    "title": "Add caching for API responses",
+    "body": "The API is slow because it hits the database on every request. We need response caching.\n",
+    "labels": [
+      {"name": "enhancement", "color": "a2eeef", "default": true}
+    ],
+    "state": "open",
+    "assignees": [],
+    "created_at": "2026-05-02T10:00:00Z",
+    "updated_at": "2026-05-02T10:00:00Z",
+    "closed_at": null,
+    "user": {"login": "Natedorr"}
+  },
+  {
+    "number": 44,
+    "title": "Refactor database connection pooling",
+    "body": "The current connection pooling implementation leaks connections under high load.\n\n/plan\n",
+    "labels": [
+      {"name": "autoswe:plan_ready", "color": "0e8a16", "default": false, "description": "Plan ready, waiting for /fix"}
+    ],
+    "state": "open",
+    "assignees": [{"login": "Natedorr"}],
+    "created_at": "2026-05-03T08:30:00Z",
+    "updated_at": "2026-05-03T09:15:00Z",
+    "closed_at": null,
+    "user": {"login": "Natedorr"}
+  }
+]

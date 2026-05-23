@@ -1,0 +1,10 @@
+{
+  "__meta": {
+    "endpoint": "GET /_git/repositories/{repo}/pullrequests",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:31:52.818383+00:00",
+    "doc_ref": "docs/azure-devops-api/list-pullrequests.md"
+  },
+  "count": 0,
+  "value": []
+}

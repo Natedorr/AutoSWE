@@ -1,0 +1,9 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/pulls?state=open",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:28:41.693890+00:00",
+    "doc_ref": "docs/github-api/list-pulls.md"
+  },
+  "data": []
+}

@@ -1,0 +1,15 @@
+[
+  {
+    "kind": "set_status",
+    "status": "skipped"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "skipped",
+      "first_dispatched_at": null,
+      "pending_command": null,
+      "pending_guidance": null
+    }
+  }
+]

@@ -1,0 +1,105 @@
+{
+  "__meta": {
+    "captured_at": "2026-05-10T00:00:00Z",
+    "api_version": "2022-11-28",
+    "description": "Golden fixture: issue with autoswe:fixed label, multiple comment types for normalization testing",
+    "token_owner_login": "Natedorr",
+    "issue_author_login": "CollaboratorJane"
+  },
+  "issue": {
+    "html_url": "https://github.com/Natedorr/example-app/issues/42",
+    "id": 9876543210,
+    "number": 42,
+    "title": "Fix authentication bug in login flow",
+    "labels": [
+      {"id": 1, "name": "bug", "color": "d73a4a", "default": true},
+      {"id": 2, "name": "autoswe:fixed", "color": "ededed", "default": false}
+    ],
+    "state": "open",
+    "assignees": [{"login": "Natedorr", "id": 111111, "html_url": "https://github.com/Natedorr", "type": "User"}],
+    "comments": 5,
+    "created_at": "2026-05-01T02:01:14Z",
+    "updated_at": "2026-05-01T03:10:05Z",
+    "closed_at": null,
+    "author_association": "OWNER",
+    "body": "Users are unable to login after the latest update.\n\n/fix with focus on session handling",
+    "user": {
+      "login": "CollaboratorJane",
+      "id": 222222,
+      "html_url": "https://github.com/CollaboratorJane",
+      "type": "User"
+    }
+  },
+  "comments": [
+    {
+      "html_url": "https://github.com/Natedorr/example-app/issues/42#issuecomment-1001",
+      "id": 1001,
+      "user": {
+        "login": "Natedorr",
+        "id": 111111,
+        "html_url": "https://github.com/Natedorr",
+        "type": "User"
+      },
+      "created_at": "2026-05-01T02:05:00Z",
+      "updated_at": "2026-05-01T02:05:00Z",
+      "body": "autoSWE picked up this issue (`natedorr_example-app_42`).\n\n<!-- autoswe-bot -->",
+      "author_association": "OWNER"
+    },
+    {
+      "html_url": "https://github.com/Natedorr/example-app/issues/42#issuecomment-1002",
+      "id": 1002,
+      "user": {
+        "login": "Natedorr",
+        "id": 111111,
+        "html_url": "https://github.com/Natedorr",
+        "type": "User"
+      },
+      "created_at": "2026-05-01T02:10:00Z",
+      "updated_at": "2026-05-01T02:10:00Z",
+      "body": "/fix with focus on session handling",
+      "author_association": "OWNER"
+    },
+    {
+      "html_url": "https://github.com/Natedorr/example-app/issues/42#issuecomment-1003",
+      "id": 1003,
+      "user": {
+        "login": "Natedorr",
+        "id": 111111,
+        "html_url": "https://github.com/Natedorr",
+        "type": "User"
+      },
+      "created_at": "2026-05-01T02:30:00Z",
+      "updated_at": "2026-05-01T02:30:00Z",
+      "body": "Completed with command `/fix` — done.\n\nSummary: Fixed the authentication bug by updating session middleware.\n\n<!-- autoswe-bot -->",
+      "author_association": "OWNER"
+    },
+    {
+      "html_url": "https://github.com/Natedorr/example-app/issues/42#issuecomment-1004",
+      "id": 1004,
+      "user": {
+        "login": "RandomContributor",
+        "id": 333333,
+        "html_url": "https://github.com/RandomContributor",
+        "type": "User"
+      },
+      "created_at": "2026-05-01T02:35:00Z",
+      "updated_at": "2026-05-01T02:35:00Z",
+      "body": "/fix with another fix",
+      "author_association": "CONTRIBUTOR"
+    },
+    {
+      "html_url": "https://github.com/Natedorr/example-app/issues/42#issuecomment-1005",
+      "id": 1005,
+      "user": {
+        "login": "CollaboratorJane",
+        "id": 222222,
+        "html_url": "https://github.com/CollaboratorJane",
+        "type": "User"
+      },
+      "created_at": "2026-05-01T03:00:00Z",
+      "updated_at": "2026-05-01T03:00:00Z",
+      "body": "/pr",
+      "author_association": "COLLABORATOR"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Time limit",
+      "2h",
+      "/retry",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "failed",
+      "attempt_count": 1,
+      "_guard_blocked": true,
+      "first_dispatched_at": null,
+      "pending_command": null
+    }
+  }
+]

@@ -1,0 +1,20 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Failed: agent crashed",
+      "/retry"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "failed",
+      "session_id": null
+    }
+  }
+]

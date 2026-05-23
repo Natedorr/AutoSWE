@@ -1,0 +1,7 @@
+{
+  "kind": "mark_failed_limit",
+  "slug": "gh__o_r_5",
+  "attempt_count": 4,
+  "triggering_comment_id": 1,
+  "limit_reason": "attempts"
+}

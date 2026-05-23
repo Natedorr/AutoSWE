@@ -1,0 +1,20 @@
+You are resolving merge conflicts for GitHub issue {{OWNER}}/{{REPO}}#{{ISSUE_NUMBER}}: {{TITLE}}
+
+Issue body:
+{{BODY}}
+
+{{PLAN}}
+
+Merging `origin/{{BASE_BRANCH}}` into this branch produced conflicts in these files:
+
+{{CONFLICT_FILES}}
+
+Read each conflicted file, reconcile both sides while preserving the fix intent of this branch,
+and remove all `<<<<<<<` / `=======` / `>>>>>>>` markers.
+
+When all conflicts are resolved, run:
+
+    git add -A && git commit --no-edit
+
+to complete the merge. Do not start new work. Do not push (the handler pushes).
+Summarize which files you resolved and how.

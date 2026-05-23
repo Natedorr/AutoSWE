@@ -1,0 +1,33 @@
+{
+  "api": {
+    "issue": {
+      "number": 99,
+      "title": "Broken session test",
+      "body": "/fix",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_99",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 99,
+    "title": "Broken session test",
+    "status": "planned",
+    "plan_branch": "autoswe/issue-99",
+    "base_branch": "main",
+    "attempt_count": 1,
+    "session_id": "stale-session-abc",
+    "provider": "github",
+    "guard_blocked": false,
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

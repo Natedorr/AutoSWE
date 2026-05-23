@@ -1,0 +1,16 @@
+{
+  "id": 100,
+  "rev": 3,
+  "fields": {
+    "System.Id": 100,
+    "System.Title": "Feature: add login page",
+    "System.Description": "<p>Implement the login page with OAuth.</p>",
+    "System.State": "New",
+    "System.Tags": "autoswe:planned;feature",
+    "System.CreatedBy": {
+      "displayName": "Nate Dorr",
+      "uniqueName": "natedorr@example.com"
+    },
+    "System.CreatedDate": "2026-04-01T10:00:00Z"
+  }
+}

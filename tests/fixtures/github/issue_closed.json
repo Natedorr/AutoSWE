@@ -1,0 +1,36 @@
+{
+  "html_url": "https://github.com/Natedorr/autoswe/issues/3",
+  "id": 4370540565,
+  "number": 3,
+  "title": "when an issue is processed, commits and branches are not being associated with the issue",
+  "labels": [
+    {
+      "id": 10848865613,
+      "name": "autoswe:fixed",
+      "color": "ededed",
+      "default": false,
+      "description": "Completed successfully"
+    }
+  ],
+  "state": "closed",
+  "assignees": [
+    {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    }
+  ],
+  "comments": 4,
+  "created_at": "2026-05-03T01:19:22Z",
+  "updated_at": "2026-05-03T01:54:27Z",
+  "closed_at": "2026-05-03T01:54:27Z",
+  "author_association": "OWNER",
+  "body": "when an issue is processed, commits and branches are not being associated with the issue",
+  "user": {
+    "login": "Natedorr",
+    "id": 185386482,
+    "html_url": "https://github.com/Natedorr",
+    "type": "User"
+  }
+}

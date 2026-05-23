@@ -1,0 +1,8 @@
+{
+  "__meta": {
+    "endpoint": "PUT /repos/{o}/{r}/issues/{n}/labels",
+    "method": "PUT",
+    "captured_at": "2026-05-11T16:28:41.382438+00:00",
+    "doc_ref": "docs/github-api/replace-labels.md"
+  }
+}

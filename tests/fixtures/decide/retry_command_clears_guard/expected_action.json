@@ -1,0 +1,7 @@
+{
+  "kind": "retry",
+  "slug": "gh:owner_repo_6",
+  "attempt_count": 1,
+  "resume_session_id": null,
+  "triggering_comment_id": null
+}

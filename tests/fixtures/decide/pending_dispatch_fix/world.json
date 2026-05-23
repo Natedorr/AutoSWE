@@ -1,0 +1,41 @@
+{
+  "api": {
+    "issue": {
+      "number": 42,
+      "title": "Test issue",
+      "body": "/fix",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open",
+      "base_branch": "main"
+    },
+    "comments": [],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_42",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 42,
+    "title": "Test issue",
+    "body": "/fix",
+    "status": "pending",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 0,
+    "first_dispatched_at": null,
+    "last_dispatched_command": null,
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "session_id": null,
+    "pr_number": null,
+    "guard_blocked": false,
+    "gh_closed": false,
+    "pending_command": "/fix",
+    "pending_guidance": null,
+    "pending_user_reply": null,
+    "suppress_welcome": false
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

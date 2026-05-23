@@ -1,0 +1,9 @@
+{
+  "kind": "fix",
+  "slug": "gh:owner_repo_42",
+  "plan_branch": "autoswe/issue-42",
+  "guidance": null,
+  "attempt_count": 1,
+  "resume_session_id": "session-fix-prev",
+  "triggering_comment_id": 2
+}

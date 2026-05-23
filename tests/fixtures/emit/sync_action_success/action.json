@@ -1,0 +1,7 @@
+{
+  "kind": "sync_branch",
+  "slug": "gh:owner_repo_42",
+  "plan_branch": "autoswe/issue-42",
+  "attempt_count": 1,
+  "triggering_comment_id": 1
+}

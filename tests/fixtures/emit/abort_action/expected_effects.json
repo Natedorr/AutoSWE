@@ -1,0 +1,22 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Task aborted",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "aborted"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "aborted",
+      "first_dispatched_at": null,
+      "pending_command": null,
+      "pending_guidance": null
+    }
+  }
+]

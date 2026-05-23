@@ -1,0 +1,12 @@
+[
+  {
+    "kind": "set_status",
+    "status": "pending"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "pending"
+    }
+  }
+]

@@ -1,0 +1,8 @@
+{
+  "kind": "plan",
+  "slug": "gh__owner_repo_42",
+  "plan_branch": "main",
+  "guidance": "detailed guidance",
+  "attempt_count": 1,
+  "triggering_comment_id": 1
+}

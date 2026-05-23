@@ -1,0 +1,154 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/labels",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:28:39.926253+00:00",
+    "doc_ref": "docs/github-api/list-repo-labels.md"
+  },
+  "data": [
+    {
+      "id": 10856675545,
+      "name": "autoswe:dispatched",
+      "color": "d93f0b",
+      "description": "Agent working on it"
+    },
+    {
+      "id": 10856675621,
+      "name": "autoswe:done",
+      "color": "ededed",
+      "description": "Completed successfully"
+    },
+    {
+      "id": 10856675710,
+      "name": "autoswe:failed",
+      "color": "d73a4a",
+      "description": "Agent errored"
+    },
+    {
+      "id": 10856675504,
+      "name": "autoswe:pending",
+      "color": "0075ca",
+      "description": "Ready to dispatch"
+    },
+    {
+      "id": 10856675764,
+      "name": "autoswe:plan_ready",
+      "color": "0e8a16",
+      "description": "Plan ready, waiting for /fix"
+    },
+    {
+      "id": 10856675736,
+      "name": "autoswe:skipped",
+      "color": "ffffff",
+      "description": "Skipped by user"
+    },
+    {
+      "id": 10856675693,
+      "name": "autoswe:waiting",
+      "color": "fbca04",
+      "description": "Agent asked a question"
+    },
+    {
+      "id": 10848066733,
+      "name": "bug",
+      "color": "d73a4a",
+      "description": "Something isn't working"
+    },
+    {
+      "id": 10848066737,
+      "name": "documentation",
+      "color": "0075ca",
+      "description": "Improvements or additions to documentation"
+    },
+    {
+      "id": 10848066739,
+      "name": "duplicate",
+      "color": "cfd3d7",
+      "description": "This issue or pull request already exists"
+    },
+    {
+      "id": 10848066744,
+      "name": "enhancement",
+      "color": "a2eeef",
+      "description": "New feature or request"
+    },
+    {
+      "id": 10848066754,
+      "name": "good first issue",
+      "color": "7057ff",
+      "description": "Good for newcomers"
+    },
+    {
+      "id": 10848066748,
+      "name": "help wanted",
+      "color": "008672",
+      "description": "Extra attention is needed"
+    },
+    {
+      "id": 10848066759,
+      "name": "invalid",
+      "color": "e4e669",
+      "description": "This doesn't seem right"
+    },
+    {
+      "id": 10848066765,
+      "name": "question",
+      "color": "d876e3",
+      "description": "Further information is requested"
+    },
+    {
+      "id": 10848865590,
+      "name": "ralph:dispatched",
+      "color": "d93f0b",
+      "description": "Agent working on it"
+    },
+    {
+      "id": 10848865613,
+      "name": "ralph:done",
+      "color": "ededed",
+      "description": "Completed successfully"
+    },
+    {
+      "id": 10848865643,
+      "name": "ralph:failed",
+      "color": "d73a4a",
+      "description": "Agent errored"
+    },
+    {
+      "id": 10848865528,
+      "name": "ralph:pending",
+      "color": "0075ca",
+      "description": "Ready to dispatch"
+    },
+    {
+      "id": 10848865679,
+      "name": "ralph:plan_ready",
+      "color": "0e8a16",
+      "description": "Plan ready, waiting for /fix"
+    },
+    {
+      "id": 10848865666,
+      "name": "ralph:skipped",
+      "color": "ffffff",
+      "description": "Skipped by user"
+    },
+    {
+      "id": 10848865625,
+      "name": "ralph:waiting",
+      "color": "fbca04",
+      "description": "Agent asked a question"
+    },
+    {
+      "id": 10914453405,
+      "name": "test",
+      "color": "ededed",
+      "description": null
+    },
+    {
+      "id": 10848066772,
+      "name": "wontfix",
+      "color": "ffffff",
+      "description": "This will not be worked on"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "api": {
+    "issue": {
+      "number": 10,
+      "title": "Add feature",
+      "body": "Need this feature.",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open"
+    },
+    "comments": [
+      {
+        "body": "Completed with command `/plan`.\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T09:00:00Z",
+        "author_login": "BOT",
+        "id": 1,
+        "is_bot": true
+      },
+      {
+        "body": "Completed with command `/fix`.\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T10:00:00Z",
+        "author_login": "BOT",
+        "id": 2,
+        "is_bot": true
+      },
+      {
+        "body": "/plan\n\nCan you re-plan this with a different approach?",
+        "created_at": "2026-01-01T11:00:00Z",
+        "author_login": "AUTHOR",
+        "id": 3,
+        "is_bot": false
+      }
+    ],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_10",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 10,
+    "title": "Add feature",
+    "status": "fixed",
+    "plan_branch": "main",
+    "base_branch": "main",
+    "attempt_count": 2,
+    "last_dispatched_command": "/fix",
+    "session_id": null,
+    "provider": "github",
+    "last_dispatched_command_id": 1,
+    "last_consumed_reply_id": 1,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

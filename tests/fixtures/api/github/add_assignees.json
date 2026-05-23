@@ -1,0 +1,11 @@
+{
+  "__meta": {
+    "endpoint": "POST /repos/{o}/{r}/issues/{n}/assignees",
+    "method": "POST",
+    "captured_at": "2026-05-11T16:28:41.382438+00:00",
+    "doc_ref": "docs/github-api/add-assignees.md"
+  },
+  "login": "testowner",
+  "id": 1,
+  "type": "User"
+}

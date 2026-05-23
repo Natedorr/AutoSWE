@@ -1,0 +1,92 @@
+{
+  "provider": "github",
+  "owner": "natedorr",
+  "repo": "autoswe",
+  "issue": {
+    "number": 8,
+    "title": "Add rate limiting",
+    "body": "API needs rate limiting.\n\n/fix",
+    "labels": [
+      {
+        "name": "autoswe:failed",
+        "color": "d73a4a"
+      }
+    ],
+    "state": "open",
+    "assignees": [],
+    "created_at": "2026-05-01T01:00:00Z",
+    "updated_at": "2026-05-01T04:00:00Z",
+    "closed_at": null,
+    "user": {
+      "login": "natedorr",
+      "id": 1,
+      "type": "User"
+    },
+    "pull_request": null
+  },
+  "labels": [
+    "autoswe:failed"
+  ],
+  "comments": [
+    {
+      "id": 50,
+      "body": "Completed with command `/fix`.\n<!-- autoswe-bot -->",
+      "created_at": "2026-05-01T01:30:00Z",
+      "user": {
+        "login": "natedorr",
+        "id": 1,
+        "type": "User"
+      }
+    },
+    {
+      "id": 100,
+      "body": "Failed: SDK timeout after 30s\n\nPost `/retry` to try again.\n<!-- autoswe-bot -->",
+      "created_at": "2026-05-01T02:00:00Z",
+      "user": {
+        "login": "natedorr",
+        "id": 1,
+        "type": "User"
+      }
+    },
+    {
+      "id": 200,
+      "body": "/retry",
+      "created_at": "2026-05-01T03:00:00Z",
+      "user": {
+        "login": "natedorr",
+        "id": 1,
+        "type": "User"
+      }
+    }
+  ],
+  "repo_labels": [],
+  "queue_task": {
+    "id": "gh:natedorr_autoswe_8",
+    "owner": "natedorr",
+    "repo": "autoswe",
+    "issue_number": 8,
+    "title": "Add rate limiting",
+    "body": "API needs rate limiting.\n\n/fix",
+    "base_branch": "main",
+    "pr_number": null,
+    "session_id": "s-fix-8",
+    "last_synced": "2026-05-01T02:30:00Z",
+    "created_at": "2026-05-01T01:00:00Z",
+    "suppress_welcome": true,
+    "attempt_count": 2,
+    "provider": "github",
+    "autoswe_status": "failed"
+  },
+  "authenticated_user": {
+    "login": "natedorr",
+    "id": 1,
+    "type": "User"
+  },
+  "claude_responses": [
+    {
+      "text": "Added rate limiting middleware using token bucket algorithm.",
+      "session_id": "s-fix-8-retry",
+      "subtype": "success"
+    }
+  ]
+}

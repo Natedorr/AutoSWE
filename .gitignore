@@ -1,0 +1,17 @@
+﻿/.vs
+**/__pycache__/**
+/worktrees/
+/data/
+/running/
+/logs/
+/.venv/
+.claude/
+
+/config/autoswe.env
+/config/repos.json
+
+# Coverage output
+.coverage
+
+# Manual test helpers — output files
+tests/helpers/ado_post_summary.json

@@ -1,0 +1,14 @@
+{
+  "__meta": {
+    "endpoint": "POST /_git/repositories/{repo}/pullrequests",
+    "method": "POST",
+    "captured_at": "2026-05-11T16:31:52.819126+00:00",
+    "doc_ref": "docs/azure-devops-api/create-pullrequest.md"
+  },
+  "pullRequestId": 1,
+  "sourceRefName": "refs/heads/autoswe/issue-1",
+  "targetRefName": "refs/heads/main",
+  "status": 3,
+  "title": "autoswe: fix for issue #1",
+  "url": "https://dev.azure.com/natedorr/testProject/_git/testProject/pullrequest/1"
+}

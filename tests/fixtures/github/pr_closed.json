@@ -1,0 +1,31 @@
+{
+  "url": "https://api.github.com/repos/Natedorr/autoswe/pulls/4",
+  "html_url": "https://github.com/Natedorr/autoswe/pull/4",
+  "number": 4,
+  "state": "closed",
+  "title": "Remove CLAUDE_MODEL config option",
+  "user": {
+    "sha": null,
+    "ref": null,
+    "label": null,
+    "user": "Natedorr"
+  },
+  "body": "CLAUDE_MODEL was redundant now that PLAN_MODEL and FIX_MODEL handle per-phase model selection, and repos.json's model field serves as a catch-all fallback. Updated model resolution to three tiers instead of four.\r\n\r\nFiles changed:\r\n- ralph/config.py: removed CLAUDE_MODEL from load_config() defaults\r\n- ralph/claude_runner.py: removed CLAUDE_MODEL from fallback chain + docstring\r\n- config/ralph.env.example: removed CLAUDE_MODEL line\r\n- README.md: removed CLAUDE_MODEL from config docs and resolution order\r\n- CLAUDE.md: removed CLAUDE_MODEL from config docs and resolution order",
+  "created_at": "2026-05-03T01:19:53Z",
+  "updated_at": "2026-05-03T01:33:07Z",
+  "closed_at": "2026-05-03T01:20:08Z",
+  "merged_at": "2026-05-03T01:20:08Z",
+  "merge_commit_sha": "660b08ea217643a37f0238c3b01d8dfd79c61ebd",
+  "head": {
+    "sha": "c6322fa0212ca783b0dbebc27a8ba5c30dfdd4bc",
+    "ref": "autoswe/issue-1",
+    "label": "Natedorr:autoswe/issue-1",
+    "user": null
+  },
+  "base": {
+    "sha": "05d5da759006b45c0f6c49f474a3774ed2202a64",
+    "ref": "master",
+    "label": "Natedorr:master",
+    "user": null
+  }
+}

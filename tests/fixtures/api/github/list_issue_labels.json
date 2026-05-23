@@ -1,0 +1,16 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/issues/{n}/labels",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:28:41.381439+00:00",
+    "doc_ref": "docs/github-api/list-issue-labels.md"
+  },
+  "data": [
+    {
+      "id": 10856675621,
+      "name": "autoswe:done",
+      "color": "ededed",
+      "description": "Completed successfully"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "kind": "mark_failed_limit",
+  "slug": "gh:owner_repo_42",
+  "attempt_count": 1,
+  "triggering_comment_id": 2,
+  "limit_reason": "time"
+}

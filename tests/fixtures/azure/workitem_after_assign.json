@@ -1,0 +1,12 @@
+{
+  "id": 100,
+  "rev": 7,
+  "fields": {
+    "System.Id": 100,
+    "System.Title": "Feature: add login page",
+    "System.AssignedTo": "natedorr@example.com",
+    "System.Tags": "feature; autoswe:fixing",
+    "System.State": "Active",
+    "System.WorkItemType": "User Story"
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/issues?state=open",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:28:40.393255+00:00",
+    "doc_ref": "docs/github-api/list-issues.md"
+  },
+  "data": [
+    {
+      "id": 4417737852,
+      "number": 70,
+      "title": "Per-WI welcomeCommentSent flag instead of config suppressWelcome",
+      "user": {
+        "login": "Natedorr",
+        "id": 185386482,
+        "type": "User"
+      },
+      "labels": [
+        {
+          "id": 10856675621,
+          "name": "autoswe:done",
+          "color": "ededed",
+          "description": "Completed successfully"
+        }
+      ],
+      "state": "open",
+      "assignees": [
+        {
+          "login": "Natedorr",
+          "id": 185386482,
+          "type": "User"
+        }
+      ],
+      "comments": 2,
+      "created_at": "2026-05-11T02:51:32Z",
+      "updated_at": "2026-05-11T16:20:05Z",
+      "closed_at": null,
+      "author_association": "OWNER",
+      "body": "/fix\n\n**Problem:** Currently uses a config-level `suppressWelcome` boolean to control welcome message posting. This is kludge logic \u2014 it's reactive and doesn't track actual state.\n\n**Fix:** Add a per-WI custom field (e.g., `welcomeCommentSent`) that tracks whether the welcome comment has been sent:\n\n1. Round-robin picks a WI\n2. Checks custom field `welcomeCommentSent` \u2014 if `true`, skip posting welcome\n3. If `false` (or undefined/null) \u2192 posts welcome comment, sets field to `true`\n4. Done. Never posts again, ever.\n\n**Benefits:**\n- No config flag needed\n- No edge cases about commands already existing\n- State is accurate and auditable per-WI\n- Straightforward: remember what you did, don't do it again\n\n**Implementation:**\n- Add custom field definition to the Azure DevOps config/schema\n- In the round-robin/processing logic, check the field before posting welcome\n- After posting welcome, set the field to true via Azure API update\n- Handle undefined/null as false (legacy WIs without the field get a welcome)"
+    },
+    {
+      "id": 4417720915,
+      "number": 69,
+      "title": "When AutoSWE creates branches via /fix, they should optionally be linked to a GitHub issue",
+      "user": {
+        "login": "Natedorr",
+        "id": 185386482,
+        "type": "User"
+      },
+      "labels": [
+        {
+          "id": 10856675764,
+          "name": "autoswe:plan_ready",
+          "color": "0e8a16",
+          "description": "Plan ready, waiting for /fix"
+        }
+      ],
+      "state": "open",
+      "assignees": [
+        {
+          "login": "Natedorr",
+          "id": 185386482,
+          "type": "User"
+        }
+      ],
+      "comments": 10,
+      "created_at": "2026-05-11T02:46:49Z",
+      "updated_at": "2026-05-11T16:20:06Z",
+      "closed_at": null,
+      "author_association": "OWNER",
+      "body": "When AutoSWE creates branches via /fix, they should optionally be linked to a GitHub issue.\n\nCurrent behavior: Branches are created, PRs can be opened, but nothing touches issue until a pr is generated.\n\nDesired behavior:\n\nwhen a fix is done, a comment is created that has the commit and new branch. but the issue itself has a development area which you can link the branch to. i want that branch linked when the first fix is done"
+    }
+  ]
+}

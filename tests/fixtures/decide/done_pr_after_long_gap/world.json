@@ -1,0 +1,67 @@
+{
+  "api": {
+    "issue": {
+      "number": 247,
+      "title": "Feature that completed with a long gap before /pr",
+      "body": "Implement the feature.",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open"
+    },
+    "comments": [
+      {
+        "body": "Completed with command `/fix` — done.\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T09:40:03Z",
+        "author_login": "BOT",
+        "id": 1,
+        "is_bot": true
+      },
+      {
+        "body": "## Review\n\nLGTM, no issues found.\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T09:45:00Z",
+        "author_login": "BOT",
+        "id": 2,
+        "is_bot": true
+      },
+      {
+        "body": "/pr",
+        "created_at": "2026-01-01T17:44:19Z",
+        "author_login": "AUTHOR",
+        "id": 3,
+        "is_bot": false
+      }
+    ],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_247",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 247,
+    "title": "Feature that completed with a long gap before /pr",
+    "status": "reviewed",
+    "plan_branch": "autoswe/issue-247",
+    "base_branch": "main",
+    "attempt_count": 1,
+    "first_dispatched_at": null,
+    "last_dispatched_command": "/review",
+    "last_dispatched_command_id": 2,
+    "last_consumed_reply_id": 2,
+    "session_id": "fix-session",
+    "pr_number": null,
+    "guard_blocked": false,
+    "provider": "github",
+    "gh_closed": false,
+    "pending_command": null,
+    "pending_guidance": null,
+    "pending_user_reply": null,
+    "suppress_welcome": true,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {
+    "MAX_ATTEMPTS": 3,
+    "MAX_TOTAL_HOURS": 2
+  },
+  "repo_cfg": {}
+}

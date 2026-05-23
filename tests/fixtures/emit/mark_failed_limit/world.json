@@ -1,0 +1,35 @@
+{
+  "api": {
+    "issue": {
+      "number": 5,
+      "title": "Too many attempts",
+      "body": "/fix",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_5",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 5,
+    "title": "Too many attempts",
+    "status": "failed",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 3,
+    "session_id": null,
+    "provider": "github",
+    "guard_blocked": false,
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {
+    "MAX_ATTEMPTS": 3
+  },
+  "repo_cfg": {}
+}

@@ -1,0 +1,25 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Max attempts",
+      "3",
+      "/retry",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "failed",
+      "attempt_count": 4,
+      "_guard_blocked": true,
+      "first_dispatched_at": null,
+      "pending_command": null
+    }
+  }
+]

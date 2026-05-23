@@ -1,0 +1,26 @@
+{
+  "__meta": {
+    "endpoint": "GET /_git/repositories",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:31:52.217450+00:00",
+    "doc_ref": "docs/azure-devops-api/list-repositories.md"
+  },
+  "count": 1,
+  "value": [
+    {
+      "id": "d512de06-9118-4a61-97f1-34938c662c41",
+      "name": "testProject",
+      "url": "https://dev.azure.com/natedorr/5f5c4aeb-774c-4ddf-935e-26bac4dd19af/_apis/git/repositories/d512de06-9118-4a61-97f1-34938c662c41",
+      "project": {
+        "id": "5f5c4aeb-774c-4ddf-935e-26bac4dd19af",
+        "name": "testProject",
+        "url": "https://dev.azure.com/natedorr/_apis/projects/5f5c4aeb-774c-4ddf-935e-26bac4dd19af",
+        "state": "wellFormed",
+        "revision": 11,
+        "visibility": "private",
+        "lastUpdateTime": "2026-05-04T15:59:22.237Z"
+      },
+      "defaultBranch": "refs/heads/main"
+    }
+  ]
+}

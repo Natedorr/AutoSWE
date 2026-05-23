@@ -1,0 +1,34 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/issues/{n}/comments",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:28:41.054135+00:00",
+    "doc_ref": "docs/github-api/list-issue-comments.md"
+  },
+  "data": [
+    {
+      "id": 4417311667,
+      "user": {
+        "login": "Natedorr",
+        "id": 185386482,
+        "type": "User"
+      },
+      "created_at": "2026-05-11T03:21:59Z",
+      "updated_at": "2026-05-11T03:21:59Z",
+      "body": "autoSWE picked up this issue (`gh:natedorr_autoswe_70`).\n\n**Available Commands:**\n- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n- `/plan --branch <name>` - Plan on a specific branch (default: main)\n- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n- `/fix --branch <name>` - Fix on a specific branch (default: main)\n- `/fix with <guidance>` - Same as /fix but appends guidance to the prompt\n- `/pr` - Open a pull request from the current branch\n- `/sync` - Pull the branch from upstream to keep it up to date\n- `/retry` - Retry a failed task (resets attempt counter)\n- `/skip` - Skip this issue\n- `/abort` - Cancel the current task\n\nYou can add guidance: `/fix with performance focus`\n\n<!-- autoswe-bot -->\n",
+      "author_association": "OWNER"
+    },
+    {
+      "id": 4418007781,
+      "user": {
+        "login": "Natedorr",
+        "id": 185386482,
+        "type": "User"
+      },
+      "created_at": "2026-05-11T06:12:14Z",
+      "updated_at": "2026-05-11T06:12:14Z",
+      "body": "Completed with command `/fix`.\n\ud83d\udd17 [Commit](https://github.com/natedorr/autoswe/commit/4da92c7)\n\ud83d\udd17 [View branch](https://github.com/natedorr/autoswe/compare/autoswe/issue-70)\n\n**Summary:**\n\n- `test_post_welcome_skips_when_already_sent`: mocks `welcome_sent=True` \u2192 no post\n- `test_post_welcome_posts_when_not_sent`: mocks `welcome_sent=False` \u2192 posts + calls `set_welcome_sent`\n- `test_post_welcome_uses_repos_cfg_for_provider_routing`: updated with mock `welcome_sent=False`\n**7. `tests/test_sync_restart.py`** \u2014 Replaced `suppress_welcome` tests with new protocol tests:\n- `test_welcome_sent_protocol_exists`: verifies protocol methods exist\n- `test_github_tracker_welcome_sent_methods`: tests `welcome_sent=True` with label present\n- `test_github_tracker_welcome_sent_false_when_no_label`: tests `welcome_sent=False` when label absent\n**8. `tests/test_github_provider.py`** \u2014 Added `autoswe:welcome_sent` to the label set in `test_set_status_ensures_labels_only_once`\n**9. `tests/conftest.py`** \u2014 Removed `suppress_welcome` from the sample task fixture\n**10. 18 scenario `state.json` files** \u2014 Removed `suppress_welcome` key from `queue_task` entries\n<!-- autoswe-bot -->",
+      "author_association": "OWNER"
+    }
+  ]
+}

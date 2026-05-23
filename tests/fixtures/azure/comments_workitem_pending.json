@@ -1,0 +1,22 @@
+{
+  "comments": [
+    {
+      "id": 1,
+      "text": "/plan --branch develop",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "uniqueName": "natedorr@example.com"
+      },
+      "createdDate": "2026-04-01T10:30:00Z"
+    },
+    {
+      "id": 2,
+      "text": "I'll get started on this plan.\n\n<!-- autoswe-bot -->",
+      "createdBy": {
+        "displayName": "autoSWE Bot",
+        "uniqueName": "autoswe-bot"
+      },
+      "createdDate": "2026-04-01T10:30:05Z"
+    }
+  ]
+}

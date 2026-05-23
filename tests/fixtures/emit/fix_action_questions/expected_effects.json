@@ -1,0 +1,16 @@
+[
+  {
+    "kind": "set_status",
+    "status": "waiting"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "waiting",
+      "last_dispatched_command": "/fix",
+      "session_id": "session-fix-quest",
+      "last_phase": "fix",
+      "last_consumed_reply_id": 1
+    }
+  }
+]

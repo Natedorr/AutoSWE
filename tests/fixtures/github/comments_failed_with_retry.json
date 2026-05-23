@@ -1,0 +1,100 @@
+[
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/7#issuecomment-4365178735",
+    "id": 4365178735,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T02:05:41Z",
+    "updated_at": "2026-05-03T02:05:41Z",
+    "body": "autoSWE picked up this issue (`natedorr_autoswe_7`).\n\n**Available Commands:**\n- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n- `/pr` - Open a pull request from the current branch\n- `/retry` - Retry a failed task (resets attempt counter)\n- `/skip` - Skip this issue\n\nYou can add guidance: `/fix with performance focus`\n\n<!-- autoswe-bot -->\n",
+    "author_association": "OWNER"
+  },
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/7#issuecomment-4365212776",
+    "id": 4365212776,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T02:24:20Z",
+    "updated_at": "2026-05-03T02:24:20Z",
+    "body": "/plan",
+    "author_association": "OWNER"
+  },
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/7#issuecomment-4365223947",
+    "id": 4365223947,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T02:32:37Z",
+    "updated_at": "2026-05-03T02:32:37Z",
+    "body": "## Plan\n\n## Plan: Add `git pull` to poller scripts on each run\n\n### Problem\nThe poller scripts (`poller.sh` and `poller.ps1`) run whatever code is currently checked out. If new commits are pushed to the repo, the poller won't pick them up until manually updated. Need to auto-update before each run.\n\n### Files to Change\n\n1. **`poller.sh`** (Linux/macOS)\n2. **`poller.ps1`** (Windows)\n\n### Approach\n\nAdd a **hard reset to `origin/master`** before running the poller in both scripts. This ensures the latest code is always executed.\n\n**`poller.sh`** \u2014 add after lock acquisition (line ~35), before running poller:\n```bash\n# Update repo to latest master on each run\ncd \"$AUTOSWE_DIR\"\ngit fetch --all\ngit reset --hard origin/master\n```\n\n**`poller.ps1`** \u2014 add after lock acquisition (line ~57), before running poller:\n```powershell\n# Update repo to latest master on each run\nPush-Location $AUTOSWE_DIR\ngit fetch --all\ngit reset --hard origin/master\nPop-Location\n```\n\n### Why `git reset --hard` instead of `git pull`\n- `git pull` = fetch + merge, which can fail with merge conflicts if local uncommitted changes exist\n- `git fetch --all` + `git reset --hard origin/master` = unconditionally discard local changes and match the remote, which is the desired \"hard pull\" behavior for a poller script\n\n### Risks\n- **Low risk**: Any local uncommitted changes in the repo will be discarded. This is acceptable because the poller directory should not have local edits \u2014 it's a deployed service. If someone is actively developing, they'd work on a feature branch or have their own clone.\n- Both scripts should `cd` to `AUTOSWE_DIR` before running git commands to ensure they operate on the correct repo.\n\n### Test Plan\n- Run each script manually and verify it fetches + resets before the poller runs\n- Check that `git log --oneline -1` matches the latest `origin/master` commit after a run\n\n_Reply with `/fix` to start coding._\n<!-- autoswe-bot -->",
+    "author_association": "OWNER"
+  },
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/7#issuecomment-4365235026",
+    "id": 4365235026,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T02:40:41Z",
+    "updated_at": "2026-05-03T02:40:41Z",
+    "body": "## Plan\n\n## Plan: Add `git fetch --all` + `git reset --hard origin/master` to poller scripts\n\n### Files to Change\n\n1. **`poller.sh`** \u2014 insert 3 lines after line 35\n2. **`poller.ps1`** \u2014 insert 3 lines after line 57\n\n### Changes\n\n**`poller.sh`** \u2014 add between the `[START]` log and the poller invocation:\n```bash\n# Hard-pull latest master on each run so new code is always executed\ncd \"$AUTOSWE_DIR\"\ngit fetch --all\ngit reset --hard origin/master\n```\n\n**`poller.ps1`** \u2014 add between the `[START]` log and the poller invocation:\n```powershell\n# Hard-pull latest master on each run so new code is always executed\nPush-Location $AUTOSWE_DIR\ngit fetch --all\ngit reset --hard origin/master\nPop-Location\n```\n\n### Why `git fetch + reset --hard` instead of `git pull`\n- `git pull` = fetch + merge, which can fail with merge conflicts if local uncommitted changes exist\n- `git fetch --all` + `git reset --hard origin/master` unconditionally discards local changes and matches the remote \u2014 the desired \"hard pull\" behavior for a deployed poller service\n\n### Risks\n- **Low risk**: Any local uncommitted changes in the poller directory will be discarded. This is acceptable \u2014 the poller directory is a deployed service, not an active development workspace. Developers working on features should use a separate clone or feature branch.\n\n### Test Plan\n- Run `bash poller.sh` manually and verify it fetches + resets before the poller runs\n- Run `pwsh -File poller.ps1` (or test the PowerShell block) and verify same behavior\n- Confirm `git log --oneline -1` matches the latest `origin/master` commit after a run\n\n_Reply with `/fix` to start coding._\n<!-- autoswe-bot -->",
+    "author_association": "OWNER"
+  },
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/7#issuecomment-4365249800",
+    "id": 4365249800,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T02:52:00Z",
+    "updated_at": "2026-05-03T02:52:00Z",
+    "body": "## Plan\n\nStep-by-step plan to add a hard-pull on each poller script run.\n\n### Files to Change\n\n1. **`poller.sh`** \u2014 insert 3 lines after line 35\n2. **`poller.ps1`** \u2014 insert 3 lines after line 57\n\n### Changes\n\n**`poller.sh`** \u2014 add between the `[START]` log and the poller invocation:\n```bash\n# Hard-pull latest master on each run so new code is always executed\ncd \"$AUTOSWE_DIR\"\ngit fetch --all\ngit reset --hard origin/master\n```\n\n**`poller.ps1`** \u2014 add between the `[START]` log and the poller invocation:\n```powershell\n# Hard-pull latest master on each run so new code is always executed\nPush-Location $AUTOSWE_DIR\ngit fetch --all\ngit reset --hard origin/master\nPop-Location\n```\n\n### Why `git fetch + reset --hard` instead of `git pull`\n- `git pull` = fetch + merge, which can fail with merge conflicts if local uncommitted changes exist\n- `git fetch --all` + `git reset --hard origin/master` unconditionally discards local changes and matches the remote \u2014 the desired \"hard pull\" behavior for a deployed poller service\n\n### Risks\n- **Low risk**: Any local uncommitted changes in the poller directory will be discarded. This is acceptable \u2014 the poller directory is a deployed service, not an active development workspace. Developers working on features should use a separate clone or feature branch.\n\n### Test Plan\n- Run `bash poller.sh` manually and verify it fetches + resets before the poller runs\n- Run `pwsh -File poller.ps1` and verify same behavior\n- Confirm `git log --oneline -1` matches the latest `origin/master` commit after a run\n\n_Reply with `/fix` to start coding._\n<!-- autoswe-bot -->",
+    "author_association": "OWNER"
+  },
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/7#issuecomment-4365262246",
+    "id": 4365262246,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T03:01:19Z",
+    "updated_at": "2026-05-03T03:01:19Z",
+    "body": "## Plan\n\nStep-by-step plan to add a hard-pull on each poller script run.\n\n### Files to Change\n\n1. **`poller.sh`** \u2014 insert 4 lines after line 35\n2. **`poller.ps1`** \u2014 insert 4 lines after line 57\n\n### Changes\n\n**`poller.sh`** \u2014 add between the `[START]` log and the poller invocation (after line 35):\n```bash\n# Hard-pull latest master on each run so new code is always executed\ngit -C \"$AUTOSWE_DIR\" fetch --all\ngit -C \"$AUTOSWE_DIR\" reset --hard origin/master\n```\n\n**`poller.ps1`** \u2014 add between the `[START]` log and the poller invocation (after line 57):\n```powershell\n# Hard-pull latest master on each run so new code is always executed\nPush-Location $AUTOSWE_DIR\ngit fetch --all\ngit reset --hard origin/master\nPop-Location\n```\n\n### Why `git fetch + reset --hard` instead of `git pull`\n- `git pull` = fetch + merge, which can fail with merge conflicts if local uncommitted changes exist\n- `git fetch --all` + `git reset --hard origin/master` unconditionally discards local changes and matches the remote \u2014 the desired \"hard pull\" behavior for a deployed poller service\n\n### Risks\n- **Low risk**: Any local uncommitted changes in the poller directory will be discarded. This is acceptable \u2014 the poller directory is a deployed service, not an active development workspace. Developers working on features should use a separate clone or feature branch.\n\n### Test Plan\n- Run `bash poller.sh` manually and verify it fetches + resets before the poller runs\n- Run `pwsh -File poller.ps1` and verify same behavior\n- Confirm `git log --oneline -1` matches the latest `origin/master` commit after a run\n\n_Reply with `/fix` to start coding._\n<!-- autoswe-bot -->",
+    "author_association": "OWNER"
+  },
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/7#issuecomment-4365275738",
+    "id": 4365275738,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T03:10:05Z",
+    "updated_at": "2026-05-03T03:10:05Z",
+    "body": "Max attempts (3) reached. Post `/retry` to continue.\n<!-- autoswe-bot -->",
+    "author_association": "OWNER"
+  }
+]

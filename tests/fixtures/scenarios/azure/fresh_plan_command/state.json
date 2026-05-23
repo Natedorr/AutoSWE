@@ -1,0 +1,34 @@
+{
+  "provider": "azure",
+  "org": "my-org",
+  "project": "my-project",
+  "repo": "my-repo",
+  "work_item": {
+    "id": 1,
+    "fields": {
+      "System.Title": "Add user authentication",
+      "System.Description": "<div>Users cannot log in.</div>\n\n/plan",
+      "System.State": "New",
+      "System.Tags": "",
+      "System.CreatedBy": {
+        "uniqueName": "testowner@dev.azure.com",
+        "id": "1"
+      }
+    }
+  },
+  "tags": [],
+  "comments": [],
+  "queue_task": null,
+  "authenticated_user": {
+    "displayName": "Test Owner",
+    "id": "1",
+    "uniqueName": "testowner@devowner.com"
+  },
+  "claude_responses": [
+    {
+      "text": "<AUTOSWE_PLAN>1. Add login endpoint\n2. Add session middleware</AUTOSWE_PLAN>",
+      "session_id": "s-plan-1",
+      "subtype": "success"
+    }
+  ]
+}

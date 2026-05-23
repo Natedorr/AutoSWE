@@ -1,0 +1,35 @@
+{
+  "api": {
+    "issue": {
+      "number": 10,
+      "title": "Time limit issue",
+      "body": "/retry",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_10",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 10,
+    "title": "Time limit issue",
+    "status": "failed",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 1,
+    "session_id": null,
+    "provider": "github",
+    "guard_blocked": false,
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {
+    "MAX_TOTAL_HOURS": 2
+  },
+  "repo_cfg": {}
+}

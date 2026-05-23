@@ -1,0 +1,8 @@
+{
+  "kind": "fix",
+  "slug": "gh__owner_repo_99",
+  "plan_branch": "autoswe/issue-99",
+  "attempt_count": 2,
+  "resume_session_id": "session-fix-old",
+  "triggering_comment_id": 1
+}

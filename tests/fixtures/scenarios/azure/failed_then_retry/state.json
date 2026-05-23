@@ -1,0 +1,83 @@
+{
+  "provider": "azure",
+  "org": "my-org",
+  "project": "my-project",
+  "repo": "my-repo",
+  "work_item": {
+    "id": 8,
+    "fields": {
+      "System.Title": "Add rate limiting",
+      "System.Description": "<div>API needs rate limiting.</div>\n\n/fix",
+      "System.State": "New",
+      "System.Tags": "autoswe:failed",
+      "System.CreatedBy": {
+        "uniqueName": "testowner@dev.azure.com",
+        "id": "1"
+      }
+    }
+  },
+  "tags": [
+    "autoswe:failed"
+  ],
+  "comments": [
+    {
+      "id": 50,
+      "text": "Completed with command `/fix`.\n<!-- autoswe-bot -->",
+      "createdDate": "2026-05-01T01:30:00Z",
+      "createdBy": {
+        "uniqueName": "testowner@dev.azure.com",
+        "id": "1",
+        "displayName": "Test Owner"
+      }
+    },
+    {
+      "id": 100,
+      "text": "Failed: SDK timeout after 30s\n\nPost `/retry` to try again.\n<!-- autoswe-bot -->",
+      "createdDate": "2026-05-01T02:00:00Z",
+      "createdBy": {
+        "uniqueName": "testowner@dev.azure.com",
+        "id": "1",
+        "displayName": "Test Owner"
+      }
+    },
+    {
+      "id": 200,
+      "text": "/retry",
+      "createdDate": "2026-05-01T03:00:00Z",
+      "createdBy": {
+        "uniqueName": "testowner@dev.azure.com",
+        "id": "1",
+        "displayName": "Test Owner"
+      }
+    }
+  ],
+  "queue_task": {
+    "id": "ado:my-org_my-project/my-repo_8",
+    "owner": "my-org",
+    "repo": "my-project/my-repo",
+    "issue_number": 8,
+    "title": "Add rate limiting",
+    "body": "API needs rate limiting.\n\n/fix",
+    "base_branch": "main",
+    "pr_number": null,
+    "session_id": "s-fix-8",
+    "last_synced": "2026-05-01T02:30:00Z",
+    "created_at": "2026-05-01T01:00:00Z",
+    "suppress_welcome": true,
+    "attempt_count": 2,
+    "provider": "azure",
+    "autoswe_status": null
+  },
+  "authenticated_user": {
+    "displayName": "Test Owner",
+    "id": "1",
+    "uniqueName": "testowner@dev.azure.com"
+  },
+  "claude_responses": [
+    {
+      "text": "Added rate limiting middleware.",
+      "session_id": "s-fix-8-retry",
+      "subtype": "success"
+    }
+  ]
+}

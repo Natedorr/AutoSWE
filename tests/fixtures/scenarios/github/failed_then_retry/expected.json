@@ -1,0 +1,28 @@
+{
+  "label_after": "autoswe:fixed",
+  "comments_posted": [
+    {
+      "body_contains": [
+        "Completed with command",
+        "<!-- autoswe-bot -->"
+      ],
+      "count": 1
+    }
+  ],
+  "queue_task_after": {
+    "session_id": "s-fix-8-retry",
+    "pending_command": null,
+    "attempt_count": 1,
+    "autoswe_status": "fixed"
+  },
+  "claude_calls": [
+    {
+      "permission_mode": "bypassPermissions",
+      "resume": "s-fix-8"
+    }
+  ],
+  "git_calls": [
+    "create_worktree",
+    "commit_and_push"
+  ]
+}

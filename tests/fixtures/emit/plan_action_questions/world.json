@@ -1,0 +1,32 @@
+{
+  "api": {
+    "issue": {
+      "number": 42,
+      "title": "Test plan with questions",
+      "body": "/plan with detailed guidance",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__owner_repo_42",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 42,
+    "title": "Test plan with questions",
+    "status": "pending",
+    "plan_branch": "main",
+    "base_branch": "main",
+    "attempt_count": 1,
+    "session_id": null,
+    "provider": "github",
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

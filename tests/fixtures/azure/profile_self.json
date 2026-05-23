@@ -1,0 +1,22 @@
+{
+  "__meta": {
+    "captured_at": "2026-05-10T00:00:00Z",
+    "api_version": "7.1",
+    "description": "Golden fixture: Azure DevOps /profile/me response for the authenticated PAT owner"
+  },
+  "id": "11111111-1111-1111-1111-111111111111",
+  "displayName": "Nate Dorr",
+  "emailAddress": "natedorr@example.com",
+  "metaData": {
+    "DisplayName": {
+      "Value": "Nate Dorr",
+      "IsProfileMeta": true,
+      "IsRequired": true
+    },
+    "MailAddress": {
+      "Value": "natedorr@example.com",
+      "IsProfileMeta": true,
+      "IsRequired": false
+    }
+  }
+}

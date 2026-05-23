@@ -1,0 +1,35 @@
+{
+  "api": {
+    "issue": {
+      "number": 7,
+      "title": "Auto dispatch",
+      "body": "",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_7",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 7,
+    "title": "Auto dispatch",
+    "status": null,
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 0,
+    "session_id": null,
+    "provider": "github",
+    "suppress_welcome": true,
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {
+    "auto_dispatch_new": true
+  }
+}

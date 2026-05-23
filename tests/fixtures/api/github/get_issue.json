@@ -1,0 +1,38 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/issues/{n}",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:28:40.778395+00:00",
+    "doc_ref": "docs/github-api/get-issue.md"
+  },
+  "id": 4417737852,
+  "number": 70,
+  "title": "Per-WI welcomeCommentSent flag instead of config suppressWelcome",
+  "user": {
+    "login": "Natedorr",
+    "id": 185386482,
+    "type": "User"
+  },
+  "labels": [
+    {
+      "id": 10856675621,
+      "name": "autoswe:done",
+      "color": "ededed",
+      "description": "Completed successfully"
+    }
+  ],
+  "state": "open",
+  "assignees": [
+    {
+      "login": "Natedorr",
+      "id": 185386482,
+      "type": "User"
+    }
+  ],
+  "comments": 2,
+  "created_at": "2026-05-11T02:51:32Z",
+  "updated_at": "2026-05-11T16:20:05Z",
+  "closed_at": null,
+  "author_association": "OWNER",
+  "body": "/fix\n\n**Problem:** Currently uses a config-level `suppressWelcome` boolean to control welcome message posting. This is kludge logic \u2014 it's reactive and doesn't track actual state.\n\n**Fix:** Add a per-WI custom field (e.g., `welcomeCommentSent`) that tracks whether the welcome comment has been sent:\n\n1. Round-robin picks a WI\n2. Checks custom field `welcomeCommentSent` \u2014 if `true`, skip posting welcome\n3. If `false` (or undefined/null) \u2192 posts welcome comment, sets field to `true`\n4. Done. Never posts again, ever.\n\n**Benefits:**\n- No config flag needed\n- No edge cases about commands already existing\n- State is accurate and auditable per-WI\n- Straightforward: remember what you did, don't do it again\n\n**Implementation:**\n- Add custom field definition to the Azure DevOps config/schema\n- In the round-robin/processing logic, check the field before posting welcome\n- After posting welcome, set the field to true via Azure API update\n- Handle undefined/null as false (legacy WIs without the field get a welcome)"
+}

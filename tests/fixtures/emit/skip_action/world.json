@@ -1,0 +1,32 @@
+{
+  "api": {
+    "issue": {
+      "number": 10,
+      "title": "Skip me",
+      "body": "/skip",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_10",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 10,
+    "title": "Skip me",
+    "status": "pending",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 0,
+    "session_id": null,
+    "provider": "github",
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

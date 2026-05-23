@@ -1,0 +1,31 @@
+{
+  "comments": [
+    {
+      "id": 1,
+      "text": "/plan",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "uniqueName": "natedorr@example.com"
+      },
+      "createdDate": "2026-04-01T10:30:00Z"
+    },
+    {
+      "id": 2,
+      "text": "<AUTOSWE_QUESTIONS>\n1. Which language should I use?\n</AUTOSWE_QUESTIONS>\n\n<!-- autoswe-bot -->",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "uniqueName": "natedorr@example.com"
+      },
+      "createdDate": "2026-04-01T10:30:05Z"
+    },
+    {
+      "id": 3,
+      "text": "Use Python. Create a greet.py file.",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "uniqueName": "natedorr@example.com"
+      },
+      "createdDate": "2026-04-01T10:35:00Z"
+    }
+  ]
+}

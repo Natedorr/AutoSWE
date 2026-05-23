@@ -1,0 +1,32 @@
+{
+  "api": {
+    "issue": {
+      "number": 1,
+      "title": "Noop task",
+      "body": "",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_1",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 1,
+    "title": "Noop task",
+    "status": "fixed",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 1,
+    "session_id": null,
+    "provider": "github",
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

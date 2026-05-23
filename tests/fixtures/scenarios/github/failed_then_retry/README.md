@@ -1,0 +1,1 @@
+- failed_then_retry — failed state + user posts /retry after failure comment → attempt counter resets, last substantive command (/fix) replays → done

@@ -1,0 +1,49 @@
+{
+  "api": {
+    "issue": {
+      "number": 140,
+      "title": "Test issue",
+      "body": "Some description.",
+      "owner": "natedorr",
+      "repo": "testProject",
+      "state": "open"
+    },
+    "comments": [
+      {
+        "body": "## Plan\n\nOriginal plan text.\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T10:00:00Z",
+        "author_login": "BOT",
+        "id": 1,
+        "is_bot": true
+      },
+      {
+        "body": "/plan --branch other",
+        "created_at": "2026-01-01T10:30:00Z",
+        "author_login": "AUTHOR",
+        "id": 2,
+        "is_bot": false
+      }
+    ],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "ado:natedorr_testProject_testProject_140",
+    "owner": "natedorr/testProject",
+    "repo": "testProject",
+    "issue_number": 140,
+    "title": "Test issue",
+    "status": "planned",
+    "plan_branch": "dev",
+    "base_branch": "main",
+    "attempt_count": 2,
+    "last_dispatched_command": "/plan",
+    "session_id": "session-plan-2",
+    "provider": "azure",
+    "last_dispatched_command_id": 2,
+    "last_consumed_reply_id": 2,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

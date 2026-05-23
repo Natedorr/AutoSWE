@@ -1,0 +1,44 @@
+{
+  "api": {
+    "issue": {
+      "number": 21,
+      "title": "Dispatched issue",
+      "body": "Description.\n\n/fix with new guidance",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open"
+    },
+    "comments": [
+      {
+        "body": "/fix with new guidance",
+        "created_at": "2026-01-01T11:00:00Z",
+        "author_login": "AUTHOR",
+        "id": 1,
+        "is_bot": false
+      }
+    ],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_21",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 21,
+    "title": "Dispatched issue",
+    "status": "fixing",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 1,
+    "first_dispatched_at": "2026-01-01T10:00:00Z",
+    "last_dispatched_command": "/fix",
+    "session_id": "session-fix",
+    "guard_blocked": false,
+    "provider": "github",
+    "last_dispatched_command_id": 1,
+    "last_consumed_reply_id": 1,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

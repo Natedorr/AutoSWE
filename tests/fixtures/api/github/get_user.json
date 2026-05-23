@@ -1,0 +1,12 @@
+{
+  "__meta": {
+    "endpoint": "GET /user",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:28:39.264675+00:00",
+    "doc_ref": "docs/github-api/get-user.md"
+  },
+  "login": "Natedorr",
+  "id": 185386482,
+  "type": "User",
+  "name": null
+}

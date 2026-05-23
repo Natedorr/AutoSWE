@@ -1,0 +1,18 @@
+{
+  "__meta": {
+    "captured_at": "2026-05-10T00:00:00Z",
+    "api_version": "2022-11-28",
+    "description": "Golden fixture: repo labels list for normalization testing"
+  },
+  "labels": [
+    {"id": 100, "name": "bug", "color": "d73a4a", "default": true, "description": "Something isn't working"},
+    {"id": 101, "name": "enhancement", "color": "a2eeef", "default": true, "description": "New feature or request"},
+    {"id": 102, "name": "autoswe:pending", "color": "0075ca", "default": false, "description": "Ready to dispatch"},
+    {"id": 103, "name": "autoswe:dispatched", "color": "d93f0b", "default": false, "description": "Agent working on it"},
+    {"id": 104, "name": "autoswe:done", "color": "ededed", "default": false, "description": "Completed successfully"},
+    {"id": 105, "name": "autoswe:failed", "color": "d73a4a", "default": false, "description": "Agent errored"},
+    {"id": 106, "name": "autoswe:waiting", "color": "fbca04", "default": false, "description": "Agent asked a question"},
+    {"id": 107, "name": "autoswe:plan_ready", "color": "0e8a16", "default": false, "description": "Plan ready"},
+    {"id": 108, "name": "autoswe:skipped", "color": "ffffff", "default": false, "description": "Skipped by user"}
+  ]
+}

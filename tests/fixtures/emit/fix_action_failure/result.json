@@ -1,0 +1,6 @@
+{
+  "done_content": "FAILED: agent error",
+  "cost_usd": 0.08,
+  "duration_seconds": 20.0,
+  "session_id": "session-fix-fail"
+}

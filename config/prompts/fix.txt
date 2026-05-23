@@ -1,0 +1,102 @@
+Fix GitHub issue {{OWNER}}/{{REPO}}#{{ISSUE_NUMBER}}: {{TITLE}}
+
+Issue body:
+{{BODY}}
+
+Discussion and plan:
+{{COMMENTS}}
+
+{{GUIDANCE_BLOCK}}
+
+{{PLAN}}
+
+{{REVIEW_BLOCK}}
+The repo is checked out at the current working directory on branch autoswe/issue-{{ISSUE_NUMBER}}.
+IMPORTANT: Use relative paths for ALL file operations (Read, Edit, Write, Bash). Never use absolute paths — the working directory IS the repo root.
+
+As you work, periodically call `mcp__autoswe_comment__update_progress` to update the sticky progress comment with what you're doing (e.g., "Reading files...", "Editing foo.py", "Running tests. ..").
+
+---
+
+## Fix Workflow
+
+### Iron Law: No Fixes Without Root Cause
+Four phases: **investigate → analyze → hypothesize → implement**.
+1. **Investigate:** Read the code. Understand the current behavior. Reproduce the issue.
+2. **Analyze:** Identify the root cause. Not the symptom — the cause.
+3. **Hypothesize:** "If I change X, then Y should happen because Z."
+4. **Implement:** Apply the fix. Verify.
+
+Never jump to implementation without investigation. A fix without root cause analysis
+is a guess, and guesses create regression bugs.
+
+### Search Before Building
+Before implementing, check:
+- Does the framework/runtime have a built-in solution? (Layer 1)
+- What is the current best practice for this pattern? (Layer 2)
+- Is there a first-principles approach the community has missed? (Layer 3)
+
+When recommending a fix pattern: verify it is current best practice for the framework
+version in use. Check if a built-in solution exists before recommending a workaround.
+Verify API signatures against current docs (APIs change between versions).
+
+### Boil the Lake — Completeness
+When the complete implementation costs minutes more than the shortcut — do the
+complete thing. The last 10% of completeness that teams used to skip? It costs
+seconds now. Do not ship partial enum handling, incomplete error paths, or missing
+edge cases that are straightforward to add.
+
+### Enum & Value Completeness
+When introducing a new enum value, status string, tier, or type constant:
+- **Trace it through every consumer.** Read (not just grep) each file that
+  switches on, filters by, or displays that value.
+- **Check allowlists/filter arrays.** Search for arrays containing sibling values
+  and verify the new value is included where needed.
+- **Check case/if-elsif chains.** If existing code branches on the enum, does
+  the new value fall through to a wrong default?
+- This requires reading code OUTSIDE the diff. Within-diff review is insufficient.
+
+### LLM Output Trust Boundary
+If this codebase processes AI/LLM output:
+- LLM-generated values (emails, URLs, names) must be format-validated before
+  DB writes (use `EMAIL_REGEXP`, `URI.parse`, `.strip` guards).
+- Structured tool output (arrays, hashes) must be type/shape-checked before
+  database writes.
+- LLM-generated URLs must be fetched against an allowlist (SSRF risk).
+
+### Adversarial Self-Review
+After implementing your fix, step back and think like an attacker and chaos engineer:
+- **Edge cases:** What happens with empty input? Null? Max values? Unicode?
+- **Race conditions:** What if two requests hit this code simultaneously?
+- **Failure modes:** What if the external service is down? Timeout? Malformed response?
+- **Silent data corruption:** What if bad data slips through? Is it caught downstream?
+- **Trust boundaries:** Where does user-controlled / LLM-controlled data enter?
+  Is it validated at the boundary?
+
+If you find issues in your own fix, address them before declaring done.
+
+### Verification of Claims
+If you claim "this pattern is safe" → cite the specific line proving safety.
+If you claim "tests cover this" → name the test file and method.
+Never say "likely handled" or "probably tested" — verify or flag as unknown.
+"This looks fine" is not a finding. Either cite evidence it IS fine, or flag
+it as unverified.
+
+### Confidence Calibration
+When describing what you fixed, calibrate your confidence:
+- **9-10:** Verified by reading specific code. Concrete bug demonstrated and fixed.
+- **7-8:** High confidence pattern match. Very likely correct.
+- **5-6:** Moderate. Could be a false positive. Add a caveat.
+- **3-4:** Low confidence. Suspicious pattern but may be fine. Flag as unknown.
+- **1-2:** Speculation. Only mention if severity would be critical.
+
+---
+
+Read the relevant code, make the necessary changes to fix the issue, and verify
+your changes are correct.
+Do NOT open a pull request — that will be handled separately.
+Summarize what you changed at the end of your response.
+
+TESTING REQUIREMENT: If your changes touch dispatch, lifecycle, sync, planner, coder,
+or ship, you MUST add or extend tests in tests/. See CLAUDE.md ## Testing for the
+layout and conventions. The fix is not complete without test coverage for the new path.

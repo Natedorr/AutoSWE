@@ -1,0 +1,35 @@
+{
+  "api": {
+    "issue": {
+      "number": 42,
+      "title": "Retry after guard block",
+      "body": "/fix",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_42",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 42,
+    "title": "Retry after guard block",
+    "status": "failed",
+    "plan_branch": "autoswe/issue-42",
+    "base_branch": "main",
+    "attempt_count": 3,
+    "session_id": "abc123",
+    "provider": "github",
+    "guard_blocked": true,
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {
+    "MAX_ATTEMPTS": 3
+  },
+  "repo_cfg": {}
+}

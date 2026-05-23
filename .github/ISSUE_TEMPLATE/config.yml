@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/Natedorr/claudius-github/blob/master/docs/autoswe/README.md
+    about: Read the autoSWE docs before filing an issue
+  - name: autoSWE Skill (AI agent reference)
+    url: https://github.com/Natedorr/claudius-github/blob/master/docs/skills/autoswe/SKILL.md
+    about: Slash commands, lifecycle, and troubleshooting — for AI agents
+  - name: autoSWE Ops Skill (host operations)
+    url: https://github.com/Natedorr/claudius-github/blob/master/docs/skills/autoswe-ops/SKILL.md
+    about: Queue, PID, logs, config, restart — for agents on the same machine

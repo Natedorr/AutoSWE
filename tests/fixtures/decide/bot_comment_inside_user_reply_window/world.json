@@ -1,0 +1,57 @@
+{
+  "api": {
+    "issue": {
+      "number": 15,
+      "title": "Feature needing reply",
+      "body": "Description.\n\n/plan",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open"
+    },
+    "comments": [
+      {
+        "body": "## Plan\n\n1. Step one\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T01:00:00Z",
+        "author_login": "BOT",
+        "id": 10,
+        "is_bot": true
+      },
+      {
+        "body": "Bot interim update.\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T02:30:00Z",
+        "author_login": "BOT",
+        "id": 20,
+        "is_bot": true
+      },
+      {
+        "body": "Please also add caching.",
+        "created_at": "2026-01-01T03:00:00Z",
+        "author_login": "AUTHOR",
+        "id": 30,
+        "is_bot": false
+      }
+    ],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_15",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 15,
+    "title": "Feature needing reply",
+    "status": "planned",
+    "plan_branch": "autoswe/issue-15",
+    "base_branch": "main",
+    "attempt_count": 1,
+    "last_dispatched_command": "/plan",
+    "session_id": "session-plan-15",
+    "last_phase": "plan",
+    "provider": "github",
+    "last_dispatched_command_id": 10,
+    "last_consumed_reply_id": 10,
+    "welcome_comment_id": null,
+    "bot_comment_ids": [10, 20]
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

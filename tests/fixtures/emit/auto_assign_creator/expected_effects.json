@@ -1,0 +1,16 @@
+[
+  {
+    "kind": "post_comment"
+  },
+  {
+    "kind": "set_status",
+    "status": "fixed"
+  },
+  {
+    "kind": "patch_queue"
+  },
+  {
+    "kind": "assign",
+    "body": "issue_creator"
+  }
+]

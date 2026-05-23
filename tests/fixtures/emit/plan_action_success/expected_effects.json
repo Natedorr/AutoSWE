@@ -1,0 +1,20 @@
+[
+  {
+    "kind": "set_status",
+    "status": "planned"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "planned",
+      "last_dispatched_command": "/plan",
+      "last_dispatched_command_id": 1,
+      "last_consumed_reply_id": 1,
+      "pending_command": null,
+      "pending_guidance": null,
+      "pending_user_reply": null,
+      "session_id": "session-plan-123",
+      "last_phase": "plan"
+    }
+  }
+]

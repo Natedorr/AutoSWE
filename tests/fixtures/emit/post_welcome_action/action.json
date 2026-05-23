@@ -1,0 +1,6 @@
+{
+  "kind": "post_welcome",
+  "slug": "gh:owner_repo_42",
+  "guidance": "## Available commands\n\n- `/plan` - Create a plan\n- `/fix` - Fix the issue",
+  "triggering_comment_id": null
+}

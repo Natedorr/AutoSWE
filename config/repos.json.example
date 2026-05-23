@@ -1,0 +1,24 @@
+{
+  "youruser/your-repo": {
+    "provider": "github",
+    "base_branch": "main",
+    "pat": "github_pat_here"
+  },
+  "youruser/another-repo": {
+    "provider": "github",
+    "base_branch": "develop",
+    "pat": "github_pat_here",
+    "model": "claude-opus-4-7",
+    "plan_model": "claude-haiku-4-5-20251001",
+    "fix_model": "claude-opus-4-7",
+    "agent_timeout": 7200,
+    "auto_dispatch_new": false
+  },
+  "your-org/your-project/your-repo": {
+    "provider": "azure",
+    "base_branch": "main",
+    "pat": "azure_pat_here",
+    "model": "claude-opus-4-7",
+    "agent_timeout": 7200
+  }
+}

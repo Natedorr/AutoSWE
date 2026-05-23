@@ -1,0 +1,22 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "/retry",
+      "Completed"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "fixed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "fixed",
+      "_guard_blocked": false,
+      "attempt_count": 1,
+      "last_phase": "fix"
+    }
+  }
+]

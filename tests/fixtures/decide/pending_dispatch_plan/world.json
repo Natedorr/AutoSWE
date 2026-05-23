@@ -1,0 +1,34 @@
+{
+  "api": {
+    "issue": {
+      "number": 20,
+      "title": "Pending plan",
+      "body": "Description.\n\n/plan with focus on performance",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open"
+    },
+    "comments": [],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_20",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 20,
+    "title": "Pending plan",
+    "status": "pending",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 0,
+    "session_id": null,
+    "suppress_welcome": true,
+    "provider": "github",
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

@@ -1,0 +1,24 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Completed with command",
+      "/sync",
+      "commits ahead",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "synced"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "synced",
+      "last_dispatched_command": "/sync",
+      "first_dispatched_at": null,
+      "last_consumed_reply_id": 1
+    }
+  }
+]

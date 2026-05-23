@@ -1,0 +1,10 @@
+{
+  "id": 456,
+  "text": "This is a comment",
+  "createdBy": {
+    "displayName": "Nate Dorr",
+    "uniqueName": "natedorr@example.com"
+  },
+  "createdDate": "2026-05-05T12:00:00Z",
+  "revisedDate": "2026-05-05T12:00:00Z"
+}

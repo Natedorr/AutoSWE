@@ -1,0 +1,36 @@
+{
+  "html_url": "https://github.com/Natedorr/autoswe/issues/7",
+  "id": 4370604274,
+  "number": 7,
+  "title": "make the poller scripts do a hard pull and update to the master branch on each script run",
+  "labels": [
+    {
+      "id": 10848865643,
+      "name": "autoswe:failed",
+      "color": "d73a4a",
+      "default": false,
+      "description": "Agent errored"
+    }
+  ],
+  "state": "open",
+  "assignees": [
+    {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    }
+  ],
+  "comments": 7,
+  "created_at": "2026-05-03T02:01:14Z",
+  "updated_at": "2026-05-03T03:10:05Z",
+  "closed_at": null,
+  "author_association": "OWNER",
+  "body": "make the poller scripts do a hard pull and update to the master branch on each script run\n\n",
+  "user": {
+    "login": "Natedorr",
+    "id": 185386482,
+    "html_url": "https://github.com/Natedorr",
+    "type": "User"
+  }
+}

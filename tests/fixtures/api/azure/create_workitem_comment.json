@@ -1,0 +1,24 @@
+{
+  "__meta": {
+    "endpoint": "POST /_apis/wit/workitems/{n}/comments",
+    "method": "POST",
+    "captured_at": "2026-05-11T16:31:52.706219+00:00",
+    "doc_ref": "docs/azure-devops-api/create-workitem-comment.md"
+  },
+  "id": 1200567,
+  "text": "Example comment text",
+  "createdDate": "2026-05-10T01:50:09.57Z",
+  "createdBy": {
+    "displayName": "Nate Dorr",
+    "url": "https://spsprodcus7.vssps.visualstudio.com/Aba28730b-ce66-48fc-99ee-a8b1adf97c2c/_apis/Identities/27453f2e-1fa7-4792-9342-d81f676a493a",
+    "_links": {
+      "avatar": {
+        "href": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+      }
+    },
+    "id": "27453f2e-1fa7-4792-9342-d81f676a493a",
+    "uniqueName": "natedorr@gmail.com",
+    "imageUrl": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk",
+    "descriptor": "msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+  }
+}

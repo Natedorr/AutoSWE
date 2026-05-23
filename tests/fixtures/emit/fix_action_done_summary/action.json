@@ -1,0 +1,7 @@
+{
+  "kind": "fix",
+  "slug": "gh__owner_repo_100",
+  "plan_branch": "autoswe/issue-100",
+  "attempt_count": 1,
+  "triggering_comment_id": 1
+}

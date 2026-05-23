@@ -1,0 +1,81 @@
+{
+  "__meta": {
+    "captured_at": "2026-05-10T00:00:00Z",
+    "api_version": "7.1",
+    "description": "Golden fixture: Azure work item with autoswe:fixed tag, multiple comment types for normalization testing",
+    "pat_owner_uniqueName": "natedorr@example.com",
+    "workitem_author_uniqueName": "jane.doe@example.com"
+  },
+  "workitem": {
+    "id": 42,
+    "rev": 5,
+    "fields": {
+      "System.Id": 42,
+      "System.Title": "Fix authentication bug in login flow",
+      "System.Description": "<div>Users are unable to login after the latest update.</div><div><br/></div><div>/fix with focus on session handling</div>",
+      "System.State": "Active",
+      "System.Tags": "bug; autoswe:fixed",
+      "System.CreatedDate": "2026-05-01T02:01:14.000Z",
+      "System.ChangedDate": "2026-05-01T03:10:05.000Z",
+      "System.CreatedBy": {
+        "displayName": "Jane Doe",
+        "uniqueName": "jane.doe@example.com",
+        "imageUrl": "https://dev.azure.com/org/project/_api/_common/identityImage?id=222222"
+      },
+      "System.AssignedTo": {
+        "displayName": "Nate Dorr",
+        "uniqueName": "natedorr@example.com",
+        "imageUrl": "https://dev.azure.com/org/project/_api/_common/identityImage?id=111111"
+      }
+    }
+  },
+  "comments": {
+    "comments": [
+      {
+        "id": 1,
+        "text": "autoSWE picked up this work item.\n\n<!-- autoswe-bot -->",
+        "createdBy": {
+          "displayName": "Nate Dorr",
+          "uniqueName": "natedorr@example.com"
+        },
+        "createdDate": "2026-05-01T02:05:00Z"
+      },
+      {
+        "id": 2,
+        "text": "/fix with focus on session handling",
+        "createdBy": {
+          "displayName": "Nate Dorr",
+          "uniqueName": "natedorr@example.com"
+        },
+        "createdDate": "2026-05-01T02:10:00Z"
+      },
+      {
+        "id": 3,
+        "text": "Completed with command `/fix` — done.\n\nSummary: Fixed the authentication bug.\n\n<!-- autoswe-bot -->",
+        "createdBy": {
+          "displayName": "Nate Dorr",
+          "uniqueName": "natedorr@example.com"
+        },
+        "createdDate": "2026-05-01T02:30:00Z"
+      },
+      {
+        "id": 4,
+        "text": "/fix with another fix",
+        "createdBy": {
+          "displayName": "Random Contributor",
+          "uniqueName": "contributor@example.com"
+        },
+        "createdDate": "2026-05-01T02:35:00Z"
+      },
+      {
+        "id": 5,
+        "text": "/pr",
+        "createdBy": {
+          "displayName": "Jane Doe",
+          "uniqueName": "jane.doe@example.com"
+        },
+        "createdDate": "2026-05-01T03:00:00Z"
+      }
+    ]
+  }
+}

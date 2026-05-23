@@ -1,0 +1,7 @@
+{
+  "done_content": "FAILED: agent crashed",
+  "session_id": "stale-session-abc",
+  "cost_usd": 0.02,
+  "duration_seconds": 30,
+  "plan_file_path": null
+}

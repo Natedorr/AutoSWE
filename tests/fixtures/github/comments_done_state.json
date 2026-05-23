@@ -1,0 +1,58 @@
+[
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/3#issuecomment-4365109918",
+    "id": 4365109918,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T01:19:30Z",
+    "updated_at": "2026-05-03T01:19:30Z",
+    "body": "/plan",
+    "author_association": "OWNER"
+  },
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/3#issuecomment-4365112509",
+    "id": 4365112509,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T01:21:19Z",
+    "updated_at": "2026-05-03T01:21:19Z",
+    "body": "## Plan\n\n## Problem\n\nWhen Ralph processes an issue, commits and branches are not appearing as linked items on the GitHub issue page. This is because the commit message format doesn't use GitHub's [closing keywords](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/using-keywords-in-issues-and-pull-requests).\n\n**Root cause:** In `coder.py` line 92, the commit message is:\n```python\ncommit_msg = f\"ralph: fix issue #{issue_num}\"  # e.g. \"ralph: fix issue #3\"\n```\n\nGitHub recognizes `Fixes #N`, `Closes #N`, `Resolves #N` **only at the start of a line** (or after a bullet). The current format `\"ralph: fix issue #3\"` has \"fix\" lowercase and buried after `ralph:` \u2014 so GitHub treats it as plain text with no issue association.\n\nThe PR body (`ship.py`) already uses `Fixes #{issue_num}`, so the PR *itself* links to the issue. But **individual commits** show under \"Linked pull requests\" only when they also contain a closing keyword.\n\n## Files to Change\n\n### 1. `ralph/coder.py` (line 92)\n\n**Change the commit message to use `Fixes #N` keyword at the start:**\n\n```python\n# Before:\ncommit_msg = f\"ralph: fix issue #{issue_num}\"\n\n# After:\ncommit_msg = f\"Fixes #{issue_num}: ralph automated fix\"\n```\n\nThis makes each commit automatically associate with the issue in GitHub's UI (visible under \"Linked issues\" \u2192 \"Adds commit\" on the issue page, even before PR merge).\n\n### 2. `ralph/ship.py` (lines 29 and 57) \u2014 PR title\n\n**Add issue reference to PR title for better visibility:**\n\n```python\n# Before (line 28):\n\"--title\", f\"Fix: {title}\",\n\n# After:\n\"--title\", f\"Fixes #{issue_num}: {title}\",\n```\n\nAnd the API fallback (line 56):\n```python\n# Before:\n\"title\": f\"Fix: {title}\",\n\n# After:\n\"title\": f\"Fixes #{issue_num}: {title}\",\n```\n\nThis makes the PR title itself a closing keyword, ensuring the association works even if the body parsing is skipped.\n\n## Risks\n\n- **Low risk.** This is purely a formatting change to commit/PR messages. No logic or workflow changes.\n- If a repo has branch protection rules that parse commit message prefixes (e.g., \"ralph:\" for DCO/conventional commit), removing that prefix could break those rules. However, this is unlikely for a bot workflow.\n- The `Fixes` keyword will auto-close the issue when the PR merges. This is the desired behavior. If users want manual merge control, they can use `References #N` instead \u2014 but `Fixes` is the standard convention for bot-generated PRs.\n\n_Reply with `/fix` to start coding._\n<!-- autoswe-bot -->",
+    "author_association": "OWNER"
+  },
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/3#issuecomment-4365113820",
+    "id": 4365113820,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T01:22:16Z",
+    "updated_at": "2026-05-03T01:22:16Z",
+    "body": "/fix",
+    "author_association": "OWNER"
+  },
+  {
+    "html_url": "https://github.com/Natedorr/autoswe/issues/3#issuecomment-4365126270",
+    "id": 4365126270,
+    "user": {
+      "login": "Natedorr",
+      "id": 185386482,
+      "html_url": "https://github.com/Natedorr",
+      "type": "User"
+    },
+    "created_at": "2026-05-03T01:30:47Z",
+    "updated_at": "2026-05-03T01:30:47Z",
+    "body": "Completed with command `/fix` \u2014 done.\n<!-- autoswe-bot -->",
+    "author_association": "OWNER"
+  }
+]

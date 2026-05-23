@@ -1,0 +1,9 @@
+{
+  "kind": "plan",
+  "slug": "gh:owner_repo_15",
+  "plan_branch": "autoswe/issue-15",
+  "user_reply_text": "Please also add caching.",
+  "attempt_count": 1,
+  "resume_session_id": "session-plan-15",
+  "triggering_comment_id": 30
+}

@@ -1,0 +1,8 @@
+{
+  "kind": "ship_pr",
+  "slug": "gh:owner_repo_247",
+  "plan_branch": "autoswe/issue-247",
+  "attempt_count": 1,
+  "resume_session_id": "fix-session",
+  "triggering_comment_id": 3
+}

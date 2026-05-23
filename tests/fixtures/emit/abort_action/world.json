@@ -1,0 +1,33 @@
+{
+  "api": {
+    "issue": {
+      "number": 10,
+      "title": "Abort me",
+      "body": "Something",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_10",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 10,
+    "title": "Abort me",
+    "status": "planned",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 1,
+    "session_id": "session-old",
+    "provider": "github",
+    "first_dispatched_at": "2026-05-16T08:00:00Z",
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

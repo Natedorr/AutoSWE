@@ -1,0 +1,22 @@
+{
+  "comments": [
+    {
+      "id": 1,
+      "text": "/plan",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "uniqueName": "natedorr@example.com"
+      },
+      "createdDate": "2026-04-01T10:30:00Z"
+    },
+    {
+      "id": 2,
+      "text": "<AUTOSWE_PLAN>\n1. Read the issue\n2. Implement the fix\n3. Write tests\n</AUTOSWE_PLAN>\n\n<!-- autoswe-bot -->",
+      "createdBy": {
+        "displayName": "autoSWE Bot",
+        "uniqueName": "autoswe-bot"
+      },
+      "createdDate": "2026-04-01T10:30:05Z"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": 99,
+  "rev": 1,
+  "fields": {
+    "System.Id": 99,
+    "System.Title": "Old completed work item",
+    "System.Description": "Already done.",
+    "System.State": "Closed",
+    "System.Tags": "autoswe:fixed",
+    "System.CreatedBy": {
+      "displayName": "Nate Dorr",
+      "uniqueName": "natedorr@example.com"
+    },
+    "System.CreatedDate": "2026-03-15T08:00:00Z"
+  }
+}

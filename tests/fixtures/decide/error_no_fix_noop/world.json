@@ -1,0 +1,56 @@
+{
+  "api": {
+    "issue": {
+      "number": 42,
+      "title": "Error issue",
+      "body": "",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open",
+      "base_branch": "main"
+    },
+    "comments": [
+      {
+        "body": "## Dispatch Error\n\nAn infrastructure error occurred while processing this task.\n\n**Exception:** `RuntimeError: simulated dispatch failure`\n\nPost `/retry` to attempt again.\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T01:00:00Z",
+        "author_login": "owner",
+        "id": 1,
+        "is_bot": true
+      },
+      {
+        "body": "/fix",
+        "created_at": "2026-01-01T02:00:00Z",
+        "author_login": "owner",
+        "id": 3,
+        "is_bot": false
+      }
+    ],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_42",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 42,
+    "title": "Error issue",
+    "body": "",
+    "status": "error",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 1,
+    "first_dispatched_at": null,
+    "last_dispatched_command": "/fix",
+    "last_dispatched_command_id": 1,
+    "last_consumed_reply_id": null,
+    "session_id": null,
+    "pr_number": null,
+    "guard_blocked": false,
+    "gh_closed": false,
+    "pending_command": null,
+    "pending_guidance": null,
+    "pending_user_reply": null,
+    "suppress_welcome": false
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

@@ -1,0 +1,12 @@
+{
+  "workItems": [
+    {
+      "id": 100,
+      "url": "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100"
+    },
+    {
+      "id": 101,
+      "url": "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/101"
+    }
+  ]
+}

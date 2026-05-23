@@ -1,0 +1,17 @@
+autoSWE picked up this issue (`{{SLUG}}`).
+
+**Available Commands:**
+- `/plan` - Start a planning session (reads code, asks questions, posts a plan)
+- `/plan --branch <name>` - Plan on a specific branch (default: main)
+- `/fix` - Implement the fix (runs Claude with code-editing permissions)
+- `/fix --branch <name>` - Fix on a specific branch (default: main)
+- `/fix with <guidance>` - Same as /fix but appends guidance to the prompt
+- `/pr` - Open a pull request from the current branch
+- `/sync` - Pull the branch from upstream to keep it up to date
+- `/retry` - Retry a failed task (resets attempt counter)
+- `/skip` - Skip this issue
+- `/abort` - Cancel the current task
+
+You can add guidance: `/fix with performance focus`
+
+<!-- autoswe-bot -->

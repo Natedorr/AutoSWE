@@ -1,0 +1,33 @@
+{
+  "api": {
+    "issue": {
+      "number": 42,
+      "title": "Skipped issue",
+      "body": "Not needed anymore.",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open"
+    },
+    "comments": [],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_42",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 42,
+    "title": "Skipped issue",
+    "status": "skipped",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 0,
+    "session_id": null,
+    "provider": "github",
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

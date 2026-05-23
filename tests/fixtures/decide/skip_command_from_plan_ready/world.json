@@ -1,0 +1,48 @@
+{
+  "api": {
+    "issue": {
+      "number": 8,
+      "title": "Skip me",
+      "body": "Description.\n\n/plan",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open"
+    },
+    "comments": [
+      {
+        "body": "## Plan\n\nSome plan.\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T10:00:00Z",
+        "author_login": "BOT",
+        "id": 1,
+        "is_bot": true
+      },
+      {
+        "body": "/skip",
+        "created_at": "2026-01-01T11:00:00Z",
+        "author_login": "AUTHOR",
+        "id": 2,
+        "is_bot": false
+      }
+    ],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_8",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 8,
+    "title": "Skip me",
+    "status": "planned",
+    "plan_branch": "main",
+    "base_branch": "main",
+    "attempt_count": 1,
+    "session_id": "session-plan",
+    "provider": "github",
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

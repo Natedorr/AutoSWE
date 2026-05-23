@@ -1,0 +1,37 @@
+{
+  "api": {
+    "issue": {
+      "number": 8,
+      "title": "Bug fix",
+      "body": "/fix",
+      "owner": "o",
+      "repo": "r",
+      "state": "open",
+      "creator_login": "issue_creator"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_8",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 8,
+    "title": "Bug fix",
+    "status": null,
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 0,
+    "session_id": null,
+    "provider": "github",
+    "guard_blocked": false,
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {
+    "AUTO_ASSIGN": true,
+    "ASSIGN_USER": "override_user"
+  },
+  "repo_cfg": {}
+}

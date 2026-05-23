@@ -1,0 +1,79 @@
+{
+  "__meta": {
+    "endpoint": "GET wit/workitems?ids=...",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:31:52.480131+00:00",
+    "doc_ref": "docs/azure-devops-api/workitems-batch.md"
+  },
+  "count": 5,
+  "value": [
+    {
+      "id": 28,
+      "rev": 10,
+      "fields": {
+        "System.Id": 28,
+        "System.AreaPath": "testProject",
+        "System.IterationId": 1,
+        "System.State": "Done",
+        "System.CreatedDate": "2026-05-06T05:13:08.227Z",
+        "System.ChangedDate": "2026-05-10T17:45:04.78Z",
+        "System.Title": "Updated 28"
+      }
+    },
+    {
+      "id": 31,
+      "rev": 9,
+      "fields": {
+        "System.Id": 31,
+        "System.AreaPath": "testProject",
+        "System.IterationId": 1,
+        "System.State": "Done",
+        "System.CreatedDate": "2026-05-06T05:18:55.867Z",
+        "System.ChangedDate": "2026-05-10T17:45:01.287Z",
+        "System.Title": "API Test Issue",
+        "System.Description": "Test body"
+      }
+    },
+    {
+      "id": 18,
+      "rev": 10,
+      "fields": {
+        "System.Id": 18,
+        "System.AreaPath": "testProject",
+        "System.IterationId": 1,
+        "System.State": "Done",
+        "System.CreatedDate": "2026-05-06T04:30:00.693Z",
+        "System.ChangedDate": "2026-05-10T17:44:57.4Z",
+        "System.Title": "Updated Title 18"
+      }
+    },
+    {
+      "id": 68,
+      "rev": 9,
+      "fields": {
+        "System.Id": 68,
+        "System.AreaPath": "testProject",
+        "System.IterationId": 1,
+        "System.State": "Done",
+        "System.CreatedDate": "2026-05-06T05:39:25.387Z",
+        "System.ChangedDate": "2026-05-10T17:44:54.413Z",
+        "System.Title": "API Test Issue",
+        "System.Description": "Test body"
+      }
+    },
+    {
+      "id": 39,
+      "rev": 9,
+      "fields": {
+        "System.Id": 39,
+        "System.AreaPath": "testProject",
+        "System.IterationId": 1,
+        "System.State": "Done",
+        "System.CreatedDate": "2026-05-06T05:22:17.913Z",
+        "System.ChangedDate": "2026-05-10T17:44:51.033Z",
+        "System.Title": "API Test Issue",
+        "System.Description": "Test body"
+      }
+    }
+  ]
+}

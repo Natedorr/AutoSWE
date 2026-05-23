@@ -1,0 +1,19 @@
+{
+  "__meta": {
+    "endpoint": "POST /repos/{o}/{r}/issues/{n}/comments",
+    "method": "POST",
+    "captured_at": "2026-05-11T16:28:41.382438+00:00",
+    "doc_ref": "docs/github-api/create-comment.md"
+  },
+  "id": 1000,
+  "body": "Example comment body",
+  "user": {
+    "login": "Natedorr",
+    "id": 185386482,
+    "type": "User",
+    "name": null
+  },
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "author_association": "OWNER"
+}

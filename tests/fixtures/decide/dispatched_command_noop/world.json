@@ -1,0 +1,49 @@
+{
+  "api": {
+    "issue": {
+      "number": 42,
+      "title": "Test issue",
+      "body": "/plan",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open",
+      "base_branch": "main"
+    },
+    "comments": [
+      {
+        "body": "/fix",
+        "created_at": "2026-01-01T02:00:00Z",
+        "author_login": "owner",
+        "id": 2,
+        "is_bot": false
+      }
+    ],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "gh:owner_repo_42",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 42,
+    "title": "Test issue",
+    "body": "/plan",
+    "status": "planning",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 1,
+    "first_dispatched_at": "2026-01-01T01:00:00Z",
+    "last_dispatched_command": "/plan",
+    "last_dispatched_command_id": 1,
+    "last_consumed_reply_id": null,
+    "session_id": "s-plan-42",
+    "pr_number": null,
+    "guard_blocked": false,
+    "gh_closed": false,
+    "pending_command": "/plan",
+    "pending_guidance": null,
+    "pending_user_reply": null,
+    "suppress_welcome": false
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

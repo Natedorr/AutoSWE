@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check autoswe tests scripts
+
+      - name: Run tests
+        run: pytest -v --tb=short --durations=10 -m "not live"
+        env:
+          AUTOSWE_DIR: /tmp/autoswe-ci
+
+      - name: Check test coverage
+        run: pytest -v --tb=short -m "not live" --cov=autoswe --cov-report=term-missing
+        env:
+          AUTOSWE_DIR: /tmp/autoswe-ci
+        continue-on-error: true
+
+  fixture-stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run live GitHub fixture checks
+        run: pytest -v -m live tests/test_github_live.py
+        env:
+          AUTOSWE_DIR: /tmp/autoswe-ci
+          GITHUB_TOKEN: ${{ secrets.AUTOSWE_GITHUB_TOKEN }}
+        if: env.GITHUB_TOKEN != ''
+        continue-on-error: true
+
+      - name: Run live Azure fixture checks
+        run: pytest -v -m live tests/test_azure_live.py
+        env:
+          AUTOSWE_DIR: /tmp/autoswe-ci
+          AZURE_DEVOPS_PAT: ${{ secrets.AUTOSWE_AZURE_PAT }}
+          AZURE_DEVOPS_ORG: ${{ secrets.AUTOSWE_AZURE_ORG }}
+          AZURE_DEVOPS_PROJECT: ${{ secrets.AUTOSWE_AZURE_PROJECT }}
+          AZURE_DEVOPS_REPO: ${{ secrets.AUTOSWE_AZURE_REPO }}
+        if: env.AZURE_DEVOPS_PAT != ''
+        continue-on-error: true

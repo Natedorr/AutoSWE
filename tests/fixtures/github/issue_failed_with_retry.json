@@ -1,0 +1,35 @@
+{
+  "html_url": "https://github.com/Natedorr/autoswe/issues/5",
+  "id": 4370547724,
+  "number": 5,
+  "title": "welcome message didnt post when /plan was already commented",
+  "user": {
+    "login": "Natedorr",
+    "id": 185386482,
+    "type": "User",
+    "html_url": "https://github.com/Natedorr"
+  },
+  "labels": [
+    {
+      "id": 10848865643,
+      "name": "autoswe:failed",
+      "color": "d73a4a",
+      "description": "Agent errored",
+      "default": false
+    }
+  ],
+  "state": "open",
+  "assignees": [
+    {
+      "login": "Natedorr",
+      "id": 185386482,
+      "type": "User"
+    }
+  ],
+  "comments": 9,
+  "created_at": "2026-05-03T01:24:11Z",
+  "updated_at": "2026-05-03T03:10:56Z",
+  "closed_at": null,
+  "author_association": "OWNER",
+  "body": "it still should post the welcome message on everything"
+}

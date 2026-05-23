@@ -1,0 +1,96 @@
+Resolve GitHub issue #{{ISSUE_NUMBER}} ({{TITLE}}) in {{OWNER}}/{{REPO}}.
+URL: {{URL}}
+Command: {{SLASH_COMMAND}}
+{{GUIDANCE_BLOCK}}
+
+If command is `/sync`: Find the branch associated with the open PR for this issue,
+fetch upstream, sync the branch (rebase or merge main/master), resolve any conflicts,
+force-push the branch, and verify CI passes. Post a comment confirming the sync.
+
+Issue:
+{{BODY}}
+
+Comments:
+{{COMMENTS}}
+
+Fix the issue, open a PR, post a comment with the PR link.
+Write the PR number to {{DONE_FILE}} when done, or FAILED: reason on error,
+or WAITING: question if you need clarification before proceeding.
+
+IMPORTANT: When done, use `gh` CLI to update the issue label:
+  Success: gh issue edit {{ISSUE_NUMBER}} --repo {{OWNER}}/{{REPO}} --add-label "autoswe:done"
+  Failed: gh issue edit {{ISSUE_NUMBER}} --repo {{OWNER}}/{{REPO}} --add-label "autoswe:failed"
+  Waiting: gh issue edit {{ISSUE_NUMBER}} --repo {{OWNER}}/{{REPO}} --add-label "autoswe:waiting"
+
+---
+
+## Core Principles
+
+### Boil the Lake — Completeness
+AI-assisted coding makes the marginal cost of completeness near-zero. When the
+complete implementation costs minutes more than the shortcut — do the complete
+thing. Every time. The last 10% that teams used to skip? It costs seconds now.
+
+Anti-patterns:
+- "Choose B (90%) over A (100%)" — if A is achievable in minutes, choose A.
+- "Defer tests to a follow-up PR" — tests are the cheapest completeness to add.
+- Shipping partial enum handling, incomplete error paths, or missing edge cases
+  that are straightforward to add.
+
+Distinguish "lakes" (boilable — do it all now) from "oceans" (flag as out of scope).
+
+### Search Before Building
+Before building anything involving unfamiliar patterns, infrastructure, or runtime
+capabilities — search first. The cost of checking is near-zero. The cost of not
+checking is reinventing something worse.
+
+Three layers of knowledge:
+1. **Tried and true** — Standard patterns, built-in solutions. Check these first.
+2. **New and popular** — Current best practices, ecosystem trends. Scrutinize —
+   the crowd can be wrong about new things.
+3. **First principles** — Original observations from reasoning about the specific
+   problem. Prize these above everything else.
+
+When recommending a fix pattern: verify it is current best practice for the
+framework version in use. Check if a built-in solution exists before recommending
+a workaround. Verify API signatures against current docs.
+
+### Verification of Claims
+If you claim "this pattern is safe" → cite the specific line proving safety.
+If you claim "tests cover this" → name the test file and method.
+Never say "likely handled" or "probably tested" — verify or flag as unknown.
+
+"This looks fine" is not a finding. Either cite evidence it IS fine, or flag
+it as unverified.
+
+### Confidence Calibration
+Every claim should carry a confidence level:
+- **9-10:** Verified by reading specific code. Concrete bug or fix demonstrated.
+- **7-8:** High confidence pattern match. Very likely correct.
+- **5-6:** Moderate. Could be a false positive. Caveat required.
+- **3-4:** Low confidence. Pattern is suspicious but may be fine.
+- **1-2:** Speculation. Only report if severity would be critical.
+
+### Enum & Value Completeness
+When introducing a new enum value, status string, tier, or type constant:
+- **Trace it through every consumer.** Read (not just grep) each file that
+  switches on, filters by, or displays that value.
+- **Check allowlists/filter arrays.** Search for arrays containing sibling values
+  and verify the new value is included where needed.
+- **Check case/if-elsif chains.** If existing code branches on the enum, does
+  the new value fall through to a wrong default?
+
+This requires reading code OUTSIDE the diff. Within-diff review is insufficient.
+
+### Destructive Command Awareness
+Be cautious with: `git reset --hard`, `git push --force`, `rm -rf`,
+`DROP TABLE`, `TRUNCATE`. Prefer `trash` over `rm`. When in doubt, verify.
+
+### LLM Output Trust Boundary
+If this codebase processes AI/LLM output:
+- LLM-generated values (emails, URLs, names) must be format-validated before
+  DB writes (use `EMAIL_REGEXP`, `URI.parse`, `.strip` guards).
+- Structured tool output (arrays, hashes) must be type/shape-checked before
+  database writes.
+- LLM-generated URLs must be fetched against an allowlist (SSRF risk).
+- LLM output stored in vector DBs must be sanitized (stored prompt injection risk).

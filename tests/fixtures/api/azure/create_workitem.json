@@ -1,0 +1,20 @@
+{
+  "__meta": {
+    "endpoint": "POST /_apis/wit/workitems/$Issue",
+    "method": "POST",
+    "captured_at": "2026-05-11T16:31:52.708215+00:00",
+    "doc_ref": "docs/azure-devops-api/create-workitem.md"
+  },
+  "data": [
+    {
+      "op": "add",
+      "path": "/fields/System.Title",
+      "value": "New work item"
+    },
+    {
+      "op": "add",
+      "path": "/fields/System.Description",
+      "value": "Description here"
+    }
+  ]
+}

@@ -1,0 +1,137 @@
+{
+  "__meta": {
+    "endpoint": "GET /_apis/wit/workitems/{n}/comments",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:31:52.706219+00:00",
+    "doc_ref": "docs/azure-devops-api/list-workitem-comments.md"
+  },
+  "count": 7,
+  "comments": [
+    {
+      "id": 1200566,
+      "text": "autoSWE picked up this issue (`ado:natedorr_testProject/testProject_28`).\n\n**Available Commands:**\n- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n- `/plan --branch ` - Plan on a specific branch (default: main)\n- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n- `/fix --branch ` - Fix on a specific branch (default: main)\n- `/fix with ` - Same as /fix but appends guidance to the prompt\n- `/pr` - Open a pull request from the current branch\n- `/sync` - Pull the branch from upstream to keep it up to date\n- `/retry` - Retry a failed task (resets attempt counter)\n- `/skip` - Skip this issue\n- `/abort` - Cancel the current task\n\nYou can add guidance: `/fix with performance focus`\n\n\n",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "url": "https://spsprodcus7.vssps.visualstudio.com/Aba28730b-ce66-48fc-99ee-a8b1adf97c2c/_apis/Identities/27453f2e-1fa7-4792-9342-d81f676a493a",
+        "_links": {
+          "avatar": {
+            "href": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+          }
+        },
+        "id": "27453f2e-1fa7-4792-9342-d81f676a493a",
+        "uniqueName": "natedorr@gmail.com",
+        "imageUrl": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk",
+        "descriptor": "msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+      },
+      "createdDate": "2026-05-10T01:50:09.57Z"
+    },
+    {
+      "id": 1200539,
+      "text": "autoSWE picked up this issue (`ado:natedorr_testProject/testProject_28`).\n\n**Available Commands:**\n- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n- `/plan --branch ` - Plan on a specific branch (default: main)\n- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n- `/fix --branch ` - Fix on a specific branch (default: main)\n- `/fix with ` - Same as /fix but appends guidance to the prompt\n- `/pr` - Open a pull request from the current branch\n- `/sync` - Pull the branch from upstream to keep it up to date\n- `/retry` - Retry a failed task (resets attempt counter)\n- `/skip` - Skip this issue\n- `/abort` - Cancel the current task\n\nYou can add guidance: `/fix with performance focus`\n\n\n",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "url": "https://spsprodcus7.vssps.visualstudio.com/Aba28730b-ce66-48fc-99ee-a8b1adf97c2c/_apis/Identities/27453f2e-1fa7-4792-9342-d81f676a493a",
+        "_links": {
+          "avatar": {
+            "href": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+          }
+        },
+        "id": "27453f2e-1fa7-4792-9342-d81f676a493a",
+        "uniqueName": "natedorr@gmail.com",
+        "imageUrl": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk",
+        "descriptor": "msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+      },
+      "createdDate": "2026-05-10T01:36:54.137Z"
+    },
+    {
+      "id": 1200466,
+      "text": "autoSWE picked up this issue (`ado:natedorr_testProject/testProject_28`).\n\n**Available Commands:**\n- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n- `/plan --branch ` - Plan on a specific branch (default: main)\n- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n- `/fix --branch ` - Fix on a specific branch (default: main)\n- `/fix with ` - Same as /fix but appends guidance to the prompt\n- `/pr` - Open a pull request from the current branch\n- `/sync` - Pull the branch from upstream to keep it up to date\n- `/retry` - Retry a failed task (resets attempt counter)\n- `/skip` - Skip this issue\n- `/abort` - Cancel the current task\n\nYou can add guidance: `/fix with performance focus`\n\n\n",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "url": "https://spsprodcus7.vssps.visualstudio.com/Aba28730b-ce66-48fc-99ee-a8b1adf97c2c/_apis/Identities/27453f2e-1fa7-4792-9342-d81f676a493a",
+        "_links": {
+          "avatar": {
+            "href": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+          }
+        },
+        "id": "27453f2e-1fa7-4792-9342-d81f676a493a",
+        "uniqueName": "natedorr@gmail.com",
+        "imageUrl": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk",
+        "descriptor": "msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+      },
+      "createdDate": "2026-05-09T23:35:44.173Z"
+    },
+    {
+      "id": 1200439,
+      "text": "autoSWE picked up this issue (`ado:natedorr_testProject/testProject_28`).\n\n**Available Commands:**\n- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n- `/plan --branch ` - Plan on a specific branch (default: main)\n- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n- `/fix --branch ` - Fix on a specific branch (default: main)\n- `/fix with ` - Same as /fix but appends guidance to the prompt\n- `/pr` - Open a pull request from the current branch\n- `/sync` - Pull the branch from upstream to keep it up to date\n- `/retry` - Retry a failed task (resets attempt counter)\n- `/skip` - Skip this issue\n- `/abort` - Cancel the current task\n\nYou can add guidance: `/fix with performance focus`\n\n\n",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "url": "https://spsprodcus7.vssps.visualstudio.com/Aba28730b-ce66-48fc-99ee-a8b1adf97c2c/_apis/Identities/27453f2e-1fa7-4792-9342-d81f676a493a",
+        "_links": {
+          "avatar": {
+            "href": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+          }
+        },
+        "id": "27453f2e-1fa7-4792-9342-d81f676a493a",
+        "uniqueName": "natedorr@gmail.com",
+        "imageUrl": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk",
+        "descriptor": "msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+      },
+      "createdDate": "2026-05-09T23:23:01.217Z"
+    },
+    {
+      "id": 1200410,
+      "text": "autoSWE picked up this issue (`ado:natedorr_testProject/testProject_28`).\n\n**Available Commands:**\n- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n- `/plan --branch ` - Plan on a specific branch (default: main)\n- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n- `/fix --branch ` - Fix on a specific branch (default: main)\n- `/fix with ` - Same as /fix but appends guidance to the prompt\n- `/pr` - Open a pull request from the current branch\n- `/sync` - Pull the branch from upstream to keep it up to date\n- `/retry` - Retry a failed task (resets attempt counter)\n- `/skip` - Skip this issue\n- `/abort` - Cancel the current task\n\nYou can add guidance: `/fix with performance focus`\n\n\n",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "url": "https://spsprodcus7.vssps.visualstudio.com/Aba28730b-ce66-48fc-99ee-a8b1adf97c2c/_apis/Identities/27453f2e-1fa7-4792-9342-d81f676a493a",
+        "_links": {
+          "avatar": {
+            "href": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+          }
+        },
+        "id": "27453f2e-1fa7-4792-9342-d81f676a493a",
+        "uniqueName": "natedorr@gmail.com",
+        "imageUrl": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk",
+        "descriptor": "msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+      },
+      "createdDate": "2026-05-09T23:16:38.977Z"
+    },
+    {
+      "id": 1200373,
+      "text": "autoSWE picked up this issue (`ado:natedorr_testProject/testProject_28`).\n\n**Available Commands:**\n- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n- `/plan --branch ` - Plan on a specific branch (default: main)\n- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n- `/fix --branch ` - Fix on a specific branch (default: main)\n- `/fix with ` - Same as /fix but appends guidance to the prompt\n- `/pr` - Open a pull request from the current branch\n- `/sync` - Pull the branch from upstream to keep it up to date\n- `/retry` - Retry a failed task (resets attempt counter)\n- `/skip` - Skip this issue\n- `/abort` - Cancel the current task\n\nYou can add guidance: `/fix with performance focus`\n\n\n",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "url": "https://spsprodcus7.vssps.visualstudio.com/Aba28730b-ce66-48fc-99ee-a8b1adf97c2c/_apis/Identities/27453f2e-1fa7-4792-9342-d81f676a493a",
+        "_links": {
+          "avatar": {
+            "href": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+          }
+        },
+        "id": "27453f2e-1fa7-4792-9342-d81f676a493a",
+        "uniqueName": "natedorr@gmail.com",
+        "imageUrl": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk",
+        "descriptor": "msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+      },
+      "createdDate": "2026-05-09T20:51:09.397Z"
+    },
+    {
+      "id": 1200347,
+      "text": "autoSWE picked up this issue (`ado:natedorr_testProject/testProject_28`).\n\n**Available Commands:**\n- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n- `/plan --branch ` - Plan on a specific branch (default: main)\n- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n- `/fix --branch ` - Fix on a specific branch (default: main)\n- `/fix with ` - Same as /fix but appends guidance to the prompt\n- `/pr` - Open a pull request from the current branch\n- `/sync` - Pull the branch from upstream to keep it up to date\n- `/retry` - Retry a failed task (resets attempt counter)\n- `/skip` - Skip this issue\n- `/abort` - Cancel the current task\n\nYou can add guidance: `/fix with performance focus`\n\n\n",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "url": "https://spsprodcus7.vssps.visualstudio.com/Aba28730b-ce66-48fc-99ee-a8b1adf97c2c/_apis/Identities/27453f2e-1fa7-4792-9342-d81f676a493a",
+        "_links": {
+          "avatar": {
+            "href": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+          }
+        },
+        "id": "27453f2e-1fa7-4792-9342-d81f676a493a",
+        "uniqueName": "natedorr@gmail.com",
+        "imageUrl": "https://dev.azure.com/natedorr/_apis/GraphProfile/MemberAvatars/msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk",
+        "descriptor": "msa.ODM2MzYxY2EtMmY0Zi03NTYxLTg3MWEtYmFjYzhkZjMxMDZk"
+      },
+      "createdDate": "2026-05-09T20:20:20.563Z"
+    }
+  ]
+}

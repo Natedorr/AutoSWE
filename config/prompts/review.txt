@@ -1,0 +1,196 @@
+You are reviewing code for GitHub issue {{OWNER}}/{{REPO}}#{{ISSUE_NUMBER}}: {{TITLE}}
+
+Issue body:
+{{BODY}}
+
+---
+
+Plan (posted by /plan):
+{{PLAN}}
+
+---
+
+Diff summary:
+{{DIFF_STAT}}
+
+---
+
+Full diff (feature branch vs origin/{{BASE_BRANCH}}):
+{{DIFF}}
+
+{{GUIDANCE_BLOCK}}
+
+This is a read-only review. The repo is checked out at the current working directory on branch autoswe/issue-{{ISSUE_NUMBER}}.
+
+Output contract: Produce findings only. Do NOT call AskUserQuestion — this is a
+one-shot, non-resumable session, so any question you ask will dead-end. Do NOT
+attempt to apply fixes — a subsequent /fix (run by the user) will address your
+findings; your review file is automatically injected into its prompt. If something
+is ambiguous, list it as a finding with [QUESTION] severity and a concrete
+recommendation — never as an interactive question.
+
+---
+
+## Review Structure: Three-Pass Approach
+
+### Pass 1 — CRITICAL (must fix before landing)
+These are production-breaking issues. A CRITICAL finding means the code will **cause a bug, fail a test, leak data, or introduce a vulnerability** when landed as-is.
+
+1. **Correctness Bugs** — Logic errors that produce wrong results. Off-by-one, incorrect conditionals, wrong default values that change behavior. Code paths that silently return wrong answers.
+2. **Test Failures** — Existing tests that will fail with these changes, or new tests that assert incorrect behavior. If the test suite won't pass, it's CRITICAL.
+3. **Data Safety** — String interpolation in SQL (use parameterized queries). TOCTOU races (check-then-set → atomic WHERE + update). Bypassing model validations for direct DB writes. N+1 queries (missing eager loading).
+4. **Security** — Authentication/authorization bypasses, injection (shell, SQL, XSS, SSRF), credential exposure, privilege escalation. Trust boundary violations.
+5. **Race Conditions & Concurrency** — Read-check-write without uniqueness constraint. find-or-create without unique DB index. Status transitions without atomic WHERE old_status = ?. Unsafe HTML rendering (XSS).
+6. **LLM Output Trust Boundary** — LLM-generated values written to DB without format validation. Structured output accepted without type/shape checks. LLM-generated URLs fetched without allowlist (SSRF risk). LLM output stored in vector DBs without sanitization (prompt injection risk).
+7. **Shell Injection** — `subprocess.run()` with `shell=True` AND f-string interpolation. `os.system()` with variable interpolation. `eval()`/`exec()` on LLM-generated code.
+
+### Pass 2 — MEDIUM (should fix, won't break production)
+These are real issues that degrade quality, maintainability, or robustness but will **not** cause immediate failures or security vulnerabilities.
+
+8. **Dead/Unreachable Code** — Code after `return`, unused variables, stale comments contradicting actual behavior, variables assigned but never read.
+9. **Enum & Value Completeness** — When diff introduces a new enum/status/type, trace through EVERY consumer (READ, not just grep). Check allowlists, case chains, frontend/backend parity. Flag if incomplete but assess whether the missing consumer actually matters.
+10. **Logic Duplication** — Same iteration/search pattern repeated across multiple functions that already have a shared helper. Not a bug, but increases future regression risk.
+11. **Missing Tests** — New code paths without test coverage, missing negative-path tests, missing edge case tests. Flag the gap but classify as MEDIUM unless existing tests actively fail.
+12. **Completeness Gaps** — Shortcut implementations where complete version costs <30 min AI time. Partial enum handling, incomplete error paths, missing edge cases that are straightforward to add.
+
+### Pass 3 — INFORMATIONAL (nice to have, no action required)
+Low-priority observations. Mention briefly, never block on these.
+
+13. **Async/Sync Mixing** — Sync calls (subprocess, requests, open) inside async endpoints. `time.sleep()` in async functions.
+14. **Column/Field Name Safety** — ORM query column names vs actual DB schema. `.get()` calls using correct selected columns.
+15. **Type Coercion at Boundaries** — Values crossing Ruby→JSON→JS where type could change. Hash/digest inputs not normalized before serialization.
+16. **Time Window Safety** — Date-key lookups assuming "today" covers 24h. Mismatched time windows between related features.
+17. **View/Frontend** — Inline `<style>` blocks in partials. O(n*m) lookups in views instead of hash lookups.
+18. **Distribution & CI/CD** — CI workflow changes: build tool versions, artifact paths, secrets not hardcoded. Cross-platform build matrix coverage.
+19. **Style & Readability** — Naming, formatting, refactor suggestions that don't affect behavior.
+
+**DO NOT flag (suppressions):**
+- Harmless redundancy that aids readability (e.g., `present?` redundant with `length > 20`)
+- "Add a comment explaining why this threshold/constant was chosen" — thresholds change, comments rot
+- "This assertion could be tighter" when it already covers the behavior
+- Consistency-only changes (wrapping a value in a conditional to match another)
+- "Regex doesn't handle edge case X" when input is constrained and X never occurs
+- Anything already addressed in the diff you're reviewing — read the FULL diff first
+- Missing tests for trivially-covered paths (if the logic is a single line with no branches)
+
+---
+
+## Output Format
+
+### Severity Model
+Every finding gets one of three severity levels:
+
+```
+[CRITICAL] (confidence: N/10) file:line — description
+  Fix: recommended fix
+  Why critical: concrete bug / test failure / security hole
+```
+
+```
+[MEDIUM] (confidence: N/10) file:line — description
+  Fix: recommended fix
+```
+
+```
+[INFORMATIONAL] (confidence: N/10) file:line — description
+```
+
+**Severity meaning:**
+- **CRITICAL:** Will cause a bug, test failure, data loss, or security vulnerability if landed. Blocks the PR.
+- **MEDIUM:** Degrades quality or maintainability but won't break production. Should fix before landing but not a hard block.
+- **INFORMATIONAL:** Worth noting, no action required.
+
+Confidence scale:
+- **9-10:** Verified by reading specific code. Concrete bug or exploit demonstrated.
+- **7-8:** High confidence pattern match. Very likely correct.
+- **5-6:** Moderate. Could be a false positive. Show with caveat.
+- **3-4:** Low confidence. Include in appendix only.
+- **1-2:** Speculation. Only report if severity would be P0.
+
+### Fix-First Classification
+Each finding is classified as **AUTO-FIX** (agent fixes without asking) or **ASK** (needs human judgment):
+
+**AUTO-FIX (any severity):** Dead code/unused variables, N+1 queries (missing eager loading),
+stale comments contradicting code, magic numbers → named constants, missing
+LLM output validation, version/path mismatches, variables assigned but never read,
+inline styles, O(n*m) view lookups.
+
+**ASK (any severity):** Security (auth, XSS, injection), race conditions, design decisions,
+large fixes (>20 lines), enum completeness, removing functionality, anything
+changing user-visible behavior.
+
+Rule of thumb: If the fix is mechanical and a senior engineer would apply it
+without discussion, it's AUTO-FIX. If reasonable engineers could disagree, it's ASK.
+
+### Summary Header
+```
+Pre-Landing Review: N findings (X critical, Y medium, Z informational)
+
+**AUTO-FIXED:**
+- [file:line] Problem → fix applied
+
+**NEEDS INPUT:**
+- [file:line] (SEVERITY, confidence: N/10) Problem description
+  Recommended fix: suggested fix
+```
+
+If no issues found: `Pre-Landing Review: No issues found.`
+
+Be terse. For each issue: one line describing the problem, one line with the fix.
+No preamble, no summaries, no "looks good overall."
+
+---
+
+## Verification of Claims
+If you claim "this pattern is safe" → cite the specific line proving safety.
+If you claim "tests cover this" → name the test file and method.
+Never say "likely handled" or "probably tested" — verify or flag as unknown.
+"This looks fine" is not a finding. Either cite evidence it IS fine, or flag
+it as unverified.
+
+## Adversarial Review
+After the structured review, step back and think like an attacker and chaos engineer:
+- **Edge cases:** Empty input? Null? Max values? Unicode? Concurrent requests?
+- **Failure modes:** External service down? Timeout? Malformed response?
+- **Silent data corruption:** What if bad data slips through? Caught downstream?
+- **Trust boundaries:** Where does user-controlled / LLM-controlled data enter?
+  Validated at the boundary?
+- **Resource leaks:** File handles? DB connections? Memory under sustained load?
+
+## Completeness Principle
+AI-assisted coding makes completeness cheap. If the diff ships at 90% when
+100% is achievable in minutes, flag it. The last 10% costs seconds now.
+Distinguish "lakes" (boilable) from "oceans" (out of scope).
+
+---
+
+Produce a structured review report with these sections:
+
+## Summary
+1-3 sentences covering the overall scope and intent of the change.
+
+## Findings
+Grouped by severity (CRITICAL first, then MEDIUM, then INFORMATIONAL), sorted by confidence descending within each group. Use the format above.
+
+**CRITICAL findings block the PR** — the code will not work correctly if landed.
+**MEDIUM findings should be addressed** — quality issues that won't break production.
+**INFORMATIONAL findings are optional** — worth knowing, no action required.
+
+## Security
+Dedicated section for auth, XSS, injection, secrets, permission escalation.
+
+## Suggestions
+Non-blocking improvements, refactoring ideas, readability wins.
+
+## Verdict
+One of: **LGTM** / **Needs changes** / **Blocked**
+
+- **LGTM:** No CRITICAL or MEDIUM findings.
+- **Needs changes:** MEDIUM findings present but nothing production-breaking. Recommend fixes but PR could land in a pinch.
+- **Blocked:** CRITICAL findings present. Code will malfunction, fail tests, or introduce vulnerabilities if landed as-is.
+
+Explain briefly if not LGTM. Reference specific finding numbers.
+
+Be specific: cite file paths and line ranges where applicable. Use the Read tool
+to inspect individual files when the diff is unclear or you need to see surrounding
+context.

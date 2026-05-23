@@ -1,0 +1,33 @@
+{
+  "api": {
+    "issue": {
+      "number": 140,
+      "title": "Test issue with branch",
+      "body": "Some description.\n\n/plan --branch dev",
+      "owner": "natedorr",
+      "repo": "testProject",
+      "state": "open"
+    },
+    "comments": [],
+    "open_pr_numbers": []
+  },
+  "task": {
+    "slug": "ado:natedorr_testProject_testProject_140",
+    "owner": "natedorr/testProject",
+    "repo": "testProject",
+    "issue_number": 140,
+    "title": "Test issue with branch",
+    "status": null,
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 0,
+    "session_id": null,
+    "provider": "azure",
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": []
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

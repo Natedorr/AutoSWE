@@ -1,0 +1,11 @@
+{
+  "__meta": {
+    "endpoint": "GET /_apis/wit/workitems/1 (fallback)",
+    "method": "GET",
+    "captured_at": "2026-05-11T16:31:52.115581+00:00",
+    "doc_ref": "docs/azure-devops-api/get-user.md"
+  },
+  "displayName": "Nate Dorr",
+  "id": "27453f2e-1fa7-4792-9342-d81f676a493a",
+  "uniqueName": "natedorr@gmail.com"
+}

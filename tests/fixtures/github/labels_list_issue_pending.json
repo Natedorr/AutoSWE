@@ -1,0 +1,16 @@
+[
+  {
+    "id": 10848865528,
+    "name": "autoswe:pending",
+    "color": "0075ca",
+    "default": false,
+    "description": "Ready to dispatch"
+  },
+  {
+    "id": 10848066733,
+    "name": "bug",
+    "color": "d73a4a",
+    "default": true,
+    "description": "Something isn't working"
+  }
+]

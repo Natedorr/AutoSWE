@@ -1,0 +1,33 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Completed with command",
+      "/fix",
+      "no changes detected",
+      "Cost: $0.10",
+      "Duration: 1m0s",
+      "Session: session-fix-789",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "fixed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "fixed",
+      "last_dispatched_command": "/fix",
+      "last_dispatched_command_id": 1,
+      "last_consumed_reply_id": 1,
+      "pending_command": null,
+      "pending_guidance": null,
+      "pending_user_reply": null,
+      "session_id": "session-fix-789",
+      "last_phase": "fix",
+      "first_dispatched_at": null
+    }
+  }
+]

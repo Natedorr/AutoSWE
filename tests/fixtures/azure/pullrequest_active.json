@@ -1,0 +1,23 @@
+{
+  "count": 1,
+  "value": [
+    {
+      "pullRequestId": 42,
+      "repository": {
+        "id": "repo-id-123",
+        "name": "my-repo",
+        "url": "https://dev.azure.com/my-org/my-project/_apis/git/repositories/repo-id-123"
+      },
+      "sourceRefName": "refs/heads/autoswe/issue-100",
+      "targetRefName": "refs/heads/main",
+      "status": "active",
+      "title": "autoSWE: Feature: add login page",
+      "url": "https://dev.azure.com/my-org/my-project/_git/my-repo/pullrequest/42",
+      "createdBy": {
+        "displayName": "Nate Dorr",
+        "uniqueName": "natedorr@example.com"
+      },
+      "creationDate": "2026-05-05T10:00:00Z"
+    }
+  ]
+}

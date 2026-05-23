@@ -1,0 +1,27 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Completed with command",
+      "Commit",
+      "abc123def",
+      "View branch",
+      "Fixed the feature",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "fixed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "fixed",
+      "last_dispatched_command": "/fix",
+      "last_phase": "fix",
+      "first_dispatched_at": null,
+      "last_consumed_reply_id": 1
+    }
+  }
+]

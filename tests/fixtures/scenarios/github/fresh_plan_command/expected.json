@@ -1,0 +1,27 @@
+{
+  "label_after": "autoswe:planned",
+  "comments_posted": [
+    {
+      "body_contains": [
+        "## Plan",
+        "Add login endpoint",
+        "<!-- autoswe-bot -->"
+      ],
+      "count": 1
+    }
+  ],
+  "queue_task_after": {
+    "session_id": "s-plan-1",
+    "pending_command": null,
+    "autoswe_status": "planned"
+  },
+  "claude_calls": [
+    {
+      "permission_mode": "plan",
+      "resume": null
+    }
+  ],
+  "git_calls": [
+    "create_worktree"
+  ]
+}
