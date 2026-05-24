@@ -34,17 +34,6 @@ def _git_global(*args: str, check: bool = True) -> subprocess.CompletedProcess[s
     )
 
 
-def _git_global_config_once():
-    """Set user.identity for the test process (idempotent)."""
-    _git_global("config", "--global", "user.email", "test@test.com", check=False)
-    _git_global("config", "--global", "user.name", "Test", check=False)
-    _git_global("config", "--global", "init.defaultBranch", "main", check=False)
-
-
-# Ensure identity on import so every test has it
-_git_global_config_once()
-
-
 class GitWorld:
     """A sandboxed git universe under one ``tmp_path``.
 
@@ -202,7 +191,10 @@ class GitWorld:
             self._owner, self._repo, "fake-token",
             self.cfg(), self._default_branch, "github",
         )
-        return main_clone_path(self._owner, self._repo, self.cfg(), "github")
+        main = main_clone_path(self._owner, self._repo, self.cfg(), "github")
+        _git(main, "config", "user.email", "test@test.com")
+        _git(main, "config", "user.name", "Test")
+        return main
 
     def make_worktree(self, issue_num: int, *, base_branch: str = "main", pull_strategy: str = "reset") -> Path:
         """Invoke the production create_worktree() and return the worktree path."""
