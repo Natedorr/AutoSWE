@@ -2,7 +2,17 @@
 
 import logging
 
-from autoswe.core.logging_utils import init_debug_logger, init_issue_logger, log, remove_issue_logger
+import pytest
+
+from autoswe.core.logging_utils import (
+    MASK,
+    SensitiveLogFilter,
+    init_debug_logger,
+    init_issue_logger,
+    log,
+    mask_sensitive,
+    remove_issue_logger,
+)
 
 
 def test_log_writes_to_debug_logger(tmp_path, caplog):
@@ -79,3 +89,113 @@ def test_init_issue_logger_ado_slug(tmp_path):
     assert log_path.parent.exists()
 
     remove_issue_logger(handler)
+
+
+# -------------------------------------------------------------------
+# Sensitive data redaction tests
+# -------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "input_val,expected",
+    [
+        # GitHub classic PAT (ghp_)
+        ("ghp_abc123def456ghi789jkl012mno345pqr678", MASK),
+        # GitHub fine-grained PAT
+        ("github_pat_abc123def456ghi789jkl012mno345pqr678stu901", MASK),
+        # GitHub OAuth token (gho_)
+        ("gho_abc123def456ghi789jkl012mno345pqr678", MASK),
+        # GitHub user token (ghu_)
+        ("ghu_abc123def456ghi789jkl012mno345pqr678", MASK),
+        # GitHub static token (ghs_)
+        ("ghs_abc123def456ghi789jkl012mno345pqr678", MASK),
+        # GitHub refresh token (ghr_)
+        ("ghr_abc123def456ghi789jkl012mno345pqr678", MASK),
+        # Anthropic API key
+        ("sk-ant-abc123def456ghi789jkl012", MASK),
+        # Token prefix with GitHub PAT
+        ("Token ghp_abc123def456ghi789jkl012mno345pqr678", f"Token {MASK}"),
+        # Bearer prefix with Anthropic key
+        ("Bearer sk-ant-abc123def456ghi789jkl012mno345", f"Bearer {MASK}"),
+        # No sensitive data
+        ("no sensitive data here", "no sensitive data here"),
+        # Empty string
+        ("", ""),
+        # None
+        (None, None),
+        # Too short — not a real token
+        ("ghp_short", "ghp_short"),
+        # Multiple tokens in one string
+        ("Multiple ghp_aaBbbccc1122334455667788 and ghp_ddEeefff9988776655443322",
+         f"Multiple {MASK} and {MASK}"),
+    ],
+)
+def test_mask_sensitive_patterns(input_val, expected):
+    assert mask_sensitive(input_val) == expected
+
+
+def test_mask_sensitive_idempotent():
+    """Calling mask_sensitive twice should produce the same result as calling it once."""
+    text = "token ghp_abc123def456ghi789jkl012mno345pqr678"
+    assert mask_sensitive(mask_sensitive(text)) == mask_sensitive(text)
+
+
+def test_sensitive_log_filter_masks_message():
+    """SensitiveLogFilter should mask tokens in the log message."""
+    record = logging.LogRecord(
+        name="test", level=logging.DEBUG, pathname="", lineno=0,
+        msg="using token ghp_abc123def456ghi789jkl012mno345pqr678",
+        args=(), exc_info=None,
+    )
+    filt = SensitiveLogFilter()
+    assert filt.filter(record) is True
+    assert MASK in record.msg
+    assert "ghp_" not in record.msg
+
+
+def test_sensitive_log_filter_masks_args():
+    """SensitiveLogFilter should mask tokens in string format args."""
+    record = logging.LogRecord(
+        name="test", level=logging.DEBUG, pathname="", lineno=0,
+        msg="error with %s",
+        args=("token ghp_abc123def456ghi789jkl012mno345pqr678",),
+        exc_info=None,
+    )
+    SensitiveLogFilter().filter(record)
+    assert MASK in str(record.args)
+    assert "ghp_" not in str(record.args)
+
+
+def test_sensitive_log_filter_masks_exc_text():
+    """SensitiveLogFilter should mask tokens in exception text."""
+    record = logging.LogRecord(
+        name="test", level=logging.ERROR, pathname="", lineno=0,
+        msg="failed", args=(), exc_info=None,
+    )
+    record.exc_text = "Traceback: token ghp_abc123def456ghi789jkl012mno345pqr678"
+    SensitiveLogFilter().filter(record)
+    assert MASK in record.exc_text
+    assert "ghp_" not in record.exc_text
+
+
+def test_mask_sensitive_on_exc_text():
+    """mask_sensitive() should handle exception-like strings with tokens."""
+    exc_str = "urllib.error.HTTPError: HTTP Error 401: ghp_abc123def456ghi789jkl012mno345pqr678"
+    result = mask_sensitive(exc_str)
+    assert MASK in result
+    assert "ghp_" not in result
+
+
+def test_log_masks_stdout(capfd):
+    """log() should mask sensitive data before printing to stdout."""
+    log("token ghp_abc123def456ghi789jkl012mno345pqr678")
+    captured = capfd.readouterr()
+    assert MASK in captured.out
+    assert "ghp_" not in captured.out
+
+
+def test_init_debug_logger_has_sensitive_filter(tmp_path):
+    """init_debug_logger() should attach SensitiveLogFilter."""
+    logger = init_debug_logger(tmp_path)
+    assert any(
+        type(f).__name__ == "SensitiveLogFilter" for f in logger.filters
+    ), "debug logger should have a SensitiveLogFilter attached"

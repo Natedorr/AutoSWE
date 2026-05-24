@@ -1,17 +1,70 @@
 import logging
 import logging.handlers
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from autoswe.core.slug import slug_to_filename
 
+# --- Sensitive data redaction ------------------------------------------------
+
+MASK = "***REDACTED***"
+
+# Compiled regex patterns for sensitive data detection.
+# Minimum length thresholds prevent false positives on short alphanumeric strings.
+_SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
+    # GitHub tokens: classic (ghp_), OAuth (gho_), user (ghu_), static (ghs_), refresh (ghr_)
+    re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
+    # GitHub fine-grained PAT
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    # Anthropic API key
+    re.compile(r"sk-ant-[A-Za-z0-9\-]{20,}"),
+    # Generic "Token <value>" / "Bearer <value>" with long secrets (catches Azure PATs)
+    re.compile(r"(?:[Bb]earer|[Tt]oken)\s+[A-Za-z0-9_\-\.]{20,}"),
+]
+
+
+def mask_sensitive(text: str) -> str:
+    """Redact sensitive tokens/API keys from a string.
+
+    Returns a copy of *text* with any detected credential pattern replaced by
+    ``***REDACTED***``.  Safe to call on already-masked text (idempotent).
+    """
+    if not text:
+        return text
+    for pattern in _SENSITIVE_PATTERNS:
+        text = pattern.sub(MASK, text)
+    return text
+
+
+class SensitiveLogFilter(logging.Filter):
+    """Logging filter that masks sensitive data in every log record's message."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = mask_sensitive(str(record.msg))
+        if hasattr(record, "args") and record.args:
+            if isinstance(record.args, dict):
+                record.args = {
+                    k: mask_sensitive(str(v)) if not isinstance(v, dict) else v
+                    for k, v in record.args.items()
+                }
+            elif isinstance(record.args, tuple):
+                record.args = tuple(
+                    mask_sensitive(str(a)) if isinstance(a, str) else a
+                    for a in record.args
+                )
+        if hasattr(record, "exc_text") and record.exc_text:
+            record.exc_text = mask_sensitive(record.exc_text)
+        return True
+
 
 def log(msg: str) -> None:
-    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] {msg}", flush=True)
+    masked = mask_sensitive(msg)
+    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] {masked}", flush=True)
     # Also emit to the debug logger so per-issue handlers capture it.
     # Uses a direct getLogger call — safe even if init_debug_logger not yet called.
     try:
-        logging.getLogger("autoswe.debug").info(msg)
+        logging.getLogger("autoswe.debug").info(masked)
     except Exception:
         pass  # logger not initialized or misconfigured — stdout is the safety net
 
@@ -22,6 +75,7 @@ def init_debug_logger(logs_dir: Path) -> logging.Logger:
         return logger
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
+    logger.addFilter(SensitiveLogFilter())
     log_path = logs_dir / "autoswe.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
