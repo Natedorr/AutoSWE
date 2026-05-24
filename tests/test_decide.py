@@ -54,6 +54,7 @@ def _load_world(data: dict) -> World:
             body=c["body"],
             created_at=c.get("created_at", ""),
             author_login=c.get("author_login", ""),
+            raw_author_login=c.get("raw_author_login", ""),
             id=c.get("id"),
             is_bot=c.get("is_bot", False),
         )

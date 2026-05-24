@@ -21,6 +21,7 @@ class NormalizedComment:
     body: str
     created_at: str  # ISO 8601
     author_login: str = ""
+    raw_author_login: str = ""  # original login before normalization (for allowlist)
     id: int | None = None       # provider's comment ID
     is_bot: bool = False        # set by adapter from bot_comment_ids membership
 

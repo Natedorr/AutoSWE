@@ -109,6 +109,7 @@ class TestGitHubTracker:
 
         assert len(comments) == 1
         assert comments[0].author_login == "BOT"
+        assert comments[0].raw_author_login == "Natedorr"
 
     def test_fetch_comments_normalizes_owner(self, tracker, fake_token, mock_gh_request, gh_route_table):
         """Comments by the authenticated token owner get author_login='OWNER'."""
@@ -126,6 +127,7 @@ class TestGitHubTracker:
 
         assert len(comments) == 1
         assert comments[0].author_login == "OWNER"
+        assert comments[0].raw_author_login == "Natedorr"
 
     def test_fetch_comments_preserves_raw_login(self, tracker, fake_token, mock_gh_request, gh_route_table):
         """Comments by other users preserve the raw login value."""
@@ -143,6 +145,7 @@ class TestGitHubTracker:
 
         assert len(comments) == 1
         assert comments[0].author_login == "some-contributor"
+        assert comments[0].raw_author_login == "some-contributor"
 
     def test_fetch_comments_bot_marker_takes_precedence(self, tracker, fake_token, mock_gh_request, gh_route_table):
         """Bot marker takes precedence over owner match — BOT wins over OWNER."""
@@ -217,9 +220,13 @@ class TestGitHubTracker:
 
         assert len(comments) == 4
         assert comments[0].author_login == "BOT"        # bot comment by owner
+        assert comments[0].raw_author_login == "Natedorr"
         assert comments[1].author_login == "OWNER"      # user comment by owner
+        assert comments[1].raw_author_login == "Natedorr"
         assert comments[2].author_login == "some-contributor"  # other user
+        assert comments[2].raw_author_login == "some-contributor"
         assert comments[3].author_login == "BOT"        # bot comment by owner
+        assert comments[3].raw_author_login == "Natedorr"
 
     def test_post_comment(self, tracker, mock_gh_post_comment):
         tracker.post_comment({}, 42, "Hello from autoSWE" + "<!-- autoswe-bot -->")

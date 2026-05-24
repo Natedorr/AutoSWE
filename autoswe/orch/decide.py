@@ -40,27 +40,37 @@ def _find_slash_command(
 ):
     """Find the latest slash command from comments, then issue body.
 
-    Returns ((cmd, guidance, branch), author_login, source_id).
+    Returns ((cmd, guidance, branch), author_login, raw_author_login, source_id).
     If the command comes from the issue body, author_login is the actual
     creator_login (for allowlist checking) and source_id is 0 (sorts older
-    than any real comment ID).
+    than any real comment ID). raw_author_login is the original login before
+    normalization, used for allowlist matching.
     """
     for comment in sorted(comments, key=lambda c: c.created_at, reverse=True):
         result = parse_slash_command(comment.body, bot_name=bot_name)
         if result:
             slash_cmd, _, _ = result
+            raw_author = getattr(comment, "raw_author_login", "")
             log(f"[DECIDE] found cmd={slash_cmd} id={comment.id or 0} author={comment.author_login}")
-            return result, comment.author_login, comment.id or 0
+            return result, comment.author_login, raw_author, comment.id or 0
     result = parse_slash_command(issue_body or "", bot_name=bot_name)
     if result:
         slash_cmd, _, _ = result
         log(f"[DECIDE] found cmd={slash_cmd} (from issue body)")
-        return result, creator_login, 0
-    return None, None, 0
+        return result, creator_login, creator_login, 0
+    return None, None, "", 0
 
 
-def _is_author_allowed(author_login: str, cfg: dict, repo_cfg: dict) -> bool:
-    """Check if an author is allowed to trigger slash commands."""
+def _is_author_allowed(
+    author_login: str, cfg: dict, repo_cfg: dict, raw_author_login: str = "",
+) -> bool:
+    """Check if an author is allowed to trigger slash commands.
+
+    Checks both the normalized ``author_login`` and the raw login
+    (before OWNER/AUTHOR normalization) against the allowlist, so that
+    ``ALLOWED_AUTHORS=Natedorr`` still matches when the comment author
+    has been normalized to ``OWNER``.
+    """
     allowed_raw = cfg.get("ALLOWED_AUTHORS", set())
     repo_override = repo_cfg.get("allowed_authors", "")
     repo_allowed = (
@@ -71,7 +81,11 @@ def _is_author_allowed(author_login: str, cfg: dict, repo_cfg: dict) -> bool:
     active = repo_allowed or allowed_raw
     if not active:
         return True
-    return author_login in active
+    if author_login in active:
+        return True
+    if raw_author_login and raw_author_login in active:
+        return True
+    return False
 
 
 def _has_user_reply_after(
@@ -211,7 +225,10 @@ def _check_restart_or_guard(
                 for c in comments:
                     if not c.is_bot and c.created_at > after_ts:
                         new_comment = c
-            if new_comment and not _is_author_allowed(new_comment.author_login or "", cfg, repo_cfg):
+            if new_comment and not _is_author_allowed(
+                new_comment.author_login or "", cfg, repo_cfg,
+                getattr(new_comment, "raw_author_login", ""),
+            ):
                 log(f"[DECIDE] {task.slug} terminal restart blocked: new comment from {new_comment.author_login} not in allowlist")
                 return Action(kind="noop", slug=task.slug)
             # Even if the author IS allowed, plain-text comment with no explicit
@@ -327,14 +344,14 @@ def decide(world: World) -> Action:
     auto_dispatch_new = repo_cfg.get("auto_dispatch_new", False)
 
     # Find the latest slash command
-    slash_result, cmd_author, cmd_id = _find_slash_command(
+    slash_result, cmd_author, cmd_raw_author, cmd_id = _find_slash_command(
         comments, api.issue.body or "", bot_name, api.issue.creator_login
     )
     slash_cmd, guidance, branch = slash_result if slash_result else (None, None, None)
 
     # Actor allowlist check
     slash_cmd_suppressed = False
-    if slash_cmd and not _is_author_allowed(cmd_author or "", cfg, repo_cfg):
+    if slash_cmd and not _is_author_allowed(cmd_author or "", cfg, repo_cfg, cmd_raw_author or ""):
         slash_cmd, guidance, branch = None, None, None
         slash_result = None
         slash_cmd_suppressed = True
@@ -354,7 +371,7 @@ def decide(world: World) -> Action:
         ):
             # Check if the issue creator is allowed
             creator = api.issue.creator_login or ""
-            if not _is_author_allowed(creator, cfg, repo_cfg):
+            if not _is_author_allowed(creator, cfg, repo_cfg, creator):
                 log(f"[DECIDE] {task.slug} ignoring: creator={creator} not in allowlist")
                 return Action(kind="noop", slug=task.slug, triggering_comment_id=None)
             return Action(
@@ -374,7 +391,10 @@ def decide(world: World) -> Action:
 
             reply = _has_user_reply_after(comments, last_autoswe_id, last_consumed)
             if reply:
-                if not _is_author_allowed(reply.author_login or "", cfg, repo_cfg):
+                if not _is_author_allowed(
+                    reply.author_login or "", cfg, repo_cfg,
+                    getattr(reply, "raw_author_login", ""),
+                ):
                     log(f"[DECIDE] {task.slug} reply from {reply.author_login} blocked: not in allowlist")
                     return Action(kind="noop", slug=task.slug)
                 # Check if the reply itself contains a slash command
@@ -483,7 +503,10 @@ def decide(world: World) -> Action:
             reply = _has_user_reply_after(comments, last_bot_id, task.last_consumed_reply_id or 0)
             if reply is None or parse_slash_command(reply.body, bot_name=bot_name):
                 return Action(kind="noop", slug=task.slug)
-            if not _is_author_allowed(reply.author_login or "", cfg, repo_cfg):
+            if not _is_author_allowed(
+                reply.author_login or "", cfg, repo_cfg,
+                getattr(reply, "raw_author_login", ""),
+            ):
                 log(f"[DECIDE] {task.slug} reply from {reply.author_login} blocked: not in allowlist")
                 return Action(kind="noop", slug=task.slug)
             return Action(
@@ -541,7 +564,10 @@ def decide(world: World) -> Action:
 
         reply = _has_user_reply_after(comments, last_autoswe_id, last_consumed)
         if reply:
-            if not _is_author_allowed(reply.author_login or "", cfg, repo_cfg):
+            if not _is_author_allowed(
+                reply.author_login or "", cfg, repo_cfg,
+                getattr(reply, "raw_author_login", ""),
+            ):
                 log(f"[DECIDE] {task.slug} reply from {reply.author_login} blocked: not in allowlist")
                 return Action(kind="noop", slug=task.slug)
             cmd_result = parse_slash_command(reply.body, bot_name=bot_name)
