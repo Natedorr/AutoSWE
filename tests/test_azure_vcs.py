@@ -1,4 +1,6 @@
 """Tests for autoswe.providers.azure.vcs — Azure DevOps VCSProvider."""
+from urllib.parse import urlparse
+
 import pytest
 
 from autoswe.providers.azure.vcs import AzureVCS
@@ -31,7 +33,7 @@ def test_clone_url(vcs):
 def test_clone_url_contains_pat(vcs):
     url = vcs.clone_url({})
     assert "fake_pat_123" in url
-    assert "dev.azure.com" in url
+    assert urlparse(url).hostname.endswith("dev.azure.com")
 
 
 # -- branch_name --
