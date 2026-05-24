@@ -1,5 +1,3 @@
-# For most projects, this workflow file will not need changing; a default scan
-# is fine.  Visit https://github.com/github/codeql for more information.
 name: "CodeQL"
 
 permissions:
