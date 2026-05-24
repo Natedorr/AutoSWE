@@ -118,6 +118,14 @@ def test_init_issue_logger_ado_slug(tmp_path):
         ("Token ghp_abc123def456ghi789jkl012mno345pqr678", f"Token {MASK}"),
         # Bearer prefix with Anthropic key
         ("Bearer sk-ant-abc123def456ghi789jkl012mno345", f"Bearer {MASK}"),
+        # Basic auth header (Azure DevOps)
+        ("Basic dXNlcjpwYXNzd29yZDEyMzQ1Njc4OTAx", MASK),
+        # URL credential param — preserves param name
+        ("https://example.com/api?pat=abc123secret",
+         f"https://example.com/api?pat={MASK}"),
+        # URL credential param — multiple params
+        ("?token=secret1&other=keep&api_key=secret2",
+         f"?token={MASK}&other=keep&api_key={MASK}"),
         # No sensitive data
         ("no sensitive data here", "no sensitive data here"),
         # Empty string
@@ -271,3 +279,150 @@ def test_sensitive_formatter_masks_full_output():
     output = fmt.format(record)
     assert MASK in output
     assert "ghp_" not in output
+
+
+# --- New redaction pattern tests (issue #15) ---
+
+
+def test_redacts_bearer_token():
+    """Bearer + ghp_ prefix token must be redacted.
+
+    The ghp_ pattern fires first, replacing the token value.  "Bearer" is a
+    non-sensitive prefix that remains visible — this is consistent with
+    existing behavior (see parametrized test: ``"Token ghp_..." -> "Token MASK"``).
+    """
+    token = "Bearer ghp_" + "a" * 36
+    result = mask_sensitive(token)
+    assert MASK in result
+    assert "ghp_" not in result
+    # Bearer itself is not a secret — it stays visible next to the redacted value
+
+
+def test_redacts_basic_auth():
+    """Basic auth header must be redacted (Azure DevOps pattern)."""
+    auth = "Basic dXNlcjpwYXNzd29yZDEyMzQ1Njc4OTAx"
+    result = mask_sensitive(auth)
+    assert MASK in result
+    assert "dXNlcjpwYXNz" not in result
+
+
+def test_redacts_url_credential_preserves_param():
+    """URL credential params must redact the value but preserve the param name."""
+    url = "https://example.com/api?pat=abc123secret&other=keep"
+    result = mask_sensitive(url)
+    assert "?pat=" + MASK in result
+    assert "abc123secret" not in result
+    assert "&other=keep" in result
+
+
+def test_redacts_url_credential_multiple_params():
+    """Multiple URL credential params in one string must all be redacted."""
+    url = "api?token=secret1&access_token=secret2&api_key=secret3"
+    result = mask_sensitive(url)
+    assert "?token=" + MASK in result
+    assert "&access_token=" + MASK in result
+    assert "&api_key=" + MASK in result
+    assert "secret1" not in result
+    assert "secret2" not in result
+    assert "secret3" not in result
+
+
+def test_redacts_url_credential_case_insensitive():
+    """URL credential param names should be matched case-insensitively."""
+    url = "https://example.com?TOKEN=uppercase_secret"
+    result = mask_sensitive(url)
+    assert "?TOKEN=" + MASK in result
+    assert "uppercase_secret" not in result
+
+
+def test_passthrough_safe_strings():
+    """Safe strings (API methods, URL paths, repo names) must pass through unchanged."""
+    safe_strings = [
+        "GH_API: GET /repos/foo/bar",
+        "POST /api/v1/issues/42",
+        "scope: repo,read:user,workflow",
+        "project_id: org_proj_repo/70",
+        "normal text with no credentials",
+        "ghp_short",  # too short to be a token
+    ]
+    for s in safe_strings:
+        assert mask_sensitive(s) == s, f"safe string was modified: {s!r} -> {mask_sensitive(s)!r}"
+
+
+def test_redaction_via_format_args(tmp_path):
+    """Tokens in format args must be scrubbed via the getMessage() path.
+
+    This verifies that the filter calls record.getMessage() (which applies
+    format args) BEFORE scrubbing, rather than only masking record.msg
+    directly.
+    """
+    # Use a dedicated logger to avoid singleton-state issues with autoswe.debug
+    test_logger = logging.getLogger(f"autoswe.test_format_args_{id(tmp_path)}")
+    test_logger.setLevel(logging.DEBUG)
+    test_logger.propagate = False
+    test_logger.addFilter(SensitiveLogFilter())
+
+    handler = logging.FileHandler(str(tmp_path / "test.log"))
+    handler.setFormatter(SensitiveFormatter("%(message)s"))
+    test_logger.addHandler(handler)
+
+    token = "Bearer ghp_" + "x" * 36
+    test_logger.info("auth=%s", token)
+    handler.flush()
+    handler.close()
+
+    content = (tmp_path / "test.log").read_text()
+    assert MASK in content, "token in format arg must be redacted in log file"
+    assert "ghp_" not in content, "raw token must not appear in log file"
+
+
+def test_log_helper_scrubs_stdout(capfd):
+    """The log() helper must scrub sensitive data before printing to stdout."""
+    token = "Bearer ghp_" + "x" * 36
+    log(token)
+    captured = capfd.readouterr()
+    assert MASK in captured.out
+    assert "ghp_" not in captured.out
+    # Bearer is a non-sensitive protocol label — same as "Token" in existing tests
+
+
+def test_redacts_fine_grained_pat():
+    """GitHub fine-grained PAT (github_pat_) must be redacted."""
+    pat = "github_pat_" + "a" * 82
+    result = mask_sensitive(pat)
+    assert MASK in result
+    assert "github_pat_" not in result
+
+
+def test_redacts_anthropic_key():
+    """Anthropic API key (sk-ant-) must be redacted."""
+    key = "sk-ant-" + "a" * 30
+    result = mask_sensitive(key)
+    assert MASK in result
+    assert "sk-ant-" not in result
+
+
+def test_redaction_in_log_file_via_filter(tmp_path):
+    """End-to-end: token logged via logger must be redacted in the file on disk."""
+    # Use a dedicated logger to avoid singleton-state issues with autoswe.debug
+    test_logger = logging.getLogger(f"autoswe.test_file_{id(tmp_path)}")
+    test_logger.setLevel(logging.DEBUG)
+    test_logger.propagate = False
+    test_logger.addFilter(SensitiveLogFilter())
+
+    handler = logging.FileHandler(str(tmp_path / "test.log"))
+    handler.setFormatter(SensitiveFormatter("%(message)s"))
+    test_logger.addHandler(handler)
+
+    # Log various token patterns
+    test_logger.info("ghp_" + "A" * 36)
+    test_logger.info("Basic " + "a" * 30)
+    test_logger.info("url?token=secretvalue")
+
+    handler.flush()
+    handler.close()
+
+    content = (tmp_path / "test.log").read_text()
+    assert MASK in content
+    assert "ghp_" not in content
+    assert "secretvalue" not in content

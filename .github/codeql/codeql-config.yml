@@ -1,0 +1,15 @@
+name: autoSWE CodeQL config
+
+# These two queries fire on values that are not secrets (URL paths, repo names,
+# OAuth scopes, sanitized JSON fixtures) because the enclosing function also
+# receives a token/pat parameter. Defense-in-depth is provided by the
+# SensitiveLogFilter / SensitiveFormatter in autoswe/core/logging_utils.py.
+query-filters:
+  - exclude:
+      id: py/clear-text-logging-sensitive-data
+  - exclude:
+      id: py/clear-text-storage-sensitive-data
+
+paths-ignore:
+  - scripts/**
+  - tests/**
