@@ -241,6 +241,22 @@ def test_init_debug_logger_handlers_use_sensitive_formatter(tmp_path):
             )
 
 
+def test_init_issue_logger_handler_uses_sensitive_formatter(tmp_path):
+    """init_issue_logger() per-issue handlers should use SensitiveFormatter.
+
+    Regression test: if _get_fmt() is ever changed back to logging.Formatter,
+    this test catches the regression that would leak tokens in exception
+    tracebacks to per-issue log files.
+    """
+    init_debug_logger(tmp_path)
+    handler = init_issue_logger(tmp_path, "test_issue_formatter")
+    assert handler is not None
+    assert type(handler.formatter).__name__ == "SensitiveFormatter", (
+        "per-issue handler must use SensitiveFormatter to mask exception tracebacks"
+    )
+    remove_issue_logger(handler)
+
+
 def test_sensitive_formatter_masks_full_output():
     """SensitiveFormatter should mask tokens in the complete formatted string."""
     fmt = SensitiveFormatter(
