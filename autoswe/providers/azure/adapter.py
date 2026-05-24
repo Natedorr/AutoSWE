@@ -103,6 +103,7 @@ def read_api(
                         body=body,
                         created_at=c.created_at,
                         author_login=c.author_login,
+                        raw_author_login=c.raw_author_login,
                         id=c.id,
                         is_bot=is_bot,
                     )
