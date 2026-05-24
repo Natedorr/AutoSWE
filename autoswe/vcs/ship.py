@@ -16,9 +16,9 @@ def _pr_ref(pr_url: str) -> str:
     Avoids logging full PR URLs (which expose repo paths, branch names,
     and internal automation patterns) to plain text log files.
     """
-    # Handle "#123" format
+    # Handle "#123" format — prefix with "PR" for consistency
     if pr_url.startswith("#"):
-        return pr_url
+        return "PR" + pr_url
     # Try to extract PR number from common URL patterns
     parsed = urlparse(pr_url)
     path = parsed.path

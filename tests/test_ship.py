@@ -240,13 +240,25 @@ def test_pr_ref_azure_url():
 
 
 def test_pr_ref_hash_format():
-    """Hash-prefixed number passes through unchanged."""
-    assert _pr_ref("#99") == "#99"
+    """Hash-prefixed number is normalized to PR# format (not returned as-is)."""
+    assert _pr_ref("#99") == "PR#99"
 
 
 def test_pr_ref_fallback_no_pattern():
     """URL without pull/pullrequest keyword falls back to last path segment."""
     assert _pr_ref("https://example.com/some/other/path/abc123") == "PR#abc123"
+
+
+def test_pr_ref_empty_string():
+    """Empty string is handled gracefully (reachable via existing.url or fallback)."""
+    result = _pr_ref("")
+    assert "PR" in result
+
+
+def test_pr_ref_hash_none():
+    """Hash-NONE string is handled gracefully (reachable when PRResult.number is None)."""
+    result = _pr_ref("#None")
+    assert result == "PR#None"
 
 
 def test_pr_ref_empty_path():
@@ -271,7 +283,7 @@ def test_pr_ref_does_not_leak_azure_org():
     assert "repo" not in redacted
 
 
-def test_open_pr_log_redacted_url(mock_gh_post_comment):
+def test_open_pr_log_redacted_url():
     """log() receives PR# reference, not full URL (security: avoid URL in logs)."""
     task = make_task()
 
@@ -295,7 +307,7 @@ def test_open_pr_log_redacted_url(mock_gh_post_comment):
     assert "o/r/pull" not in log_call
 
 
-def test_open_pr_existing_log_redacted(mock_gh_post_comment):
+def test_open_pr_existing_log_redacted():
     """Existing PR path also logs redacted reference."""
     task = make_task()
     existing = PRResult(
@@ -318,7 +330,7 @@ def test_open_pr_existing_log_redacted(mock_gh_post_comment):
     assert "o/r/pull" not in log_call
 
 
-def test_open_pr_comment_includes_full_url(mock_gh_post_comment):
+def test_open_pr_comment_includes_full_url():
     """User-facing comment still gets full URL for usability."""
     task = make_task()
 
