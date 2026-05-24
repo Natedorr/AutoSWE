@@ -13,6 +13,7 @@ from urllib import error as url_error
 from urllib import request
 
 from autoswe.core.config import AUTOSWE_DIR, REPOS_CONFIG_FILE
+from autoswe.core.logging_utils import mask_sensitive
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -379,7 +380,7 @@ def _run_smoke_test(repo_path: str, cfg: dict) -> None:
         orch_poll(cfg, mode="sync", repo_filter=repo_path)
         print("  Smoke test passed.")
     except Exception as e:
-        print(f"  Smoke test failed: {e}")
+        print(f"  Smoke test failed: {mask_sensitive(str(e))}")
 
 
 # ---------------------------------------------------------------------------

@@ -19,11 +19,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-# Sanitization — reused from capture_scenario.py
-SENSITIVE_PATTERNS = [
-    re.compile(r'gh[pousr]_[A-Za-z0-9_]+'),
-    re.compile(r'[^\s]+@[^\s]+\.[^\s]+'),
-]
+from autoswe.core.logging_utils import mask_sensitive  # noqa: E402
+
+# Email-only pattern for fixture sanitization (not a credential, but still PII)
+_SENSITIVE_EMAIL = re.compile(r'[^\s]+@[^\s]+\.[^\s]+')
 
 KEEP_USER_KEYS = {"login", "id", "type", "name"}
 KEEP_LABEL_KEYS = {"id", "name", "color", "description"}
@@ -65,10 +64,11 @@ KEEP_ADO_REPO_KEYS = {
 
 
 def sanitize_body(text: str) -> str:
+    """Strip sensitive values from text bodies for fixture capture."""
     if not text:
         return text
-    for pat in SENSITIVE_PATTERNS:
-        text = pat.sub("[REDACTED]", text)
+    text = mask_sensitive(text)  # centralized credential masking
+    text = _SENSITIVE_EMAIL.sub("***REDACTED***", text)  # email masking (not a credential)
     return text
 
 

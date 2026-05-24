@@ -14,7 +14,7 @@ from urllib import request
 from urllib.parse import quote as url_quote
 
 from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import init_debug_logger, log, mask_sensitive
 
 dbg = init_debug_logger(LOGS_DIR)
 
@@ -70,7 +70,7 @@ def _ado_request(
                 except json.JSONDecodeError as e:
                     snippet = raw.decode(errors="replace")[:300]
                     raise RuntimeError(
-                        f"Azure API {path} -> HTTP {resp.status} returned non-JSON: {snippet}"
+                        f"Azure API {path} -> HTTP {resp.status} returned non-JSON: {mask_sensitive(snippet)}"
                     ) from e
         except url_error.HTTPError as e:
             content = e.read().decode() if hasattr(e, "read") else ""
@@ -93,7 +93,7 @@ def _ado_request(
                 time.sleep(wait)
                 continue
             else:
-                raise RuntimeError(f"Azure API {path} -> HTTP {e.code}: {content}") from e
+                raise RuntimeError(f"Azure API {path} -> HTTP {e.code}: {mask_sensitive(content)}") from e
 
 
 def ado_get(path: str, pat: str, max_retries: int = 3) -> dict:

@@ -4,7 +4,7 @@ from urllib import error as url_error
 from urllib import request
 
 from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import init_debug_logger, log, mask_sensitive
 
 dbg = init_debug_logger(LOGS_DIR)
 
@@ -46,7 +46,7 @@ def _gh_request(
                     log(f"[RATELIM] 403 rate limit hit. Waiting {wait_seconds:.0f}s until reset")
                     time.sleep(wait_seconds)
                     continue
-                raise RuntimeError(f"GitHub API {path} -> HTTP {e.code}: {content}") from e
+                raise RuntimeError(f"GitHub API {path} -> HTTP {e.code}: {mask_sensitive(content)}") from e
             elif e.code >= 500 and attempt < max_retries - 1:
                 wait = (2 ** attempt) + 5
                 dbg.warning("_gh_request: server error %d on attempt %d/%d for %s: sleeping %ds",
@@ -54,7 +54,7 @@ def _gh_request(
                 time.sleep(wait)
                 continue
             else:
-                raise RuntimeError(f"GitHub API {path} -> HTTP {e.code}: {content}") from e
+                raise RuntimeError(f"GitHub API {path} -> HTTP {e.code}: {mask_sensitive(content)}") from e
 
 
 def gh_get(path: str, token: str, max_retries: int = 3):
