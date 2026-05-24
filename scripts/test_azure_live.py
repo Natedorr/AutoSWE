@@ -9,6 +9,7 @@ Usage:
 """
 import os
 import sys
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 
@@ -247,7 +248,7 @@ vcs = AzureVCS(REPO_CFG)
 
 def _vcs_clone():
     url = vcs.clone_url(REPO_CFG)
-    assert "dev.azure.com" in url
+    assert urlparse(url).hostname.endswith("dev.azure.com")
     assert PAT[:20] in url
 
 
@@ -265,7 +266,7 @@ def _vcs_pr_roundtrip():
     try:
         pr = vcs.open_pull_request(REPO_CFG, branch, "main", "API Test PR", "Test body")
         assert pr.number is not None
-        assert "dev.azure.com" in pr.url
+        assert urlparse(pr.url).hostname.endswith("dev.azure.com")
         found = vcs.find_existing_pr(REPO_CFG, branch)
         assert found is not None
         assert found.number == pr.number
