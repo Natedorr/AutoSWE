@@ -68,7 +68,7 @@ def sanitize_body(text: str) -> str:
     if not text:
         return text
     text = mask_sensitive(text)  # centralized credential masking
-    text = _SENSITIVE_EMAIL.sub("[REDACTED]", text)  # email masking (not a credential)
+    text = _SENSITIVE_EMAIL.sub("***REDACTED***", text)  # email masking (not a credential)
     return text
 
 

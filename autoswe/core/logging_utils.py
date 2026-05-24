@@ -38,24 +38,42 @@ def mask_sensitive(text: str) -> str:
 
 
 class SensitiveLogFilter(logging.Filter):
-    """Logging filter that masks sensitive data in every log record's message."""
+    """Logging filter that masks sensitive data in every log record's message
+    and format args BEFORE the Formatter processes them.
+
+    Note: ``record.exc_text`` is NOT set at filter time (it's populated by the
+    Formatter), so exception traceback masking is handled by
+    :class:`SensitiveFormatter`.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = mask_sensitive(str(record.msg))
         if hasattr(record, "args") and record.args:
             if isinstance(record.args, dict):
+                # Only mask string values — preserve int/float/etc. for %d/%f specs
                 record.args = {
-                    k: mask_sensitive(str(v)) if not isinstance(v, dict) else v
+                    k: mask_sensitive(v) if isinstance(v, str) else v
                     for k, v in record.args.items()
                 }
-            elif isinstance(record.args, tuple):
+            elif isinstance(record.args, (tuple, list)):
                 record.args = tuple(
-                    mask_sensitive(str(a)) if isinstance(a, str) else a
+                    mask_sensitive(a) if isinstance(a, str) else a
                     for a in record.args
                 )
-        if hasattr(record, "exc_text") and record.exc_text:
-            record.exc_text = mask_sensitive(record.exc_text)
         return True
+
+
+class SensitiveFormatter(logging.Formatter):
+    """Formatter that masks sensitive data in the final formatted output.
+
+    This catches tokens that appear in exception tracebacks (``exc_text``),
+    which are set by the Formatter AFTER the Filter runs and therefore
+    cannot be masked by :class:`SensitiveLogFilter` alone.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        result = super().format(record)
+        return mask_sensitive(result)
 
 
 def log(msg: str) -> None:
@@ -86,7 +104,7 @@ def init_debug_logger(logs_dir: Path) -> logging.Logger:
         logger.addHandler(logging.NullHandler())
         print(f"[WARN] could not open debug log {log_path}: {e}", flush=True)
         return logger
-    fmt = logging.Formatter(
+    fmt = SensitiveFormatter(
         "%(asctime)s %(levelname)-8s %(funcName)s:%(lineno)d — %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%SZ",
     )
@@ -101,7 +119,7 @@ def init_debug_logger(logs_dir: Path) -> logging.Logger:
 
 
 def _get_fmt():
-    fmt = logging.Formatter(
+    fmt = SensitiveFormatter(
         "%(asctime)s %(levelname)-8s %(funcName)s:%(lineno)d — %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%SZ",
     )

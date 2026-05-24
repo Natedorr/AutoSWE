@@ -1,11 +1,13 @@
 """Tests for per-issue logging infrastructure."""
 
 import logging
+import sys
 
 import pytest
 
 from autoswe.core.logging_utils import (
     MASK,
+    SensitiveFormatter,
     SensitiveLogFilter,
     init_debug_logger,
     init_issue_logger,
@@ -165,16 +167,44 @@ def test_sensitive_log_filter_masks_args():
     assert "ghp_" not in str(record.args)
 
 
-def test_sensitive_log_filter_masks_exc_text():
-    """SensitiveLogFilter should mask tokens in exception text."""
+def test_sensitive_formatter_masks_exc_text():
+    """SensitiveFormatter should mask tokens in exception tracebacks.
+
+    record.exc_text is set BY the Formatter (after the Filter runs), so
+    SensitiveFormatter is the only place that can mask exception tracebacks.
+    """
+    fmt = SensitiveFormatter("%(message)s")
     record = logging.LogRecord(
         name="test", level=logging.ERROR, pathname="", lineno=0,
         msg="failed", args=(), exc_info=None,
     )
-    record.exc_text = "Traceback: token ghp_abc123def456ghi789jkl012mno345pqr678"
+    # Simulate what Formatter.format() does with exc_info
+    try:
+        raise ValueError("ghp_abc123def456ghi789jkl012mno345pqr678")
+    except ValueError:
+        record.exc_info = sys.exc_info()
+    output = fmt.format(record)
+    assert MASK in output
+    assert "ghp_" not in output
+    assert "Traceback" in output
+
+
+def test_sensitive_log_filter_preserves_non_string_args():
+    """SensitiveLogFilter should NOT coerce non-string dict args to strings,
+    preserving %d/%f format specifiers.
+    """
+    record = logging.LogRecord(
+        name="test", level=logging.DEBUG, pathname="", lineno=0,
+        msg="code=%d token=%s",
+        args=(500, "ghp_abc123def456ghi789jkl012mno345pqr678"),
+        exc_info=None,
+    )
     SensitiveLogFilter().filter(record)
-    assert MASK in record.exc_text
-    assert "ghp_" not in record.exc_text
+    # Integer arg should remain int (not coerced to string)
+    assert isinstance(record.args[0], int), "non-string args must not be coerced"
+    assert record.args[0] == 500
+    # String arg should be masked
+    assert MASK in str(record.args[1])
 
 
 def test_mask_sensitive_on_exc_text():
@@ -199,3 +229,29 @@ def test_init_debug_logger_has_sensitive_filter(tmp_path):
     assert any(
         type(f).__name__ == "SensitiveLogFilter" for f in logger.filters
     ), "debug logger should have a SensitiveLogFilter attached"
+
+
+def test_init_debug_logger_handlers_use_sensitive_formatter(tmp_path):
+    """All handlers from init_debug_logger should use SensitiveFormatter."""
+    logger = init_debug_logger(tmp_path)
+    for h in logger.handlers:
+        if h.formatter:
+            assert type(h.formatter).__name__ == "SensitiveFormatter", (
+                f"handler {type(h).__name__} should use SensitiveFormatter"
+            )
+
+
+def test_sensitive_formatter_masks_full_output():
+    """SensitiveFormatter should mask tokens in the complete formatted string."""
+    fmt = SensitiveFormatter(
+        "%(asctime)s %(levelname)-8s %(funcName)s:%(lineno)d — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%SZ",
+    )
+    record = logging.LogRecord(
+        name="test", level=logging.INFO, pathname="", lineno=10,
+        msg="using token ghp_abc123def456ghi789jkl012mno345pqr678",
+        args=(), exc_info=None,
+    )
+    output = fmt.format(record)
+    assert MASK in output
+    assert "ghp_" not in output
