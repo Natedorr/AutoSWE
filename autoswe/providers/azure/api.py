@@ -70,7 +70,7 @@ def _ado_request(
                 except json.JSONDecodeError as e:
                     snippet = raw.decode(errors="replace")[:300]
                     raise RuntimeError(
-                        f"Azure API {path} -> HTTP {resp.status} returned non-JSON: {snippet}"
+                        f"Azure API {path} -> HTTP {resp.status} returned non-JSON: {mask_sensitive(snippet)}"
                     ) from e
         except url_error.HTTPError as e:
             content = e.read().decode() if hasattr(e, "read") else ""

@@ -24,7 +24,7 @@ _SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
-def mask_sensitive(text: str) -> str:
+def mask_sensitive(text: str | None) -> str | None:
     """Redact sensitive tokens/API keys from a string.
 
     Returns a copy of *text* with any detected credential pattern replaced by
