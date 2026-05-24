@@ -116,6 +116,7 @@ def _normalize_github_comments(raw_comments: list[dict],
             body=body,
             created_at=c.get("created_at", ""),
             author_login=author_login,
+            raw_author_login=raw_login,
         ))
     return results
 

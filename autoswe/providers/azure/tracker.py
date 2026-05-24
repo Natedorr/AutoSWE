@@ -208,6 +208,7 @@ class AzureTracker(IssueTracker):
                     body=body,
                     created_at=c.get("createdDate", ""),
                     author_login=author_login,
+                    raw_author_login=author_raw,
                     id=c.get("id"),
                 )
             )

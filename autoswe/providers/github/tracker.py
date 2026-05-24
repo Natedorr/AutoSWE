@@ -118,6 +118,7 @@ class GitHubTracker(IssueTracker):
                     body=body,
                     created_at=c.get("created_at", ""),
                     author_login=author_login,
+                    raw_author_login=raw_login,
                     id=c.get("id"),
                 )
             )

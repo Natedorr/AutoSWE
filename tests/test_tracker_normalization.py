@@ -224,6 +224,19 @@ class TestGitHubTrackerNormalization:
             f"Normalization mismatch: expected {expected}, got {actual}"
         )
 
+        # Verify raw_author_login preserves original values
+        expected_raw = [
+            "Natedorr",           # bot comment by token owner
+            "Natedorr",           # user comment by token owner
+            "Natedorr",           # bot comment by token owner
+            "RandomContributor",  # other user
+            "CollaboratorJane",   # issue author
+        ]
+        actual_raw = [c.raw_author_login for c in normalized]
+        assert actual_raw == expected_raw, (
+            f"Raw author mismatch: expected {expected_raw}, got {actual_raw}"
+        )
+
     def test_list_open_issues_caches_authors(self, monkeypatch, gh_route_table):
         """list_open_issues populates _issue_authors for later fetch_comments."""
         fixture = _load("issue_done_with_comments.json")
@@ -476,6 +489,19 @@ class TestAzureTrackerNormalization:
         actual = [c.author_login for c in normalized]
         assert actual == expected_logins, (
             f"Azure normalization mismatch: expected {expected_logins}, got {actual}"
+        )
+
+        # Verify raw_author_login preserves original uniqueName values
+        expected_raw = [
+            "natedorr@example.com",       # comment 1: bot by PAT owner
+            "natedorr@example.com",       # comment 2: /fix by PAT owner
+            "natedorr@example.com",       # comment 3: bot by PAT owner
+            "contributor@example.com",    # comment 4: other user
+            "jane.doe@example.com",       # comment 5: issue author
+        ]
+        actual_raw = [c.raw_author_login for c in normalized]
+        assert actual_raw == expected_raw, (
+            f"Azure raw author mismatch: expected {expected_raw}, got {actual_raw}"
         )
 
     def test_azure_to_normalized_populates_last_updated(self, monkeypatch, ado_route_table):
