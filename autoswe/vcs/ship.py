@@ -1,3 +1,5 @@
+from urllib.parse import urlparse
+
 from autoswe.core.config import LOGS_DIR
 from autoswe.core.logging_utils import init_debug_logger, log
 from autoswe.providers.base import PRResult
@@ -6,6 +8,29 @@ from autoswe.providers.factory import get_tracker, get_vcs
 dbg = init_debug_logger(LOGS_DIR)
 
 AUTOSWE_BOT_FOOTER = "\n<!-- autoswe-bot -->"
+
+
+def _pr_ref(pr_url: str) -> str:
+    """Extract a redacted PR reference from a URL for safe log output.
+
+    Avoids logging full PR URLs (which expose repo paths, branch names,
+    and internal automation patterns) to plain text log files.
+    """
+    # Handle "#123" format
+    if pr_url.startswith("#"):
+        return pr_url
+    # Try to extract PR number from common URL patterns
+    parsed = urlparse(pr_url)
+    path = parsed.path
+    # GitHub: /{owner}/{repo}/pull/{number}
+    # Azure: /{org}/{project}/_git/{repo}/pullrequest/{number}
+    parts = path.strip("/").split("/")
+    for idx, part in enumerate(parts):
+        if part in ("pull", "pullrequest") and idx + 1 < len(parts):
+            return f"PR#{parts[idx + 1]}"
+    # Fallback: last non-empty path segment, then full URL
+    last = next((p for p in reversed(parts) if p), pr_url)
+    return f"PR#{last}"
 
 
 def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
@@ -32,7 +57,9 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
     existing = vcs.find_existing_pr(rcfg, branch)
     if existing is not None:
         pr_url = existing.url or f"#{existing.number}"
-        log(f"[SHIP] PR already exists: {pr_url} base={base_branch} head={branch}")
+        pr_ref = _pr_ref(pr_url)
+        dbg.debug("SHIP: pr_url=%s", pr_url)
+        log(f"[SHIP] PR already exists: {pr_ref} base={base_branch} head={branch}")
         try:
             tracker.post_comment(rcfg, issue_num,
                 f"Pull request already exists: {pr_url}{AUTOSWE_BOT_FOOTER}")
@@ -49,7 +76,9 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
             body=f"Fixes #{issue_num}\n\nOpened by autoSWE.",
         )
         pr_url = pr_result.url
-        log(f"[SHIP] PR created: {pr_url} base={base_branch} head={branch}")
+        pr_ref = _pr_ref(pr_url)
+        dbg.debug("SHIP: pr_url=%s", pr_url)
+        log(f"[SHIP] PR created: {pr_ref} base={base_branch} head={branch}")
         try:
             tracker.post_comment(rcfg, issue_num,
                "Pull request opened: " + pr_url + AUTOSWE_BOT_FOOTER)

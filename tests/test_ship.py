@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from autoswe.providers.base import PRResult
+from autoswe.vcs.ship import _pr_ref
 
 
 def make_task(pr_number=None):
@@ -222,3 +223,115 @@ def test_open_pr_no_existing_creates_new(mock_gh_post_comment):
     mock_get_vcs.return_value.find_existing_pr.assert_called_once()
     # open_pull_request was called because no PR existed
     mock_get_vcs.return_value.open_pull_request.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _pr_ref — PR URL redaction for safe log output
+# ---------------------------------------------------------------------------
+
+def test_pr_ref_github_url():
+    """GitHub PR URL → PR#{number} without exposing repo path."""
+    assert _pr_ref("https://github.com/owner/repo/pull/123") == "PR#123"
+
+
+def test_pr_ref_azure_url():
+    """Azure DevOps PR URL → PR#{number} without exposing org/project path."""
+    assert _pr_ref("https://dev.azure.com/org/project/_git/repo/pullrequest/42") == "PR#42"
+
+
+def test_pr_ref_hash_format():
+    """Hash-prefixed number passes through unchanged."""
+    assert _pr_ref("#99") == "#99"
+
+
+def test_pr_ref_fallback_no_pattern():
+    """URL without pull/pullrequest keyword falls back to last path segment."""
+    assert _pr_ref("https://example.com/some/other/path/abc123") == "PR#abc123"
+
+
+def test_pr_ref_empty_path():
+    """URL with no path segments falls back to full URL."""
+    result = _pr_ref("https://example.com")
+    assert result.endswith("example.com")
+    assert "#" in result
+
+
+def test_pr_ref_does_not_leak_owner():
+    """Redacted reference must not contain owner or repo name."""
+    redacted = _pr_ref("https://github.com/internal-secret/repo/pull/7")
+    assert "internal-secret" not in redacted
+    assert "repo" not in redacted
+
+
+def test_pr_ref_does_not_leak_azure_org():
+    """Redacted reference must not contain Azure org or project name."""
+    redacted = _pr_ref("https://dev.azure.com/my-org/my-proj/_git/repo/pullrequest/5")
+    assert "my-org" not in redacted
+    assert "my-proj" not in redacted
+    assert "repo" not in redacted
+
+
+def test_open_pr_log_redacted_url(mock_gh_post_comment):
+    """log() receives PR# reference, not full URL (security: avoid URL in logs)."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship.log") as mock_log:
+        mock_get_vcs.return_value = _mock_vcs(
+            pr_url="https://github.com/o/r/pull/42",
+            existing_pr=None,
+        )
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    # log() received redacted PR reference
+    log_call = mock_log.call_args[0][0]
+    assert "PR#42" in log_call
+    # Full URL should NOT appear in log
+    assert "github.com" not in log_call
+    assert "o/r/pull" not in log_call
+
+
+def test_open_pr_existing_log_redacted(mock_gh_post_comment):
+    """Existing PR path also logs redacted reference."""
+    task = make_task()
+    existing = PRResult(
+        url="https://github.com/o/r/pull/15",
+        number=15,
+    )
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship.log") as mock_log:
+        mock_get_vcs.return_value = _mock_vcs(existing_pr=existing)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    log_call = mock_log.call_args[0][0]
+    assert "PR#15" in log_call
+    assert "github.com" not in log_call
+    assert "o/r/pull" not in log_call
+
+
+def test_open_pr_comment_includes_full_url(mock_gh_post_comment):
+    """User-facing comment still gets full URL for usability."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(
+            pr_url="https://github.com/o/r/pull/42",
+            existing_pr=None,
+        )
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][2]
+    assert "https://github.com/o/r/pull/42" in comment_body
