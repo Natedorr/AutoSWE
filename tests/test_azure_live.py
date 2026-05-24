@@ -171,8 +171,8 @@ class TestLiveAzureVCS:
         vcs = get_vcs(ado_live_cfg)
         url = vcs.clone_url(ado_live_cfg)
         assert urlparse(url).hostname.endswith("dev.azure.com")
-        assert ado_live_cfg["org"] in url
-        assert ado_live_cfg["project"] in url
+        assert f"/{ado_live_cfg['org']}/" in urlparse(url).path
+        assert f"/{ado_live_cfg['project']}/" in urlparse(url).path
 
     def test_branch_name(self, ado_live_cfg):
         from autoswe.providers.factory import get_vcs

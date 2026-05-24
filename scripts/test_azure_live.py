@@ -249,7 +249,7 @@ vcs = AzureVCS(REPO_CFG)
 def _vcs_clone():
     url = vcs.clone_url(REPO_CFG)
     assert urlparse(url).hostname.endswith("dev.azure.com")
-    assert PAT[:20] in url
+    assert (urlparse(url).password or "").startswith(PAT[:20])
 
 
 def _vcs_branch():

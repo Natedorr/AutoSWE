@@ -32,7 +32,7 @@ def test_clone_url(vcs):
 
 def test_clone_url_contains_pat(vcs):
     url = vcs.clone_url({})
-    assert "fake_pat_123" in url
+    assert urlparse(url).password == "fake_pat_123"
     assert urlparse(url).hostname.endswith("dev.azure.com")
 
 
@@ -169,7 +169,7 @@ def test_clone_url_pat_falls_back_to_token():
         "provider": "azure",
     })
     url = vcs.clone_url({})
-    assert "token_pat" in url
+    assert urlparse(url).password == "token_pat"
     assert url == "https://autoswe:token_pat@dev.azure.com/org/proj/_git/repo"
 
 
@@ -237,8 +237,8 @@ def test_clone_url_uses_raw_org_project():
     })
     url = vcs.clone_url({})
     # clone_url uses raw values, not encoded
-    assert "my org" in url
-    assert "my project" in url
+    assert "/my org/" in urlparse(url).path
+    assert "/my project/" in urlparse(url).path
 
 
 # -- branch_name consistency --
