@@ -15,6 +15,7 @@ import json
 import os
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -169,7 +170,7 @@ class TestLiveAzureVCS:
         from autoswe.providers.factory import get_vcs
         vcs = get_vcs(ado_live_cfg)
         url = vcs.clone_url(ado_live_cfg)
-        assert "dev.azure.com" in url
+        assert urlparse(url).hostname.endswith("dev.azure.com")
         assert ado_live_cfg["org"] in url
         assert ado_live_cfg["project"] in url
 
@@ -184,7 +185,7 @@ class TestLiveAzureVCS:
         vcs = get_vcs(ado_live_cfg)
         result = vcs.find_existing_pr(ado_live_cfg, "autoswe/issue-1")
         assert result is None or (
-            hasattr(result, "url") and "dev.azure.com" in result.url
+            hasattr(result, "url") and urlparse(result.url).hostname.endswith("dev.azure.com")
         )
 
     def test_get_status(self, ado_live_cfg):
@@ -240,7 +241,7 @@ class TestAzureWriteOps:
             ado_live_cfg, branch, "main", "Live test PR", "Test body from pytest"
         )
         assert pr.number is not None
-        assert "dev.azure.com" in pr.url
+        assert urlparse(pr.url).hostname.endswith("dev.azure.com")
         found = vcs.find_existing_pr(ado_live_cfg, branch)
         assert found is not None and found.number == pr.number
         # Close the PR
