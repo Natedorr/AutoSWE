@@ -1,122 +1,114 @@
-# Model Context Protocol (MCP)
+# Source: https://developers.openai.com/codex/mcp/
 
-MCP connects Codex to external tools and context — documentation servers, browsers, design tools, etc.
+Copy Page
 
-## Transport Types
+Model Context Protocol (MCP) connects models to tools and context. Use it to give Codex access to third-party documentation, or to let it interact with developer tools like your browser or Figma.
 
-| Type | Description |
-|---|---|
-| **STDIO** | Local process started by a command |
-| **Streamable HTTP** | Remote server at an address |
+Codex supports MCP servers in both the CLI and the IDE extension.
 
-Both support bearer token auth. HTTP servers also support OAuth (`codex mcp login`).
+## Supported MCP features
 
-## Configuration
+- **STDIO servers**: Servers that run as a local process (started by a command).
 
-CLI and IDE extension share config from `~/.codex/config.toml` or `.codex/config.toml`.
+- Environment variables
+- **Streamable HTTP servers**: Servers that you access at an address.
 
-### Via CLI
+- Bearer token authentication
+- OAuth authentication (run`codex mcp login <server-name>`for servers that support OAuth)
 
-```bash
-# Add STDIO server
-codex mcp add context7 -- npx -y @upstash/context7-mcp
+## Connect Codex to an MCP server
 
-# Add with env vars
-codex mcp add server-name --env VAR1=VALUE1 -- npx @server/mcp
+Codex stores MCP configuration in`config.toml`alongside other Codex configuration settings. By default this is`~/.codex/config.toml`, but you can also scope MCP servers to a project with`.codex/config.toml`(trusted projects only).
 
-# List / manage
-codex mcp --help
-/mcp              # (in TUI)
-```
+The CLI and the IDE extension share this configuration. Once you configure your MCP servers, you can switch between the two Codex clients without redoing setup.
 
-### Via config.toml
+To configure MCP servers, choose one option:
 
-#### STDIO Server
+- **Use the CLI**: Run`codex mcp`to add and manage servers.
+- **Edit`config.toml`**: Update`~/.codex/config.toml`(or a project-scoped`.codex/config.toml`in trusted projects) directly.
 
-```toml
-[mcp_servers.context7]
-command = "npx"
-args = ["-y", "@upstash/context7-mcp"]
-env = { MY_VAR = "value" }
-env_vars = ["LOCAL_TOKEN", { name = "REMOTE_TOKEN", source = "remote" }]
-cwd = "/path/to/project"
-startup_timeout_sec = 10
-tool_timeout_sec = 60
-```
+### Configure with the CLI
 
-#### HTTP Server
+#### Add an MCP server
+````codexmcpadd<server-name>--envVAR1=VALUE1--envVAR2=VALUE2--<stdioserver-command>````
 
-```toml
-[mcp_servers.figma]
-url = "https://mcp.figma.com/mcp"
-bearer_token_env_var = "FIGMA_OAUTH_TOKEN"
-http_headers = { "X-Figma-Region" = "us-east-1" }
-env_http_headers = { "Authorization" = "AUTH_TOKEN_VAR" }
-```
+For example, to add Context7 (a free MCP server for developer documentation), you can run the following command:
+````codexmcpaddcontext7--npx-y@upstash/context7-mcp````
 
-#### Tool Policy
+#### Other CLI commands
 
-```toml
-[mcp_servers.chrome_devtools]
-url = "http://localhost:3000/mcp"
-enabled_tools = ["open", "screenshot"]       # Allow list
-disabled_tools = ["screenshot"]              # Deny list (applied after enabled)
-default_tools_approval_mode = "prompt"       # "auto" | "prompt" | "approve"
+To see all available MCP commands, you can run`codex mcp --help`.
 
-[mcp_servers.chrome_devtools.tools.open]
-approval_mode = "approve"                    # Per-tool override
-```
+#### Terminal UI (TUI)
 
-#### Other Options
+In the`codex`TUI, use`/mcp`to see your active MCP servers.
 
-```toml
-[mcp_servers.example]
-enabled = true               # false to disable
-required = true              # Fail startup if this server won't initialize
-startup_timeout_sec = 20
-tool_timeout_sec = 45
-```
+### Configure with config.toml
 
-## OAuth
+For more fine-grained control over MCP server options, edit`~/.codex/config.toml`(or a project-scoped`.codex/config.toml`). In the IDE extension, select**MCP settings**>**Open config.toml**from the gear menu.
 
-```bash
-codex mcp login              # For servers supporting OAuth
-```
+Configure each MCP server with a`[mcp_servers.<server-name>]`table in the configuration file.
 
-Config overrides:
+#### STDIO servers
 
-```toml
-mcp_oauth_callback_port = 5555
-mcp_oauth_callback_url = "https://devbox.example.internal/callback"
-```
+- `command`(required): The command that starts the server.
+- `args`(optional): Arguments to pass to the server.
+- `env`(optional): Environment variables to set for the server.
+- `env_vars`(optional): Environment variables to allow and forward.
+- `cwd`(optional): Working directory to start the server from.
+- `experimental_environment`(optional): Set to`remote`to start the stdio server through a remote executor environment when one is available.
 
-## Plugin MCP Servers
+`env_vars`can contain plain variable names or objects with a source:
+````env_vars = ["LOCAL_TOKEN", { name ="REMOTE_TOKEN", source ="remote"}]````
 
-Plugins can bundle MCP servers. User config can still control them:
+String entries and`source = "local"`read from Codex’s local environment.`source = "remote"`reads from the remote executor environment and requires remote MCP stdio.
 
-```toml
-[plugins."sample@test".mcp_servers.sample]
-enabled = true
-default_tools_approval_mode = "prompt"
-enabled_tools = ["read", "search"]
+#### Streamable HTTP servers
 
-[plugins."sample@test".mcp_servers.sample.tools.search]
-approval_mode = "approve"
-```
+- `url`(required): The server address.
+- `bearer_token_env_var`(optional): Environment variable name for a bearer token to send in`Authorization`.
+- `http_headers`(optional): Map of header names to static values.
+- `env_http_headers`(optional): Map of header names to environment variable names (values pulled from the environment).
 
-## Popular MCP Servers
+#### Other configuration options
 
-| Server | Purpose |
-|---|---|
-| [OpenAI Docs MCP](https://developers.openai.com/learn/docs-mcp) | Search OpenAI developer docs |
-| [Context7](https://github.com/upstash/context7) | Up-to-date dev documentation |
-| [Figma MCP](https://developers.figma.com/docs/figma-mcp-server/) | Access Figma designs |
-| [Playwright MCP](https://www.npmjs.com/package/@playwright/mcp) | Browser control |
-| [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp/) | Chrome inspection |
-| [Sentry MCP](https://docs.sentry.io/product/sentry-mcp/) | Error logs |
-| [GitHub MCP](https://github.com/github/github-mcp-server) | GitHub API (PRs, issues) |
+- `startup_timeout_sec`(optional): Timeout (seconds) for the server to start. Default:`10`.
+- `tool_timeout_sec`(optional): Timeout (seconds) for the server to run a tool. Default:`60`.
+- `enabled`(optional): Set`false`to disable a server without deleting it.
+- `required`(optional): Set`true`to make startup fail if this enabled server can’t initialize.
+- `enabled_tools`(optional): Tool allow list.
+- `disabled_tools`(optional): Tool deny list (applied after`enabled_tools`).
+- `default_tools_approval_mode`(optional): Default approval behavior for tools from this server. Supported values are`auto`,`prompt`, and`approve`.
+- `tools.<tool>.approval_mode`(optional): Per-tool approval behavior override.
 
-## See Also
+If your OAuth provider requires a fixed callback port, set the top-level`mcp_oauth_callback_port`in`config.toml`. If unset, Codex binds to an ephemeral port.
 
-- [Configuration](./configuration.md)
-- [CLI Features](./cli-features.md)
+If your MCP OAuth flow must use a specific callback URL (for example, a remote Devbox ingress URL or a custom callback path), set`mcp_oauth_callback_url`. Codex uses this value as the OAuth`redirect_uri`while still using`mcp_oauth_callback_port`for the callback listener port. Local callback URLs (for example`localhost`) bind on the local interface; non-local callback URLs bind on`0.0.0.0`so the callback can reach the host.
+
+If the MCP server advertises`scopes_supported`, Codex prefers those server-advertised scopes during OAuth login. Otherwise, Codex falls back to the scopes configured in`config.toml`.
+
+#### config.toml examples
+````[mcp_servers.context7]command ="npx"args = ["-y","@upstash/context7-mcp"]env_vars = ["LOCAL_TOKEN"][mcp_servers.context7.env]MY_ENV_VAR ="MY_ENV_VALUE"````
+
+````# Optional MCP OAuth callback overrides (used by `codex mcp login`)mcp_oauth_callback_port =5555mcp_oauth_callback_url ="https://devbox.example.internal/callback"````
+
+````[mcp_servers.figma]url ="https://mcp.figma.com/mcp"bearer_token_env_var ="FIGMA_OAUTH_TOKEN"http_headers = { "X-Figma-Region" ="us-east-1"}````
+
+````[mcp_servers.chrome_devtools]url ="http://localhost:3000/mcp"enabled_tools = ["open","screenshot"]disabled_tools = ["screenshot"]# applied after enabled_toolsdefault_tools_approval_mode ="prompt"startup_timeout_sec =20tool_timeout_sec =45enabled =true[mcp_servers.chrome_devtools.tools.open]approval_mode ="approve"````
+
+### Plugin-provided MCP servers
+
+Installed plugins can bundle MCP servers in their plugin manifest. Those servers are launched from the plugin, so user config doesn’t set their transport command. User config can still control on/off state and tool policy under`plugins.<plugin>.mcp_servers.<server>`.
+````[plugins."sample@test".mcp_servers.sample]enabled =truedefault_tools_approval_mode ="prompt"enabled_tools = ["read","search"][plugins."sample@test".mcp_servers.sample.tools.search]approval_mode ="approve"````
+
+## Examples of useful MCP servers
+
+The list of MCP servers keeps growing. Here are a few common ones:
+
+- OpenAI Docs MCP[OpenAI Docs MCP](/learn/docs-mcp): Search and read OpenAI developer docs.
+- Context7[Context7](https://github.com/upstash/context7): Connect to up-to-date developer documentation.
+- FigmaLocal[Local](https://developers.figma.com/docs/figma-mcp-server/local-server-installation/)andRemote[Remote](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/): Access your Figma designs.
+- Playwright[Playwright](https://www.npmjs.com/package/@playwright/mcp): Control and inspect a browser using Playwright.
+- Chrome Developer Tools[Chrome Developer Tools](https://github.com/ChromeDevTools/chrome-devtools-mcp/): Control and inspect Chrome.
+- Sentry[Sentry](https://docs.sentry.io/product/sentry-mcp/#codex): Access Sentry logs.
+- GitHub[GitHub](https://github.com/github/github-mcp-server): Manage GitHub beyond what`git`supports (for example, pull requests and issues).

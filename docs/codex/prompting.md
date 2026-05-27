@@ -1,109 +1,64 @@
-# Prompting Codex
+# Source: https://developers.openai.com/codex/prompting/
 
-## Thread Model
+Copy Page
 
-A **thread** is a single session: your prompt + model outputs + tool calls. Threads can include multiple prompts and run locally or in the cloud.
+## Prompts
 
-## Prompt Tips
+You interact with Codex by sending prompts (user messages) that describe what you want it to do.
 
-- **Include verification steps:** repro steps, tests, linting commands
-- **Break complex work into focused steps**
-- **Be specific about constraints:** "Do not change the API shape"
-- **Attach context:** files (`@path`), images, selected text
+Example prompts:
+````Explain how the transform module works and how other modules use it.````
 
-## Goal Mode
+````Add a new command-line option `--json` that outputs JSON.````
 
-Give Codex a persistent objective:
+When you submit a prompt, Codex works in a loop: it calls the model and then performs the actions indicated by the model output, such as file reads, file edits, and tool calls. This process ends when the task is complete or you cancel it.
 
-```
-/goal Migrate to TypeScript. App should compile in strict mode without `any`.
-```
+As with ChatGPT, Codex is only as effective as the instructions you give it. Here are some tips we find helpful when prompting Codex:
 
-Good goals are measurable and include success criteria.
+- Codex produces higher-quality outputs when it can verify its work. Include steps to reproduce an issue, validate a feature, and run linting and pre-commit checks.
+- Codex handles complex work better when you break it into smaller, focused steps. Smaller tasks are easier for Codex to test and for you to review. If you’re not sure how to split a task up, ask Codex to propose a plan.
 
-```
-/goal          # View current goal
-/goal pause    # Pause
-/goal resume   # Resume
-/goal clear    # Remove
-```
+For more ideas about prompting Codex, refer toworkflows[workflows](/codex/workflows).
 
-Enable with `features.goals = true` if not visible.
+## Threads
 
-## Effective Prompt Patterns
+A thread is a single session: your prompt plus the model outputs and tool calls that follow. A thread can include multiple prompts. For example, your first prompt might ask Codex to implement a feature, and a follow-up prompt might ask it to add tests.
 
-### Code Exploration
+A thread is said to be “running” when Codex is actively working on it. You can run multiple threads at once, but avoid having two threads modify the same files. You can also resume a thread later by continuing it with another prompt.
 
-```
-Explain how the transform module works and how other modules use it.
-Trace the request flow from entry point to database call.
-```
+Threads can run either locally or in the cloud:
 
-### Bug Fix
+- **Local threads**run on your machine. Codex can read and edit your files and run commands, so you can see what changes and use your existing tools. To reduce the risk of unwanted changes outside your workspace, local threads run in asandbox[sandbox](/codex/agent-approvals-security).
+- **Cloud threads**run in an isolatedenvironment[environment](/codex/cloud/environments). Codex clones your repository and checks out the branch it’s working on. Cloud threads are useful when you want to run work in parallel or delegate tasks from another device. To use cloud threads with your repo, push your code to GitHub first. You can alsodelegate tasks from your local machine[delegate tasks from your local machine](/codex/ide/cloud-tasks), which includes your current working state.
 
-```
-Bug: Clicking "Save" shows "Saved" but doesn't persist.
+In the Codex app, you can also start a chat without choosing a project. Chats aren’t tied to a saved repository or project folder. Use them for research, planning, connected-tool workflows, or other work where Codex shouldn’t start from a codebase. Chats use a Codex-managed`threads`directory under your Codex home as their working location. By default, that location is`~/.codex/threads`. To change the base location for this state, set`CODEX_HOME`; seeConfig and state locations[Config and state locations](/codex/config-advanced#config-and-state-locations).
 
-Repro:
-1. npm run dev
-2. Go to /settings
-3. Toggle "Enable alerts"
-4. Click Save
-5. Refresh — toggle resets
+## Context
 
-Constraints:
-- Do not change the API shape
-- Keep the fix minimal
-- Add a regression test
-```
+When you submit a prompt, include context that Codex can use, such as references to relevant files and images. The Codex IDE extension automatically includes the list of open files and the selected text range as context.
 
-### Code Review
+As the agent works, it also gathers context from file contents, tool output, and an ongoing record of what it has done and what it still needs to do.
 
-```
-/review Focus on security vulnerabilities and edge cases
-```
+All information in a thread must fit within the model’s**context window**, which varies by model. Codex monitors and reports the remaining space. For longer tasks, Codex may automatically**compact**the context by summarizing relevant information and discarding less relevant details. With repeated compaction, Codex can continue working on complex tasks over many steps.
 
-### Refactoring
+## Goal mode
 
-```
-$plan
+Goal mode gives Codex a persistent objective to work toward across a longer task. Use it when the work may take many steps, or when Codex needs a clear definition of done that it can keep checking as it works.[Codex app goal progress controls above the composer](/images/codex/app/goal-dialog-light.webp)[Codex app goal progress controls above the composer](/images/codex/app/goal-dialog-dark.webp)[Codex app goal progress controls above the composer](/images/codex/app/goal-dialog-light.webp)[Codex app goal progress controls above the composer](/images/codex/app/goal-dialog-dark.webp)
 
-Refactor the auth subsystem to:
-- Split token parsing / session loading / permissions
-- Reduce circular imports
-- Improve testability
+When you set a goal, the goal text acts as both the starting prompt and the completion criteria. Codex uses it to decide what to do next and whether the task is complete. Start Goal mode with`/goal`in theCodex app[Codex
+app](/codex/app/commands#set-or-manage-a-goal-with-goal),IDE extension[IDE
+extension](/codex/ide/slash-commands), orCLI[CLI](/codex/cli/slash-commands#set-or-view-a-task-goal-with-goal).
 
-Constraints:
-- No user-visible behavior changes
-- Keep public APIs stable
-- Step-by-step migration plan
-```
+If`/goal`doesn’t appear in the slash command list, enable`features.goals`in`config.toml`:
+````[features]goals =true````
 
-### UI from Design
+You can also run`codex features enable goals`from the CLI or ask Codex to run it. In the Codex app, progress appears above the composer with controls to pause, resume, edit, or clear the goal.
 
-```
-Create a dashboard based on this image.
-Constraints: React + Vite + Tailwind, TypeScript.
-Match spacing, typography, and layout.
-Deliver: new route/page + README with run instructions.
-```
+Write goals so Codex can tell whether it has succeeded. Good goals include a specific outcome, measurable target, or test criteria. For example:
+````Migrate this codebase from JavaScript to TypeScript. The app should compile instrict mode without explicit `any` type definitions.````
 
-## Context Management
+````Reduce the time to interactive of the home page to below 1 second.````
 
-- `/compact` — Summarize conversation to free tokens
-- `/mention` — Attach specific files
-- `@` — Fuzzy file search
-- `!cmd` — Run shell commands inline
+If the goal is hard to define up front, start with`/plan`and ask Codex to shape it before implementation. You can also ask Codex to interview you and draft a goal with clear success criteria.
 
-## Follow-up Control
-
-- `Enter` while running — inject instructions
-- `Tab` — queue for next turn
-- `/side` — focused detour without disrupting main thread
-- `/fork` — explore alternative approach
-
-## See Also
-
-- [AGENTS.md](./agents-md.md)
-- [Workflows](./workflows.md)
-- [CLI Features](./cli-features.md)
+You can continue steering Codex after the goal starts. Send follow-up messages to adjust constraints, such as asking Codex to use a particular library or avoid a specific approach. Use side chats when you want a status recap or explanation without interrupting the main task. For long-running work, pause the goal before you lose connectivity, then resume or edit it when you are ready to continue.
