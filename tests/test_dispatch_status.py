@@ -1,6 +1,6 @@
 """Tests for the dispatch return-string → label mapping and related logic."""
 
-from autoswe.orch.emit import _build_completion_comment
+from autoswe.orch.emit import _build_branch_url, _build_commit_url, _build_completion_comment
 from autoswe.tracking.labels import _map_done_to_status
 
 # ---------------------------------------------------------------------------
@@ -123,6 +123,7 @@ def test_build_completion_comment_with_summary():
         task_owner="alice", task_repo="demo", issue_num=42,
         plan_branch=None, provider="github",
         cost_usd=None, duration_seconds=None, session_id=None,
+        repo_cfg={"owner": "alice", "repo": "demo"},
     )
     assert "Completed with command `/fix`" in msg
     assert "https://github.com/alice/demo/commit/abc1234" in msg
@@ -192,6 +193,149 @@ def test_build_completion_comment_with_metrics():
     assert "Cost: $0.42" in msg
     assert "Duration: 4m15s" in msg
     assert "Session: sess1" in msg
+
+
+def test_build_completion_comment_azure_branch_url():
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed the bug\tabc1234",
+        task_owner="my-org", task_repo="my-project/my-repo", issue_num=5,
+        plan_branch=None, provider="azure",
+        cost_usd=None, duration_seconds=None, session_id=None,
+        repo_cfg={"org": "my-org", "project": "my-project", "repo": "my-repo"},
+    )
+    assert "[Commit](https://dev.azure.com/my-org/my-project/_git/my-repo/commit/abc1234)" in msg
+    assert "[View branch](https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBautoswe%2Fissue-5)" in msg
+    assert "github.com" not in msg.split("**Summary:**")[0]
+
+
+def test_build_completion_comment_azure_fallback_owner_repo():
+    """Azure branch URL works when repo_cfg only has owner/repo (no org/project).
+
+    This is the production path when repos_cfg lookup in build_repo_cfg misses
+    the entry — only owner=org and repo="project/repo_name" are available.
+    The helper falls back to parsing owner/repo into org/project/repo.
+    """
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed\tabc1234",
+        task_owner="my-org", task_repo="my-project/my-repo", issue_num=5,
+        plan_branch=None, provider="azure",
+        cost_usd=None, duration_seconds=None, session_id=None,
+        # Only owner/repo — no explicit org/project keys (simulates repos_cfg miss)
+        repo_cfg={"owner": "my-org", "repo": "my-project/my-repo", "provider": "azure"},
+    )
+    assert "dev.azure.com/my-org/my-project/_git/my-repo?version=GBautoswe%2Fissue-5" in msg
+    assert "github.com" not in msg.split("**Summary:**")[0]
+
+
+def test_build_completion_comment_unknown_provider_fallback():
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed\tabc1234",
+        task_owner="o", task_repo="r", issue_num=1,
+        plan_branch=None, provider="unknown",
+        cost_usd=None, duration_seconds=None, session_id=None,
+    )
+    assert "Branch: autoswe/issue-1" in msg
+    assert "[View branch]" not in msg
+
+
+def test_build_completion_comment_azure_special_chars():
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed\tabc1234",
+        task_owner="my org", task_repo="my project/my#repo", issue_num=9,
+        plan_branch=None, provider="azure",
+        cost_usd=None, duration_seconds=None, session_id=None,
+        repo_cfg={"org": "my org", "project": "my project", "repo": "my#repo"},
+    )
+    assert "dev.azure.com/my%20org/my%20project/_git/my%23repo" in msg
+    # Branch name in query param is also URL-encoded
+    assert "version=GBautoswe%2Fissue-9" in msg
+
+
+def test_build_completion_comment_github_no_repo_cfg():
+    """GitHub with missing repo_cfg: both commit and branch fall back to plain text."""
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed\tabc1234",
+        task_owner="o", task_repo="r", issue_num=1,
+        plan_branch=None, provider="github",
+        cost_usd=None, duration_seconds=None, session_id=None,
+        repo_cfg=None,
+    )
+    # Both commit and branch links fall back to plain text when repo_cfg is None
+    assert "Commit: abc1234" in msg
+    assert "[Commit]" not in msg
+    assert "Branch: autoswe/issue-1" in msg
+    assert "[View branch]" not in msg
+
+
+# ---------------------------------------------------------------------------
+# _build_branch_url — provider URL construction
+# ---------------------------------------------------------------------------
+
+def test_build_branch_url_azure_with_org_project_repo():
+    """Direct test: Azure with explicit org/project/repo keys."""
+    url = _build_branch_url("azure", {
+        "org": "my-org", "project": "my-project", "repo": "my-repo",
+    }, "feature/branch")
+    assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBfeature%2Fbranch"
+
+
+def test_build_branch_url_azure_fallback_from_owner_repo():
+    """Direct test: Azure fallback when only owner/repo are set (repos_cfg miss).
+
+    This is the production path when build_repo_cfg's repos_cfg lookup misses.
+    owner=org, repo="project/repo_name" → parsed into org/project/repo.
+    """
+    url = _build_branch_url("azure", {
+        "owner": "my-org", "repo": "my-project/my-repo", "provider": "azure",
+    }, "autoswe/issue-1")
+    assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBautoswe%2Fissue-1"
+
+
+def test_build_branch_url_azure_no_fallback_returns_none():
+    """When repo_cfg has no usable Azure keys, returns None."""
+    assert _build_branch_url("azure", {"owner": "x"}, "branch") is None
+    assert _build_branch_url("azure", {}, "branch") is None
+
+
+# ---------------------------------------------------------------------------
+# _build_commit_url — provider URL construction
+# ---------------------------------------------------------------------------
+
+def test_build_commit_url_github():
+    url = _build_commit_url("github", {
+        "owner": "alice", "repo": "demo",
+    }, "abc1234")
+    assert url == "https://github.com/alice/demo/commit/abc1234"
+
+
+def test_build_commit_url_github_no_repo_cfg():
+    assert _build_commit_url("github", None, "abc1234") is None
+
+
+def test_build_commit_url_azure_with_org_project_repo():
+    url = _build_commit_url("azure", {
+        "org": "my-org", "project": "my-project", "repo": "my-repo",
+    }, "abc1234")
+    assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo/commit/abc1234"
+
+
+def test_build_commit_url_azure_fallback_from_owner_repo():
+    """Azure commit URL fallback when only owner/repo are set."""
+    url = _build_commit_url("azure", {
+        "owner": "my-org", "repo": "my-project/my-repo", "provider": "azure",
+    }, "deadbeef")
+    assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo/commit/deadbeef"
+
+
+def test_build_commit_url_azure_no_fallback_returns_none():
+    assert _build_commit_url("azure", {"owner": "x"}, "abc") is None
+    assert _build_commit_url("azure", {}, "abc") is None
+    assert _build_commit_url("azure", None, "abc") is None
 
 
 # ---------------------------------------------------------------------------
