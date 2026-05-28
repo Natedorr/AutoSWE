@@ -123,6 +123,7 @@ def test_build_completion_comment_with_summary():
         task_owner="alice", task_repo="demo", issue_num=42,
         plan_branch=None, provider="github",
         cost_usd=None, duration_seconds=None, session_id=None,
+        repo_cfg={"owner": "alice", "repo": "demo"},
     )
     assert "Completed with command `/fix`" in msg
     assert "https://github.com/alice/demo/commit/abc1234" in msg
@@ -192,6 +193,43 @@ def test_build_completion_comment_with_metrics():
     assert "Cost: $0.42" in msg
     assert "Duration: 4m15s" in msg
     assert "Session: sess1" in msg
+
+
+def test_build_completion_comment_azure_branch_url():
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed the bug\tabc1234",
+        task_owner="my-org", task_repo="my-project/my-repo", issue_num=5,
+        plan_branch=None, provider="azure",
+        cost_usd=None, duration_seconds=None, session_id=None,
+        repo_cfg={"org": "my-org", "project": "my-project", "repo": "my-repo"},
+    )
+    assert "https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBautoswe/issue-5" in msg
+    assert "github.com" not in msg
+
+
+def test_build_completion_comment_unknown_provider_fallback():
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed\tabc1234",
+        task_owner="o", task_repo="r", issue_num=1,
+        plan_branch=None, provider="unknown",
+        cost_usd=None, duration_seconds=None, session_id=None,
+    )
+    assert "Branch: autoswe/issue-1" in msg
+    assert "[View branch]" not in msg
+
+
+def test_build_completion_comment_azure_special_chars():
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed\tabc1234",
+        task_owner="my org", task_repo="my project/my#repo", issue_num=9,
+        plan_branch=None, provider="azure",
+        cost_usd=None, duration_seconds=None, session_id=None,
+        repo_cfg={"org": "my org", "project": "my project", "repo": "my#repo"},
+    )
+    assert "dev.azure.com/my%20org/my%20project/_git/my%23repo" in msg
 
 
 # ---------------------------------------------------------------------------

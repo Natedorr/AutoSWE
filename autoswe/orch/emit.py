@@ -9,6 +9,7 @@ Tests live in tests/test_emit.py, parametrized over fixture JSON files.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib.parse import quote as _url_quote
 
 from autoswe.core.logging_utils import log
 from autoswe.orch.types import Action, Effect, World
@@ -48,6 +49,27 @@ def _format_metrics(cost_usd: float | None, duration_seconds: float | None, sess
     return ""
 
 
+def _build_branch_url(provider: str, repo_cfg: dict | None, branch: str) -> str | None:
+    """Return a provider-specific branch URL, or None if unavailable."""
+    if not repo_cfg:
+        return None
+    if provider == "github":
+        owner = repo_cfg.get("owner", "")
+        repo = repo_cfg.get("repo", "")
+        if owner and repo:
+            return f"https://github.com/{owner}/{repo}/compare/{branch}"
+    elif provider == "azure":
+        org = repo_cfg.get("org", "")
+        project = repo_cfg.get("project", "")
+        repo = repo_cfg.get("repo", "")
+        if org and project and repo:
+            org_e = _url_quote(org, safe="")
+            proj_e = _url_quote(project, safe="")
+            repo_e = _url_quote(repo, safe="")
+            return f"https://dev.azure.com/{org_e}/{proj_e}/_git/{repo_e}?version=GB{branch}"
+    return None
+
+
 def _build_completion_comment(
     pending_command: str,
     done_content: str,
@@ -59,6 +81,7 @@ def _build_completion_comment(
     cost_usd: float | None,
     duration_seconds: float | None,
     session_id: str | None,
+    repo_cfg: dict | None = None,
 ) -> str:
     """Build a completion comment from handler done_content.
 
@@ -87,7 +110,11 @@ def _build_completion_comment(
             else:
                 lines.append(f"Commit: {commit_sha}")
 
-            lines.append(f"[View branch](https://github.com/{task_owner}/{task_repo}/compare/{branch})")
+            branch_url = _build_branch_url(provider, repo_cfg, branch)
+            if branch_url:
+                lines.append(f"[View branch]({branch_url})")
+            else:
+                lines.append(f"Branch: {branch}")
 
         lines.append("")
         if len(summary) > 1200:
@@ -305,6 +332,7 @@ def emit(
             cost_usd=result.cost_usd,
             duration_seconds=result.duration_seconds,
             session_id=session_id,
+            repo_cfg=world.repo_cfg,
         )
         effects.append(Effect(kind="post_comment", body=comment))
         effects.append(Effect(kind="set_status", status=new_status))
