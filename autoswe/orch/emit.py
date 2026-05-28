@@ -62,6 +62,21 @@ def _build_branch_url(provider: str, repo_cfg: dict | None, branch: str) -> str 
         org = repo_cfg.get("org", "")
         project = repo_cfg.get("project", "")
         repo = repo_cfg.get("repo", "")
+
+        # Defensive fallback: when org/project are not set (repos_cfg lookup
+        # missed), parse from owner/repo fields. For Azure, owner=org and
+        # repo="project/repo_name". Mirrors AzureTracker.__init__ fallback.
+        if not org or not project:
+            owner = repo_cfg.get("owner", "")
+            repo_val = repo_cfg.get("repo", "")
+            if "/" in repo_val:
+                proj_part, _, _repo_part = repo_val.partition("/")
+                if proj_part:
+                    org = owner
+                    project = proj_part
+                    if _repo_part:
+                        repo = _repo_part
+
         if org and project and repo:
             org_e = _url_quote(org, safe="")
             proj_e = _url_quote(project, safe="")
