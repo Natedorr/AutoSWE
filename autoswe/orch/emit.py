@@ -49,6 +49,50 @@ def _format_metrics(cost_usd: float | None, duration_seconds: float | None, sess
     return ""
 
 
+def _resolve_azure_parts(repo_cfg: dict) -> tuple[str, str, str]:
+    """Return (org, project, repo) for Azure, with fallback from owner/repo.
+
+    When repos_cfg lookup succeeds, org/project/repo are explicit keys.
+    When it misses, owner=org and repo="project/repo_name". Mirrors
+    AzureTracker.__init__ fallback logic.
+    """
+    org = repo_cfg.get("org", "")
+    project = repo_cfg.get("project", "")
+    repo = repo_cfg.get("repo", "")
+
+    if not org or not project:
+        owner = repo_cfg.get("owner", "")
+        repo_val = repo_cfg.get("repo", "")
+        if "/" in repo_val:
+            proj_part, _, _repo_part = repo_val.partition("/")
+            if proj_part:
+                org = owner
+                project = proj_part
+                if _repo_part:
+                    repo = _repo_part
+
+    return org, project, repo
+
+
+def _build_commit_url(provider: str, repo_cfg: dict | None, commit_sha: str) -> str | None:
+    """Return a provider-specific commit URL, or None if unavailable."""
+    if not repo_cfg:
+        return None
+    if provider == "github":
+        owner = repo_cfg.get("owner", "")
+        repo = repo_cfg.get("repo", "")
+        if owner and repo:
+            return f"https://github.com/{owner}/{repo}/commit/{commit_sha}"
+    elif provider == "azure":
+        org, project, repo = _resolve_azure_parts(repo_cfg)
+        if org and project and repo:
+            org_e = _url_quote(org, safe="")
+            proj_e = _url_quote(project, safe="")
+            repo_e = _url_quote(repo, safe="")
+            return f"https://dev.azure.com/{org_e}/{proj_e}/_git/{repo_e}/commit/{commit_sha}"
+    return None
+
+
 def _build_branch_url(provider: str, repo_cfg: dict | None, branch: str) -> str | None:
     """Return a provider-specific branch URL, or None if unavailable."""
     if not repo_cfg:
@@ -59,24 +103,7 @@ def _build_branch_url(provider: str, repo_cfg: dict | None, branch: str) -> str 
         if owner and repo:
             return f"https://github.com/{owner}/{repo}/compare/{branch}"
     elif provider == "azure":
-        org = repo_cfg.get("org", "")
-        project = repo_cfg.get("project", "")
-        repo = repo_cfg.get("repo", "")
-
-        # Defensive fallback: when org/project are not set (repos_cfg lookup
-        # missed), parse from owner/repo fields. For Azure, owner=org and
-        # repo="project/repo_name". Mirrors AzureTracker.__init__ fallback.
-        if not org or not project:
-            owner = repo_cfg.get("owner", "")
-            repo_val = repo_cfg.get("repo", "")
-            if "/" in repo_val:
-                proj_part, _, _repo_part = repo_val.partition("/")
-                if proj_part:
-                    org = owner
-                    project = proj_part
-                    if _repo_part:
-                        repo = _repo_part
-
+        org, project, repo = _resolve_azure_parts(repo_cfg)
         if org and project and repo:
             org_e = _url_quote(org, safe="")
             proj_e = _url_quote(project, safe="")
@@ -119,10 +146,9 @@ def _build_completion_comment(
         lines = [f"Completed with command `{pending_command}`."]
 
         if commit_sha:
-            if provider == "github":
-                lines.append(f"[Commit](https://github.com/{task_owner}/{task_repo}/commit/{commit_sha})")
-            elif provider == "azure":
-                lines.append(f"Commit: {commit_sha}")
+            commit_url = _build_commit_url(provider, repo_cfg, commit_sha)
+            if commit_url:
+                lines.append(f"[Commit]({commit_url})")
             else:
                 lines.append(f"Commit: {commit_sha}")
 
