@@ -204,8 +204,8 @@ def test_build_completion_comment_azure_branch_url():
         cost_usd=None, duration_seconds=None, session_id=None,
         repo_cfg={"org": "my-org", "project": "my-project", "repo": "my-repo"},
     )
-    assert "https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBautoswe/issue-5" in msg
-    assert "github.com" not in msg
+    assert "[View branch](https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBautoswe%2Fissue-5)" in msg
+    assert "github.com" not in msg.split("**Summary:**")[0]
 
 
 def test_build_completion_comment_unknown_provider_fallback():
@@ -230,6 +230,26 @@ def test_build_completion_comment_azure_special_chars():
         repo_cfg={"org": "my org", "project": "my project", "repo": "my#repo"},
     )
     assert "dev.azure.com/my%20org/my%20project/_git/my%23repo" in msg
+    # Branch name in query param is also URL-encoded
+    assert "version=GBautoswe%2Fissue-9" in msg
+
+
+def test_build_completion_comment_github_no_repo_cfg():
+    """GitHub with missing repo_cfg: commit link still works (uses task_owner/repo),
+    but branch link falls back to plain text."""
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed\tabc1234",
+        task_owner="o", task_repo="r", issue_num=1,
+        plan_branch=None, provider="github",
+        cost_usd=None, duration_seconds=None, session_id=None,
+        repo_cfg=None,
+    )
+    # Commit link uses task_owner/task_repo directly (always available)
+    assert "[Commit](https://github.com/o/r/commit/abc1234)" in msg
+    # Branch link falls back to plain text when repo_cfg is None
+    assert "Branch: autoswe/issue-1" in msg
+    assert "[View branch]" not in msg
 
 
 # ---------------------------------------------------------------------------
