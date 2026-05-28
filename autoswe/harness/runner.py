@@ -10,13 +10,14 @@ from autoswe.core.logging_utils import init_debug_logger, log
 _RETRYABLE_SDK_EXCEPTIONS: tuple = ()
 _PLANS_DIR = Path.home() / ".claude" / "plans"
 
-# Built-in SDK tools for progress tracking and sub-agent orchestration.
-# Safe in every phase (they do not mutate the repo directly).
-AGENT_TASK_TOOLS = [
+# Read-only-safe progress/orchestration tools (no repo mutation)
+PROGRESS_TOOLS = [
     "TodoWrite",
     "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
-    "Agent",
 ]
+
+# Full agent toolset: includes sub-agent spawning. Only safe for fix/coder phases.
+AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]
 
 
 def _get_retryable_exceptions() -> tuple:
@@ -47,6 +48,8 @@ class RunResult:
     cost_usd: float | None = None
     duration_seconds: float = 0.0
     plan_file_path: str | None = None
+    plan_posted: bool = False
+    question_posted: bool = False
 
     def __iter__(self):
         """Allow tuple-style unpacking: text, session_id, subtype = result."""
@@ -397,6 +400,7 @@ async def _run_async(
         cost_usd = None
         duration_ms = 0
         captured_plan_file: str | None = None
+        plan_posted, question_posted = False, False
         progress_state = ProgressState()
 
         try:
@@ -416,6 +420,10 @@ async def _run_async(
                                 if body:
                                     progress_callback(body)
                             if isinstance(block, ToolUseBlock):
+                                if block.name == "mcp__autoswe_comment__post_plan":
+                                    plan_posted = True
+                                elif block.name == "mcp__autoswe_comment__post_question":
+                                    question_posted = True
                                 plan_path = _extract_plan_file_path(block)
                                 if plan_path is not None:
                                     captured_plan_file = plan_path
@@ -454,6 +462,7 @@ async def _run_async(
         cost_usd = None
         duration_ms = 0
         captured_plan_file: str | None = None
+        plan_posted, question_posted = False, False
         progress_state = ProgressState()
 
         try:
@@ -473,6 +482,10 @@ async def _run_async(
                                 if body:
                                     progress_callback(body)
                             if isinstance(block, ToolUseBlock):
+                                if block.name == "mcp__autoswe_comment__post_plan":
+                                    plan_posted = True
+                                elif block.name == "mcp__autoswe_comment__post_question":
+                                    question_posted = True
                                 plan_path = _extract_plan_file_path(block)
                                 if plan_path is not None:
                                     captured_plan_file = plan_path
@@ -506,6 +519,8 @@ async def _run_async(
         cost_usd=cost_usd,
         duration_seconds=duration_ms / 1000,
         plan_file_path=captured_plan_file,
+        plan_posted=plan_posted,
+        question_posted=question_posted,
     )
 
 

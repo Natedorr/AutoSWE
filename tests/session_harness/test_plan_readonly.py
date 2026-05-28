@@ -70,9 +70,9 @@ def test_allows_todo_write(callback, context):
 
 
 def test_allows_task_tools(callback, context):
-    """Sub-agent task family must be allowed in read_only mode (orchestration, no repo mutation)."""
-    from autoswe.harness.runner import AGENT_TASK_TOOLS
-    for tool_name in AGENT_TASK_TOOLS:
+    """PROGRESS_TOOLS must be allowed in read_only mode (orchestration, no repo mutation)."""
+    from autoswe.harness.runner import PROGRESS_TOOLS
+    for tool_name in PROGRESS_TOOLS:
         result = asyncio.run(
             callback(tool_name, {}, context)
         )

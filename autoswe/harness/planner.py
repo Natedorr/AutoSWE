@@ -9,7 +9,7 @@ from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server
 from autoswe.harness.prompts import BOT_MARKER, build_plan_prompt
-from autoswe.harness.runner import AGENT_TASK_TOOLS, HandlerResult
+from autoswe.harness.runner import PROGRESS_TOOLS, HandlerResult
 from autoswe.providers.factory import get_tracker
 from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
 from autoswe.vcs.worktree import create_worktree
@@ -196,7 +196,7 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
             repo_cfg=repo_cfg,
             model=plan_model,
             permission_mode="plan",
-            allowed_tools=["Read", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS],
+            allowed_tools=["Read", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *PROGRESS_TOOLS],
             disallowed_tools=["ExitPlanMode"],
             mcp_servers=build_mcp_comment_server(task, repo_cfg),
             progress_callback=progress_callback,
@@ -220,6 +220,22 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
 
     if state.get("asked_question_md"):
         return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+
+    if result.question_posted:
+        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+
+    if result.plan_posted:
+        plan_file_path: Optional[str] = None
+        if result.plan_file_path:
+            pf = Path(result.plan_file_path)
+            if pf.exists():
+                plan_text = pf.read_text(encoding="utf-8").strip()
+                if not _plan_file_is_pending(plan_text):
+                    plan_file_path = str(pf)
+                    task["plan_file_path"] = plan_file_path
+        log(f"[PLAN] {task['id']} complete done=PLAN_READY plan_file={plan_file_path or 'none'}")
+        return HandlerResult("PLAN_READY", cost_usd=result.cost_usd,
+                             duration_seconds=result.duration_seconds, plan_file_path=plan_file_path)
 
     plan_file: Optional[Path] = (
         Path(result.plan_file_path) if result.plan_file_path else None
@@ -289,7 +305,8 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
             resume=session_id,
             model=plan_model,
             permission_mode="plan",
-            allowed_tools=["Read", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS],
+            allowed_tools=["Read", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *PROGRESS_TOOLS],
+            disallowed_tools=["ExitPlanMode"],
             mcp_servers=build_mcp_comment_server(task, repo_cfg),
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -311,6 +328,22 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
 
     if state.get("asked_question_md"):
         return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+
+    if result.question_posted:
+        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+
+    if result.plan_posted:
+        plan_file_path: Optional[str] = None
+        if result.plan_file_path:
+            pf = Path(result.plan_file_path)
+            if pf.exists():
+                plan_text = pf.read_text(encoding="utf-8").strip()
+                if not _plan_file_is_pending(plan_text):
+                    plan_file_path = str(pf)
+                    task["plan_file_path"] = plan_file_path
+        log(f"[PLAN] {task['id']} resume complete done=PLAN_READY plan_file={plan_file_path or 'none'}")
+        return HandlerResult("PLAN_READY", cost_usd=result.cost_usd,
+                             duration_seconds=result.duration_seconds, plan_file_path=plan_file_path)
 
     plan_file: Optional[Path] = (
         Path(result.plan_file_path) if result.plan_file_path else None

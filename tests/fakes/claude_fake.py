@@ -20,20 +20,21 @@ class ClaudeFake:
     """
 
     def __init__(self):
-        self.script: list[tuple[str, str, str, Any]] = []
+        self.script: list[tuple[str, str, str, Any, bool, bool]] = []
         self.calls: list[dict[str, Any]] = []
         self._call_index = 0
         self._raises: list[Exception] = []
 
     def script_response(self, text: str, session_id: str = "s1",
-                        subtype: str = "success") -> None:
+                        subtype: str = "success", plan_posted: bool = False,
+                        question_posted: bool = False) -> None:
         """Add a response to the script.  Order matters — each .run() call pops the next."""
-        self.script.append((text, session_id, subtype, None))
+        self.script.append((text, session_id, subtype, None, plan_posted, question_posted))
 
     def script_recipe(self, text: str, recipe: object,
                       session_id: str = "s1", subtype: str = "success") -> None:
         """Like script_response, but also applies *recipe* in cwd before returning."""
-        self.script.append((text, session_id, subtype, recipe))
+        self.script.append((text, session_id, subtype, recipe, False, False))
 
     def script_plan(self, plan_text: str, session_id: str = "s1") -> None:
         """Add a plan-phase response wrapping *plan_text* in AUTOSWE_PLAN tags."""
@@ -84,7 +85,7 @@ class ClaudeFake:
             # No more scripted responses — return empty success
             return RunResult("", "s-default", "success")
 
-        text, session_id, subtype, recipe = self.script[self._call_index]
+        text, session_id, subtype, recipe, plan_posted, question_posted = self.script[self._call_index]
         self._call_index += 1
 
         # Apply recipe if present
@@ -92,7 +93,7 @@ class ClaudeFake:
             from tests.fakes.claude_recipes import apply_recipe
             apply_recipe(Path(cwd), recipe)
 
-        return RunResult(text, session_id, subtype)
+        return RunResult(text, session_id, subtype, plan_posted=plan_posted, question_posted=question_posted)
 
     _real_run = None  # Class-level cache of the real runner.run
 
