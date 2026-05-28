@@ -279,17 +279,20 @@ def test_run_plan_uses_allowed_tools(tmp_path, mock_gh_post_comment):
     assert "Grep" in tools
     # MCP comment tools should be included
     assert "mcp__autoswe_comment__update_progress" in tools
-    # Agent task tools (TodoWrite, TaskCreate, etc.) should be included
-    from autoswe.harness.runner import AGENT_TASK_TOOLS
-    for tool in AGENT_TASK_TOOLS:
+    # PROGRESS_TOOLS (TodoWrite, TaskCreate, etc.) should be included
+    # but NOT 'Agent' — Agent spawns sub-agents that bypass read-only containment
+    from autoswe.harness.runner import PROGRESS_TOOLS
+    for tool in PROGRESS_TOOLS:
         assert tool in tools, f"{tool} should be in plan allowed_tools"
+    assert "Agent" not in tools
     assert "mcp__autoswe_comment__post_plan" in tools
     assert "mcp__autoswe_comment__post_question" in tools
     assert run_calls[0]["permission_mode"] == "plan"
 
 
 def test_resume_plan_uses_agent_task_tools(tmp_path, mock_gh_post_comment):
-    """Resume plan phase should include AGENT_TASK_TOOLS in allowed_tools."""
+    """Resume plan phase should include PROGRESS_TOOLS in allowed_tools
+    (Agent excluded — it bypasses read-only containment)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -304,9 +307,10 @@ def test_resume_plan_uses_agent_task_tools(tmp_path, mock_gh_post_comment):
             resume_plan(task, "Use approach A.", {}, {"GITHUB_TOKEN": "tok"})
 
     tools = run_calls[0]["allowed_tools"]
-    from autoswe.harness.runner import AGENT_TASK_TOOLS
-    for tool in AGENT_TASK_TOOLS:
+    from autoswe.harness.runner import PROGRESS_TOOLS
+    for tool in PROGRESS_TOOLS:
         assert tool in tools, f"{tool} should be in resume_plan allowed_tools"
+    assert "Agent" not in tools
 
 
 def test_run_plan_uses_plan_branch_in_prompt(tmp_path, mock_gh_post_comment):
@@ -981,4 +985,102 @@ def test_resume_plan_does_not_push_new_branch(tmp_path, mock_gh_post_comment):
     assert len(create_worktree_calls) == 1
     assert create_worktree_calls[0].get("push_new") is False, \
         "resume_plan must use push_new=False to avoid creating remote branches during planning"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: resume_plan disallows ExitPlanMode
+
+def test_resume_plan_disallows_exit_plan_mode(tmp_path, mock_gh_post_comment):
+    """resume_plan should include ExitPlanMode in disallowed_tools (matches run_plan)."""
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        return _r("<AUTOSWE_PLAN>\nPlan\n</AUTOSWE_PLAN>")
+
+    task = make_task(session_id="sess-existing")
+
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.runner.run", side_effect=fake_run):
+            from autoswe.harness.planner import resume_plan
+            resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tok"})
+
+    disallowed = run_calls[0].get("disallowed_tools", [])
+    assert "ExitPlanMode" in disallowed
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: MCP post_plan / post_question detection in RunResult
+
+
+def test_run_plan_returns_plan_ready_on_post_plan_tool_use(tmp_path, mock_gh_post_comment):
+    """When RunResult has plan_posted=True, run_plan should return PLAN_READY
+    even without plan file or XML tags."""
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult("", "sess-1", "success", plan_posted=True)):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+
+
+def test_run_plan_returns_waiting_on_post_question_tool_use(tmp_path, mock_gh_post_comment):
+    """When RunResult has question_posted=True, run_plan should return WAITING: questions."""
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult("", "sess-1", "success", question_posted=True)):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content.startswith("WAITING:")
+    assert "questions" in result.done_content
+
+
+def test_resume_plan_returns_plan_ready_on_post_plan_tool_use(tmp_path, mock_gh_post_comment):
+    """When RunResult has plan_posted=True, resume_plan should return PLAN_READY."""
+    task = make_task(session_id="sess-existing")
+
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.runner.run",
+                   return_value=RunResult("", "sess-new", "success", plan_posted=True)):
+            from autoswe.harness.planner import resume_plan
+            result = resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+
+
+def test_resume_plan_returns_waiting_on_post_question_tool_use(tmp_path, mock_gh_post_comment):
+    """When RunResult has question_posted=True, resume_plan should return WAITING: questions."""
+    task = make_task(session_id="sess-existing")
+
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.runner.run",
+                   return_value=RunResult("", "sess-new", "success", question_posted=True)):
+            from autoswe.harness.planner import resume_plan
+            result = resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content.startswith("WAITING:")
+    assert "questions" in result.done_content
+
+
+def test_run_plan_question_posted_beats_plan_posted(tmp_path, mock_gh_post_comment):
+    """When both flags are True, question_posted takes priority (WAITING over PLAN_READY)."""
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult("", "sess-1", "success", plan_posted=True, question_posted=True)):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content.startswith("WAITING:")
+    assert "questions" in result.done_content
 

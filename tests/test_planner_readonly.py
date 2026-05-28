@@ -8,6 +8,8 @@ This prevents the agent from implementing code during planning, even if
 the CLI exits plan mode via the native ExitPlanMode command.
 """
 
+from unittest.mock import patch
+
 
 def test_git_commit_push_re_matches_commit():
     from autoswe.harness.ask_user_question import _GIT_COMMIT_PUSH_RE
@@ -185,9 +187,9 @@ def test_read_only_allows_todo_write():
 
 
 def test_read_only_allows_task_tools():
-    """read_only=True should allow the sub-agent task family (progress/orchestration)."""
+    """read_only=True should allow PROGRESS_TOOLS (progress/orchestration, no repo mutation)."""
     from autoswe.harness.ask_user_question import make_can_use_tool
-    from autoswe.harness.runner import AGENT_TASK_TOOLS
+    from autoswe.harness.runner import PROGRESS_TOOLS
 
     state = {}
     cut = make_can_use_tool({}, {}, state, read_only=True)
@@ -198,7 +200,7 @@ def test_read_only_allows_task_tools():
 
     async def run():
         results = {}
-        for tool in AGENT_TASK_TOOLS:
+        for tool in PROGRESS_TOOLS:
             results[tool] = await cut(tool, {}, None)
         return results
 
@@ -696,3 +698,90 @@ def test_read_only_file_mutation_blocked_when_read_only_off():
         assert isinstance(result, PermissionResultAllow), (
             f"Bash '{cmd}' should be allowed when read_only=False"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: Agent tool must not be in plan-phase allowed_tools
+
+
+def test_plan_phase_does_not_allow_agent_tool_run_plan(tmp_path, mock_gh_post_comment):
+    """run_plan must NOT include 'Agent' in allowed_tools — Agent spawns
+    sub-agents that bypass the read-only can_use_tool callback."""
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        from autoswe.harness.runner import RunResult
+        return RunResult("<AUTOSWE_PLAN>\nPlan\n</AUTOSWE_PLAN>", "sess", "success")
+
+    task = {
+        "id": "o_r_1", "owner": "o", "repo": "r", "issue_number": 1,
+        "title": "Test", "body": "/plan", "base_branch": "master",
+        "session_id": None, "_token": "ghp_fake",
+    }
+
+    with patch("autoswe.harness.planner.create_worktree", return_value=tmp_path):
+        with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+            with patch("autoswe.tracking.api._fetch_comments", return_value=[]):
+                with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                    from autoswe.harness.planner import run_plan
+                    run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    tools = run_calls[0]["allowed_tools"]
+    assert "Agent" not in tools, (
+        "Agent must not be in run_plan allowed_tools — it bypasses read-only containment"
+    )
+
+
+def test_plan_phase_does_not_allow_agent_tool_resume_plan(tmp_path, mock_gh_post_comment):
+    """resume_plan must NOT include 'Agent' in allowed_tools."""
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        from autoswe.harness.runner import RunResult
+        return RunResult("<AUTOSWE_PLAN>\nPlan\n</AUTOSWE_PLAN>", "sess", "success")
+
+    task = {
+        "id": "o_r_1", "owner": "o", "repo": "r", "issue_number": 1,
+        "title": "Test", "body": "/plan", "base_branch": "master",
+        "session_id": "existing-sess", "_token": "ghp_fake",
+    }
+
+    with patch("autoswe.harness.planner.create_worktree", return_value=tmp_path):
+        with patch("autoswe.harness.runner.run", side_effect=fake_run):
+            from autoswe.harness.planner import resume_plan
+            resume_plan(task, "Green!", {}, {"GITHUB_TOKEN": "tok"})
+
+    tools = run_calls[0]["allowed_tools"]
+    assert "Agent" not in tools, (
+        "Agent must not be in resume_plan allowed_tools — it bypasses read-only containment"
+    )
+
+
+def test_plan_phase_allows_progress_tools(tmp_path, mock_gh_post_comment):
+    """run_plan must include PROGRESS_TOOLS (TodoWrite, TaskCreate, etc.) in allowed_tools."""
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        from autoswe.harness.runner import RunResult
+        return RunResult("<AUTOSWE_PLAN>\nPlan\n</AUTOSWE_PLAN>", "sess", "success")
+
+    task = {
+        "id": "o_r_1", "owner": "o", "repo": "r", "issue_number": 1,
+        "title": "Test", "body": "/plan", "base_branch": "master",
+        "session_id": None, "_token": "ghp_fake",
+    }
+
+    with patch("autoswe.harness.planner.create_worktree", return_value=tmp_path):
+        with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+            with patch("autoswe.tracking.api._fetch_comments", return_value=[]):
+                with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                    from autoswe.harness.planner import run_plan
+                    run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    tools = run_calls[0]["allowed_tools"]
+    from autoswe.harness.runner import PROGRESS_TOOLS
+    for tool in PROGRESS_TOOLS:
+        assert tool in tools, f"{tool} should be in plan allowed_tools"

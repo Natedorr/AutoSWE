@@ -1344,6 +1344,51 @@ TRANSITIONS: list[dict[str, Any]] = [
             "claude_permission": "plan",
         },
     },
+    # ---- WI #150: waiting -> planned via MCP post_plan during resume ----
+    {
+        "name": "waiting_resume_mcp_post_plan",
+        "description": "Task at waiting; user reply resumes plan; Claude calls MCP post_plan -> planned",
+        "meta": {"mcp_plan_posted": True},
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:waiting"],
+            "comments": [
+                {
+                    "body": "What framework?\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "Use Django.",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "waiting",
+                "session_id": "s-plan-42",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "Thanks! Here is the plan.", "session_id": "s-plan-42", "subtype": "success", "plan_posted": True},
+        ],
+        "git_calls": ["create_worktree"],
+        "expect": {
+            "label_after": "autoswe:planned",
+            "autoswe_status": "planned",
+            "session_id": "s-plan-42",
+            "claude_permission": "plan",
+        },
+    },
 ]
 
 
