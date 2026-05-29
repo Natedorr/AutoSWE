@@ -299,11 +299,15 @@ def emit(
     if session_id and kind != "review":
         queue_patch["session_id"] = session_id
 
-    # Set last_phase so resume knows which handler to call
+    # Set last_phase + resume_phase so resume knows which handler to call.
+    # ``resume_phase`` is the authoritative source for _resume_kind();
+    # ``last_phase`` is kept for backwards-compatibility (fallback).
     if kind in ("plan",):
         queue_patch["last_phase"] = "plan"
+        queue_patch["resume_phase"] = "plan"
     elif kind in ("fix", "retry"):
         queue_patch["last_phase"] = "fix"
+        queue_patch["resume_phase"] = "fix"
 
     # plan_file_path lifecycle:
     #  * plan + planned  -> persist the path the planner wrote

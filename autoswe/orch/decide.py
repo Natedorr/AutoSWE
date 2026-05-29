@@ -650,8 +650,13 @@ def decide(world: World) -> Action:
 def _resume_kind(task: "object") -> str:  # type: ignore[type-arg]  # noqa: ANN001
     """Determine the action kind for a user reply resume.
 
-    If the last phase was 'fix', resume the fix. Otherwise resume plan.
+    Priority:
+      1. ``resume_phase`` — explicit field set by emit(), authoritative
+      2. ``last_phase``   — legacy fallback for old queue entries
+      3. ``"plan"``       — TaskState default
     """
+    if task.resume_phase:
+        return "fix" if task.resume_phase == "fix" else "plan"
     if task.last_phase == "fix":
         return "fix"
     return "plan"

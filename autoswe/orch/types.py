@@ -69,6 +69,10 @@ class TaskState:
     welcome_comment_id: int | None = None
     bot_comment_ids: tuple[int, ...] = ()
     last_phase: str = "plan"
+    # Explicitly tracks which phase should resume after a user reply.
+    # Set by emit() alongside last_phase. Used by _resume_kind() as the
+    # authoritative source (falls back to last_phase if missing).
+    resume_phase: str | None = None
     created_at: str = ""
     last_synced: str = ""
     provider: str = "github"
