@@ -323,7 +323,10 @@ def _dispatch_task(
         issue_handler = init_issue_logger(LOGS_DIR, slug)
 
         # --- Set running status ---
-        running = running_status_for(action.kind, task_entry.get("last_phase"))
+        running = running_status_for(
+            action.kind,
+            task_entry.get("resume_phase") or task_entry.get("last_phase"),
+        )
         try:
             tracker.set_status(repo_cfg, issue_num, f"autoswe:{running}")
         except RuntimeError as e:

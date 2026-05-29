@@ -1094,3 +1094,39 @@ def test_plan_waiting_emit_sets_resume_phase():
         "this is the regression fix for issue #27"
     )
     assert patch.get("autoswe_status") == "waiting"
+
+
+def test_fix_waiting_emit_preserves_resume_phase_fix():
+    """Fix returning WAITING (coder asked a question during fix) must keep
+    resume_phase='fix' so a subsequent user reply resumes fixing, not planning."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
+        status="fixing", plan_branch="autoswe/issue-42", base_branch="main",
+        attempt_count=1, first_dispatched_at=None, last_dispatched_command="/fix",
+        last_dispatched_command_id=1, last_consumed_reply_id=1, session_id="s1",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    action = Action(kind="fix", slug="gh:o_r_42", triggering_comment_id=2)
+    result = DispatchResult(
+        done_content="WAITING:Should I approach A or B?", cost_usd=0.50,
+        duration_seconds=30, session_id="s1",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    assert patch.get("resume_phase") == "fix", (
+        "fix WAITING must preserve resume_phase='fix' — "
+        "a user reply should resume fixing, not switch to planning"
+    )
+    assert patch.get("last_phase") == "fix"
+    assert patch.get("autoswe_status") == "waiting"
