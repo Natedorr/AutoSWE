@@ -150,6 +150,7 @@ def _build_poll_task(
         welcome_comment_id=t.get("welcome_comment_id"),
         bot_comment_ids=tuple(t.get("bot_comment_ids", [])),
         last_phase=t.get("last_phase", "plan"),
+        resume_phase=t.get("resume_phase"),
         created_at=t.get("created_at", ""),
         last_synced=t.get("last_synced", ""),
         provider=t.get("provider", "github"),
