@@ -1210,3 +1210,36 @@ def test_resolve_sync_conflicts_persists_session_id(tmp_path):
                 )
 
     assert task["session_id"] == "s-new"
+
+
+def test_resolve_sync_conflicts_passes_harness_model(tmp_path):
+    """resolve_sync_conflicts must forward the model from the harness profile.
+
+    Regression: the harness was resolved but the model was never passed to
+    runner.run, so conflict resolution silently used the wrong model.
+    """
+    task = make_task(session_id="s1")
+    captured = {}
+
+    def _capture_run(prompt, **kw):
+        captured["model"] = kw.get("model")
+        from autoswe.harness.backends.base import RunResult
+        return RunResult(text="ok", session_id="s-new", subtype="success")
+
+    with _patch_resolve(tmp_path):
+        with patch("autoswe.harness.runner.run", side_effect=_capture_run):
+            with patch("autoswe.harness.coder.subprocess.run") as mock_run:
+                mock_run.returncode = 0
+                mock_run.stdout = "abc1234"
+            with patch("autoswe.harness.coder.get_vcs") as mock_vcs:
+                mock_vcs.return_value.branch_name.return_value = "autoswe/issue-42"
+                from autoswe.harness.coder import resolve_sync_conflicts
+                resolve_sync_conflicts(
+                    task, ["src/main.py"],
+                    repo_cfg={"provider": "github", "fix_model": "repo-model"},
+                    cfg={"FIX_MODEL": "global-model"},
+                )
+
+    # Harness profile model (via resolve_harness) should be forwarded.
+    # The synthesized default picks repo_cfg fix_model > cfg FIX_MODEL > None.
+    assert captured["model"] == "repo-model"

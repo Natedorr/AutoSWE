@@ -18,6 +18,7 @@ All architecture, data shapes, and process documentation lives in `docs/autoswe/
 | Labels (read-only mirror of `autoswe_status`) | [docs/autoswe/labels.md](docs/autoswe/labels.md) |
 | Slash commands | [docs/autoswe/slash-commands.md](docs/autoswe/slash-commands.md) |
 | Configuration (env, repos.json, prompts) | [docs/autoswe/config.md](docs/autoswe/config.md) |
+| Harness profiles (harnesses.json, backends) | [docs/autoswe/harnesses.md](docs/autoswe/harnesses.md) |
 | Provider abstraction (GitHub, Azure) | [docs/autoswe/providers.md](docs/autoswe/providers.md) |
 | Git worktrees | [docs/autoswe/git-worktrees.md](docs/autoswe/git-worktrees.md) |
 | Safeguards (limits, loop protection) | [docs/autoswe/safeguards.md](docs/autoswe/safeguards.md) |
@@ -41,6 +42,7 @@ When autoSWE processes an issue that touches any `autoswe/` module, the work **m
 - New sync behavior → `test_sync_helpers.py`
 - New worktree operations → `test_worktree.py`
 - New config options → `test_config.py`
+- New harness config or backend factory logic → `test_config.py` or `test_backend_factory.py`
 - Queue store invariants, crash recovery → `test_queue_store.py`
 - PID contention, repo locks, concurrency races → `test_concurrency.py`
 - Queue/API drift scenarios → `test_drift_detection.py`

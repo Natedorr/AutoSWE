@@ -19,9 +19,12 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | `ASSIGN_USER` | `""` | Override assignee target (defaults to issue creator) |
 | `AUTO_CREATE_PR` | `false` | Automatically create a PR after a successful `/fix` |
 | `CLAUDE_CLI_PATH` | `""` | Pin a specific `claude` binary |
-| `PLAN_MODEL` | `""` | Model for `/plan` phase |
-| `FIX_MODEL` | `""` | Model for `/fix` phase |
-| `REVIEW_MODEL` | `""` | Model for `/review` phase |
+| `PLAN_MODEL` | `""` | Model for `/plan` phase (legacy — superseded by `PLAN_HARNESS`) |
+| `FIX_MODEL` | `""` | Model for `/fix` phase (legacy — superseded by `FIX_HARNESS`) |
+| `REVIEW_MODEL` | `""` | Model for `/review` phase (legacy — superseded by `REVIEW_HARNESS`) |
+| `PLAN_HARNESS` | `""` | Named harness profile for `/plan` phase (from `harnesses.json`) |
+| `FIX_HARNESS` | `""` | Named harness profile for `/fix` phase |
+| `REVIEW_HARNESS` | `""` | Named harness profile for `/review` phase |
 | `ANTHROPIC_AUTH_TOKEN` | `""` | e.g. `"ollama"` for local Ollama server |
 | `ANTHROPIC_API_KEY` | `""` | Anthropic API key |
 | `ANTHROPIC_BASE_URL` | `""` | e.g. `http://localhost:11434` |
@@ -46,9 +49,12 @@ Loaded by `core/config.py:load_repos_config()`. Keys starting with `_` are skipp
 | `pat` | **Yes** | — | PAT token with `repo` scope |
 | `base_branch` | No | `"main"` | Base branch for worktrees |
 | `model` | No | `""` | Generic model (fallback for both phases) |
-| `plan_model` | No | `""` | Model for `/plan` phase |
-| `fix_model` | No | `""` | Model for `/fix` phase |
-| `review_model` | No | `""` | Model for `/review` phase |
+| `plan_model` | No | `""` | Model for `/plan` phase (legacy — superseded by `plan_harness`) |
+| `fix_model` | No | `""` | Model for `/fix` phase (legacy — superseded by `fix_harness`) |
+| `review_model` | No | `""` | Model for `/review` phase (legacy — superseded by `review_harness`) |
+| `plan_harness` | No | `""` | Named harness profile for `/plan` phase (from `harnesses.json`) |
+| `fix_harness` | No | `""` | Named harness profile for `/fix` phase |
+| `review_harness` | No | `""` | Named harness profile for `/review` phase |
 | `agent_timeout` | No | (from env) | Per-repo agent timeout in seconds |
 | `plan_prompt` | No | `config/prompts/plan.txt` | Custom plan prompt file path (relative to AUTOSWE_DIR, or absolute) |
 | `fix_prompt` | No | `config/prompts/fix.txt` | Custom fix prompt file path (relative to AUTOSWE_DIR, or absolute) |
@@ -63,16 +69,36 @@ Loaded by `core/config.py:load_repos_config()`. Keys starting with `_` are skipp
 
 Same fields as GitHub (`pat` is required for both GitHub and Azure entries).
 
-Keys are validated: missing `provider` raises `ValueError`, any entry without `pat` raises `ValueError`, Azure entries without 3-part key raise `ValueError` (`config.py:85-111`).
+Keys are validated: missing ``provider`` raises ``ValueError``, any entry without ``pat`` raises ``ValueError``, Azure entries without 3-part key raise ``ValueError`` (``config.py:85-111``).
 
-## Model Resolution Order (highest → lowest priority)
+## `config/harnesses.json` (gitignored, copy from `harnesses.json.example`)
 
-1. `repos.json` phase-specific: `plan_model` (for `/plan`), `fix_model` (for `/fix`), or `review_model` (for `/review`)
-2. `autoswe.env` phase-specific: `PLAN_MODEL`, `FIX_MODEL`, or `REVIEW_MODEL`
-3. `repos.json` generic: `model`
+Loaded by ``core/config.py:load_harnesses_config()``. Keys starting with ``_`` are skipped.
+
+Defines **named harness profiles** that bundle a coding backend (``claude_code``, ``codex``) with its model and auth/runtime settings. Phases reference a profile by name via ``plan_harness``, ``fix_harness``, or ``review_harness`` in repos.json (or ``PLAN_HARNESS``, ``FIX_HARNESS``, ``REVIEW_HARNESS`` in autoswe.env).
+
+Each profile requires a ``backend`` field (``"claude_code"`` or ``"codex"``). Optional fields: ``model``, ``timeout``, ``cli_path``, ``api_key_env``, ``anthropic_base_url``, ``anthropic_auth_token``.
+
+Full documentation: [harnesses.md](harnesses.md).
+
+## Harness Resolution (highest → lowest priority)
+
+For each phase (plan, fix, review):
+
+1. ``repos.json`` phase-specific harness: ``plan_harness``, ``fix_harness``, or ``review_harness`` → looks up profile in ``harnesses.json``
+2. ``autoswe.env`` phase-specific harness: ``PLAN_HARNESS``, ``FIX_HARNESS``, or ``REVIEW_HARNESS`` → looks up profile in ``harnesses.json``
+3. Synthesized default: ``{"backend": "claude_code", "model": <phase_model>}`` — falls back to the legacy model resolution below
+
+## Model Resolution Order (legacy, highest → lowest priority)
+
+(Used when no harness profile is set, or inside a synthesized default profile.)
+
+1. ``repos.json`` phase-specific: ``plan_model`` (for `/plan`), ``fix_model`` (for `/fix`), or ``review_model`` (for `/review`)
+2. ``autoswe.env`` phase-specific: ``PLAN_MODEL``, ``FIX_MODEL``, or ``REVIEW_MODEL``
+3. ``repos.json`` generic: ``model``
 4. SDK default (Claude's built-in default)
 
-Code path: `runner.py:323` (`model or rc.get("model")`), called after handler already resolved phase-specific model (e.g., `planner.py:177`, `coder.py:133`, `reviewer.py:119`).
+Code path: ``config.py:resolve_harness()`` → ``config.py:load_harnesses_config()``. Model fallback inside synthesized profile uses the same chain as handlers (e.g. ``planner.py``, ``coder.py``, ``reviewer.py``).
 
 ## Prompt Templates
 

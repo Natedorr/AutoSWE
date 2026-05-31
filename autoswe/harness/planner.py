@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from autoswe.core.config import LOGS_DIR
+from autoswe.core.config import LOGS_DIR, resolve_harness
 from autoswe.core.logging_utils import init_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
@@ -179,7 +179,8 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
     dbg.debug("PLAN: worktree=%s", wt)
     prompt = build_plan_prompt(task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance)
 
-    plan_model = repo_cfg.get("plan_model") or cfg.get("PLAN_MODEL") or None
+    harness = resolve_harness("plan", repo_cfg, cfg)
+    plan_model = harness.get("model")
     log(f"[PLAN] {task['id']} session=NEW model={plan_model or 'default'} guidance_len={len(guidance or '')}")
     dbg.debug("PLAN: model=%s guidance=%s", plan_model or "default", guidance)
 
@@ -202,6 +203,7 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during plan phase")
@@ -288,7 +290,8 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
         "<AUTOSWE_QUESTIONS> block."
     )
 
-    plan_model = repo_cfg.get("plan_model") or cfg.get("PLAN_MODEL") or None
+    harness = resolve_harness("plan", repo_cfg, cfg)
+    plan_model = harness.get("model")
     log(f"[PLAN] {task['id']} session=RESUME from={session_id} reply_chars={len(user_text)}")
 
     state = {}
@@ -311,6 +314,7 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during plan resume")

@@ -2,7 +2,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import LOGS_DIR
+from autoswe.core.config import LOGS_DIR, resolve_harness
 from autoswe.core.logging_utils import init_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
@@ -131,7 +131,8 @@ def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict =
             "to complete the merge. Then proceed with the user's request."
         )
 
-    fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
+    harness = resolve_harness("fix", rc, cfg or {})
+    fix_model = harness.get("model")
     log(f"[FIX] {task['id']} session={'NEW' if use_fresh_session else 'RESUME'} session_id={session_id or 'none'} plan_file={plan_file_path or 'none'}")
     log(f"[FIX] {task['id']} model={fix_model or 'default'} guidance={str(guidance or '')[:200]!r} prompt_len={len(prompt)} conflict_files={len(conflict_files or [])}")
     dbg.debug("FIX: model=%s guidance=%s", fix_model or "default", guidance)
@@ -153,6 +154,7 @@ def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict =
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during fix phase")
@@ -281,7 +283,8 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
     mcp_servers = build_mcp_comment_server(task, rc) or {}
     allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
 
-    fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
+    harness = resolve_harness("fix", rc, cfg or {})
+    fix_model = harness.get("model")
     log(f"[FIX] {task['id']} session=RESUME from={session_id} user_reply_chars={len(user_text)}")
 
     state = {}
@@ -301,6 +304,7 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during fix resume")
@@ -378,6 +382,8 @@ def resolve_sync_conflicts(
     mcp_servers = build_mcp_comment_server(task, rc) or {}
     allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
 
+    harness = resolve_harness("fix", rc, cfg or {})
+    fix_model = harness.get("model")
     log(
         f"[RESOLVE] {task['id']} session={'RESUME' if session_id else 'NEW'} "
         f"session_id={session_id or 'none'} conflicts={len(conflict_files)}"
@@ -393,12 +399,14 @@ def resolve_sync_conflicts(
             cfg=cfg or {},
             repo_cfg=rc,
             resume=session_id,  # None if first conflict with no prior session
+            model=fix_model,
             permission_mode="bypassPermissions",
             allowed_tools=allowed_tools,
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during conflict resolution")

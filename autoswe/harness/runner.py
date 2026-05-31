@@ -105,11 +105,17 @@ def run(
     progress_callback=None,
     can_use_tool=None,
     state: dict = None,
+    harness_cfg: dict = None,
 ):
     """Synchronous wrapper. Returns a RunResult dataclass.
 
     The dataclass supports backward-compatible tuple unpacking:
         text, session_id, subtype = runner.run(...)
+
+    When *harness_cfg* is provided the backend is resolved via the factory
+    (``get_backend()``).  When omitted the default is ``ClaudeCodeBackend``,
+    preserving backward compatibility for callers that don't use harness
+    profiles yet.
     """
     rc = repo_cfg or {}
     timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
@@ -146,7 +152,12 @@ def run(
         state=state,
     )
 
-    backend = ClaudeCodeBackend()
+    if harness_cfg is not None:
+        from autoswe.harness.backends.factory import get_backend
+
+        backend = get_backend(harness_cfg)
+    else:
+        backend = ClaudeCodeBackend()
 
     async def _with_timeout():
         return await asyncio.wait_for(

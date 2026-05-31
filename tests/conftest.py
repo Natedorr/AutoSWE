@@ -221,6 +221,7 @@ def isolated_autoswe_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config" / "autoswe.env")
     monkeypatch.setattr(cfg, "REPOS_CONFIG_FILE", tmp_path / "config" / "repos.json")
+    monkeypatch.setattr(cfg, "HARNESSES_CONFIG_FILE", tmp_path / "config" / "harnesses.json")
 
     monkeypatch.setattr(qs, "AUTOSWE_DIR", tmp_path)
     monkeypatch.setattr(qs, "QUEUE_FILE", tmp_path / "data" / "queue.json")
@@ -295,6 +296,9 @@ def scenario_cfg(isolated_autoswe_dir, tmp_path):
         "PLAN_MODEL": "",
         "FIX_MODEL": "",
         "REVIEW_MODEL": "",
+        "PLAN_HARNESS": "",
+        "FIX_HARNESS": "",
+        "REVIEW_HARNESS": "",
         "ANTHROPIC_AUTH_TOKEN": "",
         "ANTHROPIC_API_KEY": "",
         "ANTHROPIC_BASE_URL": "",

@@ -9,7 +9,7 @@ for backward compatibility.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, Protocol, runtime_checkable
 
 # ---------- Shared dataclasses ----------
 
@@ -108,6 +108,7 @@ class RunSpec:
 # ---------- CodingBackend Protocol ----------
 
 
+@runtime_checkable
 class CodingBackend(Protocol):
     """Protocol every coding backend must implement.
 

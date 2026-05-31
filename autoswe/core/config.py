@@ -7,6 +7,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AUTOSWE_DIR = Path(os.environ.get("AUTOSWE_DIR", _REPO_ROOT))
 CONFIG_FILE = AUTOSWE_DIR / "config" / "autoswe.env"
 REPOS_CONFIG_FILE = AUTOSWE_DIR / "config" / "repos.json"
+HARNESSES_CONFIG_FILE = AUTOSWE_DIR / "config" / "harnesses.json"
 WELCOME_FILE = AUTOSWE_DIR / "config" / "welcome_comment.txt"
 QUEUE_FILE = AUTOSWE_DIR / "data" / "queue.json"
 RUNNING_DIR = AUTOSWE_DIR / "running"
@@ -35,6 +36,9 @@ def load_config() -> dict:
         "PLAN_MODEL": os.environ.get("PLAN_MODEL", ""),
         "FIX_MODEL": os.environ.get("FIX_MODEL", ""),
         "REVIEW_MODEL": os.environ.get("REVIEW_MODEL", ""),
+        "PLAN_HARNESS": os.environ.get("PLAN_HARNESS", ""),
+        "FIX_HARNESS": os.environ.get("FIX_HARNESS", ""),
+        "REVIEW_HARNESS": os.environ.get("REVIEW_HARNESS", ""),
         "ANTHROPIC_AUTH_TOKEN": os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
         "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
         "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
@@ -111,3 +115,83 @@ def load_repos_config() -> dict:
             entry["repo"] = parts[2]
         validated[key] = entry
     return validated
+
+
+# Recognized backend names (populated as new backends are added).
+KNOWN_BACKENDS = {"claude_code", "codex"}
+
+
+def load_harnesses_config() -> dict:
+    """Load named harness profiles from ``harnesses.json``.
+
+    Mirrors ``load_repos_config()``: skip ``_``-prefixed keys, require a
+    ``backend`` field per entry, validate the backend is known.
+
+    Returns a dict mapping profile name to its configuration dict.
+    Each profile must have at least:
+      - ``backend`` (str): one of ``KNOWN_BACKENDS`` (e.g. ``"claude_code"``)
+    Optional fields depend on the backend (e.g. ``model``, ``auth_token``,
+    ``api_key``, ``timeout``, ``cli_path``).
+    """
+    if HARNESSES_CONFIG_FILE.exists():
+        try:
+            raw = json.loads(HARNESSES_CONFIG_FILE.read_text())
+        except json.JSONDecodeError:
+            return {}
+    else:
+        raw = {}
+
+    validated = {}
+    for key, entry in raw.items():
+        if key.startswith("_"):
+            continue
+        backend = entry.get("backend", "").lower()
+        if not backend:
+            raise ValueError(
+                f"harnesses.json entry '{key}' is missing the required 'backend' field. "
+                f"Use one of: {', '.join(sorted(KNOWN_BACKENDS))}."
+            )
+        if backend not in KNOWN_BACKENDS:
+            raise ValueError(
+                f"harnesses.json entry '{key}' has unknown backend '{backend}'. "
+                f"Use one of: {', '.join(sorted(KNOWN_BACKENDS))}."
+            )
+        validated[key] = dict(entry, backend=backend)
+    return validated
+
+
+def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict = None) -> dict:
+    """Resolve the harness profile for a coding phase (plan, fix, review).
+
+    Resolution order (highest → lowest priority):
+    1. ``repo_cfg`` phase-specific harness: ``{phase}_harness`` (e.g. ``plan_harness``)
+    2. ``cfg`` phase-specific harness: ``{PHASE}_HARNESS`` (e.g. ``PLAN_HARNESS``)
+    3. Synthesized default: ``{"backend": "claude_code", "model": <phase_model>}``
+
+    The synthesized default preserves the legacy model resolution chain
+    (``{phase}_model`` in repos.json → ``PHASE_MODEL`` in autoswe.env) so
+    existing configurations work without any ``harnesses.json``.
+
+    Returns a harness profile dict with at least ``backend`` and ``model`` keys.
+    """
+    if harnesses is None:
+        harnesses = load_harnesses_config()
+
+    # Determine the phase key (e.g. "plan" → "plan_harness" / "PLAN_HARNESS" / "plan_model" / "PLAN_MODEL")
+    phase_key = phase.lower()
+
+    # 1. Check repo_cfg for a harness profile reference
+    profile_name = repo_cfg.get(f"{phase_key}_harness") or cfg.get(f"{phase_key.upper()}_HARNESS", "")
+
+    if profile_name:
+        profile = harnesses.get(profile_name)
+        if profile is None:
+            raise ValueError(
+                f"Harness profile '{profile_name}' referenced for phase '{phase}' "
+                f"was not found in harnesses.json."
+            )
+        return dict(profile)
+
+    # 2. Synthesize from legacy model resolution (backward compatibility)
+    model = repo_cfg.get(f"{phase_key}_model") or cfg.get(f"{phase_key.upper()}_MODEL") or None
+    return {"backend": "claude_code", "model": model}

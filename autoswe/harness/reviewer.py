@@ -12,7 +12,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import LOGS_DIR
+from autoswe.core.config import LOGS_DIR, resolve_harness
 from autoswe.core.logging_utils import init_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
@@ -117,7 +117,8 @@ def run_review(
         guidance=guidance,
     )
 
-    review_model = repo_cfg.get("review_model") or cfg.get("REVIEW_MODEL") or None
+    harness = resolve_harness("review", repo_cfg, cfg)
+    review_model = harness.get("model")
     log(f"[REVIEW] {task['id']} session=NEW model={review_model or 'default'} diff_stat_lines={diff_stat.count(chr(10))}")
 
     # 5. Read-only session (fresh, no resume)
@@ -138,6 +139,7 @@ def run_review(
             can_use_tool=cut,
             state=state,
             progress_callback=progress_callback,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during review phase")
