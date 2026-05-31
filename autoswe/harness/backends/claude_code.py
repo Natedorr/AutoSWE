@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Awaitable
 
 from autoswe.core.config import LOGS_DIR
 from autoswe.core.logging_utils import init_debug_logger, log
@@ -341,7 +342,7 @@ class ClaudeCodeBackend:
     def capabilities(cls) -> set[str]:
         return cls.CAPABILITIES.copy()
 
-    def run(self, spec: RunSpec) -> object:
+    def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec via Claude Agent SDK.
 
         Returns an awaitable that resolves to a RunResult.

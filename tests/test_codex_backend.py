@@ -117,12 +117,12 @@ def _get_cmd(mock_exec: AsyncMock) -> tuple:
 
 
 def test_codex_capabilities():
-    """CodexBackend advertises mode, resume and progress_stream."""
+    """CodexBackend advertises resume and progress_stream (Phase 4, core run only)."""
     caps = CodexBackend.capabilities()
-    assert "mode" in caps
+    assert "mode" not in caps
     assert "resume" in caps
     assert "progress_stream" in caps
-    # Phase 4: no mcp, no can_use_tool, no plan_permission yet
+    # Phase 4: no mcp, no can_use_tool, no plan_permission, no mode yet
     assert "mcp" not in caps
     assert "can_use_tool" not in caps
     assert "plan_permission" not in caps
@@ -845,7 +845,8 @@ def test_backend_has_capability_codex():
     from autoswe.harness.runner import backend_has_capability
 
     harness = {"backend": "codex"}
-    assert backend_has_capability(harness, "mode")
+    # Phase 4: only resume and progress_stream
+    assert not backend_has_capability(harness, "mode")
     assert backend_has_capability(harness, "resume")
     assert backend_has_capability(harness, "progress_stream")
     assert not backend_has_capability(harness, "mcp")
@@ -868,7 +869,9 @@ def test_backend_parity_runresult_shape():
     assert "resume" in codex_caps
     assert "resume" in claude_caps
 
-    # Claude has more capabilities (mcp, can_use_tool, etc.)
+    # Claude has more capabilities (mode, mcp, can_use_tool, etc.)
+    assert "mode" in claude_caps
+    assert "mode" not in codex_caps
     assert "mcp" in claude_caps
     assert "mcp" not in codex_caps
 

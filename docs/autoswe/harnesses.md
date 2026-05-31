@@ -79,6 +79,11 @@ Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuesti
 
 Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--ask-for-approval`). Parses the JSONL event stream into a `RunResult`. Initially supports `resume` and `progress_stream` capabilities only (no MCP, no AskUserQuestion — degrades to text parsing).
 
+**Known limitation:** ``cost_usd`` is always ``None`` — the Codex JSONL stream
+reports token counts (``input_tokens``, ``output_tokens``) but not dollar
+amounts, and no pricing table is maintained yet.  Duration is tracked via
+``time.monotonic()``.  A future phase will add token→cost conversion.
+
 ### Factory
 
 Backend instances are created by `autoswe/harness/backends/factory.py:get_backend(harness_cfg)`. Dispatch on `harness_cfg["backend"]` field. Mirrors the provider factory pattern (`providers/factory.py`).

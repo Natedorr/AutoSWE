@@ -20,9 +20,28 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import dataclass, field
+from typing import Awaitable
 
 from autoswe.core.logging_utils import log
 from autoswe.harness.backends.base import RunResult, RunSpec
+
+# ---------- Streaming accumulator ----------
+
+
+@dataclass
+class _CodexAccumulator:
+    """Accumulates state during Codex JSONL streaming.
+
+    The fields are wrapped in single-element lists at the call site
+    inside ``_run_async`` so that ``_parse_jsonl_line`` can mutate them
+    in-place (a standard Python pattern for nested-callback mutation).
+    """
+
+    text_chunks: list[str] = field(default_factory=list)
+    session_id: str | None = None
+    turn_failed: bool = False
+
 
 # ---------- Mode → Codex sandbox mapping ----------
 
@@ -32,6 +51,10 @@ _MODE_SANDBOX = {
     "read_only": "read-only",
     "read_write": "workspace-write",
 }
+
+# Matches RunSpec.max_turns default — only emit -c flag when the caller
+# requests a value different from the default, keeping the command minimal.
+_DEFAULT_MAX_TURNS = 200
 
 
 def _mode_to_sandbox(mode: str | None) -> str:
@@ -142,15 +165,20 @@ class CodexBackend:
     Shells out to ``codex exec --json`` (or ``codex exec resume`` for
     resumption), streams the JSONL event lines for live progress, and
     returns a RunResult.
+
+    **Known limitation (Phase 4):** ``cost_usd`` is always ``None`` because
+    the Codex JSONL stream reports token counts but not dollar amounts, and
+    no pricing table is maintained yet.  Duration is tracked via
+    ``time.monotonic()``.  A future phase will add token→cost conversion.
     """
 
-    CAPABILITIES: set[str] = {"mode", "resume", "progress_stream"}
+    CAPABILITIES: set[str] = {"resume", "progress_stream"}
 
     @classmethod
     def capabilities(cls) -> set[str]:
         return cls.CAPABILITIES.copy()
 
-    def run(self, spec: RunSpec) -> object:
+    def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec via Codex CLI.
 
         Returns an awaitable that resolves to a RunResult.
@@ -184,17 +212,17 @@ class CodexBackend:
             "--cd", spec.cwd,
         ])
 
-        # Append the prompt (for non-resume, it's the task; for resume,
-        # it's the continuation instruction)
-        cmd.append(spec.prompt)
-
         # Ephemeral: don't persist session files (unless resuming, which needs them)
         if not spec.resume:
             cmd.append("--ephemeral")
 
-        # Limit turns to prevent runaway sessions
-        if spec.max_turns and spec.max_turns != 200:
+        # Limit turns to prevent runaway sessions (only add flag when non-default)
+        if spec.max_turns and spec.max_turns != _DEFAULT_MAX_TURNS:
             cmd.extend(["-c", f"agent.max_turns={spec.max_turns}"])
+
+        # Append the prompt (for non-resume, it's the task; for resume,
+        # it's the continuation instruction)
+        cmd.append(spec.prompt)
 
         # Build environment
         env = dict(os.environ)
@@ -228,9 +256,10 @@ class CodexBackend:
             ) from e
 
         # Accumulators (list-wrappers for in-place mutation in _parse_jsonl_line)
-        text_chunks: list[str] = []
-        session_id: list[str | None] = [None]
-        turn_failed: list[bool] = [False]
+        acc = _CodexAccumulator()
+        text_chunks: list[str] = acc.text_chunks
+        session_id: list[str | None] = [acc.session_id]
+        turn_failed: list[bool] = [acc.turn_failed]
 
         async def read_stderr() -> bytes:
             """Collect all stderr output (non-JSON progress/debug)."""
@@ -288,11 +317,15 @@ class CodexBackend:
         else:
             subtype = "error"
 
+        # TODO(Phase 5): Parse cost from turn.completed usage token counts
+        # once a pricing table (model → $/token) is available.  The JSONL
+        # parser already receives usage data; a simple multiplier would
+        # populate cost_usd.
         return RunResult(
             text="\n".join(text_chunks),
             session_id=session_id[0],
             subtype=subtype,
-            cost_usd=None,  # Phase 4: no pricing tables yet
+            cost_usd=None,
             duration_seconds=duration,
             plan_file_path=None,
             plan_posted=False,

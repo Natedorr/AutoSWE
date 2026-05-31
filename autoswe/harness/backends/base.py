@@ -17,7 +17,7 @@ modes vs. Codex sandbox flags).  Backends advertise what they support via
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal, Protocol, runtime_checkable
+from typing import Awaitable, Callable, Literal, Protocol, runtime_checkable
 
 # ---------- Mode types ----------
 
@@ -167,6 +167,6 @@ class CodingBackend(Protocol):
         """Return the set of supported capability strings."""
         ...
 
-    def run(self, spec: RunSpec) -> object:
+    def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec and return an awaitable yielding RunResult."""
         ...
