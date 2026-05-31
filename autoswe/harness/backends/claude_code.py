@@ -478,10 +478,15 @@ class ClaudeCodeBackend:
                 # running more tools after posting a question.
                 if spec.state and spec.state.get("asked_question_md"):
                     break
-        except RuntimeError as e:
+        except (RuntimeError, Exception) as e:
             error_msg = str(e).lower()
-            if "generator" in error_msg and ("async" in error_msg or "aclose" in error_msg):
-                log(f"[CLAUDE] Async generator crash: {e} — returning partial results "
+            # Async generator crashes and "Claude Code returned an error result:
+            # success" (SDK throws Exception on ollama even after a successful run).
+            # In both cases we already captured the result via the message stream,
+            # so return partial results rather than failing.
+            if ("generator" in error_msg and ("async" in error_msg or "aclose" in error_msg)) \
+               or "returned an error result" in error_msg:
+                log(f"[CLAUDE] {type(e).__name__}: {e} — returning partial results "
                     f"(session_id={session_id}, subtype={subtype})")
             else:
                 raise
