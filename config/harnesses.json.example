@@ -28,5 +28,11 @@
     "backend": "codex",
     "model": "gpt-5",
     "codex_api_key": "${CODEX_API_KEY}"
+  },
+
+  "ollama-codex": {
+    "_comment": "Local ollama provider — uses ~/.codex/config.toml for model provider config. No API key needed.",
+    "backend": "codex",
+    "model": "qwen3.6:27b"
   }
 }
