@@ -257,8 +257,8 @@ def test_run_plan_empty_text_from_sdk(tmp_path, mock_gh_post_comment):
     assert "(no response)" in mock_gh_post_comment.posted[0]["body"]
 
 
-def test_run_plan_uses_allowed_tools(tmp_path, mock_gh_post_comment):
-    """Plan phase should use read-only tools plus MCP comment tools."""
+def test_run_plan_uses_mode_plan(tmp_path, mock_gh_post_comment):
+    """Plan phase should use mode='plan' (backend translates to read-only tools + MCP comment tools)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -273,26 +273,28 @@ def test_run_plan_uses_allowed_tools(tmp_path, mock_gh_post_comment):
                 from autoswe.harness.planner import run_plan
                 run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    tools = run_calls[0]["allowed_tools"]
+    # Phase 3: handler passes mode="plan", backend translates to permission+tools
+    assert run_calls[0]["mode"] == "plan"
+    # Verify the backend maps mode="plan" correctly
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    perm, tools, disallowed = _MODE_CONFIG["plan"]
+    assert perm == "plan"
     assert "Read" in tools
     assert "Glob" in tools
     assert "Grep" in tools
-    # MCP comment tools should be included
-    assert "mcp__autoswe_comment__update_progress" in tools
-    # PROGRESS_TOOLS (TodoWrite, TaskCreate, etc.) should be included
-    # but NOT 'Agent' — Agent spawns sub-agents that bypass read-only containment
-    from autoswe.harness.runner import PROGRESS_TOOLS
-    for tool in PROGRESS_TOOLS:
-        assert tool in tools, f"{tool} should be in plan allowed_tools"
     assert "Agent" not in tools
+    assert "ExitPlanMode" in disallowed
+    # MCP comment tools included
     assert "mcp__autoswe_comment__post_plan" in tools
     assert "mcp__autoswe_comment__post_question" in tools
-    assert run_calls[0]["permission_mode"] == "plan"
+    # PROGRESS_TOOLS included
+    from autoswe.harness.runner import PROGRESS_TOOLS
+    for tool in PROGRESS_TOOLS:
+        assert tool in tools, f"{tool} should be in plan mode tools"
 
 
-def test_resume_plan_uses_agent_task_tools(tmp_path, mock_gh_post_comment):
-    """Resume plan phase should include PROGRESS_TOOLS in allowed_tools
-    (Agent excluded — it bypasses read-only containment)."""
+def test_resume_plan_uses_mode_plan(tmp_path, mock_gh_post_comment):
+    """Resume plan phase should use mode='plan' (same tool set as run_plan)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -306,10 +308,13 @@ def test_resume_plan_uses_agent_task_tools(tmp_path, mock_gh_post_comment):
             from autoswe.harness.planner import resume_plan
             resume_plan(task, "Use approach A.", {}, {"GITHUB_TOKEN": "tok"})
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "plan"
+    # Verify PROGRESS_TOOLS included, Agent excluded
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["plan"]
     from autoswe.harness.runner import PROGRESS_TOOLS
     for tool in PROGRESS_TOOLS:
-        assert tool in tools, f"{tool} should be in resume_plan allowed_tools"
+        assert tool in tools, f"{tool} should be in plan mode tools"
     assert "Agent" not in tools
 
 
@@ -381,11 +386,11 @@ def test_run_plan_sanitizes_absolute_paths_in_prompt(tmp_path, mock_gh_post_comm
 
 
 # ---------------------------------------------------------------------------
-# permission_mode="plan" — explicit regression tests
+# mode="plan" — regression tests (Phase 3)
 # ---------------------------------------------------------------------------
 
-def test_run_plan_uses_plan_permission_mode(tmp_path, mock_gh_post_comment):
-    """Plan phase should use permission_mode='plan' (native plan mode)."""
+def test_run_plan_uses_mode_plan_regression(tmp_path, mock_gh_post_comment):
+    """Plan phase should use mode='plan' (backend translates to permission_mode='plan')."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -400,11 +405,11 @@ def test_run_plan_uses_plan_permission_mode(tmp_path, mock_gh_post_comment):
                 from autoswe.harness.planner import run_plan
                 run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    assert run_calls[0]["permission_mode"] == "plan"
+    assert run_calls[0]["mode"] == "plan"
 
 
-def test_resume_plan_uses_plan_permission_mode(tmp_path, mock_gh_post_comment):
-    """Resume plan should also use permission_mode='plan'."""
+def test_resume_plan_uses_mode_plan_regression(tmp_path, mock_gh_post_comment):
+    """Resume plan should also use mode='plan'."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -418,7 +423,7 @@ def test_resume_plan_uses_plan_permission_mode(tmp_path, mock_gh_post_comment):
             from autoswe.harness.planner import resume_plan
             resume_plan(task, "Use approach A.", {}, {"GITHUB_TOKEN": "tok"})
 
-    assert run_calls[0]["permission_mode"] == "plan"
+    assert run_calls[0]["mode"] == "plan"
 
 
 # ---------------------------------------------------------------------------
@@ -663,8 +668,8 @@ def test_resume_plan_records_last_phase_plan(tmp_path, mock_gh_post_comment):
     assert task.get("last_phase") == "plan"
 
 
-def test_run_plan_ask_user_question_in_allowed_tools(tmp_path, mock_gh_post_comment):
-    """AskUserQuestion should be included in allowed_tools for plan phase."""
+def test_run_plan_ask_user_question_in_mode(tmp_path, mock_gh_post_comment):
+    """AskUserQuestion should be included in mode='plan' tool set (planner can ask questions)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -679,12 +684,14 @@ def test_run_plan_ask_user_question_in_allowed_tools(tmp_path, mock_gh_post_comm
                 from autoswe.harness.planner import run_plan
                 run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "plan"
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["plan"]
     assert "AskUserQuestion" in tools
 
 
-def test_run_plan_disallowed_tools_includes_exit_plan_mode(tmp_path, mock_gh_post_comment):
-    """run_plan should include ExitPlanMode in disallowed_tools."""
+def test_run_plan_mode_excludes_exit_plan_mode(tmp_path, mock_gh_post_comment):
+    """mode='plan' should translate to ExitPlanMode in disallowed_tools (via backend)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -699,7 +706,10 @@ def test_run_plan_disallowed_tools_includes_exit_plan_mode(tmp_path, mock_gh_pos
                 from autoswe.harness.planner import run_plan
                 run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    disallowed = run_calls[0].get("disallowed_tools", [])
+    assert run_calls[0]["mode"] == "plan"
+    # Verify the backend maps mode="plan" to disallow ExitPlanMode
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, _tools, disallowed = _MODE_CONFIG["plan"]
     assert "ExitPlanMode" in disallowed
 
 
@@ -988,10 +998,10 @@ def test_resume_plan_does_not_push_new_branch(tmp_path, mock_gh_post_comment):
 
 
 # ---------------------------------------------------------------------------
-# Fix 1: resume_plan disallows ExitPlanMode
+# Fix 1: resume_plan disallows ExitPlanMode (via mode="plan")
 
 def test_resume_plan_disallows_exit_plan_mode(tmp_path, mock_gh_post_comment):
-    """resume_plan should include ExitPlanMode in disallowed_tools (matches run_plan)."""
+    """resume_plan should use mode='plan' which includes ExitPlanMode in disallowed_tools (via backend)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -1003,9 +1013,11 @@ def test_resume_plan_disallows_exit_plan_mode(tmp_path, mock_gh_post_comment):
     with _patch_worktree(tmp_path):
         with patch("autoswe.harness.runner.run", side_effect=fake_run):
             from autoswe.harness.planner import resume_plan
-            resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tok"})
+            resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tool"})
 
-    disallowed = run_calls[0].get("disallowed_tools", [])
+    assert run_calls[0]["mode"] == "plan"
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, _tools, disallowed = _MODE_CONFIG["plan"]
     assert "ExitPlanMode" in disallowed
 
 

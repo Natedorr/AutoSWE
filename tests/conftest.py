@@ -223,6 +223,9 @@ def isolated_autoswe_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "REPOS_CONFIG_FILE", tmp_path / "config" / "repos.json")
     monkeypatch.setattr(cfg, "HARNESSES_CONFIG_FILE", tmp_path / "config" / "harnesses.json")
 
+    # Clear the harnesses cache so load_harnesses_config re-reads from the new path
+    cfg._harnesses_cache.clear()
+
     monkeypatch.setattr(qs, "AUTOSWE_DIR", tmp_path)
     monkeypatch.setattr(qs, "QUEUE_FILE", tmp_path / "data" / "queue.json")
     monkeypatch.setattr(qs, "LOGS_DIR", tmp_path / "logs")

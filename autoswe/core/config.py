@@ -120,19 +120,25 @@ def load_repos_config() -> dict:
 # Recognized backend names (populated as new backends are added).
 KNOWN_BACKENDS = {"claude_code", "codex"}
 
+# Module-level cache for harnesses config — avoids re-reading harnesses.json
+# on every handler invocation.  Clear with ``_harnesses_cache.clear()`` in tests.
+_harnesses_cache: dict = {}
+
 
 def load_harnesses_config() -> dict:
-    """Load named harness profiles from ``harnesses.json``.
+    """Load named harness profiles from ``harnesses.json`` (memoized).
 
     Mirrors ``load_repos_config()``: skip ``_``-prefixed keys, require a
     ``backend`` field per entry, validate the backend is known.
 
-    Returns a dict mapping profile name to its configuration dict.
-    Each profile must have at least:
-      - ``backend`` (str): one of ``KNOWN_BACKENDS`` (e.g. ``"claude_code"``)
-    Optional fields depend on the backend (e.g. ``model``, ``auth_token``,
-    ``api_key``, ``timeout``, ``cli_path``).
+    The result is cached after the first call so that repeated handler
+    invocations in a single poll don't re-read the file.  Call
+    ``_harnesses_cache.clear()`` (or ``autoswe.core.config._harnesses_cache.clear()``)
+    to force a reload during testing.
     """
+    if _harnesses_cache:
+        return dict(_harnesses_cache)
+
     if HARNESSES_CONFIG_FILE.exists():
         try:
             raw = json.loads(HARNESSES_CONFIG_FILE.read_text())
@@ -157,7 +163,9 @@ def load_harnesses_config() -> dict:
                 f"Use one of: {', '.join(sorted(KNOWN_BACKENDS))}."
             )
         validated[key] = dict(entry, backend=backend)
-    return validated
+
+    _harnesses_cache.update(validated)
+    return dict(validated)
 
 
 def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict = None) -> dict:
@@ -166,11 +174,14 @@ def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict = Non
     Resolution order (highest → lowest priority):
     1. ``repo_cfg`` phase-specific harness: ``{phase}_harness`` (e.g. ``plan_harness``)
     2. ``cfg`` phase-specific harness: ``{PHASE}_HARNESS`` (e.g. ``PLAN_HARNESS``)
-    3. Synthesized default: ``{"backend": "claude_code", "model": <phase_model>}``
+    3. Synthesized default: ``{"backend": "claude_code", "model": <phase_model>, ...}``
 
     The synthesized default preserves the legacy model resolution chain
     (``{phase}_model`` in repos.json → ``PHASE_MODEL`` in autoswe.env) so
-    existing configurations work without any ``harnesses.json``.
+    existing configurations work without any ``harnesses.json``.  It also
+    carries the Anthropic credentials and ``cli_path`` needed by
+    ``ClaudeCodeBackend``, so the dispatcher (``runner.run``) stays
+    backend-agnostic.
 
     Returns a harness profile dict with at least ``backend`` and ``model`` keys.
     """
@@ -192,6 +203,15 @@ def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict = Non
             )
         return dict(profile)
 
-    # 2. Synthesize from legacy model resolution (backward compatibility)
+    # 2. Synthesize from legacy model + credential resolution (backward compatibility).
+    #    Include cli_path and Anthropic credentials so ClaudeCodeBackend has everything
+    #    it needs and the dispatcher stays backend-agnostic.
     model = repo_cfg.get(f"{phase_key}_model") or cfg.get(f"{phase_key.upper()}_MODEL") or None
-    return {"backend": "claude_code", "model": model}
+    return {
+        "backend": "claude_code",
+        "model": model,
+        "cli_path": cfg.get("CLAUDE_CLI_PATH"),
+        "anthropic_base_url": repo_cfg.get("anthropic_base_url") or cfg.get("ANTHROPIC_BASE_URL"),
+        "anthropic_auth_token": repo_cfg.get("anthropic_auth_token") or cfg.get("ANTHROPIC_AUTH_TOKEN"),
+        "anthropic_api_key": cfg.get("ANTHROPIC_API_KEY"),
+    }

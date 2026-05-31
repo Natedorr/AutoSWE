@@ -62,8 +62,15 @@ class ClaudeFake:
         self._raises.append(exc)
 
     def run(self, prompt: str, *, cwd: str, cfg: dict, repo_cfg: dict = None,
-            resume: str = None, permission_mode: str = "default",
-            allowed_tools: list = None, max_turns: int = 200,
+            resume: str = None,
+            # Phase 3: generic intent
+            mode: str = None,
+            extra_tools: list = None,
+            disallowed_tools_override: list = None,
+            # Legacy fields (backward compat)
+            permission_mode: str = "default",
+            allowed_tools: list = None,
+            max_turns: int = 200,
             model: str = None, mcp_servers: dict = None,
             progress_callback=None, disallowed_tools: list = None,
             **kwargs) -> RunResult:
@@ -71,6 +78,9 @@ class ClaudeFake:
         self.calls.append({
             "cwd": cwd,
             "resume": resume,
+            "mode": mode,
+            "extra_tools": extra_tools,
+            "disallowed_tools_override": disallowed_tools_override,
             "permission_mode": permission_mode,
             "model": model,
             "allowed_tools": allowed_tools,

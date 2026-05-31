@@ -16,6 +16,7 @@ from autoswe.harness.backends.base import (  # noqa: F401
     AGENT_TASK_TOOLS,
     PROGRESS_TOOLS,
     HandlerResult,
+    Mode,
     RunResult,
     RunSpec,
 )
@@ -38,6 +39,24 @@ def _get_retryable_exceptions() -> tuple:
     return _backend_get()
 
 
+def backend_has_capability(harness_cfg: dict, capability: str) -> bool:
+    """Check if the backend for *harness_cfg* supports *capability*.
+
+    Resolves the backend via the factory and checks its capabilities set.
+    Defaults to ClaudeCodeBackend when *harness_cfg* is None.
+
+    Use this before relying on capability-specific RunResult fields
+    (e.g. check ``"mcp"`` before trusting ``plan_posted`` / ``question_posted``).
+    """
+    if harness_cfg is not None:
+        from autoswe.harness.backends.factory import get_backend
+
+        backend = get_backend(harness_cfg)
+    else:
+        backend = ClaudeCodeBackend()
+    return capability in backend.capabilities()
+
+
 # ---------- Backward-compatible shim ----------
 
 # Tests and some internal code import `_run_async` directly. Provide a
@@ -51,6 +70,9 @@ async def _run_async(
     *,
     cwd: str,
     resume: str = None,
+    mode: str = None,
+    extra_tools: list = None,
+    disallowed_tools_override: list = None,
     permission_mode: str = "default",
     allowed_tools: list = None,
     disallowed_tools: list = None,
@@ -73,6 +95,9 @@ async def _run_async(
         cwd=cwd,
         model=model,
         resume=resume,
+        mode=mode,
+        extra_tools=extra_tools,
+        disallowed_tools_override=disallowed_tools_override,
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
@@ -96,11 +121,18 @@ def run(
     cfg: dict,
     repo_cfg: dict = None,
     resume: str = None,
+    # Phase 3: generic intent (preferred)
+    mode: str = None,
+    extra_tools: list = None,
+    disallowed_tools_override: list = None,
+    # Legacy fields (backward compat, ignored when mode is set)
     permission_mode: str = "default",
     allowed_tools: list = None,
     disallowed_tools: list = None,
     max_turns: int = 200,
     model: str = None,
+    cli_path: str = None,
+    env_overrides: dict = None,
     mcp_servers: dict = None,
     progress_callback=None,
     can_use_tool=None,
@@ -116,40 +148,41 @@ def run(
     (``get_backend()``).  When omitted the default is ``ClaudeCodeBackend``,
     preserving backward compatibility for callers that don't use harness
     profiles yet.
+
+    **mode** (Phase 3, preferred): pass ``"plan"``, ``"read_only"``, or
+    ``"read_write"`` instead of the legacy *permission_mode* /
+    *allowed_tools* / *disallowed_tools* triple.
     """
     rc = repo_cfg or {}
     timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
     max_retries = int(rc.get("agent_retry_on_failure", cfg.get("AGENT_RETRY_ON_FAILURE", 0)))
-    model = model or rc.get("model") or None
-    cli_path = cfg.get("CLAUDE_CLI_PATH") or None
 
-    env_overrides = {}
-    base_url = rc.get("anthropic_base_url") or cfg.get("ANTHROPIC_BASE_URL")
-    auth_token = rc.get("anthropic_auth_token") or cfg.get("ANTHROPIC_AUTH_TOKEN")
-    api_key = cfg.get("ANTHROPIC_API_KEY")
-    if base_url:
-        env_overrides["ANTHROPIC_BASE_URL"] = base_url
-    if auth_token:
-        env_overrides["ANTHROPIC_AUTH_TOKEN"] = auth_token
-    if api_key:
-        env_overrides["ANTHROPIC_API_KEY"] = api_key
+    # Thread harness_cfg into spec.state so the backend can read
+    # backend-specific fields (cli_path, anthropic_api_key, etc.).
+    effective_state = state
+    if harness_cfg is not None:
+        effective_state = dict(state) if state else {}
+        effective_state["_harness_cfg"] = harness_cfg
 
     spec = RunSpec(
         prompt=prompt,
         cwd=cwd,
         model=model,
         resume=resume,
+        mode=mode,
+        extra_tools=extra_tools,
+        disallowed_tools_override=disallowed_tools_override,
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
         max_turns=max_turns,
         timeout=timeout,
         cli_path=cli_path,
-        env_overrides=env_overrides or None,
+        env_overrides=env_overrides,
         mcp_servers=mcp_servers,
         progress_callback=progress_callback,
         can_use_tool=can_use_tool,
-        state=state,
+        state=effective_state,
     )
 
     if harness_cfg is not None:
@@ -171,10 +204,10 @@ def run(
             return asyncio.run(_with_timeout())
         except retryable as e:
             if attempt < max_retries:
-                log(f"[CLAUDE] Attempt {attempt + 1} failed ({type(e).__name__}: {e}), retrying ({attempt + 2}/{max_retries + 1})")
+                log(f"[RUNNER] Attempt {attempt + 1} failed ({type(e).__name__}: {e}), retrying ({attempt + 2}/{max_retries + 1})")
             else:
                 if isinstance(e, asyncio.TimeoutError):
-                    log(f"[CLAUDE] Timeout after {timeout}s (attempt {attempt + 1}/{max_retries + 1})")
+                    log(f"[RUNNER] Timeout after {timeout}s (attempt {attempt + 1}/{max_retries + 1})")
                 else:
-                    log(f"[CLAUDE] Agent failed after {attempt + 1} attempt(s): {type(e).__name__}: {e}")
+                    log(f"[RUNNER] Agent failed after {attempt + 1} attempt(s): {type(e).__name__}: {e}")
                 raise

@@ -234,10 +234,28 @@ def assert_claude_calls(cl_fake, expected_calls: list[dict]) -> None:
             )
 
         call = cl_fake.calls[i]
+        # Phase 3: check mode first, fall back to permission_mode for compat
+        if "mode" in exp:
+            assert call["mode"] == exp["mode"], (
+                f"Call {i}: expected mode={exp['mode']!r}, "
+                f"got {call.get('mode')!r}"
+            )
         if "permission_mode" in exp:
-            assert call["permission_mode"] == exp["permission_mode"], (
-                f"Call {i}: expected permission_mode={exp['permission_mode']!r}, "
-                f"got {call['permission_mode']!r}"
+            # If scenario checks permission_mode, translate from mode
+            expected_pm = exp["permission_mode"]
+            actual_mode = call.get("mode")
+            if actual_mode is not None:
+                # Translate mode → permission_mode for comparison
+                from autoswe.harness.backends.claude_code import _MODE_CONFIG
+                if actual_mode in _MODE_CONFIG:
+                    actual_pm = _MODE_CONFIG[actual_mode][0]
+                else:
+                    actual_pm = call.get("permission_mode")
+            else:
+                actual_pm = call.get("permission_mode")
+            assert actual_pm == expected_pm, (
+                f"Call {i}: expected permission_mode={expected_pm!r}, "
+                f"got mode={actual_mode!r} (→ {actual_pm if actual_mode else call.get('permission_mode')!r})"
             )
         if "resume" in exp:
             assert call["resume"] == exp["resume"], (

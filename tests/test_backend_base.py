@@ -73,6 +73,11 @@ def test_run_spec_defaults():
     spec = RunSpec(prompt="p", cwd="/tmp")
     assert spec.model is None
     assert spec.resume is None
+    # Phase 3: mode-based fields
+    assert spec.mode is None
+    assert spec.extra_tools is None
+    assert spec.disallowed_tools_override is None
+    # Legacy fields
     assert spec.permission_mode == "default"
     assert spec.allowed_tools is None
     assert spec.disallowed_tools is None

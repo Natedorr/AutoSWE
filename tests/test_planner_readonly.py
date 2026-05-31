@@ -701,12 +701,11 @@ def test_read_only_file_mutation_blocked_when_read_only_off():
 
 
 # ---------------------------------------------------------------------------
-# Fix 2: Agent tool must not be in plan-phase allowed_tools
+# Fix 2: Agent tool must not be in plan-phase tool set
 
 
 def test_plan_phase_does_not_allow_agent_tool_run_plan(tmp_path, mock_gh_post_comment):
-    """run_plan must NOT include 'Agent' in allowed_tools — Agent spawns
-    sub-agents that bypass the read-only can_use_tool callback."""
+    """mode='plan' must NOT include 'Agent' — Agent spawns sub-agents that bypass read-only containment."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -727,14 +726,16 @@ def test_plan_phase_does_not_allow_agent_tool_run_plan(tmp_path, mock_gh_post_co
                     from autoswe.harness.planner import run_plan
                     run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "plan"
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["plan"]
     assert "Agent" not in tools, (
-        "Agent must not be in run_plan allowed_tools — it bypasses read-only containment"
+        "Agent must not be in plan mode tools — it bypasses read-only containment"
     )
 
 
 def test_plan_phase_does_not_allow_agent_tool_resume_plan(tmp_path, mock_gh_post_comment):
-    """resume_plan must NOT include 'Agent' in allowed_tools."""
+    """mode='plan' must NOT include 'Agent' in tool set."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -753,14 +754,16 @@ def test_plan_phase_does_not_allow_agent_tool_resume_plan(tmp_path, mock_gh_post
             from autoswe.harness.planner import resume_plan
             resume_plan(task, "Green!", {}, {"GITHUB_TOKEN": "tok"})
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "plan"
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["plan"]
     assert "Agent" not in tools, (
-        "Agent must not be in resume_plan allowed_tools — it bypasses read-only containment"
+        "Agent must not be in plan mode tools — it bypasses read-only containment"
     )
 
 
 def test_plan_phase_allows_progress_tools(tmp_path, mock_gh_post_comment):
-    """run_plan must include PROGRESS_TOOLS (TodoWrite, TaskCreate, etc.) in allowed_tools."""
+    """mode='plan' must include PROGRESS_TOOLS (TodoWrite, TaskCreate, etc.)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -781,7 +784,9 @@ def test_plan_phase_allows_progress_tools(tmp_path, mock_gh_post_comment):
                     from autoswe.harness.planner import run_plan
                     run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "plan"
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["plan"]
     from autoswe.harness.runner import PROGRESS_TOOLS
     for tool in PROGRESS_TOOLS:
-        assert tool in tools, f"{tool} should be in plan allowed_tools"
+        assert tool in tools, f"{tool} should be in plan mode tools"

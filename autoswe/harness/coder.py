@@ -8,7 +8,7 @@ from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server, build_mcp_inline_comment_server
 from autoswe.harness.prompts import build_conflict_resolution_prompt, build_fix_prompt
-from autoswe.harness.runner import AGENT_TASK_TOOLS, HandlerResult
+from autoswe.harness.runner import HandlerResult
 from autoswe.providers.factory import get_vcs
 from autoswe.providers.github.vcs import MissingScopeError
 from autoswe.vcs.worktree import (
@@ -23,14 +23,7 @@ dbg = init_debug_logger(LOGS_DIR)
 
 _scope_error_warned = False
 
-
-_MCP_COMMENT_TOOL_PREFIX = "mcp__autoswe_comment__"
-_MCP_COMMENT_TOOLS = [
-    f"{_MCP_COMMENT_TOOL_PREFIX}update_progress",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_plan",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_question",
-]
-
+# Inline comment MCP tool (only used when a PR exists, passed as extra_tools)
 _MCP_INLINE_COMMENT_TOOLS = [
     "mcp__autoswe_inline_comment__post_inline_comment",
 ]
@@ -83,7 +76,7 @@ def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict =
     # Build MCP server config: comment server (always) + inline comment server (if PR exists)
     rc = repo_cfg or {}
     mcp_servers = build_mcp_comment_server(task, rc) or {}
-    allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
+    extra_tools: list[str] = []
 
     # Register inline comment server if an existing PR exists for this branch
     branch = f"autoswe/issue-{issue_num}"
@@ -103,7 +96,7 @@ def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict =
             inline_cfg = build_mcp_inline_comment_server(task, rc, head_sha, pr_number)
             if inline_cfg:
                 mcp_servers.update(inline_cfg)
-                allowed_tools.extend(_MCP_INLINE_COMMENT_TOOLS)
+                extra_tools.extend(_MCP_INLINE_COMMENT_TOOLS)
                 dbg.debug("FIX: inline comment server registered (pr=%d sha=%s)", pr_number, head_sha[:8])
 
     plan_file_path = task.pop("plan_file_path", None)
@@ -148,8 +141,8 @@ def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict =
             repo_cfg=rc,
             resume=None if use_fresh_session else session_id,
             model=fix_model,
-            permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools,
+            mode="read_write",
+            extra_tools=extra_tools or None,
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -281,7 +274,6 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
 
     rc = repo_cfg or {}
     mcp_servers = build_mcp_comment_server(task, rc) or {}
-    allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
 
     harness = resolve_harness("fix", rc, cfg or {})
     fix_model = harness.get("model")
@@ -298,8 +290,7 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
             repo_cfg=rc,
             resume=session_id,
             model=fix_model,
-            permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools,
+            mode="read_write",
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -380,7 +371,6 @@ def resolve_sync_conflicts(
 
     # Focused tool set — no AskUserQuestion (keep autonomous), no inline comments
     mcp_servers = build_mcp_comment_server(task, rc) or {}
-    allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
 
     harness = resolve_harness("fix", rc, cfg or {})
     fix_model = harness.get("model")
@@ -400,8 +390,8 @@ def resolve_sync_conflicts(
             repo_cfg=rc,
             resume=session_id,  # None if first conflict with no prior session
             model=fix_model,
-            permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools,
+            mode="read_write",
+            disallowed_tools_override=["AskUserQuestion"],
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,

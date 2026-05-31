@@ -5,11 +5,25 @@ tying it to any specific agent.  CodingBackend is the Protocol every
 backend must implement.  RunResult and HandlerResult are the shared output
 contracts; they used to live in runner.py and are re-exported from there
 for backward compatibility.
+
+Phase 3 introduces *mode*: a generic intent string (``"plan"``, ``"read_only"``,
+``"read_write"``) that replaces the Claude-specific triple of
+``permission_mode`` + ``allowed_tools`` + ``disallowed_tools``.  Each backend
+translates *mode* into its own configuration (e.g. Claude Code permission
+modes vs. Codex sandbox flags).  Backends advertise what they support via
+``capabilities()`` so handlers can degrade gracefully when a feature
+(e.g. MCP comment posting) is unavailable.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable, Literal, Protocol, runtime_checkable
+
+# ---------- Mode types ----------
+
+# Mode strings shared by all backends. Each backend maps these to its own
+# configuration (Claude Code permission modes, Codex sandbox flags, etc.).
+Mode = Literal["plan", "read_only", "read_write"]
 
 # ---------- Shared dataclasses ----------
 
@@ -85,16 +99,32 @@ class RunSpec:
 
     All fields are optional except *prompt* and *cwd* so that backends can
     provide their own defaults (e.g. Codex sandbox mode from permission flags).
-    Phase 1 keeps the Claude-specific knobs as explicit fields so nothing
-    changes; Phase 3 collapses them into *mode*.
+
+    **mode** (Phase 3, preferred): a generic intent string (``"plan"``,
+    ``"read_only"``, ``"read_write"``) that the backend translates into its
+    own configuration (permission modes, sandbox flags, tool sets).  When set
+    it takes precedence over the legacy *permission_mode* / *allowed_tools* /
+    *disallowed_tools* fields.
+
+    **Legacy fields** (*permission_mode*, *allowed_tools*, *disallowed_tools*):
+    kept for backward compatibility.  Ignored when *mode* is set.
+    New code should use *mode* + *extra_tools* + *disallowed_tools_override*.
     """
     prompt: str
     cwd: str
     model: str | None = None
     resume: str | None = None
+
+    # --- Phase 3: generic intent (preferred) ---
+    mode: Mode | None = None  # "plan" | "read_only" | "read_write"
+    extra_tools: list | None = None  # append to mode-derived tool list
+    disallowed_tools_override: list | None = None  # remove from mode-derived tool list
+
+    # --- Legacy fields (backward compat, ignored when mode is set) ---
     permission_mode: str = "default"
     allowed_tools: list | None = None
     disallowed_tools: list | None = None
+
     max_turns: int = 200
     timeout: int = 7200
     cli_path: str | None = None
@@ -117,8 +147,19 @@ class CodingBackend(Protocol):
     wrap it in asyncio.wait_for (timeout) or retry logic.
 
     ``capabilities()`` is a classmethod returning the set of features this
-    backend supports, e.g. ``{"mcp", "can_use_tool", "plan_permission",
-    "resume", "progress_stream"}``.
+    backend supports.  Standard capability strings:
+
+    - ``"mode"``: backend supports RunSpec.mode and translates it to its
+      own configuration (permission modes, sandbox flags, tool sets).
+    - ``"mcp"``: backend supports MCP servers and can post plans/questions
+      via MCP tools (``plan_posted`` / ``question_posted`` in RunResult).
+    - ``"can_use_tool"``: backend supports a per-tool runtime callback
+      (``can_use_tool`` in RunSpec) for fine-grained tool gating.
+    - ``"plan_permission"``: backend supports a dedicated "plan" mode that
+      uses plan-specific tool restrictions.
+    - ``"resume"``: backend supports resuming a prior session.
+    - ``"progress_stream"``: backend fires progress_callback with rendered
+      todo/command updates during execution.
     """
 
     @classmethod

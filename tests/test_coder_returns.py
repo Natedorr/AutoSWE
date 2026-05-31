@@ -145,7 +145,8 @@ def test_run_fix_passes_guidance_in_prompt(tmp_path):
     assert "extra logging" in run_calls[0]
 
 
-def test_run_fix_uses_bypass_permissions(tmp_path):
+def test_run_fix_uses_mode_read_write(tmp_path):
+    """Fix phase should use mode='read_write' (backend translates to bypassPermissions + full tools)."""
     task = make_task()
     run_calls = []
 
@@ -160,7 +161,14 @@ def test_run_fix_uses_bypass_permissions(tmp_path):
                     from autoswe.harness.coder import run_fix
                     run_fix(task, cfg={})
 
-    assert run_calls[0]["permission_mode"] == "bypassPermissions"
+    assert run_calls[0]["mode"] == "read_write"
+    # Verify the backend maps mode="read_write" to bypassPermissions
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    perm, tools, _disallowed = _MODE_CONFIG["read_write"]
+    assert perm == "bypassPermissions"
+    assert "Agent" in tools
+    assert "Edit" in tools
+    assert "Bash" in tools
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +262,8 @@ def test_run_fix_resumes_with_session_id(tmp_path):
     assert run_calls[0]["resume"] == "prev-sess"
 
 
-def test_run_fix_uses_correct_tools(tmp_path):
-    """Fix phase should use editing tools plus MCP comment tools."""
+def test_run_fix_mode_provides_full_tool_set(tmp_path):
+    """Fix phase mode='read_write' provides editing tools + MCP comment tools + Agent."""
     task = make_task()
     run_calls = []
 
@@ -270,15 +278,18 @@ def test_run_fix_uses_correct_tools(tmp_path):
                     from autoswe.harness.coder import run_fix
                     run_fix(task, cfg={})
 
-    allowed = set(run_calls[0]["allowed_tools"])
+    assert run_calls[0]["mode"] == "read_write"
+    # Verify the backend maps mode="read_write" to full tool set
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["read_write"]
+    allowed = set(tools)
     assert "Edit" in allowed
     assert "Bash" in allowed
     assert "Write" in allowed
     assert "mcp__autoswe_comment__update_progress" in allowed
-    # Agent task tools (TodoWrite, TaskCreate, etc.) should be included
     from autoswe.harness.runner import AGENT_TASK_TOOLS
     for tool in AGENT_TASK_TOOLS:
-        assert tool in allowed, f"{tool} should be in fix allowed_tools"
+        assert tool in allowed, f"{tool} should be in read_write mode tools"
 
 
 
@@ -787,8 +798,8 @@ def test_run_fix_records_last_phase_fix(tmp_path):
     assert task.get("last_phase") == "fix"
 
 
-def test_run_fix_ask_user_question_in_allowed_tools(tmp_path):
-    """AskUserQuestion should be included in allowed_tools for fix phase."""
+def test_run_fix_ask_user_question_in_mode(tmp_path):
+    """AskUserQuestion should be included in mode='read_write' tool set for fix phase."""
     task = make_task()
     run_calls = []
 
@@ -803,12 +814,14 @@ def test_run_fix_ask_user_question_in_allowed_tools(tmp_path):
                     from autoswe.harness.coder import run_fix
                     run_fix(task, cfg={})
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "read_write"
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["read_write"]
     assert "AskUserQuestion" in tools
 
 
-def test_resume_fix_includes_agent_task_tools(tmp_path):
-    """resume_fix should include AGENT_TASK_TOOLS in allowed_tools."""
+def test_resume_fix_uses_mode_read_write(tmp_path):
+    """resume_fix should use mode='read_write' with AGENT_TASK_TOOLS."""
     task = make_task(session_id="sess-previous")
     run_calls = []
 
@@ -823,14 +836,16 @@ def test_resume_fix_includes_agent_task_tools(tmp_path):
                     from autoswe.harness.coder import resume_fix
                     resume_fix(task, "Answer to question.", {}, {})
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "read_write"
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["read_write"]
     from autoswe.harness.runner import AGENT_TASK_TOOLS
     for tool in AGENT_TASK_TOOLS:
-        assert tool in tools, f"{tool} should be in resume_fix allowed_tools"
+        assert tool in tools, f"{tool} should be in read_write mode tools"
 
 
-def test_resolve_sync_conflicts_includes_agent_task_tools(tmp_path):
-    """resolve_sync_conflicts should include AGENT_TASK_TOOLS in allowed_tools."""
+def test_resolve_sync_conflicts_uses_mode_read_write(tmp_path):
+    """resolve_sync_conflicts should use mode='read_write' with disallowed_tools_override=['AskUserQuestion']."""
     task = make_task()
     run_calls = []
 
@@ -848,10 +863,14 @@ def test_resolve_sync_conflicts_includes_agent_task_tools(tmp_path):
                     task, ["src/main.py"], repo_cfg={"provider": "github"}, cfg={},
                 )
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "read_write"
+    assert run_calls[0]["disallowed_tools_override"] == ["AskUserQuestion"]
+    # Verify AGENT_TASK_TOOLS in read_write mode (minus AskUserQuestion)
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, base_disallowed = _MODE_CONFIG["read_write"]
     from autoswe.harness.runner import AGENT_TASK_TOOLS
     for tool in AGENT_TASK_TOOLS:
-        assert tool in tools, f"{tool} should be in resolve_sync_conflicts allowed_tools"
+        assert tool in tools, f"{tool} should be in read_write mode tools"
 
 
 def test_resume_fix_resumes_session(tmp_path):
@@ -1153,7 +1172,7 @@ def test_resolve_sync_conflicts_missing_worktree_returns_failed(tmp_path):
 
 
 def test_resolve_sync_conflicts_no_ask_user_question(tmp_path):
-    """AskUserQuestion should NOT be in allowed_tools for resolver."""
+    """resolve_sync_conflicts should use disallowed_tools_override=['AskUserQuestion'] to exclude it."""
     task = make_task()
     run_calls = []
 
@@ -1171,10 +1190,16 @@ def test_resolve_sync_conflicts_no_ask_user_question(tmp_path):
                     task, ["src/main.py"], repo_cfg={"provider": "github"}, cfg={},
                 )
 
-    tools = run_calls[0]["allowed_tools"]
-    assert "AskUserQuestion" not in tools
-    assert "Edit" in tools
-    assert "Bash" in tools
+    assert run_calls[0]["mode"] == "read_write"
+    disallowed_override = run_calls[0].get("disallowed_tools_override", [])
+    assert "AskUserQuestion" in disallowed_override
+    # The backend will remove AskUserQuestion from read_write tools
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _base_disallowed = _MODE_CONFIG["read_write"]
+    effective = [t for t in tools if t not in disallowed_override]
+    assert "AskUserQuestion" not in effective
+    assert "Edit" in effective
+    assert "Bash" in effective
 
 
 def test_resolve_sync_conflicts_push_failure_returns_failed(tmp_path):

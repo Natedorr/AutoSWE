@@ -3,6 +3,10 @@
 All Claude-specific execution logic (ClaudeAgentOptions construction, SDK
 message streaming, ProgressState, plan-file capture) lives here.  runner.py
 is now a thin dispatcher that delegates to this backend.
+
+Phase 3: translates RunSpec.mode into Claude-specific permission_mode,
+allowed_tools, and disallowed_tools.  Per-mode tool lists live here as the
+canonical mapping, so handlers no longer carry Claude-specific tool names.
 """
 from __future__ import annotations
 
@@ -12,12 +16,51 @@ from pathlib import Path
 
 from autoswe.core.config import LOGS_DIR
 from autoswe.core.logging_utils import init_debug_logger, log
-from autoswe.harness.backends.base import RunResult, RunSpec
+from autoswe.harness.backends.base import PROGRESS_TOOLS, RunResult, RunSpec
 
 _dbg = init_debug_logger(LOGS_DIR)
 
 _RETRYABLE_SDK_EXCEPTIONS: tuple = ()
 _PLANS_DIR = Path.home() / ".claude" / "plans"
+
+# ---------- Mode → Claude Code mapping ----------
+
+# MCP comment tool names (shared across plan/read_write modes).
+# Defined here so handlers don't need to know about MCP tool naming.
+_MCP_COMMENT_TOOLS = [
+    "mcp__autoswe_comment__update_progress",
+    "mcp__autoswe_comment__post_plan",
+    "mcp__autoswe_comment__post_question",
+]
+
+# Base read-only tools (file inspection, search, progress tracking).
+# Does NOT include AskUserQuestion — add via extra_tools if needed (planner).
+_READ_ONLY_TOOLS = [
+    "Read", "Glob", "Grep",
+    *_MCP_COMMENT_TOOLS, *PROGRESS_TOOLS,
+]
+
+# Full read-write tools (everything the fix phase needs)
+_READ_WRITE_TOOLS = [
+    "Read", "Edit", "Write", "Bash", "Glob", "Grep",
+    "AskUserQuestion", *_MCP_COMMENT_TOOLS,
+    "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet",
+    "TaskList", "TaskOutput", "TaskStop", "Agent",
+]
+
+# Plan mode tools (read-only + AskUserQuestion + plan MCP tools, Agent excluded).
+# Planner needs AskUserQuestion to ask clarifying questions.
+_PLAN_TOOLS = [
+    "Read", "Glob", "Grep", "AskUserQuestion",
+    *_MCP_COMMENT_TOOLS, *PROGRESS_TOOLS,
+]
+
+# Mode → (permission_mode, allowed_tools, disallowed_tools) mapping
+_MODE_CONFIG = {
+    "plan": ("plan", _PLAN_TOOLS, ["ExitPlanMode"]),
+    "read_only": ("plan", _READ_ONLY_TOOLS, []),
+    "read_write": ("bypassPermissions", _READ_WRITE_TOOLS, []),
+}
 
 
 def _get_retryable_exceptions() -> tuple:
@@ -286,6 +329,7 @@ class ClaudeCodeBackend:
     """
 
     CAPABILITIES = {
+        "mode",
         "mcp",
         "can_use_tool",
         "plan_permission",
@@ -318,19 +362,48 @@ class ClaudeCodeBackend:
             query,
         )
 
-        log(f"[CLAUDE] starting cwd={spec.cwd} resume={'NEW' if not spec.resume else spec.resume[:8]} model={spec.model} allowed_tools={len(spec.allowed_tools or [])}")
-        if spec.env_overrides:
-            os.environ.update({k: v for k, v in spec.env_overrides.items() if v})
+        log(f"[CLAUDE] starting cwd={spec.cwd} resume={'NEW' if not spec.resume else spec.resume[:8]} model={spec.model} mode={spec.mode}")
+
+        # --- Apply Anthropic env vars from harness profile ---
+        harness_cfg = (spec.state or {}).get("_harness_cfg") or {}
+        _claude_env = {}
+        if harness_cfg.get("anthropic_base_url"):
+            _claude_env["ANTHROPIC_BASE_URL"] = harness_cfg["anthropic_base_url"]
+        if harness_cfg.get("anthropic_auth_token"):
+            _claude_env["ANTHROPIC_AUTH_TOKEN"] = harness_cfg["anthropic_auth_token"]
+        if harness_cfg.get("anthropic_api_key"):
+            _claude_env["ANTHROPIC_API_KEY"] = harness_cfg["anthropic_api_key"]
+        # Merge with spec.env_overrides (explicit overrides take precedence)
+        if _claude_env or spec.env_overrides:
+            merged_env = dict(_claude_env)
+            merged_env.update(spec.env_overrides or {})
+            os.environ.update({k: v for k, v in merged_env.items() if v})
+
+        # --- Resolve permission_mode + tool lists from mode (Phase 3) ---
+        if spec.mode is not None:
+            _perm, _tools, _disallowed = _MODE_CONFIG[spec.mode]
+            final_allowed = list(_tools)
+            # Append extra_tools (e.g. inline comment MCP tools)
+            if spec.extra_tools:
+                final_allowed.extend(spec.extra_tools)
+            # Remove disallowed_tools_override (e.g. exclude AskUserQuestion)
+            if spec.disallowed_tools_override:
+                _disallowed = list(_disallowed) + list(spec.disallowed_tools_override)
+        else:
+            # Legacy path: use explicit fields directly (backward compat)
+            _perm = spec.permission_mode
+            final_allowed = spec.allowed_tools or ["Read", "Glob", "Grep"]
+            _disallowed = spec.disallowed_tools or []
 
         options_kwargs = {
             "cwd": spec.cwd,
             "resume": spec.resume,
-            "permission_mode": spec.permission_mode,
-            "allowed_tools": spec.allowed_tools or ["Read", "Glob", "Grep"],
-            "disallowed_tools": spec.disallowed_tools or [],
+            "permission_mode": _perm,
+            "allowed_tools": final_allowed,
+            "disallowed_tools": _disallowed,
             "max_turns": spec.max_turns,
             "model": spec.model or None,
-            "cli_path": spec.cli_path or None,
+            "cli_path": spec.cli_path or harness_cfg.get("cli_path"),
             "mcp_servers": spec.mcp_servers or {},
         }
 

@@ -9,7 +9,7 @@ from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server
 from autoswe.harness.prompts import BOT_MARKER, build_plan_prompt
-from autoswe.harness.runner import PROGRESS_TOOLS, HandlerResult
+from autoswe.harness.runner import HandlerResult
 from autoswe.providers.factory import get_tracker
 from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
 from autoswe.vcs.worktree import create_worktree
@@ -17,12 +17,54 @@ from autoswe.vcs.worktree import create_worktree
 dbg = init_debug_logger(LOGS_DIR)
 
 
-_MCP_COMMENT_TOOL_PREFIX = "mcp__autoswe_comment__"
-_MCP_COMMENT_TOOLS = [
-    f"{_MCP_COMMENT_TOOL_PREFIX}update_progress",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_plan",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_question",
-]
+def _interpret_plan_result(result, state, harness: dict) -> tuple[str, Optional[str]]:
+    """Interpret a plan-phase RunResult, returning (done_content, plan_file_path).
+
+    Checks MCP-specific fields (plan_posted, question_posted) only when the
+    backend advertises the ``"mcp"`` capability.  Falls back to text parsing
+    (``_extract_plan_output``) when MCP is unavailable or flags are not set.
+
+    Returns a tuple of (done_content, plan_file_path).  Callers should use
+    these to construct the HandlerResult.
+    """
+    # 1. AskUserQuestion via can_use_tool callback (always available)
+    if state.get("asked_question_md"):
+        return "WAITING: questions", None
+
+    has_mcp = runner.backend_has_capability(harness, "mcp")
+
+    if has_mcp:
+        # 2. MCP post_question → WAITING
+        if result.question_posted:
+            return "WAITING: questions", None
+
+        # 3. MCP post_plan → PLAN_READY
+        if result.plan_posted:
+            plan_file_path: Optional[str] = None
+            if result.plan_file_path:
+                pf = Path(result.plan_file_path)
+                if pf.exists():
+                    plan_text = pf.read_text(encoding="utf-8").strip()
+                    if not _plan_file_is_pending(plan_text):
+                        plan_file_path = str(pf)
+            return "PLAN_READY", plan_file_path
+
+    # 4. Text-parse fallback (always available)
+    plan_file: Optional[Path] = (
+        Path(result.plan_file_path) if result.plan_file_path else None
+    )
+    comment, done_content = _extract_plan_output(result.text, plan_file=plan_file)
+
+    plan_file_path: Optional[str] = None
+    if done_content == "PLAN_READY":
+        actual_file = plan_file or _find_latest_plan_file()
+        if actual_file is not None:
+            pt = actual_file.read_text(encoding="utf-8").strip()
+            if not _plan_file_is_pending(pt):
+                plan_file_path = str(actual_file)
+
+    # Return comment as part of done_content for _post_and_return
+    return f"_POST:{done_content}\t{comment}", plan_file_path
 
 
 def _get_plans_dir() -> Path:
@@ -196,9 +238,7 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
             cfg=cfg,
             repo_cfg=repo_cfg,
             model=plan_model,
-            permission_mode="plan",
-            allowed_tools=["Read", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *PROGRESS_TOOLS],
-            disallowed_tools=["ExitPlanMode"],
+            mode="plan",
             mcp_servers=build_mcp_comment_server(task, repo_cfg),
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -220,46 +260,31 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
         task["session_id"] = result.session_id
     task["last_phase"] = "plan"
 
-    if state.get("asked_question_md"):
-        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+    done_content, plan_file_path = _interpret_plan_result(result, state, harness)
 
-    if result.question_posted:
-        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+    # Helper returns "WAITING..." directly, or "_POST:done_content\tcomment" for posting
+    if done_content.startswith("_POST:"):
+        inner_done, comment = done_content[len("_POST:"):].split("\t", 1)
+        if plan_file_path:
+            task["plan_file_path"] = plan_file_path
+        _post_and_return(task, comment, inner_done, repo_cfg, progress_callback=progress_callback)
+        log(f"[PLAN] {task['id']} complete done={inner_done} plan_file={plan_file_path or 'none'}")
+        return HandlerResult(
+            inner_done,
+            cost_usd=result.cost_usd,
+            duration_seconds=result.duration_seconds,
+            plan_file_path=plan_file_path,
+        )
 
-    if result.plan_posted:
-        plan_file_path: Optional[str] = None
-        if result.plan_file_path:
-            pf = Path(result.plan_file_path)
-            if pf.exists():
-                plan_text = pf.read_text(encoding="utf-8").strip()
-                if not _plan_file_is_pending(plan_text):
-                    plan_file_path = str(pf)
-                    task["plan_file_path"] = plan_file_path
-        log(f"[PLAN] {task['id']} complete done=PLAN_READY plan_file={plan_file_path or 'none'}")
-        return HandlerResult("PLAN_READY", cost_usd=result.cost_usd,
-                             duration_seconds=result.duration_seconds, plan_file_path=plan_file_path)
-
-    plan_file: Optional[Path] = (
-        Path(result.plan_file_path) if result.plan_file_path else None
-    )
-    comment, done_content = _extract_plan_output(result.text, plan_file=plan_file)
-    plan_file_path: Optional[str] = None
-    if done_content == "PLAN_READY":
-        actual_file = plan_file or _find_latest_plan_file()
-        if actual_file is not None:
-            plan_text = actual_file.read_text(encoding="utf-8").strip()
-            if not _plan_file_is_pending(plan_text):
-                plan_file_path = str(actual_file)
-                task["plan_file_path"] = plan_file_path
-    _post_and_return(task, comment, done_content, repo_cfg, progress_callback=progress_callback)
-    result_str = HandlerResult(
+    if done_content == "PLAN_READY" and plan_file_path:
+        task["plan_file_path"] = plan_file_path
+        log(f"[PLAN] {task['id']} complete done=PLAN_READY plan_file={plan_file_path}")
+    return HandlerResult(
         done_content,
         cost_usd=result.cost_usd,
         duration_seconds=result.duration_seconds,
         plan_file_path=plan_file_path,
     )
-    log(f"[PLAN] {task['id']} complete done={done_content} plan_file={plan_file_path or 'none'}")
-    return result_str
 
 
 def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progress_callback=None, wt=None) -> str:
@@ -307,9 +332,7 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
             repo_cfg=repo_cfg,
             resume=session_id,
             model=plan_model,
-            permission_mode="plan",
-            allowed_tools=["Read", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *PROGRESS_TOOLS],
-            disallowed_tools=["ExitPlanMode"],
+            mode="plan",
             mcp_servers=build_mcp_comment_server(task, repo_cfg),
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -330,43 +353,27 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
         task["session_id"] = result.session_id
     task["last_phase"] = "plan"
 
-    if state.get("asked_question_md"):
-        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+    done_content, plan_file_path = _interpret_plan_result(result, state, harness)
 
-    if result.question_posted:
-        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+    if done_content.startswith("_POST:"):
+        inner_done, comment = done_content[len("_POST:"):].split("\t", 1)
+        if plan_file_path:
+            task["plan_file_path"] = plan_file_path
+        _post_and_return(task, comment, inner_done, repo_cfg, progress_callback=progress_callback)
+        log(f"[PLAN] {task['id']} resume complete done={inner_done} plan_file={plan_file_path or 'none'}")
+        return HandlerResult(
+            inner_done,
+            cost_usd=result.cost_usd,
+            duration_seconds=result.duration_seconds,
+            plan_file_path=plan_file_path,
+        )
 
-    if result.plan_posted:
-        plan_file_path: Optional[str] = None
-        if result.plan_file_path:
-            pf = Path(result.plan_file_path)
-            if pf.exists():
-                plan_text = pf.read_text(encoding="utf-8").strip()
-                if not _plan_file_is_pending(plan_text):
-                    plan_file_path = str(pf)
-                    task["plan_file_path"] = plan_file_path
-        log(f"[PLAN] {task['id']} resume complete done=PLAN_READY plan_file={plan_file_path or 'none'}")
-        return HandlerResult("PLAN_READY", cost_usd=result.cost_usd,
-                             duration_seconds=result.duration_seconds, plan_file_path=plan_file_path)
-
-    plan_file: Optional[Path] = (
-        Path(result.plan_file_path) if result.plan_file_path else None
-    )
-    comment, done_content = _extract_plan_output(result.text, plan_file=plan_file)
-    plan_file_path: Optional[str] = None
-    if done_content == "PLAN_READY":
-        actual_file = plan_file or _find_latest_plan_file()
-        if actual_file is not None:
-            plan_text = actual_file.read_text(encoding="utf-8").strip()
-            if not _plan_file_is_pending(plan_text):
-                plan_file_path = str(actual_file)
-                task["plan_file_path"] = plan_file_path
-    _post_and_return(task, comment, done_content, repo_cfg, progress_callback=progress_callback)
-    result_str = HandlerResult(
+    if done_content == "PLAN_READY" and plan_file_path:
+        task["plan_file_path"] = plan_file_path
+        log(f"[PLAN] {task['id']} resume complete done=PLAN_READY plan_file={plan_file_path}")
+    return HandlerResult(
         done_content,
         cost_usd=result.cost_usd,
         duration_seconds=result.duration_seconds,
         plan_file_path=plan_file_path,
     )
-    log(f"[PLAN] {task['id']} resume complete done={done_content} plan_file={plan_file_path or 'none'}")
-    return result_str

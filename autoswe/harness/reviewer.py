@@ -17,7 +17,7 @@ from autoswe.core.logging_utils import init_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.prompts import _find_plan_in_comments, build_review_prompt
-from autoswe.harness.runner import PROGRESS_TOOLS, HandlerResult
+from autoswe.harness.runner import HandlerResult
 from autoswe.providers.factory import get_tracker
 from autoswe.vcs.worktree import create_worktree, worktree_path
 
@@ -133,8 +133,7 @@ def run_review(
             repo_cfg=repo_cfg,
             resume=None,  # CRITICAL: one-off session
             model=review_model,
-            permission_mode="plan",
-            allowed_tools=["Read", "Glob", "Grep", *PROGRESS_TOOLS],
+            mode="read_only",
             max_turns=80,
             can_use_tool=cut,
             state=state,
