@@ -16,11 +16,10 @@ import os
 import re
 import sys
 import time
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
-
-import urllib.request
-import urllib.error
 
 # ── Config ──────────────────────────────────────────────────────────
 
@@ -215,7 +214,7 @@ def fetch_url(url):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.read().decode("utf-8", errors="replace")
-    except urllib.error.URLError as e:
+    except urllib.error.URLError:
         return None
 
 
@@ -230,7 +229,7 @@ def html_to_markdown(html):
         tag.decompose()
 
     # Try to find main content area
-    main = soup.find("main") or soup.find("article") or soup.find(class_, re.compile(r"content|article|prose|markdown"))
+    main = soup.find("main") or soup.find("article") or soup.find(class_=re.compile(r"content|article|prose|markdown"))
     if not main:
         main = soup.find("div", class_=re.compile(r"container|wrapper|content"))
     if not main:
@@ -339,7 +338,7 @@ def main():
     # Find resume point
     start_idx = 0
     if args.continue_run:
-        for idx, (url, subdir, filename, display) in enumerate(manifest):
+        for idx, (_url, subdir, filename, _display) in enumerate(manifest):
             target_path = os.path.join(OUTPUT_DIR, subdir, filename) if subdir else os.path.join(OUTPUT_DIR, filename)
             if os.path.exists(target_path) and os.path.getsize(target_path) > 100:
                 start_idx = idx + 1
@@ -394,13 +393,13 @@ def main():
 
     # Summary
     print(f"\n{'=' * 70}")
-    print(f"Results:")
+    print("Results:")
     print(f"  Fetched: {fetched}")
     print(f"  Skipped: {skipped}")
     print(f"  Failed:  {len(failed)}")
 
     if failed:
-        print(f"\nFailed pages:")
+        print("\nFailed pages:")
         for url, display in failed:
             print(f"  - {display} ({url})")
 
