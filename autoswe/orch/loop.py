@@ -150,6 +150,7 @@ def _build_poll_task(
         welcome_comment_id=t.get("welcome_comment_id"),
         bot_comment_ids=tuple(t.get("bot_comment_ids", [])),
         last_phase=t.get("last_phase", "plan"),
+        resume_phase=t.get("resume_phase"),
         created_at=t.get("created_at", ""),
         last_synced=t.get("last_synced", ""),
         provider=t.get("provider", "github"),
@@ -322,7 +323,10 @@ def _dispatch_task(
         issue_handler = init_issue_logger(LOGS_DIR, slug)
 
         # --- Set running status ---
-        running = running_status_for(action.kind, task_entry.get("last_phase"))
+        running = running_status_for(
+            action.kind,
+            task_entry.get("resume_phase") or task_entry.get("last_phase"),
+        )
         try:
             tracker.set_status(repo_cfg, issue_num, f"autoswe:{running}")
         except RuntimeError as e:

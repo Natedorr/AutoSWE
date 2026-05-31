@@ -29,5 +29,5 @@
     "bot_comment_ids": []
   },
   "cfg": {},
-  "repo_cfg": {}
+  "repo_cfg": {"owner": "owner", "repo": "repo"}
 }

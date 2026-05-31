@@ -255,6 +255,8 @@ def patched_world(
             resp["text"],
             session_id=resp.get("session_id", "s1"),
             subtype=resp.get("subtype", "success"),
+            plan_posted=resp.get("plan_posted", False),
+            question_posted=resp.get("question_posted", False),
         )
 
     # Script git operations

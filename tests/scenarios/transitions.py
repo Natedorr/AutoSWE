@@ -1344,6 +1344,144 @@ TRANSITIONS: list[dict[str, Any]] = [
             "claude_permission": "plan",
         },
     },
+    # ---- WI #150: waiting -> planned via MCP post_plan during resume ----
+    {
+        "name": "waiting_resume_mcp_post_plan",
+        "description": "Task at waiting; user reply resumes plan; Claude calls MCP post_plan -> planned",
+        "meta": {"mcp_plan_posted": True},
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:waiting"],
+            "comments": [
+                {
+                    "body": "What framework?\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "Use Django.",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "waiting",
+                "session_id": "s-plan-42",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "Thanks! Here is the plan.", "session_id": "s-plan-42", "subtype": "success", "plan_posted": True},
+        ],
+        "git_calls": ["create_worktree"],
+        "expect": {
+            "label_after": "autoswe:planned",
+            "autoswe_status": "planned",
+            "session_id": "s-plan-42",
+            "claude_permission": "plan",
+        },
+    },
+    # ---- Issue #27: waiting resume with stale last_phase ----
+    {
+        "name": "waiting_resume_plan_with_stale_last_phase_fix",
+        "description": "Task at waiting; user reply resumes plan. last_phase='fix' but resume_phase='plan' → label shows planning, not fixing. Regression test for issue #27.",
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:waiting"],
+            "comments": [
+                {
+                    "body": "What framework?\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "Use Django.",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "waiting",
+                "session_id": "s-plan-42",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+                "last_phase": "fix",          # stale — from a previous /fix
+                "resume_phase": "plan",       # authoritative — set by last emit
+            },
+        },
+        "claude_responses": [
+            {"text": "<AUTOSWE_PLAN>1. Use Django\n2. Implement</AUTOSWE_PLAN>", "session_id": "s-plan-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree"],
+        "expect": {
+            "label_after": "autoswe:planned",
+            "autoswe_status": "planned",
+            "session_id": "s-plan-42",
+            "comment_contains": ["## Plan", "Use Django"],
+            "claude_permission": "plan",
+        },
+    },
+    {
+        "name": "waiting_resume_fix_with_stale_last_phase_plan",
+        "description": "Task at waiting from a fix session; user reply resumes fix. resume_phase='fix' → label shows fixing.",
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:waiting"],
+            "comments": [
+                {
+                    "body": "Should I use approach A or B?\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "Use approach A.",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "waiting",
+                "session_id": "s-fix-42",
+                "plan_branch": "autoswe/issue-42",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+                "last_phase": "plan",          # stale — from a previous /plan
+                "resume_phase": "fix",         # authoritative — set by last emit
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed using approach A\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["worktree_path", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command", "Fixed using approach A"],
+            "claude_permission": "bypassPermissions",
+        },
+    },
 ]
 
 

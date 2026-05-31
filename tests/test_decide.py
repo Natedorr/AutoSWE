@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from autoswe.orch.decide import decide
+from autoswe.orch.decide import _resume_kind, decide
 from autoswe.orch.types import (
     Action,
     ApiState,
@@ -93,6 +93,7 @@ def _load_world(data: dict) -> World:
         welcome_comment_id=task_data.get("welcome_comment_id"),
         bot_comment_ids=tuple(task_data.get("bot_comment_ids", [])),
         last_phase=task_data.get("last_phase", "plan"),
+        resume_phase=task_data.get("resume_phase"),
         created_at=task_data.get("created_at", ""),
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
@@ -171,3 +172,74 @@ def test_decide(scenario: Path):
     assert actual.resume_session_id == expected.resume_session_id
     assert actual.user_reply_text == expected.user_reply_text
     assert actual.limit_reason == expected.limit_reason, f"limit_reason: expected={expected.limit_reason!r} actual={actual.limit_reason!r}"
+
+
+# ---------------------------------------------------------------------------
+# _resume_kind unit tests — Issue #27 regression
+# ---------------------------------------------------------------------------
+
+def test_resume_kind_resume_phase_plan_overrides_last_phase_fix():
+    """resume_phase='plan' overrides last_phase='fix'. This is the core fix
+    for issue #27: planning session resuming as 'fixing' after a question."""
+    task = TaskState(
+        slug="gh:owner_repo_42", owner="owner", repo="repo",
+        issue_number=42, title="T", body="B", status="waiting",
+        plan_branch=None, base_branch="main", attempt_count=1,
+        first_dispatched_at=None, last_dispatched_command="/plan",
+        last_dispatched_command_id=1, last_consumed_reply_id=1,
+        session_id="s1", pr_number=None, guard_blocked=False,
+        gh_closed=False, pending_command=None, pending_guidance=None,
+        pending_user_reply=None,
+        last_phase="fix",           # stale from a previous /fix dispatch
+        resume_phase="plan",        # authoritative — planner was last to emit
+    )
+    assert _resume_kind(task) == "plan"
+
+
+def test_resume_kind_resume_phase_fix():
+    """resume_phase='fix' correctly returns 'fix'."""
+    task = TaskState(
+        slug="gh:owner_repo_42", owner="owner", repo="repo",
+        issue_number=42, title="T", body="B", status="waiting",
+        plan_branch=None, base_branch="main", attempt_count=1,
+        first_dispatched_at=None, last_dispatched_command="/fix",
+        last_dispatched_command_id=1, last_consumed_reply_id=1,
+        session_id="s1", pr_number=None, guard_blocked=False,
+        gh_closed=False, pending_command=None, pending_guidance=None,
+        pending_user_reply=None,
+        last_phase="fix",
+        resume_phase="fix",
+    )
+    assert _resume_kind(task) == "fix"
+
+
+def test_resume_kind_fallback_to_last_phase():
+    """When resume_phase is None (old queue entry), fall back to last_phase."""
+    task = TaskState(
+        slug="gh:owner_repo_42", owner="owner", repo="repo",
+        issue_number=42, title="T", body="B", status="waiting",
+        plan_branch=None, base_branch="main", attempt_count=1,
+        first_dispatched_at=None, last_dispatched_command="/fix",
+        last_dispatched_command_id=1, last_consumed_reply_id=1,
+        session_id="s1", pr_number=None, guard_blocked=False,
+        gh_closed=False, pending_command=None, pending_guidance=None,
+        pending_user_reply=None,
+        last_phase="fix",
+        resume_phase=None,
+    )
+    assert _resume_kind(task) == "fix"
+
+
+def test_resume_kind_default_to_plan():
+    """When both resume_phase and last_phase default, returns 'plan'."""
+    task = TaskState(
+        slug="gh:owner_repo_42", owner="owner", repo="repo",
+        issue_number=42, title="T", body="B", status="waiting",
+        plan_branch=None, base_branch="main", attempt_count=1,
+        first_dispatched_at=None, last_dispatched_command=None,
+        last_dispatched_command_id=None, last_consumed_reply_id=None,
+        session_id=None, pr_number=None, guard_blocked=False,
+        gh_closed=False, pending_command=None, pending_guidance=None,
+        pending_user_reply=None,
+    )
+    assert _resume_kind(task) == "plan"

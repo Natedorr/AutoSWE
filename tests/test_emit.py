@@ -101,6 +101,7 @@ def _load_world(data: dict) -> World:
         welcome_comment_id=task_data.get("welcome_comment_id"),
         bot_comment_ids=tuple(task_data.get("bot_comment_ids", [])),
         last_phase=task_data.get("last_phase", "plan"),
+        resume_phase=task_data.get("resume_phase"),
         created_at=task_data.get("created_at", ""),
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
@@ -989,3 +990,143 @@ def test_mark_failed_limit_resets_first_dispatched_at():
     )
     assert patch.get("_guard_blocked") is True
     assert patch.get("autoswe_status") == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Issue #27 — resume_phase set by emit()
+# ---------------------------------------------------------------------------
+
+
+def test_plan_emit_sets_resume_phase():
+    """Plan actions must set resume_phase='plan' in the queue patch so that
+    _resume_kind uses the authoritative value, not a stale last_phase."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
+        status="waiting", plan_branch=None, base_branch="main", attempt_count=1,
+        first_dispatched_at=None, last_dispatched_command="/plan",
+        last_dispatched_command_id=1, last_consumed_reply_id=1, session_id="s1",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    action = Action(kind="plan", slug="gh:o_r_42", triggering_comment_id=1)
+    result = DispatchResult(
+        done_content="PLAN_READY", cost_usd=0.1, duration_seconds=10, session_id="s1",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    assert patch.get("resume_phase") == "plan", "plan emit must set resume_phase='plan'"
+    assert patch.get("last_phase") == "plan", "plan emit must set last_phase='plan'"
+
+
+def test_fix_emit_sets_resume_phase():
+    """Fix actions must set resume_phase='fix' in the queue patch."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
+        status="planned", plan_branch="autoswe/issue-42", base_branch="main",
+        attempt_count=1, first_dispatched_at=None, last_dispatched_command="/fix",
+        last_dispatched_command_id=1, last_consumed_reply_id=1, session_id="s1",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    action = Action(kind="fix", slug="gh:o_r_42", triggering_comment_id=2)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tfixed\tabc123", cost_usd=1.0,
+        duration_seconds=60, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    assert patch.get("resume_phase") == "fix", "fix emit must set resume_phase='fix'"
+    assert patch.get("last_phase") == "fix", "fix emit must set last_phase='fix'"
+
+
+def test_plan_waiting_emit_sets_resume_phase():
+    """Plan returning WAITING must still set resume_phase='plan' so a
+    subsequent user reply resumes planning, not fixing."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
+        status="waiting", plan_branch=None, base_branch="main", attempt_count=1,
+        first_dispatched_at=None, last_dispatched_command="/plan",
+        last_dispatched_command_id=1, last_consumed_reply_id=1, session_id="s1",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+        last_phase="fix",       # stale — from a previous /fix
+        resume_phase="fix",     # stale — from a previous /fix
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    action = Action(kind="plan", slug="gh:o_r_42", triggering_comment_id=3)
+    result = DispatchResult(
+        done_content="WAITING:What framework?", cost_usd=0.05,
+        duration_seconds=5, session_id="s1",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    assert patch.get("resume_phase") == "plan", (
+        "plan WAITING must overwrite resume_phase to 'plan' — "
+        "this is the regression fix for issue #27"
+    )
+    assert patch.get("autoswe_status") == "waiting"
+
+
+def test_fix_waiting_emit_preserves_resume_phase_fix():
+    """Fix returning WAITING (coder asked a question during fix) must keep
+    resume_phase='fix' so a subsequent user reply resumes fixing, not planning."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
+        status="fixing", plan_branch="autoswe/issue-42", base_branch="main",
+        attempt_count=1, first_dispatched_at=None, last_dispatched_command="/fix",
+        last_dispatched_command_id=1, last_consumed_reply_id=1, session_id="s1",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    action = Action(kind="fix", slug="gh:o_r_42", triggering_comment_id=2)
+    result = DispatchResult(
+        done_content="WAITING:Should I approach A or B?", cost_usd=0.50,
+        duration_seconds=30, session_id="s1",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    assert patch.get("resume_phase") == "fix", (
+        "fix WAITING must preserve resume_phase='fix' — "
+        "a user reply should resume fixing, not switch to planning"
+    )
+    assert patch.get("last_phase") == "fix"
+    assert patch.get("autoswe_status") == "waiting"

@@ -6,7 +6,7 @@ Each handler returns a done-content string; the dispatch loop maps it to an `aut
 
 ## `/plan` — `planner.run_plan(task, repo_cfg, cfg)`
 
-- **Permission mode:** `plan` (read-only: `Read`, `Glob`, `Grep` + `AGENT_TASK_TOOLS` for progress tracking)
+- **Permission mode:** `plan` (read-only: `Read`, `Glob`, `Grep` + `PROGRESS_TOOLS` for progress tracking)
 - **Prompt source:** `config/prompts/plan.txt` (loaded by `prompts.py:build_plan_prompt()`)
 - **Model resolution:** `repo_cfg.plan_model` → `cfg.PLAN_MODEL` → SDK default
 - **Worktree:** created via `create_worktree()` on `plan_branch` (or `base_branch`)
@@ -19,7 +19,7 @@ Each handler returns a done-content string; the dispatch loop maps it to an `aut
 
 ## `resume_plan` — `planner.resume_plan(task, user_reply, repo_cfg, cfg)`
 
-- **Permission mode:** `plan` (read-only + `AGENT_TASK_TOOLS`)
+- **Permission mode:** `plan` (read-only + `PROGRESS_TOOLS`)
 - **Prompt:** wraps user reply in resume prompt, asks Claude to continue planning
 - **Session:** resumed via `task.session_id`
 - **Returns:** same as `run_plan()` — `"PLAN_READY"`, `"WAITING: questions"`, `"WAITING: see comment"`, or `"FAILED: …"`
@@ -81,7 +81,7 @@ Each handler returns a done-content string; the dispatch loop maps it to an `aut
 
 ## `/review` — `reviewer.run_review(task, repo_cfg, cfg)`
 
-- **Permission mode:** `plan` (read-only: `Read`, `Glob`, `Grep` + `AGENT_TASK_TOOLS`)
+- **Permission mode:** `plan` (read-only: `Read`, `Glob`, `Grep` + `PROGRESS_TOOLS`)
 - **Prompt source:** `config/prompts/review.txt` (loaded by `prompts.py:build_review_prompt()`)
 - **Model resolution:** `repo_cfg.review_model` → `cfg.REVIEW_MODEL` → SDK default
 - **Worktree:** accessed via `worktree_path()` on the feature branch. Does not create a new worktree — uses the existing one from `/plan` or `/fix`.

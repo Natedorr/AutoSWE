@@ -6,12 +6,12 @@ autoSWE runs Claude with `bypassPermissions` + `Bash` for `/fix` (and `/sync` co
 
 The orchestrator's own privilege split still holds inside that machine:
 
-- `/plan` and `resume_plan` → `permission_mode="plan"`, `allowed_tools=["Read", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — read-only (native plan mode produces plan files in `~/.claude/plans/`). `Write`/`Edit` remain blocked by the `can_use_tool` callback.
+- `/plan` and `resume_plan` → `permission_mode="plan"`, `allowed_tools=["Read", "Glob", "Grep"]` + `PROGRESS_TOOLS` — read-only (native plan mode produces plan files in `~/.claude/plans/`). `Write`/`Edit` blocked by `can_use_tool` callback; `Agent` excluded so sub-agents cannot bypass containment.
 - `/fix` → `permission_mode="bypassPermissions"`, `allowed_tools=["Read", "Edit", "Write", "Bash", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — full access.
 - `/sync` conflict resolution → same as `/fix`.
 - `/review` → `permission_mode="plan"`, `allowed_tools=["Read", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — read-only.
 
-`AGENT_TASK_TOOLS` (`TodoWrite`, `TaskCreate`, `TaskUpdate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`, `Agent`) are progress/orchestration tools available in all phases. They do not themselves grant repo write access (though a sub-agent spawned via `Agent` inherits the same `can_use_tool` callback, so `Write`/`Edit` denials still apply in read-only phases).
+`PROGRESS_TOOLS` (`TodoWrite`, `TaskCreate`, `TaskUpdate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`) are available in every phase. `AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]` is used only for `/fix`, `/sync` conflict resolution, and `/review` — phases where sub-agent spawning is needed and safe. Plan phase uses `PROGRESS_TOOLS` directly to prevent `Agent` sub-agent escapes.
 
 ## Who Can Steer
 
