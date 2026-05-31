@@ -20,6 +20,9 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | `anthropic_auth_token` | No | (from env) | Auth token (Claude Code only) |
 | `anthropic_api_key` | No | (from env) | API key (Claude Code only) |
 
+String values support ``${VAR}`` and ``${VAR:-default}`` environment variable
+interpolation (expanded at load time from the current process environment).
+
 ### Resolution Order
 
 For each phase, the harness profile is resolved in this order:

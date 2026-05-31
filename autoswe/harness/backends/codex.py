@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable
@@ -33,14 +34,14 @@ from autoswe.harness.backends.base import RunResult, RunSpec
 class _CodexAccumulator:
     """Accumulates state during Codex JSONL streaming.
 
-    The fields are wrapped in single-element lists at the call site
-    inside ``_run_async`` so that ``_parse_jsonl_line`` can mutate them
-    in-place (a standard Python pattern for nested-callback mutation).
+    Passed directly to ``_parse_jsonl_line`` so the parser mutates the
+    accumulator in-place (avoids list-wrapper indirection).
     """
 
     text_chunks: list[str] = field(default_factory=list)
     session_id: str | None = None
     turn_failed: bool = False
+    usage: list[dict] = field(default_factory=list)
 
 
 # ---------- Mode → Codex sandbox mapping ----------
@@ -67,19 +68,30 @@ def _mode_to_sandbox(mode: str | None) -> str:
 
 # ---------- JSONL line parser ----------
 
+# Expands ${VAR} and ${VAR:-default} inside JSON string values for
+# env-variable substitution in config files.
+_ENV_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _expand_env(value: str) -> str:
+    """Expand ``${VAR}`` and ``${VAR:-default}`` inside a string."""
+    def _repl(m: re.Match) -> str:
+        expr = m.group(1)
+        if ":-" in expr:
+            var, default = expr.split(":-", 1)
+            return os.environ.get(var, default)
+        return os.environ.get(expr, "")
+    return _ENV_RE.sub(_repl, value)
+
 
 def _parse_jsonl_line(
     line: str,
-    *,
-    text_chunks: list[str],
-    session_id: list[str | None],
-    turn_failed: list[bool],
+    acc: _CodexAccumulator,
     callback,
 ) -> None:
-    """Parse a single JSONL event line and update accumulators in-place.
+    """Parse a single JSONL event line and update the accumulator in-place.
 
-    *text_chunks* and *session_id* are single-element lists so they can be
-    mutated inside this function (convenient for the streaming reader).
+    *acc* is a ``_CodexAccumulator`` instance mutated by this function.
     """
     line = line.strip()
     if not line:
@@ -95,8 +107,8 @@ def _parse_jsonl_line(
 
     if etype == "thread.started":
         tid = event.get("thread_id")
-        if tid and not session_id[0]:
-            session_id[0] = tid
+        if tid and not acc.session_id:
+            acc.session_id = tid
 
     elif etype == "item.started":
         item = event.get("item", {})
@@ -114,7 +126,7 @@ def _parse_jsonl_line(
         if item_type in ("agent_message", "summary_output"):
             text = item.get("text", "")
             if text:
-                text_chunks.append(text)
+                acc.text_chunks.append(text)
                 # Fire progress with the latest agent message
                 if callback:
                     callback(f"Agent: {text[:120]}")
@@ -132,14 +144,26 @@ def _parse_jsonl_line(
             if items:
                 _fire_todo_progress(callback, items)
 
+    elif etype == "item.delta":
+        # Incremental content — append to last chunk if available
+        delta = event.get("delta", "")
+        if delta:
+            if acc.text_chunks:
+                acc.text_chunks[-1] += delta
+            else:
+                acc.text_chunks.append(delta)
+
     elif etype == "turn.failed":
-        error = event.get("error", "")
-        log(f"[CODEX] turn.failed: {error}")
-        turn_failed[0] = True
+        # error field is a dict with "message" key (live-verified)
+        error_obj = event.get("error", {})
+        error_msg = error_obj.get("message", str(error_obj)) if isinstance(error_obj, dict) else str(error_obj)
+        log(f"[CODEX] turn.failed: {error_msg}")
+        acc.turn_failed = True
 
     elif etype == "turn.completed":
         usage = event.get("usage", {})
         if usage:
+            acc.usage.append(usage)
             log(f"[CODEX] turn.completed usage={usage}")
 
     elif etype == "error":
@@ -193,36 +217,46 @@ class CodexBackend:
         """Run Codex CLI subprocess with streaming JSONL. Returns RunResult."""
         sandbox = _mode_to_sandbox(spec.mode)
         model = spec.model or "gpt-5.4"
+        resume = bool(spec.resume)
 
         # Build the command
         cmd: list[str] = ["codex", "exec"]
 
-        # Resume mode
-        if spec.resume:
+        # --- Resume mode has a different flag set than exec ---
+        # Verified against `codex exec resume --help`:
+        #   Supported: --json, -m/--model, -c, --dangerously-bypass-approvals-and-sandbox,
+        #              --ephemeral, --ignore-user-config, --ignore-rules, --last, --skip-git-repo-check
+        #   NOT supported: --sandbox, -C/--cd
+        if resume:
             cmd.extend(["resume", spec.resume])
-
-        # Flags — always ignore user config and rules for controlled automation
-        cmd.extend([
-            "--json",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--sandbox", sandbox,
-            "--ask-for-approval", "never",
-            "--model", model,
-            "--cd", spec.cwd,
-        ])
-
-        # Ephemeral: don't persist session files (unless resuming, which needs them)
-        if not spec.resume:
+            # Flags valid for both exec and resume
+            cmd.extend([
+                "--json",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model", model,
+            ])
+        else:
+            # Fresh exec — full flag set
+            cmd.extend([
+                "--json",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--sandbox", sandbox,
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model", model,
+                "-C", spec.cwd,
+            ])
+            # Ephemeral: don't persist session files (unless resuming, which needs them)
             cmd.append("--ephemeral")
 
         # Limit turns to prevent runaway sessions (only add flag when non-default)
         if spec.max_turns and spec.max_turns != _DEFAULT_MAX_TURNS:
             cmd.extend(["-c", f"agent.max_turns={spec.max_turns}"])
 
-        # Append the prompt (for non-resume, it's the task; for resume,
-        # it's the continuation instruction)
-        cmd.append(spec.prompt)
+        # Append the prompt behind `--` so prompts starting with `-` are safe
+        cmd.extend(["--", spec.prompt])
 
         # Build environment
         env = dict(os.environ)
@@ -237,7 +271,7 @@ class CodexBackend:
             env.update(spec.env_overrides)
 
         log(f"[CODEX] running model={model} sandbox={sandbox} "
-            f"resume={'NEW' if not spec.resume else spec.resume[:8]}")
+            f"resume={'NEW' if not resume else spec.resume[:8]}")
 
         t0 = time.monotonic()
 
@@ -255,11 +289,8 @@ class CodexBackend:
                 "Install with: npm i -g @openai/codex"
             ) from e
 
-        # Accumulators (list-wrappers for in-place mutation in _parse_jsonl_line)
+        # Accumulator for in-place mutation by _parse_jsonl_line
         acc = _CodexAccumulator()
-        text_chunks: list[str] = acc.text_chunks
-        session_id: list[str | None] = [acc.session_id]
-        turn_failed: list[bool] = [acc.turn_failed]
 
         async def read_stderr() -> bytes:
             """Collect all stderr output (non-JSON progress/debug)."""
@@ -271,15 +302,13 @@ class CodexBackend:
             """Read stdout line-by-line, parse JSONL events, fire callbacks."""
             if process.stdout:
                 while True:
-                    line = await process.stdout.readline()
-                    if not line:
+                    raw = await process.stdout.readline()
+                    if not raw:
                         break
-                    text = line.decode("utf-8", errors="replace")
+                    text = raw.decode("utf-8", errors="replace")
                     _parse_jsonl_line(
                         text,
-                        text_chunks=text_chunks,
-                        session_id=session_id,
-                        turn_failed=turn_failed,
+                        acc=acc,
                         callback=spec.progress_callback,
                     )
 
@@ -308,22 +337,26 @@ class CodexBackend:
             log(f"[CODEX] exit={returncode}")
 
         # Determine subtype from exit code and turn failures
-        if returncode == 0 and not turn_failed[0]:
+        # asyncio.subprocess uses negative values for signal-killed processes
+        # (e.g. -9 = SIGKILL, -15 = SIGTERM).  Positive values are normal
+        # exit codes returned by the process itself.
+        if returncode == 0 and not acc.turn_failed:
             subtype = "success"
-        elif returncode == 0 and turn_failed[0]:
+        elif returncode == 0 and acc.turn_failed:
             subtype = "error"
-        elif returncode < 0:
+        elif returncode is not None and returncode < 0:
+            # Killed by signal (SIGKILL, SIGTERM, timeout)
             subtype = "killed"
         else:
             subtype = "error"
 
         # TODO(Phase 5): Parse cost from turn.completed usage token counts
         # once a pricing table (model → $/token) is available.  The JSONL
-        # parser already receives usage data; a simple multiplier would
+        # parser accumulates usage in acc.usage; a simple multiplier would
         # populate cost_usd.
         return RunResult(
-            text="\n".join(text_chunks),
-            session_id=session_id[0],
+            text="\n".join(acc.text_chunks),
+            session_id=acc.session_id,
             subtype=subtype,
             cost_usd=None,
             duration_seconds=duration,

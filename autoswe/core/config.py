@@ -1,6 +1,35 @@
 import json
 import os
+import re
 from pathlib import Path
+
+# Expands ${VAR} and ${VAR:-default} inside JSON string values.
+_ENV_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _expand_env(value: str) -> str:
+    """Expand ``${VAR}`` and ``${VAR:-default}`` inside a string."""
+    def _repl(m: re.Match) -> str:
+        expr = m.group(1)
+        if ":-" in expr:
+            var, default = expr.split(":-", 1)
+            return os.environ.get(var, default)
+        return os.environ.get(expr, "")
+    return _ENV_RE.sub(_repl, value)
+
+
+def _expand_env_dict(obj: dict) -> dict:
+    """Recursively expand ``${VAR}`` env references in dict string values."""
+    result = {}
+    for key, value in obj.items():
+        if isinstance(value, str):
+            result[key] = _expand_env(value)
+        elif isinstance(value, dict):
+            result[key] = _expand_env_dict(value)
+        else:
+            result[key] = value
+    return result
+
 
 # Resolve repo root relative to this module (autoswe/core/config.py → repo root)
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -162,7 +191,9 @@ def load_harnesses_config() -> dict:
                 f"harnesses.json entry '{key}' has unknown backend '{backend}'. "
                 f"Use one of: {', '.join(sorted(KNOWN_BACKENDS))}."
             )
-        validated[key] = dict(entry, backend=backend)
+        # Expand ${VAR} and ${VAR:-default} env references in string values
+        profile = _expand_env_dict(dict(entry, backend=backend))
+        validated[key] = profile
 
     _harnesses_cache.update(validated)
     return dict(validated)

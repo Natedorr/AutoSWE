@@ -5,11 +5,13 @@ output on the simulated stdout pipe.  No live Codex calls are made.
 """
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, Mock, patch
 
 from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.backends.codex import (
     CodexBackend,
+    _CodexAccumulator,
     _mode_to_sandbox,
     _parse_jsonl_line,
 )
@@ -189,55 +191,43 @@ def test_mode_to_sandbox_unknown():
 
 def test_parse_jsonl_line_thread_started():
     """thread.started sets session_id."""
-    chunks: list[str] = []
-    sid: list[str | None] = [None]
-    tf: list[bool] = [False]
+    acc = _CodexAccumulator()
     _parse_jsonl_line(
         '{"type":"thread.started","thread_id":"t-42"}',
-        text_chunks=chunks,
-        session_id=sid,
-        turn_failed=tf,
+        acc=acc,
         callback=None,
     )
-    assert sid[0] == "t-42"
-    assert not chunks
+    assert acc.session_id == "t-42"
+    assert not acc.text_chunks
 
 
 def test_parse_jsonl_line_agent_message_completed():
     """item.completed agent_message accumulates text."""
-    chunks = []
-    sid = [None]
-    tf = [False]
+    acc = _CodexAccumulator()
     _parse_jsonl_line(
         json.dumps({
             "type": "item.completed",
             "item": {"id": "i1", "type": "agent_message", "text": "Hello"},
         }),
-        text_chunks=chunks,
-        session_id=sid,
-        turn_failed=tf,
+        acc=acc,
         callback=None,
     )
-    assert chunks == ["Hello"]
+    assert acc.text_chunks == ["Hello"]
 
 
 def test_parse_jsonl_line_summary_output_collected():
     """item.completed summary_output accumulates text."""
-    chunks = []
-    sid = [None]
-    tf = [False]
+    acc = _CodexAccumulator()
     callback = Mock()
     _parse_jsonl_line(
         json.dumps({
             "type": "item.completed",
             "item": {"id": "s1", "type": "summary_output", "text": "All done."},
         }),
-        text_chunks=chunks,
-        session_id=sid,
-        turn_failed=tf,
+        acc=acc,
         callback=callback,
     )
-    assert chunks == ["All done."]
+    assert acc.text_chunks == ["All done."]
     # Callback should have fired with Agent: prefix
     callback.assert_called_once()
     assert "Agent: All done." in callback.call_args[0][0]
@@ -245,86 +235,98 @@ def test_parse_jsonl_line_summary_output_collected():
 
 def test_parse_jsonl_line_empty_text_skipped():
     """Empty agent_message text is not accumulated."""
-    chunks = []
-    sid = [None]
-    tf = [False]
+    acc = _CodexAccumulator()
     _parse_jsonl_line(
         json.dumps({
             "type": "item.completed",
             "item": {"id": "i1", "type": "agent_message", "text": ""},
         }),
-        text_chunks=chunks,
-        session_id=sid,
-        turn_failed=tf,
+        acc=acc,
         callback=None,
     )
-    assert not chunks
+    assert not acc.text_chunks
 
 
 def test_parse_jsonl_line_non_json_ignored():
     """Non-JSON lines are skipped gracefully."""
-    chunks = []
-    sid = [None]
-    tf = [False]
-    _parse_jsonl_line("WARNING: something went wrong", text_chunks=chunks, session_id=sid, turn_failed=tf, callback=None)
-    assert not chunks
+    acc = _CodexAccumulator()
+    _parse_jsonl_line("WARNING: something went wrong", acc=acc, callback=None)
+    assert not acc.text_chunks
 
 
 def test_parse_jsonl_line_turn_failed_sets_flag():
     """turn.failed sets turn_failed flag for downstream subtype logic."""
-    chunks = []
-    sid = [None]
-    tf = [False]
+    acc = _CodexAccumulator()
     _parse_jsonl_line(
-        '{"type":"turn.failed","error":"Model not found"}',
-        text_chunks=chunks,
-        session_id=sid,
-        turn_failed=tf,
+        '{"type":"turn.failed","error":{"message":"Model not found"}}',
+        acc=acc,
         callback=None,
     )
-    assert not chunks
-    assert tf[0] is True
+    assert not acc.text_chunks
+    assert acc.turn_failed is True
 
 
-def test_parse_jsonl_line_turn_completed_logged():
-    """turn.completed doesn't crash the parser."""
-    chunks = []
-    sid = [None]
-    tf = [False]
+def test_parse_jsonl_line_turn_failed_dict_error():
+    """turn.failed with dict error extracts the message (live-verified shape)."""
+    acc = _CodexAccumulator()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "turn.failed",
+            "error": {
+                "message": "unexpected status 401 Unauthorized",
+                "code": 401,
+            },
+        }),
+        acc=acc,
+        callback=None,
+    )
+    assert acc.turn_failed is True
+
+
+def test_parse_jsonl_line_turn_failed_string_error():
+    """turn.failed with string error still works (backward compat)."""
+    acc = _CodexAccumulator()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "turn.failed",
+            "error": "plain string error",
+        }),
+        acc=acc,
+        callback=None,
+    )
+    assert acc.turn_failed is True
+
+
+def test_parse_jsonl_line_turn_completed_accumulates_usage():
+    """turn.completed accumulates usage data for future cost calculation."""
+    acc = _CodexAccumulator()
     _parse_jsonl_line(
         json.dumps({
             "type": "turn.completed",
             "usage": {"input_tokens": 100, "output_tokens": 50},
         }),
-        text_chunks=chunks,
-        session_id=sid,
-        turn_failed=tf,
+        acc=acc,
         callback=None,
     )
-    assert not chunks
+    assert len(acc.usage) == 1
+    assert acc.usage[0]["input_tokens"] == 100
 
 
 def test_parse_jsonl_line_error_event():
     """error event doesn't crash the parser."""
-    chunks = []
-    sid = [None]
-    tf = [False]
+    acc = _CodexAccumulator()
     _parse_jsonl_line(
         '{"type":"error","message":"Internal error"}',
-        text_chunks=chunks,
-        session_id=sid,
-        turn_failed=tf,
+        acc=acc,
         callback=None,
     )
-    assert not chunks
+    assert not acc.text_chunks
 
 
 def test_parse_jsonl_line_todo_progress():
     """todo_list item fires callback with rendered items."""
+    acc = _CodexAccumulator()
     callback = Mock()
-    chunks = []
-    sid = [None]
-    tf = [False]
     _parse_jsonl_line(
         json.dumps({
             "type": "item.completed",
@@ -336,9 +338,7 @@ def test_parse_jsonl_line_todo_progress():
                 ],
             },
         }),
-        text_chunks=chunks,
-        session_id=sid,
-        turn_failed=tf,
+        acc=acc,
         callback=callback,
     )
     callback.assert_called_once()
@@ -346,6 +346,44 @@ def test_parse_jsonl_line_todo_progress():
     assert "☐" in callback.call_args[0][0]
     assert "Fix bug" in callback.call_args[0][0]
     assert "Add tests" in callback.call_args[0][0]
+
+
+def test_parse_jsonl_line_item_delta_appends():
+    """item.delta appends incremental content to the last chunk."""
+    acc = _CodexAccumulator()
+    # Seed with a completed agent message
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "i1", "type": "agent_message", "text": "Hello"},
+        }),
+        acc=acc,
+        callback=None,
+    )
+    # Delta extends it
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.delta",
+            "delta": " world",
+        }),
+        acc=acc,
+        callback=None,
+    )
+    assert acc.text_chunks == ["Hello world"]
+
+
+def test_parse_jsonl_line_item_delta_no_chunks():
+    """item.delta with no prior chunks creates a new one."""
+    acc = _CodexAccumulator()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.delta",
+            "delta": "streaming content",
+        }),
+        acc=acc,
+        callback=None,
+    )
+    assert acc.text_chunks == ["streaming content"]
 
 
 # ---------- CodexBackend integration (mocked subprocess) ----------
@@ -424,13 +462,17 @@ def test_codex_run_calls_with_correct_flags():
     assert "--ignore-rules" in cmd
     assert "--sandbox" in cmd
     assert "workspace-write" in cmd
-    assert "--ask-for-approval" in cmd
-    assert "never" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    # Old --ask-for-approval must NOT be present
+    assert "--ask-for-approval" not in cmd
     assert "--model" in cmd
     assert "gpt-5" in cmd
-    assert "--cd" in cmd
+    assert "-C" in cmd
     assert "/tmp/repo" in cmd
-    assert "Fix bug" in cmd
+    # Prompt should be after -- separator
+    assert "--" in cmd
+    dash_idx = cmd.index("--")
+    assert cmd[dash_idx + 1] == "Fix bug"
 
 
 def test_codex_read_only_mode():
@@ -468,6 +510,38 @@ def test_codex_resume_mode():
     assert "sess-abc-123" in cmd
 
 
+def test_codex_resume_no_sandbox_or_cd():
+    """Resume command must NOT include --sandbox or -C (unsupported by resume subcommand)."""
+    backend = CodexBackend()
+    spec = RunSpec(
+        prompt="Continue",
+        cwd="/tmp/repo",
+        resume="sess-123",
+        mode="read_write",
+    )
+
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--sandbox" not in cmd
+    assert "-C" not in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+
+
+def test_codex_prompt_starts_with_dash():
+    """Prompt starting with - must be protected by -- separator."""
+    backend = CodexBackend()
+    spec = RunSpec(
+        prompt="-Fix the bug",
+        cwd="/tmp/repo",
+        mode="read_write",
+    )
+
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    dash_idx = cmd.index("--")
+    assert cmd[dash_idx + 1] == "-Fix the bug"
+    # The prompt must be the last element
+    assert cmd[-1] == "-Fix the bug"
+
+
 def test_codex_error_returncode():
     """Non-zero exit code → subtype='error'."""
     backend = CodexBackend()
@@ -485,6 +559,27 @@ def test_codex_error_returncode():
     assert result.text == ""
 
 
+def test_codex_killed_subtype():
+    """Negative returncode (asyncio signal convention) → subtype='killed'.
+
+    asyncio.subprocess uses negative values for signal-killed processes
+    (e.g. -9 = SIGKILL), unlike raw os.waitpid which packs signals
+    into positive values.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            returncode=-9, stdout=""
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.subtype == "killed"
+
+
 def test_codex_timeout():
     """asyncio.TimeoutError is re-raised after killing the process."""
     backend = CodexBackend()
@@ -495,7 +590,7 @@ def test_codex_timeout():
     mock_process.stderr = None
     mock_process.kill = Mock()
     mock_process.wait = AsyncMock(return_value=-9)
-    mock_process.returncode = -9
+    mock_process.returncode = 9  # SIGKILL — positive signal number
 
     async def blocking_read():
         await asyncio.sleep(999)
@@ -707,7 +802,7 @@ def test_codex_result_no_mcp_flags():
 
 
 def test_codex_no_cwd_in_subprocess():
-    """subprocess is NOT given cwd= (Codex handles --cd itself)."""
+    """subprocess is NOT given cwd= (Codex handles -C itself)."""
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp/repo", mode="read_write")
 
@@ -759,7 +854,7 @@ def test_codex_turn_failed_affects_subtype():
     backend = CodexBackend()
     jsonl = _jsonl(
         {"type": "thread.started", "thread_id": "t-1"},
-        {"type": "turn.failed", "error": "Model quota exceeded"},
+        {"type": "turn.failed", "error": {"message": "Model quota exceeded"}},
     )
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
 
@@ -815,6 +910,35 @@ def test_codex_default_max_turns_no_flag():
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "-c" not in cmd
+
+
+# ---------- Config interpolation ----------
+
+
+def test_config_expand_env_var():
+    """${VAR} references are expanded from environment."""
+    from autoswe.core.config import _expand_env
+
+    os.environ["_TEST_VAR_XYZ"] = "expanded-value"
+    try:
+        assert _expand_env("${_TEST_VAR_XYZ}") == "expanded-value"
+        assert _expand_env("prefix-${_TEST_VAR_XYZ}-suffix") == "prefix-expanded-value-suffix"
+    finally:
+        del os.environ["_TEST_VAR_XYZ"]
+
+
+def test_config_expand_env_default():
+    """${VAR:-default} uses the default when env var is not set."""
+    from autoswe.core.config import _expand_env
+
+    assert _expand_env("${_NONEXISTENT_VAR_XYZ:-fallback}") == "fallback"
+
+
+def test_config_expand_env_missing_no_default():
+    """${VAR} with no default and no env var → empty string."""
+    from autoswe.core.config import _expand_env
+
+    assert _expand_env("${_NONEXISTENT_VAR_XYZ}") == ""
 
 
 # ---------- factory integration ----------
