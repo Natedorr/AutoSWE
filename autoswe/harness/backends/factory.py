@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from autoswe.harness.backends.base import CodingBackend
 from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+from autoswe.harness.backends.codex import CodexBackend
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -19,17 +20,16 @@ def get_backend(harness_cfg: dict) -> CodingBackend:
     The ``backend`` field in *harness_cfg* selects the implementation::
 
         {"backend": "claude_code", "model": "claude-sonnet-4-6"}
+        {"backend": "codex", "model": "gpt-5.4"}
 
     Raises ``ValueError`` on unknown backend names.
     """
     backend = harness_cfg.get("backend", "claude_code").lower()
     if backend == "claude_code":
         return ClaudeCodeBackend()
-    # Codex backend will be added in Phase 4:
-    # if backend == "codex":
-    #     from autoswe.harness.backends.codex import CodexBackend
-    #     return CodexBackend(harness_cfg)
+    if backend == "codex":
+        return CodexBackend()
     raise ValueError(
         f"Unknown coding backend: '{backend}'. "
-        "Supported backends: claude_code"
+        "Supported backends: claude_code, codex"
     )
