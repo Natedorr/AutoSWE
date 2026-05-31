@@ -219,6 +219,14 @@ class CodexBackend:
         model = spec.model or "gpt-5.4"
         resume = bool(spec.resume)
 
+        # Resolve auth early (needed for command-building below).
+        # --ignore-user-config is only safe when we supply an explicit API key.
+        # Without a key we let codex use ~/.codex/config.toml (ollama provider, etc.).
+        harness_cfg = (spec.state or {}).get("_harness_cfg") or {}
+        has_api_key = bool(harness_cfg.get("openai_api_key") or harness_cfg.get("codex_api_key")
+                           or os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"))
+        needs_ignore_user_config = has_api_key
+
         # Build the command
         cmd: list[str] = ["codex", "exec"]
 
@@ -230,18 +238,20 @@ class CodexBackend:
         if resume:
             cmd.extend(["resume", spec.resume])
             # Flags valid for both exec and resume
+            cmd.extend(["--json"])
+            if needs_ignore_user_config:
+                cmd.append("--ignore-user-config")
             cmd.extend([
-                "--json",
-                "--ignore-user-config",
                 "--ignore-rules",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model", model,
             ])
         else:
             # Fresh exec — full flag set
+            cmd.extend(["--json"])
+            if needs_ignore_user_config:
+                cmd.append("--ignore-user-config")
             cmd.extend([
-                "--json",
-                "--ignore-user-config",
                 "--ignore-rules",
                 "--sandbox", sandbox,
                 "--dangerously-bypass-approvals-and-sandbox",
@@ -260,8 +270,6 @@ class CodexBackend:
 
         # Build environment
         env = dict(os.environ)
-        # Auth: OPENAI_API_KEY or CODEX_API_KEY from profile or env
-        harness_cfg = (spec.state or {}).get("_harness_cfg") or {}
         if harness_cfg.get("openai_api_key"):
             env["OPENAI_API_KEY"] = harness_cfg["openai_api_key"]
         if harness_cfg.get("codex_api_key"):
@@ -271,7 +279,8 @@ class CodexBackend:
             env.update(spec.env_overrides)
 
         log(f"[CODEX] running model={model} sandbox={sandbox} "
-            f"resume={'NEW' if not resume else spec.resume[:8]}")
+            f"resume={'NEW' if not resume else spec.resume[:8]} "
+            f"auth={'local' if not has_api_key else 'api_key'}")
 
         t0 = time.monotonic()
 

@@ -458,13 +458,36 @@ def test_codex_run_calls_with_correct_flags():
     assert "codex" in cmd
     assert "exec" in cmd
     assert "--json" in cmd
-    assert "--ignore-user-config" in cmd
+    # Without an API key, --ignore-user-config is absent (use local codex config)
+    assert "--ignore-user-config" not in cmd
     assert "--ignore-rules" in cmd
     assert "--sandbox" in cmd
     assert "workspace-write" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     # Old --ask-for-approval must NOT be present
     assert "--ask-for-approval" not in cmd
+
+
+def test_codex_ignore_user_config_with_api_key():
+    """--ignore-user-config present when API key is supplied (isolated auth)."""
+    backend = CodexBackend()
+    spec = RunSpec(
+        prompt="Fix bug",
+        cwd="/tmp/repo",
+        model="gpt-5",
+        mode="read_write",
+        state={"_harness_cfg": {"openai_api_key": "sk-test"}},
+    )
+    jsonl = _make_success_jsonl()
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_run()))
+    assert "--ignore-user-config" in cmd
     assert "--model" in cmd
     assert "gpt-5" in cmd
     assert "-C" in cmd
