@@ -117,10 +117,14 @@ def test_run_review_is_read_only(tmp_path, mock_gh_post_comment):
     assert "Read" in run_calls[0]["allowed_tools"]
     assert "Write" not in run_calls[0]["allowed_tools"]
     assert "Edit" not in run_calls[0]["allowed_tools"]
-    # Agent task tools (TodoWrite, TaskCreate, etc.) should be included
-    from autoswe.harness.runner import AGENT_TASK_TOOLS
-    for tool in AGENT_TASK_TOOLS:
+    # Progress/task tools (TodoWrite, TaskCreate, etc.) should be included
+    # but Agent (sub-agent spawning) must NOT — review is read-only
+    from autoswe.harness.runner import PROGRESS_TOOLS
+    for tool in PROGRESS_TOOLS:
         assert tool in run_calls[0]["allowed_tools"], f"{tool} should be in review allowed_tools"
+    assert "Agent" not in run_calls[0]["allowed_tools"], (
+        "Agent (sub-agent spawning) must not be available in a read-only review"
+    )
     assert cut_calls[0] is True
     assert "AskUserQuestion" not in run_calls[0]["allowed_tools"], (
         "Reviewer must not be able to ask questions — review session is "
