@@ -9,7 +9,7 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 ### Profile Schema
 
 | Field | Required | Default | Description |
-|-------|----------|---------|-------------|
+|-------|----------|---------|-----------|
 | `backend` | **Yes** | — | Backend implementation: `"claude_code"` or `"codex"` |
 | `model` | No | `""` | Model ID (e.g. `"claude-opus-4-8"`, `"gpt-5"`) |
 | `timeout` | No | (from env) | Backend-specific timeout in seconds |
@@ -60,7 +60,7 @@ Referenced in `repos.json`:
     "provider": "github",
     "pat": "ghp_...",
     "plan_harness": "claude-opus",
-    "fix_harness": "claude-sonnet",
+    "fix_harness": "codex-gpt5",
     "review_harness": "claude-sonnet"
   }
 }
@@ -69,7 +69,28 @@ Referenced in `repos.json`:
 Or globally in `autoswe.env`:
 ```
 PLAN_HARNESS=claude-opus
-FIX_HARNESS=claude-sonnet
+FIX_HARNESS=codex-gpt5
+```
+
+### Mixing Backends
+
+Different phases can use different backends. Common patterns:
+
+- **Claude for plan, Codex for fix**: Claude's deeper reasoning for architecture, Codex for execution speed.
+- **Codex for plan+fix, Claude for review**: Codex does the work, Claude provides the quality gate.
+- **All Claude**: Full feature set (MCP, AskUserQuestion, plan files).
+- **All Codex**: No Claude API dependency, but MCP/AskUserQuestion features degrade gracefully.
+
+```json
+{
+  "owner/repo": {
+    "provider": "github",
+    "pat": "ghp_...",
+    "plan_harness": "codex-4o",
+    "fix_harness": "codex-gpt5",
+    "review_harness": "claude-sonnet"
+  }
+}
 ```
 
 ### Backends
@@ -78,18 +99,45 @@ FIX_HARNESS=claude-sonnet
 
 Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuestion interception, plan file capture, progress streaming, session resume.
 
+**Profile fields:** `backend`, `model`, `cli_path`, `anthropic_base_url`, `anthropic_auth_token`, `anthropic_api_key`, `timeout`.
+
+**Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `progress_stream`.
+
 #### `codex` (Phase 4)
 
-Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--ask-for-approval`). Parses the JSONL event stream into a `RunResult`. Initially supports `resume` and `progress_stream` capabilities only (no MCP, no AskUserQuestion — degrades to text parsing).
+Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--ask-for-approval`). Parses the JSONL event stream into a `RunResult`.
 
-**Known limitation:** ``cost_usd`` is always ``None`` — the Codex JSONL stream
-reports token counts (``input_tokens``, ``output_tokens``) but not dollar
-amounts, and no pricing table is maintained yet.  Duration is tracked via
-``time.monotonic()``.  A future phase will add token→cost conversion.
+**Requirements:** `codex` CLI on PATH (`npm i -g @openai/codex`). API key via `codex_api_key`, `openai_api_key`, or environment variable. For local providers (Ollama), configure via `~/.codex/config.toml` — no API key needed.
+
+**Profile fields:**
+- `backend`: `"codex"` (required)
+- `model`: Codex model ID (e.g. `"gpt-5"`, `"gpt-4o"`, `"qwen3.6:27b"` for Ollama)
+- `codex_api_key` or `openai_api_key`: API key for the provider (optional for local providers)
+- `timeout`: Override the default timeout (optional)
+
+**Capabilities (Phase 4, core run only):** `resume`, `progress_stream`.
+
+**Capabilities (not yet supported):** `mode` (mode flags are mapped but not first-class), `mcp` (no MCP comment posting), `can_use_tool` (no per-tool gating), `plan_permission` (no dedicated plan mode). Handlers degrade gracefully when these are unavailable — e.g. the planner falls back to text parsing instead of MCP plan posting.
+
+**Mode → sandbox mapping:**
+- `plan` / `read_only` → `--sandbox read-only`
+- `read_write` → `--sandbox workspace-write`
+
+**Command mapping:**
+- Fresh run: `codex exec --json --sandbox <mode> --model <model> -C <cwd> --ephemeral -- <prompt>`
+- Resume: `codex exec resume <session_id> --json --model <model>`
+
+**Known limitations:**
+- ``cost_usd`` is always ``None`` — the Codex JSONL stream reports token counts (`input_tokens`, `output_tokens`) but not dollar amounts, and no pricing table is maintained yet.
+- ``plan_file_path`` is always ``None`` — Codex doesn't write to `~/.claude/plans/`.
+- ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting yet.
+- Duration is tracked via ``time.monotonic()`` locally.
 
 ### Factory
 
 Backend instances are created by `autoswe/harness/backends/factory.py:get_backend(harness_cfg)`. Dispatch on `harness_cfg["backend"]` field. Mirrors the provider factory pattern (`providers/factory.py`).
+
+Unknown backend names raise `ValueError`. Case-insensitive matching.
 
 ### Backward Compatibility
 

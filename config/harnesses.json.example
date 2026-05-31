@@ -1,5 +1,5 @@
 {
-  "_comment": "Named harness profiles for coding phases (plan, fix, review). Reference a profile from repos.json using plan_harness, fix_harness, or review_harness. Keys starting with _ are skipped.",
+  "_comment": "Named harness profiles for coding phases (plan, fix, review). Copy to harnesses.json (gitignored) and edit. Reference a profile from repos.json using plan_harness, fix_harness, or review_harness. Keys starting with _ are skipped.",
 
   "claude-opus": {
     "backend": "claude_code",
@@ -17,6 +17,7 @@
   },
 
   "ollama-local": {
+    "_comment": "Claude Code with a local Ollama provider — requires Ollama running on localhost",
     "backend": "claude_code",
     "model": "sonnet",
     "anthropic_base_url": "http://localhost:11434",
@@ -24,15 +25,37 @@
   },
 
   "codex-gpt5": {
-    "_comment": "Phase 4 — requires 'codex' CLI on PATH and CODEX_API_KEY (or openai_api_key as fallback)",
+    "_comment": "OpenAI Codex with GPT-5 — requires 'codex' CLI on PATH and CODEX_API_KEY (or openai_api_key as fallback)",
     "backend": "codex",
     "model": "gpt-5",
     "codex_api_key": "${CODEX_API_KEY}"
   },
 
+  "codex-gpt5-codex": {
+    "_comment": "Alternative: use codex_api_key instead of openai_api_key (maps to CODEX_API_KEY env var)",
+    "backend": "codex",
+    "model": "gpt-5-codex",
+    "codex_api_key": "${CODEX_API_KEY}"
+  },
+
+  "codex-4o": {
+    "_comment": "OpenAI Codex with GPT-4o — cheaper, faster, good for plan/review phases",
+    "backend": "codex",
+    "model": "gpt-4o",
+    "openai_api_key": "${OPENAI_API_KEY}"
+  },
+
   "ollama-codex": {
-    "_comment": "Local ollama provider — uses ~/.codex/config.toml for model provider config. No API key needed.",
+    "_comment": "Local Codex with Ollama — uses ~/.codex/config.toml for model provider config. No API key needed.",
     "backend": "codex",
     "model": "qwen3.6:27b"
+  },
+
+  "codex-custom": {
+    "_comment": "Codex with custom model, timeout, and API base — for self-hosted OpenAI-compatible endpoints",
+    "backend": "codex",
+    "model": "custom-model",
+    "openai_api_key": "${CUSTOM_API_KEY}",
+    "timeout": 3600
   }
 }
