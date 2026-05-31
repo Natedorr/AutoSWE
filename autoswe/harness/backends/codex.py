@@ -6,22 +6,23 @@ stream into a ``RunResult``.
 
 **Capabilities (Phase 4, core run only):** ``resume``, ``progress_stream``.
 
+Progress streaming uses ``asyncio.create_subprocess_exec`` with async
+line-reading so that ``progress_callback`` fires with live todo/command
+updates while the Codex CLI is running (not just after it finishes).
+
 Future phases may add ``mcp`` (MCP comment posting) and structured
 AskUserQuestion handling.  Until then those features degrade gracefully
 — handlers fall back to text parsing when ``"mcp"`` is not advertised.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import subprocess
 import time
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import log
 from autoswe.harness.backends.base import RunResult, RunSpec
-
-_dbg = init_debug_logger(LOGS_DIR)
 
 # ---------- Mode → Codex sandbox mapping ----------
 
@@ -41,82 +42,88 @@ def _mode_to_sandbox(mode: str | None) -> str:
     return _MODE_SANDBOX.get(mode, "read-only")
 
 
-# ---------- JSONL parser ----------
+# ---------- JSONL line parser ----------
 
 
-def _parse_jsonl_stream(stdout: str) -> tuple[str, str | None, float | None, float]:
-    """Parse a Codex JSONL event stream into (text, session_id, cost_usd, duration_seconds).
+def _parse_jsonl_line(
+    line: str,
+    *,
+    text_chunks: list[str],
+    session_id: list[str | None],
+    callback,
+) -> None:
+    """Parse a single JSONL event line and update accumulators in-place.
 
-    Walks the JSONL lines, collecting:
-    - ``thread.started`` → thread_id (becomes session_id)
-    - ``item.completed`` with type ``agent_message`` → text chunks
-    - ``turn.completed`` → usage tokens (cost estimate placeholder) and duration
-
-    Returns (text, session_id, cost_usd, duration_seconds).
+    *text_chunks* and *session_id* are single-element lists so they can be
+    mutated inside this function (convenient for the streaming reader).
     """
-    text_chunks: list[str] = []
-    session_id: str | None = None
-    cost_usd: float | None = None
-    start_time = time.monotonic()
+    line = line.strip()
+    if not line:
+        return
 
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        # Non-JSON line (stderr leak, progress) — skip
+        return
 
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            # Non-JSON line (progress, stderr leak) — skip
-            continue
+    etype = event.get("type", "")
 
-        etype = event.get("type", "")
+    if etype == "thread.started":
+        tid = event.get("thread_id")
+        if tid and not session_id[0]:
+            session_id[0] = tid
 
-        if etype == "thread.started":
-            tid = event.get("thread_id")
-            if tid and session_id is None:
-                session_id = tid
+    elif etype == "item.started":
+        item = event.get("item", {})
+        item_type = item.get("type", "")
+        # item.started is the "in progress" signal — fire progress
+        if callback and item_type in ("agent_message", "command_execution"):
+            info = item.get("text", item.get("command", ""))
+            if info:
+                callback(f"Working: {info[:120]}")
 
-        elif etype == "item.completed":
-            item = event.get("item", {})
-            item_type = item.get("type", "")
+    elif etype == "item.completed":
+        item = event.get("item", {})
+        item_type = item.get("type", "")
 
-            if item_type == "agent_message":
-                text = item.get("text", "")
-                if text:
-                    text_chunks.append(text)
+        if item_type == "agent_message":
+            text = item.get("text", "")
+            if text:
+                text_chunks.append(text)
+                # Fire progress with the latest agent message
+                if callback:
+                    callback(f"Agent: {text[:120]}")
+        elif item_type == "todo_list":
+            # Render todo items as progress
+            items = item.get("items", [])
+            if callback and items:
+                _fire_todo_progress(callback, items)
 
-        elif etype == "item.updated":
-            # todo_list updates → progress callback handled in caller
-            item = event.get("item", {})
-            item_type = item.get("type", "")
-            if item_type == "todo_list":
-                # Emit todo_list progress for progress_callback
-                pass  # handled in caller
+    elif etype == "item.updated":
+        item = event.get("item", {})
+        item_type = item.get("type", "")
+        if item_type == "todo_list" and callback:
+            items = item.get("items", [])
+            if items:
+                _fire_todo_progress(callback, items)
 
-        elif etype == "turn.completed":
-            usage = event.get("usage", {})
-            if usage:
-                # Token counts available; actual cost depends on model pricing.
-                # Store raw token count info for now — cost estimation can
-                # be added when model pricing tables are available.
-                input_tokens = usage.get("input_tokens", 0)
-                output_tokens = usage.get("output_tokens", 0)
-                # Rough estimate placeholder — real pricing added later
-                # For now, cost_usd stays None (consistent with "no pricing yet")
-                _ = input_tokens  # kept for future pricing calculation
-                _ = output_tokens
+    elif etype == "turn.failed":
+        error = event.get("error", "")
+        log(f"[CODEX] turn.failed: {error}")
 
-        elif etype == "turn.failed":
-            error = event.get("error", "")
-            log(f"[CODEX] turn.failed: {error}")
+    elif etype == "error":
+        error = event.get("message", event.get("error", "unknown error"))
+        log(f"[CODEX] error event: {error}")
 
-        elif etype == "error":
-            error = event.get("message", event.get("error", "unknown error"))
-            log(f"[CODEX] error event: {error}")
 
-    duration = time.monotonic() - start_time
-    return "\n".join(text_chunks), session_id, cost_usd, duration
+def _fire_todo_progress(callback, items: list[dict]) -> None:
+    """Render a todo_list item array into a progress callback string."""
+    parts = []
+    for ti in items:
+        status = "✅" if ti.get("completed") else "☐"
+        parts.append(f"{status} {ti.get('text', '')}")
+    callback("📋 " + " | ".join(parts))
 
 
 # ---------- CodexBackend ----------
@@ -126,7 +133,8 @@ class CodexBackend:
     """Codex CLI backend implementing CodingBackend.
 
     Shells out to ``codex exec --json`` (or ``codex exec resume`` for
-    resumption), parses the JSONL event stream, and returns a RunResult.
+    resumption), streams the JSONL event lines for live progress, and
+    returns a RunResult.
     """
 
     CAPABILITIES: set[str] = {"resume", "progress_stream"}
@@ -140,23 +148,14 @@ class CodexBackend:
 
         Returns an awaitable that resolves to a RunResult.
 
-        The returned coroutine is synchronous under the hood (Codex CLI is
-        a blocking subprocess), but wrapped in async to satisfy the
-        CodingBackend Protocol which requires an awaitable (so the runner
-        can apply asyncio.wait_for for timeouts).
+        Uses ``asyncio.create_subprocess_exec`` so that ``progress_callback``
+        fires with live updates while the Codex CLI is running.  The runner
+        wraps this in ``asyncio.wait_for`` for timeouts.
         """
         return self._run_async(spec)
 
     async def _run_async(self, spec: RunSpec) -> RunResult:
-        """Run Codex CLI subprocess. Returns a RunResult dataclass."""
-        import asyncio
-
-        return await asyncio.get_event_loop().run_in_executor(
-            None, self._run_sync, spec
-        )
-
-    def _run_sync(self, spec: RunSpec) -> RunResult:
-        """Synchronous Codex CLI execution."""
+        """Run Codex CLI subprocess with streaming JSONL. Returns RunResult."""
         sandbox = _mode_to_sandbox(spec.mode)
         model = spec.model or "gpt-5.4"
 
@@ -167,9 +166,11 @@ class CodexBackend:
         if spec.resume:
             cmd.extend(["resume", spec.resume])
 
-        # Flags
+        # Flags — always ignore user config and rules for controlled automation
         cmd.extend([
             "--json",
+            "--ignore-user-config",
+            "--ignore-rules",
             "--sandbox", sandbox,
             "--ask-for-approval", "never",
             "--model", model,
@@ -188,62 +189,91 @@ class CodexBackend:
             env["OPENAI_API_KEY"] = harness_cfg["openai_api_key"]
         if harness_cfg.get("codex_api_key"):
             env["CODEX_API_KEY"] = harness_cfg["codex_api_key"]
-        # Apply explicit env overrides
+        # Apply explicit env overrides (take precedence)
         if spec.env_overrides:
             env.update(spec.env_overrides)
-
-        # Max turns → config override (Codex uses max_turns config key)
-        # Not a CLI flag — passed as --config if needed
-        # For now, rely on Codex default turn limits.
 
         log(f"[CODEX] running model={model} sandbox={sandbox} "
             f"resume={'NEW' if not spec.resume else spec.resume[:8]}")
 
         t0 = time.monotonic()
+
+        # Start subprocess with streaming stdout/stderr
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=spec.timeout,
-                cwd=spec.cwd,
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-        except subprocess.TimeoutExpired:
-            log(f"[CODEX] timeout after {spec.timeout}s")
-            raise
         except FileNotFoundError as e:
             raise RuntimeError(
                 "codex executable not found on PATH. "
                 "Install with: npm i -g @openai/codex"
             ) from e
 
+        # Accumulators (list-wrappers for in-place mutation in _parse_jsonl_line)
+        text_chunks: list[str] = []
+        session_id: list[str | None] = [None]
+
+        async def read_stderr() -> bytes:
+            """Collect all stderr output (non-JSON progress/debug)."""
+            if process.stderr:
+                return await process.stderr.read()
+            return b""
+
+        async def read_stdout_jsonl() -> None:
+            """Read stdout line-by-line, parse JSONL events, fire callbacks."""
+            if process.stdout:
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace")
+                    _parse_jsonl_line(
+                        text,
+                        text_chunks=text_chunks,
+                        session_id=session_id,
+                        callback=spec.progress_callback,
+                    )
+
+        try:
+            # Run stdout and stderr readers concurrently, with overall timeout.
+            # read_stdout_jsonl drains stdout (JSONL); read_stderr collects stderr.
+            # Once both finish, the process has exited.
+            await asyncio.wait_for(
+                asyncio.gather(
+                    read_stdout_jsonl(),
+                    read_stderr(),
+                    return_exceptions=False,
+                ),
+                timeout=spec.timeout,
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            log(f"[CODEX] timeout after {spec.timeout}s — killed process")
+            raise
+
+        returncode = process.returncode
         duration = time.monotonic() - t0
 
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            log(f"[CODEX] exit={result.returncode} stderr={stderr[:300]}")
-
-        # Parse JSONL stdout
-        text, session_id, cost_usd, _ = _parse_jsonl_stream(result.stdout)
+        if returncode != 0:
+            log(f"[CODEX] exit={returncode}")
 
         # Determine subtype from exit code
-        if result.returncode == 0:
+        if returncode == 0:
             subtype = "success"
-        elif result.returncode < 0:
+        elif returncode < 0:
             subtype = "killed"
         else:
             subtype = "error"
 
-        # Progress callback: fire a final summary if text was produced
-        if spec.progress_callback and text:
-            spec.progress_callback(f"Completed: {len(text)} chars")
-
         return RunResult(
-            text=text,
-            session_id=session_id,
+            text="\n".join(text_chunks),
+            session_id=session_id[0],
             subtype=subtype,
-            cost_usd=cost_usd,
+            cost_usd=None,  # Phase 4: no pricing tables yet
             duration_seconds=duration,
             plan_file_path=None,
             plan_posted=False,

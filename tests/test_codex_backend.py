@@ -1,19 +1,17 @@
 """Tests for autoswe.harness.backends.codex — CodexBackend via faked subprocess.
 
-All tests mock ``subprocess.run`` to emit canned JSONL output.  No live
-Codex calls are made.  The contract mirrors ``test_claude_runner.py`` and
-``test_backend_base.py``: the same RunSpec → RunResult shape, just a
-different backend.
+All tests mock ``asyncio.create_subprocess_exec`` to emit canned JSONL
+output on the simulated stdout pipe.  No live Codex calls are made.
 """
+import asyncio
 import json
-import subprocess
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.backends.codex import (
     CodexBackend,
     _mode_to_sandbox,
-    _parse_jsonl_stream,
+    _parse_jsonl_line,
 )
 
 # ---------- Helpers ----------
@@ -21,52 +19,98 @@ from autoswe.harness.backends.codex import (
 
 def _jsonl(*events: dict) -> str:
     """Build a JSONL string from a sequence of event dicts."""
-    return "\n".join(json.dumps(e) for e in events)
+    return "\n".join(json.dumps(e) for e in events) + "\n"
 
 
 def _make_success_jsonl(
     thread_id: str = "thread-1",
-    agent_text: str = "Fix applied successfully.",
-    usage: dict | None = None,
+    agent_texts: list[str] | None = None,
 ) -> str:
     """Build a canonical success JSONL stream."""
+    if agent_texts is None:
+        agent_texts = ["Fix applied successfully."]
     events = [
         {"type": "thread.started", "thread_id": thread_id},
         {"type": "turn.started"},
-        {
-            "type": "item.completed",
-            "item": {
-                "id": "item_1",
-                "type": "agent_message",
-                "text": agent_text,
-            },
-        },
     ]
-    if usage is None:
-        usage = {
+    for i, text in enumerate(agent_texts, 1):
+        events.append({
+            "type": "item.started",
+            "item": {"id": f"item_{i}", "type": "agent_message", "text": text},
+        })
+        events.append({
+            "type": "item.completed",
+            "item": {"id": f"item_{i}", "type": "agent_message", "text": text},
+        })
+    events.append({
+        "type": "turn.completed",
+        "usage": {
             "input_tokens": 1000,
             "cached_input_tokens": 900,
             "output_tokens": 200,
             "reasoning_output_tokens": 0,
-        }
-    events.append({"type": "turn.completed", "usage": usage})
+        },
+    })
     return _jsonl(*events)
 
 
-def _run_coro(backend, spec):
-    """Helper: run a CodexBackend coroutine synchronously for testing."""
-    import asyncio
+class _MockProcess:
+    """Fake asyncio subprocess process with controllable stdout/stderr."""
 
-    coro = backend.run(spec)
-    try:
-        return asyncio.run(coro)
-    except RuntimeError as e:
-        # "await" was used outside of running event loop — that's fine,
-        # we used run_in_executor so it should work
-        if "event loop" in str(e).lower():
-            # Fallback: run the inner sync method directly
-            return backend._run_sync(spec)
-        raise
+    def __init__(
+        self,
+        stdout: str = "",
+        stderr: str = "",
+        returncode: int = 0,
+    ):
+        self.returncode = returncode
+        self._stdout_lines = stdout.splitlines(keepends=True) if stdout else []
+        self._stdout_pos = 0
+        self._stdout_bytes = stdout.encode() if stdout else b""
+        self._stderr_bytes = stderr.encode() if stderr else b""
+
+    async def wait(self) -> int:
+        return self.returncode
+
+    @property
+    def stdout(self):
+        return self
+
+    @property
+    def stderr(self):
+        return self
+
+    async def readline(self) -> bytes:
+        if self._stdout_pos < len(self._stdout_lines):
+            line = self._stdout_lines[self._stdout_pos]
+            self._stdout_pos += 1
+            return line.encode()
+        return b""
+
+    async def read(self) -> bytes:
+        return self._stderr_bytes
+
+
+async def _run_backend(backend, spec):
+    """Helper: run a CodexBackend with mocked subprocess."""
+    return await backend._run_async(spec)
+
+
+def _mock_create_process(
+    stdout: str = "",
+    stderr: str = "",
+    returncode: int = 0,
+) -> _MockProcess:
+    return _MockProcess(stdout=stdout, stderr=stderr, returncode=returncode)
+
+
+def _get_cmd(mock_exec: AsyncMock) -> tuple:
+    """Extract the full command tuple from create_subprocess_exec call args.
+
+    create_subprocess_exec(*cmd, ...) spreads the cmd list, so call_args[0]
+    is a tuple of individual arguments: ("codex", "exec", "--json", ...).
+    """
+    return mock_exec.call_args[0]
 
 
 # ---------- Capabilities ----------
@@ -104,8 +148,6 @@ def test_codex_satisfies_protocol():
 
 def test_codex_run_returns_awaitable():
     """run(spec) should return an awaitable (coroutine)."""
-    import asyncio
-
     backend = CodexBackend()
     spec = RunSpec(prompt="test", cwd="/tmp")
     result = backend.run(spec)
@@ -141,137 +183,135 @@ def test_mode_to_sandbox_unknown():
     assert _mode_to_sandbox("unknown_mode") == "read-only"
 
 
-# ---------- JSONL parser ----------
+# ---------- JSONL line parser ----------
 
 
-def test_parse_jsonl_basic():
-    """Parse a minimal success stream."""
-    jsonl = _jsonl(
-        {"type": "thread.started", "thread_id": "t-42"},
-        {"type": "turn.started"},
-        {
+def test_parse_jsonl_line_thread_started():
+    """thread.started sets session_id."""
+    chunks: list[str] = []
+    sid: list[str | None] = [None]
+    _parse_jsonl_line(
+        '{"type":"thread.started","thread_id":"t-42"}',
+        text_chunks=chunks,
+        session_id=sid,
+        callback=None,
+    )
+    assert sid[0] == "t-42"
+    assert not chunks
+
+
+def test_parse_jsonl_line_agent_message_completed():
+    """item.completed agent_message accumulates text."""
+    chunks = []
+    sid = [None]
+    _parse_jsonl_line(
+        json.dumps({
             "type": "item.completed",
             "item": {"id": "i1", "type": "agent_message", "text": "Hello"},
-        },
-        {
-            "type": "turn.completed",
-            "usage": {
-                "input_tokens": 100,
-                "cached_input_tokens": 50,
-                "output_tokens": 10,
-                "reasoning_output_tokens": 0,
-            },
-        },
+        }),
+        text_chunks=chunks,
+        session_id=sid,
+        callback=None,
     )
-    text, sid, cost, dur = _parse_jsonl_stream(jsonl)
-    assert text == "Hello"
-    assert sid == "t-42"
-    assert cost is None  # Phase 4: no pricing yet
-    assert dur >= 0
+    assert chunks == ["Hello"]
 
 
-def test_parse_jsonl_multiple_agent_messages():
-    """Multiple agent_message items are joined with newlines."""
-    jsonl = _jsonl(
-        {"type": "thread.started", "thread_id": "t-1"},
-        {"type": "turn.started"},
-        {
-            "type": "item.completed",
-            "item": {"id": "i1", "type": "agent_message", "text": "Part 1"},
-        },
-        {
-            "type": "item.completed",
-            "item": {"id": "i2", "type": "agent_message", "text": "Part 2"},
-        },
-        {
-            "type": "turn.completed",
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        },
-    )
-    text, sid, _, _ = _parse_jsonl_stream(jsonl)
-    assert text == "Part 1\nPart 2"
-    assert sid == "t-1"
-
-
-def test_parse_jsonl_empty_agent_text_ignored():
-    """Agent messages with empty text are skipped."""
-    jsonl = _jsonl(
-        {"type": "thread.started", "thread_id": "t-1"},
-        {"type": "turn.started"},
-        {
+def test_parse_jsonl_line_empty_text_skipped():
+    """Empty agent_message text is not accumulated."""
+    chunks = []
+    sid = [None]
+    _parse_jsonl_line(
+        json.dumps({
             "type": "item.completed",
             "item": {"id": "i1", "type": "agent_message", "text": ""},
-        },
-        {
+        }),
+        text_chunks=chunks,
+        session_id=sid,
+        callback=None,
+    )
+    assert not chunks
+
+
+def test_parse_jsonl_line_non_json_ignored():
+    """Non-JSON lines are skipped gracefully."""
+    chunks = []
+    sid = [None]
+    _parse_jsonl_line("WARNING: something went wrong", text_chunks=chunks, session_id=sid, callback=None)
+    assert not chunks
+
+
+def test_parse_jsonl_line_turn_failed_logged():
+    """turn.failed doesn't crash the parser."""
+    chunks = []
+    sid = [None]
+    _parse_jsonl_line(
+        '{"type":"turn.failed","error":"Model not found"}',
+        text_chunks=chunks,
+        session_id=sid,
+        callback=None,
+    )
+    assert not chunks
+
+
+def test_parse_jsonl_line_error_event():
+    """error event doesn't crash the parser."""
+    chunks = []
+    sid = [None]
+    _parse_jsonl_line(
+        '{"type":"error","message":"Internal error"}',
+        text_chunks=chunks,
+        session_id=sid,
+        callback=None,
+    )
+    assert not chunks
+
+
+def test_parse_jsonl_line_todo_progress():
+    """todo_list item fires callback with rendered items."""
+    callback = Mock()
+    chunks = []
+    sid = [None]
+    _parse_jsonl_line(
+        json.dumps({
             "type": "item.completed",
-            "item": {"id": "i2", "type": "agent_message", "text": "Real text"},
-        },
-        {
-            "type": "turn.completed",
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        },
+            "item": {
+                "type": "todo_list",
+                "items": [
+                    {"text": "Fix bug", "completed": True},
+                    {"text": "Add tests", "completed": False},
+                ],
+            },
+        }),
+        text_chunks=chunks,
+        session_id=sid,
+        callback=callback,
     )
-    text, _, _, _ = _parse_jsonl_stream(jsonl)
-    assert text == "Real text"
-
-
-def test_parse_jsonl_non_json_lines_skipped():
-    """Non-JSON lines (stderr leaks, progress) are skipped gracefully."""
-    jsonl = (
-        "some progress message\n"
-        '{"type":"thread.started","thread_id":"t-1"}\n'
-        "WARNING: something\n"
-        '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
-    )
-    text, sid, _, _ = _parse_jsonl_stream(jsonl)
-    assert sid == "t-1"
-    assert text == ""
-
-
-def test_parse_jsonl_turn_failed():
-    """turn.failed event is logged but doesn't crash the parser."""
-    jsonl = _jsonl(
-        {"type": "thread.started", "thread_id": "t-1"},
-        {"type": "turn.failed", "error": "Model not found"},
-    )
-    text, sid, _, _ = _parse_jsonl_stream(jsonl)
-    assert sid == "t-1"
-    assert text == ""
-
-
-def test_parse_jsonl_error_event():
-    """error event is logged but doesn't crash the parser."""
-    jsonl = _jsonl(
-        {"type": "thread.started", "thread_id": "t-1"},
-        {"type": "error", "message": "Internal error"},
-    )
-    text, sid, _, _ = _parse_jsonl_stream(jsonl)
-    assert sid == "t-1"
-
-
-def test_parse_jsonl_no_thread_id():
-    """Missing thread_id → session_id stays None."""
-    jsonl = _jsonl(
-        {"type": "thread.started"},
-        {
-            "type": "turn.completed",
-            "usage": {"input_tokens": 1, "output_tokens": 1},
-        },
-    )
-    _, sid, _, _ = _parse_jsonl_stream(jsonl)
-    assert sid is None
+    callback.assert_called_once()
+    assert "✅" in callback.call_args[0][0]
+    assert "☐" in callback.call_args[0][0]
+    assert "Fix bug" in callback.call_args[0][0]
+    assert "Add tests" in callback.call_args[0][0]
 
 
 # ---------- CodexBackend integration (mocked subprocess) ----------
 
 
-def _mock_subprocess_run(returncode=0, stdout="", stderr=""):
-    """Create a mock subprocess.run with the given output."""
-    mock_result = Mock()
-    mock_result.returncode = returncode
-    mock_result.stdout = stdout
-    mock_result.stderr = stderr
-    return mock_result
+# ---------- Shared async helpers for command-flag tests ----------
+
+
+def _async_cmd_test(backend, spec):
+    """Return an async function that runs backend and returns the mock."""
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec
+    return _run
+
+
+# ---------- CodexBackend integration (mocked subprocess) ----------
 
 
 def test_codex_basic_run():
@@ -283,11 +323,17 @@ def test_codex_basic_run():
         model="gpt-5.4",
         mode="read_write",
     )
+    jsonl = _make_success_jsonl(thread_id="sess-codex-1", agent_texts=["Bug fixed."])
 
-    jsonl = _make_success_jsonl(thread_id="sess-codex-1", agent_text="Bug fixed.")
+    async def _run():
+        with patch(
+            "asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=_mock_create_process(stdout=jsonl),
+        ):
+            return await _run_backend(backend, spec)
 
-    with patch("subprocess.run", return_value=_mock_subprocess_run(stdout=jsonl)):
-        result = _run_coro(backend, spec)
+    result = asyncio.run(_run())
 
     assert isinstance(result, RunResult)
     assert result.text == "Bug fixed."
@@ -296,8 +342,8 @@ def test_codex_basic_run():
     assert result.duration_seconds >= 0
 
 
-def test_codex_run_calls_subprocess_with_correct_args():
-    """CodexBackend builds the correct command-line for codex exec."""
+def test_codex_run_calls_with_correct_flags():
+    """CodexBackend builds the correct command-line flags."""
     backend = CodexBackend()
     spec = RunSpec(
         prompt="Fix bug",
@@ -306,20 +352,21 @@ def test_codex_run_calls_subprocess_with_correct_args():
         mode="read_write",
         timeout=300,
     )
-
     jsonl = _make_success_jsonl()
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(stdout=jsonl)
-        _run_coro(backend, spec)
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec
 
-    mock_run.assert_called_once()
-    call_args = mock_run.call_args
-    cmd = call_args[0][0] if call_args[0] else call_args[1].get("cmd", [])
+    cmd = _get_cmd(asyncio.run(_run()))
 
     assert "codex" in cmd
     assert "exec" in cmd
     assert "--json" in cmd
+    assert "--ignore-user-config" in cmd
+    assert "--ignore-rules" in cmd
     assert "--sandbox" in cmd
     assert "workspace-write" in cmd
     assert "--ask-for-approval" in cmd
@@ -334,20 +381,9 @@ def test_codex_run_calls_subprocess_with_correct_args():
 def test_codex_read_only_mode():
     """mode='read_only' produces --sandbox read-only."""
     backend = CodexBackend()
-    spec = RunSpec(
-        prompt="Review code",
-        cwd="/tmp/repo",
-        mode="read_only",
-    )
+    spec = RunSpec(prompt="Review code", cwd="/tmp/repo", mode="read_only")
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
-            stdout=_make_success_jsonl()
-        )
-        _run_coro(backend, spec)
-
-    cmd = mock_run.call_args[0][0]
-    assert cmd.count("--sandbox") == 1
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     idx = cmd.index("--sandbox")
     assert cmd[idx + 1] == "read-only"
 
@@ -355,19 +391,9 @@ def test_codex_read_only_mode():
 def test_codex_plan_mode():
     """mode='plan' produces --sandbox read-only."""
     backend = CodexBackend()
-    spec = RunSpec(
-        prompt="Plan the fix",
-        cwd="/tmp/repo",
-        mode="plan",
-    )
+    spec = RunSpec(prompt="Plan the fix", cwd="/tmp/repo", mode="plan")
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
-            stdout=_make_success_jsonl()
-        )
-        _run_coro(backend, spec)
-
-    cmd = mock_run.call_args[0][0]
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     idx = cmd.index("--sandbox")
     assert cmd[idx + 1] == "read-only"
 
@@ -382,13 +408,7 @@ def test_codex_resume_mode():
         mode="read_write",
     )
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
-            stdout=_make_success_jsonl()
-        )
-        _run_coro(backend, spec)
-
-    cmd = mock_run.call_args[0][0]
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "resume" in cmd
     assert "sess-abc-123" in cmd
 
@@ -398,34 +418,48 @@ def test_codex_error_returncode():
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
-            returncode=1,
-            stdout="",
-            stderr="Model not found",
-        )
-        result = _run_coro(backend, spec)
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            returncode=1, stdout="", stderr="Model not found"
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
 
+    result = asyncio.run(_run())
     assert result.subtype == "error"
     assert result.text == ""
 
 
 def test_codex_timeout():
-    """subprocess.TimeoutExpired is re-raised."""
+    """asyncio.TimeoutError is re-raised after killing the process."""
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", timeout=60)
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=60)
+    async def _run():
+        mock_process = Mock()
+        mock_process.stdout = None
+        mock_process.stderr = None
+        mock_process.kill = Mock()
+        mock_process.wait = AsyncMock(return_value=-9)
+        mock_process.returncode = -9
 
-        import asyncio
+        async def blocking_read():
+            await asyncio.sleep(999)
 
-        coro = backend.run(spec)
-        try:
-            asyncio.run(coro)
-            assert False, "Should have raised TimeoutExpired"
-        except subprocess.TimeoutExpired:
-            pass  # expected
+        mock_process.stdout = Mock()
+        mock_process.stdout.readline = blocking_read
+        mock_process.stderr = Mock()
+        mock_process.stderr.read = AsyncMock(return_value=b"")
+
+        mock_exec = AsyncMock(return_value=mock_process)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    try:
+        asyncio.run(_run())
+        assert False, "Should have raised TimeoutError"
+    except asyncio.TimeoutError:
+        pass  # expected
 
 
 def test_codex_not_found():
@@ -433,37 +467,25 @@ def test_codex_not_found():
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.side_effect = FileNotFoundError("codex")
+    async def _run():
+        mock_exec = AsyncMock(side_effect=FileNotFoundError("codex"))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
 
-        import asyncio
-
-        coro = backend.run(spec)
-        try:
-            asyncio.run(coro)
-            assert False, "Should have raised RuntimeError"
-        except RuntimeError as e:
-            assert "codex" in str(e).lower()
-            assert "npm" in str(e)
+    try:
+        asyncio.run(_run())
+        assert False, "Should have raised RuntimeError"
+    except RuntimeError as e:
+        assert "codex" in str(e).lower()
+        assert "npm" in str(e)
 
 
 def test_codex_default_model():
     """When spec.model is None, default to gpt-5.4."""
     backend = CodexBackend()
-    spec = RunSpec(
-        prompt="Fix",
-        cwd="/tmp",
-        model=None,
-        mode="read_write",
-    )
+    spec = RunSpec(prompt="Fix", cwd="/tmp", model=None, mode="read_write")
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
-            stdout=_make_success_jsonl()
-        )
-        _run_coro(backend, spec)
-
-    cmd = mock_run.call_args[0][0]
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     idx = cmd.index("--model")
     assert cmd[idx + 1] == "gpt-5.4"
 
@@ -478,20 +500,20 @@ def test_codex_env_openai_api_key_from_harness():
         state={"_harness_cfg": {"openai_api_key": "sk-test-key-123"}},
     )
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
             stdout=_make_success_jsonl()
-        )
-        _run_coro(backend, spec)
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec.call_args[1].get("env", {})
 
-    # Check the env kwarg
-    call_kwargs = mock_run.call_args[1]
-    env = call_kwargs.get("env", {})
+    env = asyncio.run(_run())
     assert env.get("OPENAI_API_KEY") == "sk-test-key-123"
 
 
 def test_codex_env_codex_api_key_from_harness():
-    """CODEX_API_KEY from harness profile takes precedence for codex auth."""
+    """CODEX_API_KEY from harness profile is passed to subprocess env."""
     backend = CodexBackend()
     spec = RunSpec(
         prompt="Fix",
@@ -500,14 +522,15 @@ def test_codex_env_codex_api_key_from_harness():
         state={"_harness_cfg": {"codex_api_key": "csk-test-456"}},
     )
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
             stdout=_make_success_jsonl()
-        )
-        _run_coro(backend, spec)
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec.call_args[1].get("env", {})
 
-    call_kwargs = mock_run.call_args[1]
-    env = call_kwargs.get("env", {})
+    env = asyncio.run(_run())
     assert env.get("CODEX_API_KEY") == "csk-test-456"
 
 
@@ -521,21 +544,27 @@ def test_codex_env_overrides():
         env_overrides={"CUSTOM_VAR": "hello"},
     )
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
             stdout=_make_success_jsonl()
-        )
-        _run_coro(backend, spec)
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec.call_args[1].get("env", {})
 
-    call_kwargs = mock_run.call_args[1]
-    env = call_kwargs.get("env", {})
+    env = asyncio.run(_run())
     assert env.get("CUSTOM_VAR") == "hello"
 
 
-def test_codex_progress_callback():
-    """progress_callback is fired with completion summary."""
+def test_codex_progress_callback_streaming():
+    """progress_callback fires with live agent messages during execution."""
     backend = CodexBackend()
     callback = Mock()
+    # Build JSONL with item.started + item.completed agent_message events
+    jsonl = _make_success_jsonl(
+        thread_id="t-1",
+        agent_texts=["Step 1 done.", "Step 2 done."],
+    )
     spec = RunSpec(
         prompt="Fix",
         cwd="/tmp",
@@ -543,21 +572,45 @@ def test_codex_progress_callback():
         progress_callback=callback,
     )
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
-            stdout=_make_success_jsonl(agent_text="Fix applied.")
-        )
-        _run_coro(backend, spec)
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
 
-    callback.assert_called_once()
-    assert "Completed" in callback.call_args[0][0]
-    assert "chars" in callback.call_args[0][0]
+    result = asyncio.run(_run())
+    assert result.text == "Step 1 done.\nStep 2 done."
+    # Callback should have been called for each agent message
+    assert callback.call_count >= 2
+    # At least one call should mention "Agent:"
+    agent_calls = [c for c in callback.call_args_list if "Agent:" in c[0][0]]
+    assert len(agent_calls) >= 2
 
 
-def test_codex_progress_callback_no_text():
-    """No progress callback fire when there's no text output."""
+def test_codex_progress_callback_todo():
+    """progress_callback fires with rendered todo list for todo_list events."""
     backend = CodexBackend()
     callback = Mock()
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "todo_list",
+                "items": [
+                    {"text": "Fix bug", "completed": True},
+                    {"text": "Write tests", "completed": False},
+                ],
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "msg1", "type": "agent_message", "text": "Done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    )
     spec = RunSpec(
         prompt="Fix",
         cwd="/tmp",
@@ -565,13 +618,16 @@ def test_codex_progress_callback_no_text():
         progress_callback=callback,
     )
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
-            stdout=_make_success_jsonl(agent_text="")
-        )
-        _run_coro(backend, spec)
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
 
-    callback.assert_not_called()
+    asyncio.run(_run())
+    # Should have fired at least once with todo content
+    todo_calls = [c for c in callback.call_args_list if "📋" in c[0][0]]
+    assert len(todo_calls) >= 1
+    assert "Fix bug" in todo_calls[0][0][0]
 
 
 def test_codex_result_no_mcp_flags():
@@ -579,15 +635,35 @@ def test_codex_result_no_mcp_flags():
     backend = CodexBackend()
     spec = RunSpec(prompt="Plan", cwd="/tmp", mode="plan")
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
             stdout=_make_success_jsonl()
-        )
-        result = _run_coro(backend, spec)
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
 
+    result = asyncio.run(_run())
     assert result.plan_posted is False
     assert result.question_posted is False
     assert result.plan_file_path is None
+
+
+def test_codex_no_cwd_in_subprocess():
+    """subprocess is NOT given cwd= (Codex handles --cd itself)."""
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp/repo", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        call_kwargs = mock_exec.call_args[1]
+        return "cwd" not in call_kwargs
+
+    has_no_cwd = asyncio.run(_run())
+    assert has_no_cwd, "create_subprocess_exec should NOT receive cwd kwarg"
 
 
 # ---------- factory integration ----------
@@ -598,8 +674,6 @@ def test_factory_codex():
     from autoswe.harness.backends.factory import get_backend
 
     backend = get_backend({"backend": "codex", "model": "gpt-5"})
-    from autoswe.harness.backends.codex import CodexBackend
-
     assert isinstance(backend, CodexBackend)
 
 
@@ -609,8 +683,6 @@ def test_factory_codex_case_insensitive():
 
     for val in ("codex", "CODEX", "Codex"):
         backend = get_backend({"backend": val})
-        from autoswe.harness.backends.codex import CodexBackend
-
         assert isinstance(backend, CodexBackend)
 
 
@@ -630,23 +702,68 @@ def test_backend_has_capability_codex():
     assert not backend_has_capability(harness, "mode")
 
 
-# ---------- RunSpec → RunResult contract ----------
+# ---------- Backend parity (Codex vs Claude Code contract) ----------
 
 
-def test_codex_runresult_tuple_unpacking():
-    """RunResult from Codex supports tuple unpacking (back-compat)."""
-    backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+def test_backend_parity_runresult_shape():
+    """Both backends return RunResult with identical field names."""
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
 
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value = _mock_subprocess_run(
-            stdout=_make_success_jsonl(
-                thread_id="t-99", agent_text="Done"
-            )
-        )
-        result = _run_coro(backend, spec)
+    # Both backends produce RunResult with the same fields
+    codex_caps = CodexBackend.capabilities()
+    claude_caps = ClaudeCodeBackend.capabilities()
 
-    text, session_id, subtype = result
-    assert text == "Done"
-    assert session_id == "t-99"
+    # Both advertise resume
+    assert "resume" in codex_caps
+    assert "resume" in claude_caps
+
+    # Claude has more capabilities (mcp, can_use_tool, etc.)
+    assert "mcp" in claude_caps
+    assert "mcp" not in codex_caps
+
+    assert "can_use_tool" in claude_caps
+    assert "can_use_tool" not in codex_caps
+
+
+def test_backend_parity_run_spec_compatibility():
+    """Both backends accept the same RunSpec fields."""
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+
+    # Both backends can be instantiated and accept a RunSpec
+    codex = CodexBackend()
+    claude = ClaudeCodeBackend()
+
+    spec = RunSpec(
+        prompt="test",
+        cwd="/tmp",
+        model="test-model",
+        mode="read_write",
+        resume=None,
+        max_turns=100,
+        timeout=300,
+        env_overrides={"KEY": "val"},
+        progress_callback=lambda x: None,
+    )
+
+    # Both return awaitables
+    codex_coro = codex.run(spec)
+    claude_coro = claude.run(spec)
+    assert asyncio.iscoroutine(codex_coro)
+    assert asyncio.iscoroutine(claude_coro)
+    codex_coro.close()
+    claude_coro.close()
+
+
+def test_backend_parity_runresult_tuple_unpacking():
+    """Both backends' RunResult supports tuple-style unpacking."""
+    r = RunResult(
+        text="hello",
+        session_id="s1",
+        subtype="success",
+        cost_usd=0.01,
+        duration_seconds=5.0,
+    )
+    text, session_id, subtype = r
+    assert text == "hello"
+    assert session_id == "s1"
     assert subtype == "success"
