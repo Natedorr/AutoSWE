@@ -50,6 +50,7 @@ def _parse_jsonl_line(
     *,
     text_chunks: list[str],
     session_id: list[str | None],
+    turn_failed: list[bool],
     callback,
 ) -> None:
     """Parse a single JSONL event line and update accumulators in-place.
@@ -78,7 +79,7 @@ def _parse_jsonl_line(
         item = event.get("item", {})
         item_type = item.get("type", "")
         # item.started is the "in progress" signal — fire progress
-        if callback and item_type in ("agent_message", "command_execution"):
+        if callback and item_type in ("agent_message", "command_execution", "summary_output"):
             info = item.get("text", item.get("command", ""))
             if info:
                 callback(f"Working: {info[:120]}")
@@ -87,7 +88,7 @@ def _parse_jsonl_line(
         item = event.get("item", {})
         item_type = item.get("type", "")
 
-        if item_type == "agent_message":
+        if item_type in ("agent_message", "summary_output"):
             text = item.get("text", "")
             if text:
                 text_chunks.append(text)
@@ -111,6 +112,12 @@ def _parse_jsonl_line(
     elif etype == "turn.failed":
         error = event.get("error", "")
         log(f"[CODEX] turn.failed: {error}")
+        turn_failed[0] = True
+
+    elif etype == "turn.completed":
+        usage = event.get("usage", {})
+        if usage:
+            log(f"[CODEX] turn.completed usage={usage}")
 
     elif etype == "error":
         error = event.get("message", event.get("error", "unknown error"))
@@ -137,7 +144,7 @@ class CodexBackend:
     returns a RunResult.
     """
 
-    CAPABILITIES: set[str] = {"resume", "progress_stream"}
+    CAPABILITIES: set[str] = {"mode", "resume", "progress_stream"}
 
     @classmethod
     def capabilities(cls) -> set[str]:
@@ -181,6 +188,14 @@ class CodexBackend:
         # it's the continuation instruction)
         cmd.append(spec.prompt)
 
+        # Ephemeral: don't persist session files (unless resuming, which needs them)
+        if not spec.resume:
+            cmd.append("--ephemeral")
+
+        # Limit turns to prevent runaway sessions
+        if spec.max_turns and spec.max_turns != 200:
+            cmd.extend(["-c", f"agent.max_turns={spec.max_turns}"])
+
         # Build environment
         env = dict(os.environ)
         # Auth: OPENAI_API_KEY or CODEX_API_KEY from profile or env
@@ -215,6 +230,7 @@ class CodexBackend:
         # Accumulators (list-wrappers for in-place mutation in _parse_jsonl_line)
         text_chunks: list[str] = []
         session_id: list[str | None] = [None]
+        turn_failed: list[bool] = [False]
 
         async def read_stderr() -> bytes:
             """Collect all stderr output (non-JSON progress/debug)."""
@@ -234,6 +250,7 @@ class CodexBackend:
                         text,
                         text_chunks=text_chunks,
                         session_id=session_id,
+                        turn_failed=turn_failed,
                         callback=spec.progress_callback,
                     )
 
@@ -261,9 +278,11 @@ class CodexBackend:
         if returncode != 0:
             log(f"[CODEX] exit={returncode}")
 
-        # Determine subtype from exit code
-        if returncode == 0:
+        # Determine subtype from exit code and turn failures
+        if returncode == 0 and not turn_failed[0]:
             subtype = "success"
+        elif returncode == 0 and turn_failed[0]:
+            subtype = "error"
         elif returncode < 0:
             subtype = "killed"
         else:

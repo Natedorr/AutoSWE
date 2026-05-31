@@ -24,9 +24,9 @@
   },
 
   "codex-gpt5": {
-    "_comment": "Phase 4 — requires 'codex' CLI on PATH and OPENAI_API_KEY",
+    "_comment": "Phase 4 — requires 'codex' CLI on PATH and CODEX_API_KEY (or openai_api_key as fallback)",
     "backend": "codex",
     "model": "gpt-5",
-    "api_key_env": "OPENAI_API_KEY"
+    "codex_api_key": "${CODEX_API_KEY}"
   }
 }

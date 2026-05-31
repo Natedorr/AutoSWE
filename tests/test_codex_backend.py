@@ -117,8 +117,9 @@ def _get_cmd(mock_exec: AsyncMock) -> tuple:
 
 
 def test_codex_capabilities():
-    """CodexBackend advertises resume and progress_stream only."""
+    """CodexBackend advertises mode, resume and progress_stream."""
     caps = CodexBackend.capabilities()
+    assert "mode" in caps
     assert "resume" in caps
     assert "progress_stream" in caps
     # Phase 4: no mcp, no can_use_tool, no plan_permission yet
@@ -190,10 +191,12 @@ def test_parse_jsonl_line_thread_started():
     """thread.started sets session_id."""
     chunks: list[str] = []
     sid: list[str | None] = [None]
+    tf: list[bool] = [False]
     _parse_jsonl_line(
         '{"type":"thread.started","thread_id":"t-42"}',
         text_chunks=chunks,
         session_id=sid,
+        turn_failed=tf,
         callback=None,
     )
     assert sid[0] == "t-42"
@@ -204,6 +207,7 @@ def test_parse_jsonl_line_agent_message_completed():
     """item.completed agent_message accumulates text."""
     chunks = []
     sid = [None]
+    tf = [False]
     _parse_jsonl_line(
         json.dumps({
             "type": "item.completed",
@@ -211,15 +215,39 @@ def test_parse_jsonl_line_agent_message_completed():
         }),
         text_chunks=chunks,
         session_id=sid,
+        turn_failed=tf,
         callback=None,
     )
     assert chunks == ["Hello"]
+
+
+def test_parse_jsonl_line_summary_output_collected():
+    """item.completed summary_output accumulates text."""
+    chunks = []
+    sid = [None]
+    tf = [False]
+    callback = Mock()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "s1", "type": "summary_output", "text": "All done."},
+        }),
+        text_chunks=chunks,
+        session_id=sid,
+        turn_failed=tf,
+        callback=callback,
+    )
+    assert chunks == ["All done."]
+    # Callback should have fired with Agent: prefix
+    callback.assert_called_once()
+    assert "Agent: All done." in callback.call_args[0][0]
 
 
 def test_parse_jsonl_line_empty_text_skipped():
     """Empty agent_message text is not accumulated."""
     chunks = []
     sid = [None]
+    tf = [False]
     _parse_jsonl_line(
         json.dumps({
             "type": "item.completed",
@@ -227,6 +255,7 @@ def test_parse_jsonl_line_empty_text_skipped():
         }),
         text_chunks=chunks,
         session_id=sid,
+        turn_failed=tf,
         callback=None,
     )
     assert not chunks
@@ -236,18 +265,40 @@ def test_parse_jsonl_line_non_json_ignored():
     """Non-JSON lines are skipped gracefully."""
     chunks = []
     sid = [None]
-    _parse_jsonl_line("WARNING: something went wrong", text_chunks=chunks, session_id=sid, callback=None)
+    tf = [False]
+    _parse_jsonl_line("WARNING: something went wrong", text_chunks=chunks, session_id=sid, turn_failed=tf, callback=None)
     assert not chunks
 
 
-def test_parse_jsonl_line_turn_failed_logged():
-    """turn.failed doesn't crash the parser."""
+def test_parse_jsonl_line_turn_failed_sets_flag():
+    """turn.failed sets turn_failed flag for downstream subtype logic."""
     chunks = []
     sid = [None]
+    tf = [False]
     _parse_jsonl_line(
         '{"type":"turn.failed","error":"Model not found"}',
         text_chunks=chunks,
         session_id=sid,
+        turn_failed=tf,
+        callback=None,
+    )
+    assert not chunks
+    assert tf[0] is True
+
+
+def test_parse_jsonl_line_turn_completed_logged():
+    """turn.completed doesn't crash the parser."""
+    chunks = []
+    sid = [None]
+    tf = [False]
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "turn.completed",
+            "usage": {"input_tokens": 100, "output_tokens": 50},
+        }),
+        text_chunks=chunks,
+        session_id=sid,
+        turn_failed=tf,
         callback=None,
     )
     assert not chunks
@@ -257,10 +308,12 @@ def test_parse_jsonl_line_error_event():
     """error event doesn't crash the parser."""
     chunks = []
     sid = [None]
+    tf = [False]
     _parse_jsonl_line(
         '{"type":"error","message":"Internal error"}',
         text_chunks=chunks,
         session_id=sid,
+        turn_failed=tf,
         callback=None,
     )
     assert not chunks
@@ -271,6 +324,7 @@ def test_parse_jsonl_line_todo_progress():
     callback = Mock()
     chunks = []
     sid = [None]
+    tf = [False]
     _parse_jsonl_line(
         json.dumps({
             "type": "item.completed",
@@ -284,6 +338,7 @@ def test_parse_jsonl_line_todo_progress():
         }),
         text_chunks=chunks,
         session_id=sid,
+        turn_failed=tf,
         callback=callback,
     )
     callback.assert_called_once()
@@ -435,22 +490,22 @@ def test_codex_timeout():
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", timeout=60)
 
+    mock_process = Mock()
+    mock_process.stdout = None
+    mock_process.stderr = None
+    mock_process.kill = Mock()
+    mock_process.wait = AsyncMock(return_value=-9)
+    mock_process.returncode = -9
+
+    async def blocking_read():
+        await asyncio.sleep(999)
+
+    mock_process.stdout = Mock()
+    mock_process.stdout.readline = blocking_read
+    mock_process.stderr = Mock()
+    mock_process.stderr.read = AsyncMock(return_value=b"")
+
     async def _run():
-        mock_process = Mock()
-        mock_process.stdout = None
-        mock_process.stderr = None
-        mock_process.kill = Mock()
-        mock_process.wait = AsyncMock(return_value=-9)
-        mock_process.returncode = -9
-
-        async def blocking_read():
-            await asyncio.sleep(999)
-
-        mock_process.stdout = Mock()
-        mock_process.stdout.readline = blocking_read
-        mock_process.stderr = Mock()
-        mock_process.stderr.read = AsyncMock(return_value=b"")
-
         mock_exec = AsyncMock(return_value=mock_process)
         with patch("asyncio.create_subprocess_exec", mock_exec):
             return await _run_backend(backend, spec)
@@ -460,6 +515,9 @@ def test_codex_timeout():
         assert False, "Should have raised TimeoutError"
     except asyncio.TimeoutError:
         pass  # expected
+
+    # Verify the process was actually killed on timeout
+    mock_process.kill.assert_called_once()
 
 
 def test_codex_not_found():
@@ -666,6 +724,99 @@ def test_codex_no_cwd_in_subprocess():
     assert has_no_cwd, "create_subprocess_exec should NOT receive cwd kwarg"
 
 
+def test_codex_summary_output_collected():
+    """summary_output items are accumulated in RunResult.text."""
+    backend = CodexBackend()
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "msg1", "type": "agent_message", "text": "Step 1"},
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "sum1", "type": "summary_output", "text": "Summary: done"},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    )
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert "Step 1" in result.text
+    assert "Summary: done" in result.text
+
+
+def test_codex_turn_failed_affects_subtype():
+    """JSONL with turn.failed + exit 0 produces subtype='error'."""
+    backend = CodexBackend()
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "turn.failed", "error": "Model quota exceeded"},
+    )
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=jsonl, returncode=0
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.subtype == "error"
+
+
+def test_codex_ephemeral_fresh_run():
+    """Fresh run (no resume) includes --ephemeral flag."""
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--ephemeral" in cmd
+
+
+def test_codex_no_ephemeral_resume():
+    """Resume run omits --ephemeral (needs persistent session files)."""
+    backend = CodexBackend()
+    spec = RunSpec(
+        prompt="Continue",
+        cwd="/tmp",
+        resume="sess-abc",
+        mode="read_write",
+    )
+
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--ephemeral" not in cmd
+
+
+def test_codex_max_turns_flag():
+    """Non-default max_turns adds -c agent.max_turns=N to command."""
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=80)
+
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "-c" in cmd
+    idx = cmd.index("-c")
+    assert cmd[idx + 1] == "agent.max_turns=80"
+
+
+def test_codex_default_max_turns_no_flag():
+    """Default max_turns (200) does NOT add -c flag."""
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=200)
+
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "-c" not in cmd
+
+
 # ---------- factory integration ----------
 
 
@@ -694,12 +845,12 @@ def test_backend_has_capability_codex():
     from autoswe.harness.runner import backend_has_capability
 
     harness = {"backend": "codex"}
+    assert backend_has_capability(harness, "mode")
     assert backend_has_capability(harness, "resume")
     assert backend_has_capability(harness, "progress_stream")
     assert not backend_has_capability(harness, "mcp")
     assert not backend_has_capability(harness, "can_use_tool")
     assert not backend_has_capability(harness, "plan_permission")
-    assert not backend_has_capability(harness, "mode")
 
 
 # ---------- Backend parity (Codex vs Claude Code contract) ----------

@@ -43,6 +43,7 @@ When autoSWE processes an issue that touches any `autoswe/` module, the work **m
 - New worktree operations → `test_worktree.py`
 - New config options → `test_config.py`
 - New harness config or backend factory logic → `test_config.py` or `test_backend_factory.py`
+- Codex backend (JSONL parsing, subprocess, capabilities) → `test_codex_backend.py`
 - Queue store invariants, crash recovery → `test_queue_store.py`
 - PID contention, repo locks, concurrency races → `test_concurrency.py`
 - Queue/API drift scenarios → `test_drift_detection.py`

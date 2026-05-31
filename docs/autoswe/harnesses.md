@@ -14,9 +14,11 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | `model` | No | `""` | Model ID (e.g. `"claude-opus-4-8"`, `"gpt-5"`) |
 | `timeout` | No | (from env) | Backend-specific timeout in seconds |
 | `cli_path` | No | (from env) | Path to the CLI binary (e.g. `claude` or `codex`) |
-| `api_key_env` | No | — | Env var name for the API key (Codex: `"OPENAI_API_KEY"`) |
+| `codex_api_key` | No | — | API key for Codex backend (sets `CODEX_API_KEY` env var) |
+| `openai_api_key` | No | — | Alternative API key for Codex backend (sets `OPENAI_API_KEY` env var) |
 | `anthropic_base_url` | No | (from env) | Custom API endpoint (Claude Code only) |
 | `anthropic_auth_token` | No | (from env) | Auth token (Claude Code only) |
+| `anthropic_api_key` | No | (from env) | API key (Claude Code only) |
 
 ### Resolution Order
 
@@ -43,7 +45,7 @@ Code path: `config.py:resolve_harness()`.
   "codex-gpt5": {
     "backend": "codex",
     "model": "gpt-5",
-    "api_key_env": "OPENAI_API_KEY"
+    "codex_api_key": "${CODEX_API_KEY}"
   }
 }
 ```
