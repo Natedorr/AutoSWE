@@ -506,7 +506,7 @@ class TestApplyEffectCreatePrBranchLinking:
         repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
 
         with patch("autoswe.providers.github.adapter.get_vcs", return_value=MockVCS()):
-            with patch("autoswe.providers.github.adapter._get_remote_branch_sha",
+            with patch("autoswe.providers.github.adapter.get_remote_branch_sha",
                        return_value="abcdef1"):
                 from autoswe.providers.github.adapter import apply_effect
                 effect = Effect(
@@ -569,7 +569,7 @@ class TestApplyEffectCreatePrBranchLinking:
         repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
 
         with patch("autoswe.providers.github.adapter.get_vcs", return_value=FailingVCS()):
-            with patch("autoswe.providers.github.adapter._get_remote_branch_sha",
+            with patch("autoswe.providers.github.adapter.get_remote_branch_sha",
                        return_value="abcdef1"):
                 from autoswe.providers.github.adapter import apply_effect
                 effect = Effect(
@@ -599,7 +599,7 @@ class TestApplyEffectCreatePrBranchLinking:
         repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
 
         with patch("autoswe.providers.github.adapter.get_vcs", return_value=MockVCS()):
-            with patch("autoswe.providers.github.adapter._get_remote_branch_sha",
+            with patch("autoswe.providers.github.adapter.get_remote_branch_sha",
                        return_value=None):
                 from autoswe.providers.github.adapter import apply_effect
                 effect = Effect(
@@ -612,4 +612,76 @@ class TestApplyEffectCreatePrBranchLinking:
                 apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
 
         # Should NOT call link_branch_to_issue when SHA is unknown
+        assert len(link_calls) == 0
+
+
+class TestApplyEffectAzureCreatePr:
+    """Azure adapter create_pr should call link_branch_to_issue (issue #49 fix)."""
+
+    def test_azure_create_pr_calls_link_branch(self):
+        """Azure adapter should call link_branch_to_issue after PR creation."""
+        tracker = MagicMock()
+        queue = {}
+        link_calls = []
+
+        class MockVCS:
+            def find_existing_pr(self, *a, **kw):
+                return None
+            def open_pull_request(self, *a, **kw):
+                return PRResult(
+                    url="https://dev.azure.com/o/p/_git/r/pr/42",
+                    number=42,
+                )
+            def link_branch_to_issue(self, issue_number, commit_sha, branch):
+                link_calls.append((issue_number, commit_sha, branch))
+
+        repo_cfg = {"provider": "azure", "org": "o", "project": "p", "repo": "r", "pat": "fake"}
+
+        with patch("autoswe.providers.azure.adapter.get_vcs", return_value=MockVCS()):
+            from autoswe.providers.azure.adapter import apply_effect
+            effect = Effect(
+                kind="create_pr",
+                pr_title="Fixes #1: Test",
+                pr_body="Fixes #1",
+                pr_head="autoswe/issue-1",
+                pr_base="main",
+            )
+            apply_effect(tracker, effect, repo_cfg, 1, queue, "ado__owner_repo_1")
+
+        assert len(link_calls) == 1
+        assert link_calls[0][0] == 1
+
+    def test_azure_create_pr_no_link_when_existing(self):
+        """When PR already exists on Azure, link_branch_to_issue is not called."""
+        tracker = MagicMock()
+        queue = {}
+        link_calls = []
+
+        class MockVCS:
+            def find_existing_pr(self, *a, **kw):
+                return PRResult(
+                    url="https://dev.azure.com/o/p/_git/r/pr/15",
+                    number=15,
+                )
+            def open_pull_request(self, *a, **kw):
+                return PRResult(
+                    url="https://dev.azure.com/o/p/_git/r/pr/42",
+                    number=42,
+                )
+            def link_branch_to_issue(self, issue_number, commit_sha, branch):
+                link_calls.append((issue_number, commit_sha, branch))
+
+        repo_cfg = {"provider": "azure", "org": "o", "project": "p", "repo": "r", "pat": "fake"}
+
+        with patch("autoswe.providers.azure.adapter.get_vcs", return_value=MockVCS()):
+            from autoswe.providers.azure.adapter import apply_effect
+            effect = Effect(
+                kind="create_pr",
+                pr_title="Fixes #1: Test",
+                pr_body="Fixes #1",
+                pr_head="autoswe/issue-1",
+                pr_base="main",
+            )
+            apply_effect(tracker, effect, repo_cfg, 1, queue, "ado__owner_repo_1")
+
         assert len(link_calls) == 0

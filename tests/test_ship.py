@@ -456,7 +456,7 @@ def test_open_pr_links_branch_after_new_pr(mock_gh_post_comment):
 
     with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
          patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
-         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value="abcdef1"):
+         patch("autoswe.vcs.ship.get_remote_branch_sha", return_value="abcdef1"):
         mock_vcs = _mock_vcs_with_link(
             pr_url="https://github.com/o/r/pull/42",
             existing_pr=None,
@@ -484,7 +484,7 @@ def test_open_pr_links_branch_for_existing_pr(mock_gh_post_comment):
 
     with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
          patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
-         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value="fedcba2"):
+         patch("autoswe.vcs.ship.get_remote_branch_sha", return_value="fedcba2"):
         mock_vcs = _mock_vcs_with_link(existing_pr=existing)
         mock_get_vcs.return_value = mock_vcs
         mock_get_tracker.return_value = _mock_tracker()
@@ -503,7 +503,7 @@ def test_open_pr_skip_link_when_flag_false(mock_gh_post_comment):
 
     with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
          patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
-         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value="abcdef1"):
+         patch("autoswe.vcs.ship.get_remote_branch_sha", return_value="abcdef1"):
         mock_vcs = _mock_vcs_with_link(
             pr_url="https://github.com/o/r/pull/42",
             existing_pr=None,
@@ -524,7 +524,7 @@ def test_open_pr_no_link_when_sha_fetch_fails(mock_gh_post_comment):
 
     with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
          patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
-         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value=None):
+         patch("autoswe.vcs.ship.get_remote_branch_sha", return_value=None):
         mock_vcs = _mock_vcs_with_link(
             pr_url="https://github.com/o/r/pull/42",
             existing_pr=None,
@@ -554,7 +554,7 @@ def test_open_pr_link_failure_does_not_fail_pr(mock_gh_post_comment):
 
     with patch("autoswe.vcs.ship.get_vcs", return_value=FailingLinkVCS()), \
          patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
-         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value="abcdef1"):
+         patch("autoswe.vcs.ship.get_remote_branch_sha", return_value="abcdef1"):
         mock_get_tracker.return_value = _mock_tracker()
 
         from autoswe.vcs.ship import open_pr

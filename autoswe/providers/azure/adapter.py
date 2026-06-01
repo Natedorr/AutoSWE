@@ -178,3 +178,8 @@ def apply_effect(
                 title=effect.pr_title or "",
                 body=body,
             )
+            # Best-effort: link branch to issue in platform UI (no-op for Azure)
+            try:
+                vcs.link_branch_to_issue(issue_num, "", branch)
+            except Exception:
+                pass

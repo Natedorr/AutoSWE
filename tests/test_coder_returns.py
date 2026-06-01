@@ -964,6 +964,7 @@ def test_run_fix_link_branch_skipped_when_flag_false(tmp_path):
     # Reset the module-level flag
     import autoswe.harness.coder as coder_mod
     coder_mod._scope_error_warned = False
+    coder_mod._link_disabled_warned = False
 
     task = make_task()
     link_calls = []

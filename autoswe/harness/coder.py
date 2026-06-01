@@ -22,6 +22,7 @@ from autoswe.vcs.worktree import (
 dbg = init_debug_logger(LOGS_DIR)
 
 _scope_error_warned = False
+_link_disabled_warned = False
 
 # Inline comment MCP tool (only used when a PR exists, passed as extra_tools)
 _MCP_INLINE_COMMENT_TOOLS = [
@@ -230,8 +231,9 @@ def _finalize_fix(
         except Exception as e:
             dbg.warning("link_branch_to_issue failed: %s", e, exc_info=True)
     else:
-        if not _scope_error_warned:
-            _scope_error_warned = True
+        global _link_disabled_warned
+        if not _link_disabled_warned:
+            _link_disabled_warned = True
             log("[FIX] link_branch_to_issue disabled by LINK_BRANCH_TO_ISSUE=false")
 
     log(f"[FIX] {task['id']} committed sha={commit_result['commit_sha']} branch={commit_result['branch']}")

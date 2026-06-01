@@ -8,6 +8,36 @@ from autoswe.providers.factory import get_vcs
 dbg = init_debug_logger(LOGS_DIR)
 
 
+def get_remote_branch_sha(
+    owner: str,
+    repo: str,
+    branch: str,
+    token: str,
+    provider: str = "github",
+) -> str | None:
+    """Get the SHA at the tip of a remote branch without cloning.
+
+    Uses the VCS provider's ``clone_url()`` to get the correct HTTPS URL
+    for the given provider (GitHub, Azure DevOps, etc.).
+    """
+    repo_cfg = {"owner": owner, "repo": repo, "token": token, "provider": provider}
+    try:
+        clone_url = get_vcs(repo_cfg).clone_url(repo_cfg)
+    except Exception as e:
+        dbg.debug("get_remote_branch_sha: clone_url failed: %s", e)
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", clone_url, branch],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.split()[0]
+    except Exception as e:
+        dbg.debug("get_remote_branch_sha: ls-remote failed: %s", e)
+    return None
+
+
 def _worktrees_root(cfg: dict) -> Path:
     """Absolute path to the worktrees directory."""
     worktree_dir = cfg.get("WORKTREE_DIR", "worktrees")
