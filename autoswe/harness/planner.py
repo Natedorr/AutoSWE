@@ -227,7 +227,7 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
     provider = repo_cfg.get("provider", "github")
 
     if wt is None:
-        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg, provider,
+        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
                              default_branch=base_branch, pull_strategy="reset", push_new=False)
     dbg.debug("PLAN: worktree=%s", wt)
     prompt = build_plan_prompt(task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance)
@@ -312,7 +312,7 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
     provider = repo_cfg.get("provider", "github")
 
     if wt is None:
-        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg, provider,
+        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
                              default_branch=base_branch, pull_strategy="reset", push_new=False)
     dbg.debug("PLAN_RESUME: worktree=%s session=%s", wt, session_id)
 

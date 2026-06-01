@@ -73,12 +73,12 @@ def run_review(
     provider = repo_cfg.get("provider", "github")
 
     # 1. Worktree — reuse if present, create if missing
-    wt = worktree_path(owner, repo, issue_num, cfg, provider)
+    wt = worktree_path(owner, repo, issue_num, cfg or {}, provider)
     if wt.exists():
         log(f"[REVIEW] Reusing worktree {wt}")
     else:
         wt = create_worktree(
-            owner, repo, issue_num, base_branch, token, cfg, provider,
+            owner, repo, issue_num, base_branch, token, cfg or {}, provider,
             default_branch=base_branch, pull_strategy="reset", push_new=False,
         )
 

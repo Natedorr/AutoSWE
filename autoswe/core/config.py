@@ -21,9 +21,8 @@ def _expand_env(value: str) -> str:
 def _expand_env_dict(obj: dict) -> dict:
     """Recursively expand ``${VAR}`` env references in dict string values.
 
-    Raises ``ValueError`` if a config value is a ``list``, since
-    ``${VAR}`` references inside arrays would otherwise be silently
-    skipped.
+    List values are recursed into: string elements are expanded, non-string
+    elements (booleans, numbers, nested dicts) are passed through unchanged.
     """
     result = {}
     for key, value in obj.items():
@@ -32,10 +31,9 @@ def _expand_env_dict(obj: dict) -> dict:
         elif isinstance(value, dict):
             result[key] = _expand_env_dict(value)
         elif isinstance(value, list):
-            raise ValueError(
-                f"Cannot expand env vars in list value for key '{key}'. "
-                "Harness config values must be strings or dicts, not lists."
-            )
+            result[key] = [_expand_env(item) if isinstance(item, str)
+                           else _expand_env_dict(item) if isinstance(item, dict)
+                           else item for item in value]
         else:
             result[key] = value
     return result
