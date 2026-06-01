@@ -422,3 +422,142 @@ def test_open_pr_body_minimal_when_no_issue_body(mock_gh_post_comment):
     assert "**Issue:**" not in pr_body
     assert "**Fix Summary:**" not in pr_body
     assert "Opened by autoSWE." in pr_body
+
+
+# ---------------------------------------------------------------------------
+# open_pr — branch linking (issue #49)
+# ---------------------------------------------------------------------------
+
+def _mock_vcs_with_link(pr_url=None, pr_num=None, raise_exc=None, existing_pr=None):
+    """Build a mock VCS provider with link_branch_to_issue tracking."""
+    link_calls = []
+
+    class MockVCS:
+        def find_existing_pr(self, *a, **kw):
+            return existing_pr
+        def open_pull_request(self, *a, **kw):
+            if raise_exc is not None:
+                raise raise_exc
+            return PRResult(
+                url=pr_url or f"https://github.com/o/r/pull/{pr_num or 42}",
+                number=pr_num,
+            )
+        def link_branch_to_issue(self, issue_number, commit_sha, branch):
+            link_calls.append((issue_number, commit_sha, branch))
+
+    mock = MockVCS()
+    mock.link_calls = link_calls
+    return mock
+
+
+def test_open_pr_links_branch_after_new_pr(mock_gh_post_comment):
+    """open_pr should call link_branch_to_issue after creating a new PR."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value="abcdef1"):
+        mock_vcs = _mock_vcs_with_link(
+            pr_url="https://github.com/o/r/pull/42",
+            existing_pr=None,
+        )
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")
+    assert len(mock_vcs.link_calls) == 1
+    assert mock_vcs.link_calls[0][0] == 1  # issue_number
+    assert mock_vcs.link_calls[0][1] == "abcdef1"  # commit_sha
+    assert mock_vcs.link_calls[0][2] == "autoswe/issue-1"  # branch
+
+
+def test_open_pr_links_branch_for_existing_pr(mock_gh_post_comment):
+    """open_pr should also link branch when PR already exists."""
+    task = make_task()
+    existing = PRResult(
+        url="https://github.com/o/r/pull/15",
+        number=15,
+    )
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value="fedcba2"):
+        mock_vcs = _mock_vcs_with_link(existing_pr=existing)
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result == "DONE: PR https://github.com/o/r/pull/15"
+    assert len(mock_vcs.link_calls) == 1
+    assert mock_vcs.link_calls[0][1] == "fedcba2"
+
+
+def test_open_pr_skip_link_when_flag_false(mock_gh_post_comment):
+    """When LINK_BRANCH_TO_ISSUE=false, open_pr should not call link_branch_to_issue."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value="abcdef1"):
+        mock_vcs = _mock_vcs_with_link(
+            pr_url="https://github.com/o/r/pull/42",
+            existing_pr=None,
+        )
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok", "LINK_BRANCH_TO_ISSUE": False})
+
+    assert result.startswith("DONE: PR")
+    assert len(mock_vcs.link_calls) == 0
+
+
+def test_open_pr_no_link_when_sha_fetch_fails(mock_gh_post_comment):
+    """When branch SHA fetch fails, link_branch_to_issue should not be called."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value=None):
+        mock_vcs = _mock_vcs_with_link(
+            pr_url="https://github.com/o/r/pull/42",
+            existing_pr=None,
+        )
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")
+    # link_branch_to_issue should NOT be called when SHA is None
+    assert len(mock_vcs.link_calls) == 0
+
+
+def test_open_pr_link_failure_does_not_fail_pr(mock_gh_post_comment):
+    """If link_branch_to_issue raises, open_pr should still return DONE."""
+    task = make_task()
+
+    class FailingLinkVCS:
+        def find_existing_pr(self, *a, **kw):
+            return None
+        def open_pull_request(self, *a, **kw):
+            return PRResult(url="https://github.com/o/r/pull/42", number=42)
+        def link_branch_to_issue(self, issue_number, commit_sha, branch):
+            raise RuntimeError("API down")
+
+    with patch("autoswe.vcs.ship.get_vcs", return_value=FailingLinkVCS()), \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship._get_remote_branch_sha", return_value="abcdef1"):
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")

@@ -5,6 +5,8 @@ so the orchestrator can stay provider-agnostic.
 """
 from __future__ import annotations
 
+import subprocess
+
 from autoswe.orch.types import ApiState, Effect
 from autoswe.providers.base import IssueTracker, NormalizedComment
 from autoswe.providers.factory import get_vcs
@@ -148,3 +150,33 @@ def apply_effect(
                 title=effect.pr_title or "",
                 body=body,
             )
+            # Best-effort: link branch to issue in platform UI
+            _try_link_branch_to_issue(vcs, repo_cfg, issue_num, branch)
+
+
+def _try_link_branch_to_issue(vcs, repo_cfg: dict, issue_num: int, branch: str) -> None:
+    """Best-effort link branch to issue after PR creation (adapter path)."""
+    owner = repo_cfg.get("owner", "")
+    repo = repo_cfg.get("repo", "")
+    if not owner or not repo:
+        return
+    commit_sha = _get_remote_branch_sha(owner, repo, branch)
+    if commit_sha:
+        try:
+            vcs.link_branch_to_issue(issue_num, commit_sha, branch)
+        except Exception:
+            pass  # Silently ignore — best-effort only
+
+
+def _get_remote_branch_sha(owner: str, repo: str, branch: str) -> str | None:
+    """Get the SHA at the tip of a remote branch without cloning."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", f"https://github.com/{owner}/{repo}.git", branch],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.split()[0]
+    except Exception:
+        pass
+    return None

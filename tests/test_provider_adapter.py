@@ -484,3 +484,132 @@ class TestApplyEffectCreatePr:
         vcs.find_existing_pr.assert_called_once()
         # open_pull_request must NOT be called when PR exists
         vcs.open_pull_request.assert_not_called()
+
+
+class TestApplyEffectCreatePrBranchLinking:
+    """create_pr effect should link branch to issue after PR creation (issue #49)."""
+
+    def test_github_create_pr_links_branch(self):
+        """After creating a new PR, link_branch_to_issue should be called."""
+        tracker = MagicMock()
+        queue = {}
+        link_calls = []
+
+        class MockVCS:
+            def find_existing_pr(self, *a, **kw):
+                return None
+            def open_pull_request(self, *a, **kw):
+                return PRResult(url="https://github.com/o/r/pull/42", number=42)
+            def link_branch_to_issue(self, issue_number, commit_sha, branch):
+                link_calls.append((issue_number, commit_sha, branch))
+
+        repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=MockVCS()):
+            with patch("autoswe.providers.github.adapter._get_remote_branch_sha",
+                       return_value="abcdef1"):
+                from autoswe.providers.github.adapter import apply_effect
+                effect = Effect(
+                    kind="create_pr",
+                    pr_title="Fixes #1: Test",
+                    pr_body="Fixes #1",
+                    pr_head="autoswe/issue-1",
+                    pr_base="main",
+                )
+                apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
+
+        assert len(link_calls) == 1
+        assert link_calls[0][0] == 1
+        assert link_calls[0][1] == "abcdef1"
+        assert link_calls[0][2] == "autoswe/issue-1"
+
+    def test_github_create_pr_no_link_when_existing(self):
+        """When PR already exists, link_branch_to_issue should NOT be called."""
+        tracker = MagicMock()
+        queue = {}
+        link_calls = []
+
+        class MockVCS:
+            def find_existing_pr(self, *a, **kw):
+                return PRResult(url="https://github.com/o/r/pull/15", number=15)
+            def open_pull_request(self, *a, **kw):
+                return PRResult(url="https://github.com/o/r/pull/42", number=42)
+            def link_branch_to_issue(self, issue_number, commit_sha, branch):
+                link_calls.append((issue_number, commit_sha, branch))
+
+        repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=MockVCS()):
+            from autoswe.providers.github.adapter import apply_effect
+            effect = Effect(
+                kind="create_pr",
+                pr_title="Fixes #1: Test",
+                pr_body="Fixes #1",
+                pr_head="autoswe/issue-1",
+                pr_base="main",
+            )
+            apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
+
+        # link_branch_to_issue should NOT be called when PR exists
+        assert len(link_calls) == 0
+
+    def test_github_create_pr_link_failure_does_not_break(self):
+        """If link_branch_to_issue raises, apply_effect should not raise."""
+        tracker = MagicMock()
+        queue = {}
+
+        class FailingVCS:
+            def find_existing_pr(self, *a, **kw):
+                return None
+            def open_pull_request(self, *a, **kw):
+                return PRResult(url="https://github.com/o/r/pull/42", number=42)
+            def link_branch_to_issue(self, issue_number, commit_sha, branch):
+                raise RuntimeError("API error")
+
+        repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=FailingVCS()):
+            with patch("autoswe.providers.github.adapter._get_remote_branch_sha",
+                       return_value="abcdef1"):
+                from autoswe.providers.github.adapter import apply_effect
+                effect = Effect(
+                    kind="create_pr",
+                    pr_title="Fixes #1: Test",
+                    pr_body="Fixes #1",
+                    pr_head="autoswe/issue-1",
+                    pr_base="main",
+                )
+                # Should not raise
+                apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
+
+    def test_github_create_pr_no_link_when_sha_unknown(self):
+        """When branch SHA fetch returns None, link_branch_to_issue is skipped."""
+        tracker = MagicMock()
+        queue = {}
+        link_calls = []
+
+        class MockVCS:
+            def find_existing_pr(self, *a, **kw):
+                return None
+            def open_pull_request(self, *a, **kw):
+                return PRResult(url="https://github.com/o/r/pull/42", number=42)
+            def link_branch_to_issue(self, issue_number, commit_sha, branch):
+                link_calls.append((issue_number, commit_sha, branch))
+
+        repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=MockVCS()):
+            with patch("autoswe.providers.github.adapter._get_remote_branch_sha",
+                       return_value=None):
+                from autoswe.providers.github.adapter import apply_effect
+                effect = Effect(
+                    kind="create_pr",
+                    pr_title="Fixes #1: Test",
+                    pr_body="Fixes #1",
+                    pr_head="autoswe/issue-1",
+                    pr_base="main",
+                )
+                apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
+
+        # Should NOT call link_branch_to_issue when SHA is unknown
+        assert len(link_calls) == 0

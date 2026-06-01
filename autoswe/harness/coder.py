@@ -199,9 +199,9 @@ def _finalize_fix(
     subject = f"autoswe: {guidance[:60]}" if guidance else "autoswe: automated fix"
     body_text = "\n".join(summary_lines[-15:]) if summary_lines else ""
     if body_text:
-        commit_msg = f"{subject}\n\n{body_text}\n\nRefs #{issue_num}"
+        commit_msg = f"{subject}\n\n{body_text}\n\nFixes #{issue_num}"
     else:
-        commit_msg = f"{subject}\n\nRefs #{issue_num}"
+        commit_msg = f"{subject}\n\nFixes #{issue_num}"
 
     log(f"[FIX] {task['id']} committing subject={subject!r}")
     dbg.debug("FIX: committing with subject=%r", subject)
@@ -462,6 +462,22 @@ def resolve_sync_conflicts(
         ahead_count = len(ahead_result.stdout.strip().split("\n")) if ahead_result.stdout.strip() else 0
     except Exception:
         ahead_count = 0
+
+    # Best-effort: link branch to issue in platform UI
+    token = task.get("_token")
+    if cfg.get("LINK_BRANCH_TO_ISSUE", True) and token and full_sha != "unknown":
+        try:
+            _link_repo_cfg = dict(repo_cfg or {}, token=token)
+            get_vcs(_link_repo_cfg).link_branch_to_issue(
+                issue_num, full_sha, branch,
+            )
+        except MissingScopeError:
+            global _scope_error_warned
+            if not _scope_error_warned:
+                _scope_error_warned = True
+                log("[RESOLVE] link_branch_to_issue skipped: PAT missing check_runs:write scope")
+        except Exception as e:
+            dbg.warning("link_branch_to_issue failed in resolve_sync: %s", e, exc_info=True)
 
     summary = (
         f"Resolved merge conflicts in {len(conflict_files)} file(s) "
