@@ -87,6 +87,9 @@ class TaskState:
     # build_fix_prompt / build_plan_prompt on the next /fix or /plan,
     # then cleared (pop-after-first-use lifecycle).
     review_file_path: str | None = None
+    # Extracted from DONE_SUMMARY on fix/retry completion. Persisted in the
+    # queue so PR creation can include it in the body.
+    fix_summary: str = ""
 
 
 @dataclass(frozen=True)

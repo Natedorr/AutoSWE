@@ -106,6 +106,7 @@ def _ensure_queue_entry(
         "last_updated": None,
         "last_comment_sync": None,
         "creator_login": api.issue.creator_login or "",
+        "fix_summary": None,
     }
     log(f"[NEW] {slug} (no command, no label)")
 
@@ -157,6 +158,7 @@ def _build_poll_task(
         plan_file_path=t.get("plan_file_path"),
         review_file_path=t.get("review_file_path"),
         creator_login=t.get("creator_login", ""),
+        fix_summary=t.get("fix_summary", ""),
     )
     world = World(api=api, task=ts, cfg=cfg, repo_cfg=repo_cfg)
     return PollTask(slug=slug, task_state=ts, world=world)

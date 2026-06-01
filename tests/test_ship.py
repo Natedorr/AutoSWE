@@ -347,3 +347,78 @@ def test_open_pr_comment_includes_full_url():
 
     comment_body = mock_get_tracker.return_value.post_comment.call_args[0][2]
     assert "https://github.com/o/r/pull/42" in comment_body
+
+
+# ---------------------------------------------------------------------------
+# open_pr — rich PR body (issue #43)
+# ---------------------------------------------------------------------------
+
+def test_open_pr_rich_body_includes_issue_and_summary(mock_gh_post_comment):
+    """PR body should include issue body and fix_summary when available."""
+    task = make_task()
+    task["body"] = "Something is broken and needs fixing"
+    task["fix_summary"] = "Fixed the bug by updating the logic in module.py"
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    call_kwargs = mock_vcs.open_pull_request.call_args
+    pr_body = call_kwargs[1]["body"]
+    assert "Fixes #1" in pr_body
+    assert "**Issue:**" in pr_body
+    assert "Something is broken and needs fixing" in pr_body
+    assert "**Fix Summary:**" in pr_body
+    assert "Fixed the bug by updating the logic in module.py" in pr_body
+    assert "Opened by autoSWE." in pr_body
+
+
+def test_open_pr_body_without_summary(mock_gh_post_comment):
+    """PR body should include issue body even when fix_summary is absent."""
+    task = make_task()
+    task["body"] = "Missing feature X"
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    call_kwargs = mock_vcs.open_pull_request.call_args
+    pr_body = call_kwargs[1]["body"]
+    assert "Fixes #1" in pr_body
+    assert "**Issue:**" in pr_body
+    assert "Missing feature X" in pr_body
+    assert "**Fix Summary:**" not in pr_body
+    assert "Opened by autoSWE." in pr_body
+
+
+def test_open_pr_body_minimal_when_no_issue_body(mock_gh_post_comment):
+    """PR body gracefully handles empty issue body and no fix_summary."""
+    task = make_task()
+    task["body"] = ""
+    task["fix_summary"] = ""
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    call_kwargs = mock_vcs.open_pull_request.call_args
+    pr_body = call_kwargs[1]["body"]
+    assert "Fixes #1" in pr_body
+    assert "**Issue:**" not in pr_body
+    assert "**Fix Summary:**" not in pr_body
+    assert "Opened by autoSWE." in pr_body

@@ -63,6 +63,7 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it â€
 | `welcome_comment_id` | `int \| None` | Comment ID of the welcome message (if posted) |
 | `bot_comment_ids` | `list[int]` | Every comment ID autoSWE has posted on this issue |
 | `pr_number` | `int \| None` | Cached PR number |
+| `fix_summary` | `str \| None` | Extracted from `DONE_SUMMARY` on fix/retry completion; persisted in the queue so PR creation can include it in the body |
 | `gh_closed` | `bool` | True once the issue is observed closed; cleared if it's reopened; task is never auto-purged |
 | `created_at` | `str` | ISO 8601; when the task was first created |
 | `last_synced` | `str` | ISO 8601; last poll time |
@@ -137,6 +138,7 @@ class TaskState:
     provider: str = "github"
     plan_file_path: str | None = None
     review_file_path: str | None = None
+    fix_summary: str = ""
 ```
 
 Built from the queue entry by `_build_poll_task()`. Transient fields (`_token`, `_comment_id`) are excluded â€” they belong in the dispatch runtime, not the decision boundary.

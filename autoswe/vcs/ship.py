@@ -53,6 +53,17 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
 
     dbg.debug("SHIP: branch=%s base=%s", branch, base_branch)
 
+    # Build informative PR body from task data
+    fix_summary = task.get("fix_summary", "") or ""
+    issue_body = task.get("body", "") or ""
+    body_parts = [f"Fixes #{issue_num}"]
+    if issue_body:
+        body_parts.append(f"**Issue:**\n\n{issue_body}")
+    if fix_summary:
+        body_parts.append(f"**Fix Summary:**\n\n{fix_summary}")
+    body_parts.append("\nOpened by autoSWE.")
+    pr_body = "\n\n".join(body_parts)
+
     # Idempotency: check if a PR already exists for this branch
     existing = vcs.find_existing_pr(rcfg, branch)
     if existing is not None:
@@ -73,7 +84,7 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
             branch=branch,
             base=base_branch,
             title=f"Fixes #{issue_num}: {title}",
-            body=f"Fixes #{issue_num}\n\nOpened by autoSWE.",
+            body=pr_body,
         )
         pr_url = pr_result.url
         pr_ref = _pr_ref(pr_url)

@@ -382,18 +382,37 @@ def emit(
         )
         effects.append(Effect(kind="post_comment", body=comment))
         effects.append(Effect(kind="set_status", status=new_status))
+
+        # Persist fix_summary from DONE_SUMMARY for PR body enrichment
+        if kind in ("fix", "retry") and done.startswith("DONE_SUMMARY\t"):
+            summary_rest = done[len("DONE_SUMMARY\t"):]
+            summary_text = summary_rest.split("\t")[0].strip()
+            if summary_text:
+                queue_patch["fix_summary"] = summary_text
+
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 
         # Auto-create PR if fix completed and configured
         if kind in ("fix", "retry") and cfg.get("AUTO_CREATE_PR") and task.pr_number is None:
-            branch = task.plan_branch or f"autoswe/issue-{task.issue_number}"
+            pr_head = f"autoswe/issue-{task.issue_number}"
+            pr_base = task.plan_branch or task.base_branch
+            # Build PR body from task data for context
+            body_parts = [f"Fixes #{task.issue_number}"]
+            issue_body = task.body or ""
+            fix_summary = queue_patch.get("fix_summary", "") or ""
+            if issue_body:
+                body_parts.append(f"**Issue:**\n\n{issue_body}")
+            if fix_summary:
+                body_parts.append(f"**Fix Summary:**\n\n{fix_summary}")
+            body_parts.append("\nOpened by autoSWE.")
+            pr_body = "\n\n".join(body_parts)
             effects.append(
                 Effect(
                     kind="create_pr",
                     pr_title=f"Fixes #{task.issue_number}: {task.title}",
-                    pr_body=f"Fixes #{task.issue_number}",
-                    pr_head=branch,
-                    pr_base=task.base_branch,
+                    pr_body=pr_body,
+                    pr_head=pr_head,
+                    pr_base=pr_base,
                 )
             )
 

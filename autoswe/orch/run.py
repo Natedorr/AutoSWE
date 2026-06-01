@@ -71,6 +71,7 @@ def _build_task_dict(world: World, action: Action) -> dict:
         "pr_number": task.pr_number,
         "plan_file_path": task.plan_file_path,
         "review_file_path": task.review_file_path,
+        "fix_summary": task.fix_summary,
         "_token": token,
     }
 
