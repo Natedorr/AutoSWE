@@ -244,10 +244,11 @@ def test_extract_plan_output_plan_file(tmp_path):
     plan_file = tmp_path / "my-plan.md"
     plan_file.write_text("## Steps\n1. Fix bug A\n2. Fix bug B")
 
-    comment, done = _extract_plan_output("Some random text", plan_file=plan_file)
+    comment, done, used_file = _extract_plan_output("Some random text", plan_file=plan_file)
     assert done == "PLAN_READY"
     assert "## Steps" in comment
     assert "Fix bug A" in comment
+    assert used_file == plan_file
 
 
 def test_extract_plan_output_pending_fallback(tmp_path):
@@ -255,32 +256,41 @@ def test_extract_plan_output_pending_fallback(tmp_path):
     plan_file = tmp_path / "pending-plan.md"
     plan_file.write_text("I'm waiting for clarification on the approach.")
 
-    comment, done = _extract_plan_output("Some text", plan_file=plan_file)
+    comment, done, used_file = _extract_plan_output("Some text", plan_file=plan_file)
     # "waiting for" is a pending indicator → should NOT return PLAN_READY
     assert done != "PLAN_READY", "Pending plan should not return PLAN_READY"
 
 
 def test_extract_plan_output_autoswe_plan_tag():
     """<AUTOSWE_PLAN> tags detected when no plan file."""
+    from unittest.mock import patch
     text = "Some preamble <AUTOSWE_PLAN>Step 1\nStep 2</AUTOSWE_PLAN> done."
-    comment, done = _extract_plan_output(text)
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(text)
     assert done == "PLAN_READY"
     assert "Step 1" in comment
+    assert used_file is None
 
 
 def test_extract_plan_output_autoswe_questions_tag():
     """<AUTOSWE_QUESTIONS> tags detected."""
+    from unittest.mock import patch
     text = "Hey <AUTOSWE_QUESTIONS>What should I do?</AUTOSWE_QUESTIONS>"
-    comment, done = _extract_plan_output(text)
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(text)
     assert done == "WAITING: questions"
     assert "## Questions" in comment
+    assert used_file is None
 
 
 def test_extract_plan_output_fallback():
     """Plain text falls back to WAITING: see comment."""
-    comment, done = _extract_plan_output("Just some random response text.")
+    from unittest.mock import patch
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output("Just some random response text.")
     assert done == "WAITING: see comment"
     assert "## Claude's response" in comment
+    assert used_file is None
 
 
 # ==== TEST 6: _plan_file_is_pending detection ====
@@ -453,7 +463,7 @@ def test_ollama_plan_extract_output(tmp_path, ollama_env, ollama_model):
 
     # Now run _extract_plan_output on the result
     plan_file = Path(result.plan_file_path) if result.plan_file_path else None
-    comment, done = _extract_plan_output(result.text, plan_file=plan_file)
+    comment, done, used_file = _extract_plan_output(result.text, plan_file=plan_file)
 
     # The model should have produced either a plan file or text output
     assert done in ("PLAN_READY", "WAITING: questions", "WAITING: see comment")

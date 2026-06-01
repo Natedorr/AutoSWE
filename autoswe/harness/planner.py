@@ -53,15 +53,11 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, Optional[
     plan_file: Optional[Path] = (
         Path(result.plan_file_path) if result.plan_file_path else None
     )
-    comment, done_content = _extract_plan_output(result.text, plan_file=plan_file)
+    comment, done_content, used_file = _extract_plan_output(result.text, plan_file=plan_file)
 
     plan_file_path: Optional[str] = None
-    if done_content == "PLAN_READY":
-        actual_file = plan_file or _find_latest_plan_file()
-        if actual_file is not None:
-            pt = actual_file.read_text(encoding="utf-8").strip()
-            if not _plan_file_is_pending(pt):
-                plan_file_path = str(actual_file)
+    if done_content == "PLAN_READY" and used_file is not None:
+        plan_file_path = str(used_file)
 
     # Return comment as part of done_content for _post_and_return
     return f"_POST:{done_content}\t{comment}", plan_file_path
@@ -108,37 +104,39 @@ def _plan_file_is_pending(plan_text: str) -> bool:
     return any(indicator in lower for indicator in pending_indicators)
 
 
-def _extract_plan_output(text: str, plan_file: Path = None) -> tuple[str, str]:
-    """Return (comment_body, done_content) using the output priority chain.
+def _extract_plan_output(text: str, plan_file: Path = None) -> tuple[str, str, Optional[Path]]:
+    """Return (comment_body, done_content, used_file_path) using the output priority chain.
+
+    The third element is the Path of the plan file used (when content came from
+    a file), or None when content came from tags / raw text.
 
     Priority:
-    1. Plan file (from captured Write tool call or filesystem scan) -> "## Plan" + "PLAN_READY" (unless pending)
-    2. <AUTOSWE_PLAN> tags in text -> "## Plan" + "PLAN_READY"
-    3. <AUTOSWE_QUESTIONS> tags in text -> "## Questions" + "WAITING: questions"
-    4. Fallback -> "## Claude's response" + "WAITING: see comment"
+    1. Captured plan file (from Write tool call) -> "## Plan" + "PLAN_READY" + path (unless pending)
+    2. <AUTOSWE_PLAN> tags in text -> "## Plan" + "PLAN_READY" + None
+    3. <AUTOSWE_QUESTIONS> tags in text -> "## Questions" + "WAITING: questions" + None
+    4. Filesystem scan (_find_latest_plan_file) -> "## Plan" + "PLAN_READY" + path (last resort)
+    5. Fallback -> "## Claude's response" + "WAITING: see comment" + None
+
+    Tags (steps 2-3) are checked BEFORE the filesystem scan (step 4) to avoid
+    picking up another session's plan file during concurrent execution.
+    (Regression fix for issue #36 — plan file collision.)
     """
-    # 1. Check for plan file — use captured path from tool calls (primary),
-    # fall back to filesystem scan
+    # 1. Check for captured plan file path (from Write tool call — per-session)
     captured_file = plan_file
-    plan_file = None
     try:
         if captured_file is not None and captured_file.exists():
-            plan_file = captured_file
-        else:
-            plan_file = _find_latest_plan_file()
+            plan_text = captured_file.read_text(encoding="utf-8").strip()
+            # If the plan file is a placeholder waiting for user input,
+            # fall through to check for tags instead of returning PLAN_READY
+            if _plan_file_is_pending(plan_text):
+                dbg.debug("PLAN: plan file detected as pending (waiting for user input) — falling through to tag detection")
+            else:
+                comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
+                return comment, "PLAN_READY", captured_file
     except FileNotFoundError:
-        plan_file = _find_latest_plan_file()
-    if plan_file is not None:
-        plan_text = plan_file.read_text(encoding="utf-8").strip()
-        # If the plan file is a placeholder waiting for user input,
-        # fall through to check for questions instead of returning PLAN_READY
-        if _plan_file_is_pending(plan_text):
-            dbg.debug("PLAN: plan file detected as pending (waiting for user input) — falling through to question detection")
-        else:
-            comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
-            return comment, "PLAN_READY"
+        captured_file = None
 
-    # 2. Check for <AUTOSWE_PLAN> tags (backward compat, deprecated)
+    # 2. Check for <AUTOSWE_PLAN> tags (session-correct, before filesystem scan)
     plan_m = _PLAN_RE.search(text or "")
     questions_m = _QUESTIONS_RE.search(text or "")
 
@@ -146,15 +144,28 @@ def _extract_plan_output(text: str, plan_file: Path = None) -> tuple[str, str]:
         dbg.warning("PLAN: deprecated <AUTOSWE_PLAN> tag used — migrate to mcp__autoswe_comment__post_plan tool")
         plan_text = plan_m.group(1).strip()
         comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
-        return comment, "PLAN_READY"
+        return comment, "PLAN_READY", None
     elif questions_m:
         dbg.warning("PLAN: deprecated <AUTOSWE_QUESTIONS> tag used — migrate to mcp__autoswe_comment__post_question tool")
         q_text = questions_m.group(1).strip()
         comment = f"## Questions\n\n{q_text}\n\n_Reply in this thread to answer._"
-        return comment, "WAITING: questions"
-    else:
-        comment = f"## Claude's response\n\n{text or '(no response)'}"
-        return comment, "WAITING: see comment"
+        return comment, "WAITING: questions", None
+
+    # 3. Filesystem scan — true last resort (may return another session's file)
+    fs_file: Optional[Path] = None
+    try:
+        fs_file = _find_latest_plan_file()
+    except Exception:
+        fs_file = None
+    if fs_file is not None:
+        plan_text = fs_file.read_text(encoding="utf-8").strip()
+        if not _plan_file_is_pending(plan_text):
+            comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
+            return comment, "PLAN_READY", fs_file
+
+    # 4. Raw text fallback
+    comment = f"## Claude's response\n\n{text or '(no response)'}"
+    return comment, "WAITING: see comment", None
 
 
 def _post_and_return(task: dict, comment_body: str, done_content: str, repo_cfg: dict, *, progress_callback=None) -> str:
