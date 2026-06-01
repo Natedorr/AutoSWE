@@ -57,10 +57,11 @@ _PLAN_TOOLS = [
 ]
 
 # Mode → (permission_mode, allowed_tools, disallowed_tools) mapping
+# Values are tuples to prevent accidental mutation of tool lists.
 _MODE_CONFIG = {
-    "plan": ("plan", _PLAN_TOOLS, ["ExitPlanMode"]),
-    "read_only": ("plan", _READ_ONLY_TOOLS, []),
-    "read_write": ("bypassPermissions", _READ_WRITE_TOOLS, []),
+    "plan": ("plan", _PLAN_TOOLS, ("ExitPlanMode",)),
+    "read_only": ("plan", _READ_ONLY_TOOLS, ()),
+    "read_write": ("bypassPermissions", _READ_WRITE_TOOLS, ()),
 }
 
 

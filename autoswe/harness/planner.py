@@ -227,12 +227,12 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
     provider = repo_cfg.get("provider", "github")
 
     if wt is None:
-        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg, provider,
+        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
                              default_branch=base_branch, pull_strategy="reset", push_new=False)
     dbg.debug("PLAN: worktree=%s", wt)
     prompt = build_plan_prompt(task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance)
 
-    harness = resolve_harness("plan", repo_cfg, cfg)
+    harness = resolve_harness("plan", repo_cfg, cfg or {})
     plan_model = harness.get("model")
     log(f"[PLAN] {task['id']} session=NEW model={plan_model or 'default'} guidance_len={len(guidance or '')}")
     dbg.debug("PLAN: model=%s guidance=%s", plan_model or "default", guidance)
@@ -246,7 +246,7 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
         result = runner.run(
             prompt,
             cwd=str(wt),
-            cfg=cfg,
+            cfg=cfg or {},
             repo_cfg=repo_cfg,
             model=plan_model,
             mode="plan",
@@ -312,7 +312,7 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
     provider = repo_cfg.get("provider", "github")
 
     if wt is None:
-        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg, provider,
+        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
                              default_branch=base_branch, pull_strategy="reset", push_new=False)
     dbg.debug("PLAN_RESUME: worktree=%s session=%s", wt, session_id)
 
@@ -326,7 +326,7 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
         "<AUTOSWE_QUESTIONS> block."
     )
 
-    harness = resolve_harness("plan", repo_cfg, cfg)
+    harness = resolve_harness("plan", repo_cfg, cfg or {})
     plan_model = harness.get("model")
     log(f"[PLAN] {task['id']} session=RESUME from={session_id} reply_chars={len(user_text)}")
 
@@ -339,7 +339,7 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
         result = runner.run(
             resume_prompt,
             cwd=str(wt),
-            cfg=cfg,
+            cfg=cfg or {},
             repo_cfg=repo_cfg,
             resume=session_id,
             model=plan_model,

@@ -19,13 +19,21 @@ def _expand_env(value: str) -> str:
 
 
 def _expand_env_dict(obj: dict) -> dict:
-    """Recursively expand ``${VAR}`` env references in dict string values."""
+    """Recursively expand ``${VAR}`` env references in dict string values.
+
+    List values are recursed into: string elements are expanded, non-string
+    elements (booleans, numbers, nested dicts) are passed through unchanged.
+    """
     result = {}
     for key, value in obj.items():
         if isinstance(value, str):
             result[key] = _expand_env(value)
         elif isinstance(value, dict):
             result[key] = _expand_env_dict(value)
+        elif isinstance(value, list):
+            result[key] = [_expand_env(item) if isinstance(item, str)
+                           else _expand_env_dict(item) if isinstance(item, dict)
+                           else item for item in value]
         else:
             result[key] = value
     return result
@@ -61,7 +69,7 @@ def load_config() -> dict:
         "AUTO_ASSIGN": os.environ.get("AUTO_ASSIGN", "true").lower() == "true",
         "ASSIGN_USER": os.environ.get("ASSIGN_USER", ""),
         "AUTO_CREATE_PR": os.environ.get("AUTO_CREATE_PR", "false").lower() == "true",
-        "CLAUDE_CLI_PATH": os.environ.get("CLAUDE_CLI_PATH") or None,
+        "CLAUDE_CLI_PATH": os.environ.get("CLAUDE_CLI_PATH", ""),
         "PLAN_MODEL": os.environ.get("PLAN_MODEL", ""),
         "FIX_MODEL": os.environ.get("FIX_MODEL", ""),
         "REVIEW_MODEL": os.environ.get("REVIEW_MODEL", ""),
@@ -219,6 +227,9 @@ def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict = Non
     if harnesses is None:
         harnesses = load_harnesses_config()
 
+    cfg = cfg or {}
+    repo_cfg = repo_cfg or {}
+
     # Determine the phase key (e.g. "plan" → "plan_harness" / "PLAN_HARNESS" / "plan_model" / "PLAN_MODEL")
     phase_key = phase.lower()
 
@@ -244,5 +255,5 @@ def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict = Non
         "cli_path": cfg.get("CLAUDE_CLI_PATH"),
         "anthropic_base_url": repo_cfg.get("anthropic_base_url") or cfg.get("ANTHROPIC_BASE_URL"),
         "anthropic_auth_token": repo_cfg.get("anthropic_auth_token") or cfg.get("ANTHROPIC_AUTH_TOKEN"),
-        "anthropic_api_key": cfg.get("ANTHROPIC_API_KEY"),
+        "anthropic_api_key": repo_cfg.get("anthropic_api_key") or cfg.get("ANTHROPIC_API_KEY"),
     }

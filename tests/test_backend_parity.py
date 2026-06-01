@@ -273,11 +273,11 @@ class TestCapabilityHonesty:
         )
 
     def test_codex_phase4_capabilities(self):
-        """Codex (Phase 4) advertises resume + progress_stream only."""
+        """Codex (Phase 4) advertises mode, resume + progress_stream."""
         from autoswe.harness.backends.codex import CodexBackend
 
         caps = CodexBackend.capabilities()
-        expected = {"resume", "progress_stream"}
+        expected = {"mode", "resume", "progress_stream"}
         assert caps == expected, (
             f"CodexBackend capabilities changed: got {caps}"
         )
@@ -290,8 +290,8 @@ class TestCapabilityHonesty:
         from autoswe.harness.backends.codex import CodexBackend
 
         caps = CodexBackend.capabilities()
-        # Phase 4: Codex does NOT support these
-        claude_exclusives = {"mode", "mcp", "can_use_tool", "plan_permission"}
+        # Phase 4: Codex does NOT support these (mode IS supported via _mode_to_sandbox)
+        claude_exclusives = {"mcp", "can_use_tool", "plan_permission"}
         overlap = caps & claude_exclusives
         assert not overlap, (
             f"Codex advertises Claude-exclusive capabilities: {overlap}. "
@@ -386,7 +386,7 @@ class TestRunnerDispatcherParity:
         from autoswe.harness.runner import backend_has_capability
 
         harness = {"backend": "codex"}
-        assert not backend_has_capability(harness, "mode")
+        assert backend_has_capability(harness, "mode")
         assert not backend_has_capability(harness, "mcp")
         assert not backend_has_capability(harness, "can_use_tool")
         assert not backend_has_capability(harness, "plan_permission")
@@ -426,9 +426,9 @@ class TestModeTranslationParity:
             )
             perm, tools, disallowed = _MODE_CONFIG[mode]
             assert isinstance(perm, str), f"permission_mode for {mode!r} should be str"
-            assert isinstance(tools, list), f"allowed_tools for {mode!r} should be list"
-            assert isinstance(disallowed, list), (
-                f"disallowed_tools for {mode!r} should be list"
+            assert isinstance(tools, (list, tuple)), f"allowed_tools for {mode!r} should be iterable"
+            assert isinstance(disallowed, (list, tuple)), (
+                f"disallowed_tools for {mode!r} should be iterable"
             )
             assert len(tools) > 0, f"allowed_tools for {mode!r} should not be empty"
 

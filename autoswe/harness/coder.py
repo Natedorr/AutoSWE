@@ -70,7 +70,6 @@ def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict =
         dbg.debug("FIX: worktree=%s", wt)
 
     # Check for merge conflicts produced by pull_strategy="merge"
-    branch = f"autoswe/issue-{issue_num}"
     conflict_files = get_merge_conflict_files(wt)
 
     # Build MCP server config: comment server (always) + inline comment server (if PR exists)

@@ -4,7 +4,7 @@ Shells out to the Codex CLI subprocess (no alpha SDK), maps a
 harness-agnostic ``RunSpec`` to CLI flags, and parses the JSONL event
 stream into a ``RunResult``.
 
-**Capabilities (Phase 4, core run only):** ``resume``, ``progress_stream``.
+**Capabilities (Phase 4, core run only):** ``mode``, ``resume``, ``progress_stream``.
 
 Progress streaming uses ``asyncio.create_subprocess_exec`` with async
 line-reading so that ``progress_callback`` fires with live todo/command
@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable
@@ -67,21 +66,6 @@ def _mode_to_sandbox(mode: str | None) -> str:
 
 
 # ---------- JSONL line parser ----------
-
-# Expands ${VAR} and ${VAR:-default} inside JSON string values for
-# env-variable substitution in config files.
-_ENV_RE = re.compile(r"\$\{([^}]+)\}")
-
-
-def _expand_env(value: str) -> str:
-    """Expand ``${VAR}`` and ``${VAR:-default}`` inside a string."""
-    def _repl(m: re.Match) -> str:
-        expr = m.group(1)
-        if ":-" in expr:
-            var, default = expr.split(":-", 1)
-            return os.environ.get(var, default)
-        return os.environ.get(expr, "")
-    return _ENV_RE.sub(_repl, value)
 
 
 def _parse_jsonl_line(
@@ -196,7 +180,7 @@ class CodexBackend:
     ``time.monotonic()``.  A future phase will add token→cost conversion.
     """
 
-    CAPABILITIES: set[str] = {"resume", "progress_stream"}
+    CAPABILITIES: set[str] = {"mode", "resume", "progress_stream"}
 
     @classmethod
     def capabilities(cls) -> set[str]:

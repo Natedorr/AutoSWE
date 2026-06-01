@@ -504,3 +504,126 @@ def test_resolve_harness_no_model_in_synthesized(isolated_autoswe_dir):
     result = resolve_harness("plan", repo_cfg, cfg)
     assert result["backend"] == "claude_code"
     assert result["model"] is None
+
+
+def test_resolve_harness_none_cfg(isolated_autoswe_dir):
+    """resolve_harness does not crash when cfg=None."""
+    from autoswe.core.config import resolve_harness
+
+    result = resolve_harness("plan", {}, None)
+    assert result["backend"] == "claude_code"
+
+
+def test_resolve_harness_none_repo_cfg(isolated_autoswe_dir):
+    """resolve_harness does not crash when repo_cfg=None."""
+    from autoswe.core.config import resolve_harness
+
+    cfg = {"PLAN_MODEL": "claude-sonnet-4-6", "PLAN_HARNESS": ""}
+    result = resolve_harness("plan", None, cfg)
+    assert result["backend"] == "claude_code"
+    assert result["model"] == "claude-sonnet-4-6"
+
+
+def test_resolve_harness_synthesized_includes_repo_api_key(isolated_autoswe_dir):
+    """Synthesized default checks repo_cfg for anthropic_api_key."""
+    from autoswe.core.config import resolve_harness
+
+    cfg = {"ANTHROPIC_API_KEY": "sk-cfg-key", "PLAN_HARNESS": ""}
+    repo_cfg = {"anthropic_api_key": "sk-repo-key"}
+
+    result = resolve_harness("plan", repo_cfg, cfg)
+    assert result["anthropic_api_key"] == "sk-repo-key"
+
+
+def test_resolve_harness_synthesized_cfg_api_key_fallback(isolated_autoswe_dir):
+    """Synthesized default falls back to cfg ANTHROPIC_API_KEY when repo_cfg is empty."""
+    from autoswe.core.config import resolve_harness
+
+    cfg = {"ANTHROPIC_API_KEY": "sk-cfg-key", "PLAN_HARNESS": ""}
+    repo_cfg = {}
+
+    result = resolve_harness("plan", repo_cfg, cfg)
+    assert result["anthropic_api_key"] == "sk-cfg-key"
+
+
+def test_expand_env_dict_expands_list_strings(isolated_autoswe_dir):
+    """_expand_env_dict expands ${VAR} in string elements of list values."""
+    import os
+
+    from autoswe.core.config import _expand_env_dict
+
+    os.environ["_TEST_LIST_VAR"] = "expanded-item"
+    try:
+        result = _expand_env_dict({
+            "items": ["${_TEST_LIST_VAR}", "static", 42, True],
+            "nested": {"key": "${_TEST_LIST_VAR}"},
+        })
+        assert result["items"] == ["expanded-item", "static", 42, True]
+        assert result["nested"]["key"] == "expanded-item"
+    finally:
+        del os.environ["_TEST_LIST_VAR"]
+
+
+def test_expand_env_dict_list_with_non_string_items(isolated_autoswe_dir):
+    """Non-string list elements (booleans, numbers) pass through unchanged."""
+    from autoswe.core.config import _expand_env_dict
+
+    result = _expand_env_dict({"flags": [True, False, 0, 1, None]})
+    assert result["flags"] == [True, False, 0, 1, None]
+
+
+def test_expand_env_dict_list_with_nested_dicts(isolated_autoswe_dir):
+    """List containing dicts are recursively expanded."""
+    import os
+
+    from autoswe.core.config import _expand_env_dict
+
+    os.environ["_TEST_NESTED_VAR"] = "nested-expanded"
+    try:
+        result = _expand_env_dict({
+            "servers": [{"url": "${_TEST_NESTED_VAR}"}, "plain"],
+        })
+        assert result["servers"][0]["url"] == "nested-expanded"
+        assert result["servers"][1] == "plain"
+    finally:
+        del os.environ["_TEST_NESTED_VAR"]
+
+
+def test_claude_cli_path_defaults_to_empty_string(isolated_autoswe_dir):
+    """CLAUDE_CLI_PATH defaults to empty string (backward compat)."""
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["CLAUDE_CLI_PATH"] == ""
+    assert cfg["CLAUDE_CLI_PATH"] is not None
+
+
+def test_resolve_harness_codex_profile(isolated_autoswe_dir):
+    """resolve_harness returns codex backend profile when specified."""
+    from autoswe.core.config import resolve_harness
+
+    harnesses = {"my-codex": {"backend": "codex", "model": "gpt-5"}}
+    cfg = {"FIX_HARNESS": ""}
+    repo_cfg = {"fix_harness": "my-codex"}
+
+    result = resolve_harness("fix", repo_cfg, cfg, harnesses=harnesses)
+    assert result["backend"] == "codex"
+    assert result["model"] == "gpt-5"
+
+
+def test_load_harnesses_config_with_list_values(isolated_autoswe_dir):
+    """harnesses.json with list values loads without crashing."""
+    harnesses_json = isolated_autoswe_dir / "config" / "harnesses.json"
+    harnesses_json.write_text(
+        '{"with-list": {"backend": "claude_code", "model": "claude-opus-4-8", "extra_tools": ["Read", "Write"]}}',
+        encoding="utf-8",
+    )
+
+    from autoswe.core import config as config_mod
+    config_mod._harnesses_cache.clear()
+
+    from autoswe.core.config import load_harnesses_config
+
+    result = load_harnesses_config()
+    assert "with-list" in result
+    assert result["with-list"]["extra_tools"] == ["Read", "Write"]
