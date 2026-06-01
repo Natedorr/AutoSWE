@@ -660,3 +660,217 @@ def test_async_generator_crash_resumes_with_captured_session():
     assert result.subtype == "success"
     assert "Planning step 1" in result.text
     assert "Planning step 2" in result.text
+
+
+# ---------------------------------------------------------------------------
+# Credential cleanup (issue #40)
+
+def test_credentials_cleaned_up_after_run():
+    """Credentials set via harness_cfg are restored to their original values
+    in os.environ after _run_async completes successfully."""
+    import os
+
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import RunResult, _run_async
+
+    async def fake_query_success(prompt, options):
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    # Capture pre-existing values (may already be set by CI/harness)
+    orig_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    orig_base_url = os.environ.get("ANTHROPIC_BASE_URL")
+
+    async def run_it():
+        sdk = sys.modules["claude_agent_sdk"]
+        with patch.object(sdk, "query", fake_query_success):
+            result = await _run_async(
+                "test prompt",
+                cwd="/tmp",
+                permission_mode="default",
+                allowed_tools=["Read"],
+                state={"_harness_cfg": {
+                    "anthropic_api_key": "sk-leak-test-key",
+                    "anthropic_base_url": "http://leak.test",
+                }},
+            )
+            return result
+
+    result = asyncio.run(run_it())
+    assert isinstance(result, RunResult)
+    assert result.text == "ok"
+    # Credentials must be restored to their pre-run values
+    assert os.environ.get("ANTHROPIC_API_KEY") == orig_api_key
+    assert os.environ.get("ANTHROPIC_BASE_URL") == orig_base_url
+
+
+def test_credentials_cleaned_up_on_exception():
+    """Credentials are restored from os.environ even when query() raises an
+    exception that is NOT caught (non-Ollama error)."""
+    import os
+
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    async def fake_query_raise(prompt, options):
+        yield AssistantMessage(content=[TextBlock(text="partial")], model="test")
+        raise RuntimeError("some other error occurred")
+
+    orig_api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    async def run_it():
+        sdk = sys.modules["claude_agent_sdk"]
+        with patch.object(sdk, "query", fake_query_raise):
+            try:
+                result = await _run_async(
+                    "test prompt",
+                    cwd="/tmp",
+                    permission_mode="default",
+                    allowed_tools=["Read"],
+                    state={"_harness_cfg": {
+                        "anthropic_api_key": "sk-leak-on-error",
+                    }},
+                )
+                return result  # Should NOT reach here
+            except RuntimeError as e:
+                return e
+
+    result = asyncio.run(run_it())
+    assert isinstance(result, RuntimeError)
+    # Credentials must be restored to pre-run value after the exception
+    assert os.environ.get("ANTHROPIC_API_KEY") == orig_api_key
+
+
+def test_credentials_cleaned_up_on_async_generator_crash():
+    """Credentials are cleaned up when the async-generator-crash partial-result
+    path fires."""
+    import os
+
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import RunResult, _run_async
+
+    async def fake_query_crash(prompt, options):
+        yield AssistantMessage(content=[TextBlock(text="partial")], model="test")
+        raise RuntimeError("aclose(): asynchronous generator is already running")
+
+    orig_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    orig_auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+
+    async def run_it():
+        sdk = sys.modules["claude_agent_sdk"]
+        with patch.object(sdk, "query", fake_query_crash):
+            result = await _run_async(
+                "test prompt",
+                cwd="/tmp",
+                permission_mode="default",
+                allowed_tools=["Read"],
+                state={"_harness_cfg": {
+                    "anthropic_api_key": "sk-crash-leak",
+                    "anthropic_auth_token": "crash-token",
+                }},
+            )
+            return result
+
+    result = asyncio.run(run_it())
+    assert isinstance(result, RunResult)
+    assert "partial" in result.text
+    # Credentials must be restored to their pre-run values
+    assert os.environ.get("ANTHROPIC_API_KEY") == orig_api_key
+    assert os.environ.get("ANTHROPIC_AUTH_TOKEN") == orig_auth_token
+
+
+def test_credentials_not_leaked_between_tasks():
+    """Two sequential runs with different keys don't leak credentials from run 1
+    into run 2."""
+    import os
+
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import RunResult, _run_async
+
+    async def fake_query(prompt, options):
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    orig_api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    async def run_both():
+        sdk = sys.modules["claude_agent_sdk"]
+
+        # Run 1 with key A
+        with patch.object(sdk, "query", fake_query):
+            r1 = await _run_async(
+                "prompt 1",
+                cwd="/tmp",
+                permission_mode="default",
+                allowed_tools=["Read"],
+                state={"_harness_cfg": {"anthropic_api_key": "sk-key-A"}},
+            )
+
+        # Credentials from run 1 must be restored (not leaked)
+        assert os.environ.get("ANTHROPIC_API_KEY") == orig_api_key, \
+            f"Key A leaked after run 1, got {os.environ.get('ANTHROPIC_API_KEY')}"
+
+        # Run 2 with key B
+        with patch.object(sdk, "query", fake_query):
+            r2 = await _run_async(
+                "prompt 2",
+                cwd="/tmp",
+                permission_mode="default",
+                allowed_tools=["Read"],
+                state={"_harness_cfg": {"anthropic_api_key": "sk-key-B"}},
+            )
+
+        # Credentials from run 2 must also be restored (not leaked)
+        assert os.environ.get("ANTHROPIC_API_KEY") == orig_api_key, \
+            f"Key B leaked after run 2, got {os.environ.get('ANTHROPIC_API_KEY')}"
+
+        return r1, r2
+
+    r1, r2 = asyncio.run(run_both())
+    assert isinstance(r1, RunResult)
+    assert isinstance(r2, RunResult)
+
+
+def test_credentials_restore_preexisting_values():
+    """If ANTHROPIC_API_KEY already exists before the run, the original value
+    is restored (not deleted)."""
+    import os
+
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import RunResult, _run_async
+
+    original_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    async def fake_query(prompt, options):
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    async def run_it():
+        # Set a pre-existing value
+        os.environ["ANTHROPIC_API_KEY"] = "sk-pre-existing"
+
+        sdk = sys.modules["claude_agent_sdk"]
+        with patch.object(sdk, "query", fake_query):
+            result = await _run_async(
+                "test prompt",
+                cwd="/tmp",
+                permission_mode="default",
+                allowed_tools=["Read"],
+                state={"_harness_cfg": {"anthropic_api_key": "sk-override"}},
+            )
+            return result
+
+    try:
+        result = asyncio.run(run_it())
+        assert isinstance(result, RunResult)
+        # The pre-existing value must be restored
+        assert os.environ.get("ANTHROPIC_API_KEY") == "sk-pre-existing", \
+            f"Expected pre-existing value, got {os.environ.get('ANTHROPIC_API_KEY')}"
+    finally:
+        # Restore whatever was there before our test
+        if original_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = original_key
