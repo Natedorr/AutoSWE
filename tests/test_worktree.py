@@ -251,7 +251,7 @@ def test_commit_and_push_preserves_auto_commits(tmp_path, monkeypatch):
         # After fetch + reset-to-origin, there are 2 auto-commits from this session
         if "origin/autoswe/issue-1..HEAD" in cmd_str:
             result.stdout = "aaa1111 fix typo\nbbb2222 fix logic\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "def9876"
         else:
             result.stdout = ""
@@ -297,7 +297,7 @@ def test_commit_and_push_amend_uses_correct_message(tmp_path, monkeypatch):
         cmd_str = " ".join(args)
         if "origin/autoswe/issue-42..HEAD" in cmd_str:
             result.stdout = "ccc3333 initial fix\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "abc1234"
         else:
             result.stdout = ""
@@ -343,7 +343,7 @@ def test_commit_and_push_multi_fix_preserves_history(tmp_path, monkeypatch):
         # origin/autoswe/issue-1..HEAD only shows the new session commits.
         if "origin/autoswe/issue-1..HEAD" in cmd_str:
             result.stdout = "ddd4444 second fix round\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "abc1234"
         else:
             result.stdout = ""
@@ -1083,7 +1083,7 @@ def test_commit_and_push_skips_amend_for_merge_commit(tmp_path, monkeypatch):
         elif "rev-list" in cmd_str and "--parents" in cmd_str:
             # Simulate merge commit: hash + 2 parents = 3 items
             result.stdout = "aaa1111 bbb2222 ccc3333\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "def9876"
         else:
             result.stdout = ""
@@ -1121,7 +1121,7 @@ def test_commit_and_push_amends_normal_commit(tmp_path, monkeypatch):
         elif "rev-list" in cmd_str and "--parents" in cmd_str:
             # Simulate normal commit: hash + 1 parent = 2 items
             result.stdout = "aaa1111 bbb2222\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "def9876"
         else:
             result.stdout = ""
@@ -1157,7 +1157,7 @@ def test_sync_branch_returns_commit_sha_and_changed(tmp_path, monkeypatch):
         cmd_str = " ".join(args)
         if "origin/main..HEAD" in cmd_str:
             result.stdout = "abc1234 fix\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "abc1234"
         elif "rev-parse" in cmd_str and "HEAD" in cmd_str:
             # First call returns one SHA, second returns different (changed=True)
@@ -1193,7 +1193,7 @@ def test_sync_branch_unchanged(tmp_path, monkeypatch):
         cmd_str = " ".join(args)
         if "origin/main..HEAD" in cmd_str:
             result.stdout = ""
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "aaa1111"
         elif "rev-parse" in cmd_str:
             result.stdout = "aaa1111"  # Same SHA before and after
@@ -1746,7 +1746,7 @@ def test_commit_and_push_azure_provider(tmp_path, monkeypatch):
         elif "--cached" in cmd and "--quiet" in cmd:
             result.returncode = 1  # Changes exist
             result.stdout = ""
-        elif "rev-parse --short" in cmd:
+        elif "rev-parse" in cmd:
             result.stdout = "abc1234"
             result.returncode = 0
         else:

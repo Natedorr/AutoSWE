@@ -444,15 +444,15 @@ def resolve_sync_conflicts(
             duration_seconds=run_result.duration_seconds,
         )
 
-    # Compute summary stats
+    # Compute summary stats — use full SHA (ADO commit URLs require 40-char hash)
     try:
-        short_sha_result = subprocess.run(
-            ["git", "-C", str(wt), "rev-parse", "--short", "HEAD"],
+        full_sha_result = subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=10, check=True,
         )
-        short_sha = short_sha_result.stdout.strip()
+        full_sha = full_sha_result.stdout.strip()
     except Exception:
-        short_sha = "unknown"
+        full_sha = "unknown"
 
     try:
         ahead_result = subprocess.run(
@@ -470,7 +470,7 @@ def resolve_sync_conflicts(
     )
 
     return HandlerResult(
-        f"DONE_SUMMARY\t{summary}\t{short_sha}",
+        f"DONE_SUMMARY\t{summary}\t{full_sha}",
         cost_usd=run_result.cost_usd,
         duration_seconds=run_result.duration_seconds,
     )
