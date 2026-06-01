@@ -279,7 +279,7 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
 
     Returns dict with:
       - committed: bool
-      - commit_sha: str  (short SHA, present when committed)
+      - commit_sha: str  (full SHA, present when committed)
       - branch: str      (branch name, e.g. "autoswe/issue-42")
     """
     repo_cfg = {"owner": owner, "repo": repo, "token": "", "provider": provider}
@@ -356,7 +356,7 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
     _run(["git", "-C", str(wt), "push", "-u", "origin", branch])
     commit_sha = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
     dbg.debug("WORKTREE: committed and pushed %s sha=%s", branch, commit_sha)
-    log(f"[WORKTREE] Committed and pushed {branch} ({commit_sha})")
+    log(f"[WORKTREE] Committed and pushed {branch} ({commit_sha[:8]})")
     return {"committed": True, "commit_sha": commit_sha, "branch": branch}
 
 
