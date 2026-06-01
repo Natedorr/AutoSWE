@@ -13,11 +13,16 @@ $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $FORCE      = $args -contains "--force"
 
 $AUTOSWE_DIR = if ($env:AUTOSWE_DIR) { $env:AUTOSWE_DIR } else { $SCRIPT_DIR }
+$LOGFILE     = Join-Path $AUTOSWE_DIR "logs\update.log"
+
+$logDir = Split-Path $LOGFILE -Parent
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
 function Write-Log {
     param([string]$Message)
-    $line = "[$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ' -AsUTC)] $Message"
+    $line = "[$([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))] $Message"
     Write-Output $line
+    Add-Content -Path $LOGFILE -Value $line
 }
 
 Push-Location $AUTOSWE_DIR
