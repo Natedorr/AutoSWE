@@ -383,10 +383,14 @@ def emit(
         effects.append(Effect(kind="post_comment", body=comment))
         effects.append(Effect(kind="set_status", status=new_status))
 
-        # Persist fix_summary from DONE_SUMMARY for PR body enrichment
+        # Persist fix_summary from DONE_SUMMARY for PR body enrichment.
+        # Mirrors _build_completion_comment's rfind pattern so tabs inside
+        # the LLM-generated summary are preserved (the last tab separates
+        # the summary from the commit SHA).
         if kind in ("fix", "retry") and done.startswith("DONE_SUMMARY\t"):
             summary_rest = done[len("DONE_SUMMARY\t"):]
-            summary_text = summary_rest.split("\t")[0].strip()
+            tab_idx = summary_rest.rfind("\t")
+            summary_text = summary_rest[:tab_idx].strip() if tab_idx >= 0 else summary_rest.strip()
             if summary_text:
                 queue_patch["fix_summary"] = summary_text
 
