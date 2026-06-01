@@ -16,11 +16,16 @@ $ErrorActionPreference = "SilentlyContinue"
 $SCRIPT_DIR = Split-Path $MyInvocation.MyDefinition.Path -Parent
 $AUTOSWE_DIR = if ($env:AUTOSWE_DIR) { $env:AUTOSWE_DIR } else { $SCRIPT_DIR }
 $RUNNING_DIR = Join-Path $AUTOSWE_DIR "running"
+$LOGFILE     = Join-Path $AUTOSWE_DIR "logs\cleanup.log"
+
+$logDir = Split-Path $LOGFILE -Parent
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
 function Write-Log {
     param([string]$Message)
-    $line = "[$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ' -AsUtc)] $Message"
+    $line = "[$([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))] $Message"
     Write-Output $line
+    Add-Content -Path $LOGFILE -Value $line
 }
 
 # -- Banner / Warning --------------------------------------------------------
