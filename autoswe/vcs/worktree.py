@@ -279,7 +279,7 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
 
     Returns dict with:
       - committed: bool
-      - commit_sha: str  (short SHA, present when committed)
+      - commit_sha: str  (full SHA, present when committed)
       - branch: str      (branch name, e.g. "autoswe/issue-42")
     """
     repo_cfg = {"owner": owner, "repo": repo, "token": "", "provider": provider}
@@ -343,8 +343,8 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
             log(f"[WORKTREE] Reworded last commit on {branch} ({count} commit(s) preserved)")
             _run(["git", "-C", str(wt), "push", "-f", "origin", branch])
             log(f"[WORKTREE] git push -f origin {branch}")
-        commit_sha = _run(["git", "-C", str(wt), "rev-parse", "--short", "HEAD"]).stdout.strip()
-        log(f"[WORKTREE] git commit ({commit_sha}) on {branch}: {msg[:60]!r}")
+        commit_sha = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
+        log(f"[WORKTREE] git commit ({commit_sha[:8]}) on {branch}: {msg[:60]!r}")
         return {"committed": True, "commit_sha": commit_sha, "branch": branch}
 
     _run(["git", "-C", str(wt), "add", "-A"])
@@ -354,9 +354,9 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
         return {"committed": False}
     _run(["git", "-C", str(wt), "commit", "-m", msg])
     _run(["git", "-C", str(wt), "push", "-u", "origin", branch])
-    commit_sha = _run(["git", "-C", str(wt), "rev-parse", "--short", "HEAD"]).stdout.strip()
+    commit_sha = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
     dbg.debug("WORKTREE: committed and pushed %s sha=%s", branch, commit_sha)
-    log(f"[WORKTREE] Committed and pushed {branch} ({commit_sha})")
+    log(f"[WORKTREE] Committed and pushed {branch} ({commit_sha[:8]})")
     return {"committed": True, "commit_sha": commit_sha, "branch": branch}
 
 
@@ -482,13 +482,13 @@ def sync_branch(wt: Path, owner: str, repo: str, issue_num: int, base_branch: st
     ahead = _run(["git", "-C", str(wt), "log", f"origin/{base_branch}..HEAD", "--oneline"], check=False)
     ahead_count = len(ahead.stdout.strip().split("\n")) if ahead.stdout.strip() else 0
 
-    short_sha = _run(["git", "-C", str(wt), "rev-parse", "--short", "HEAD"]).stdout.strip()
+    commit_sha = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
     head_after = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
 
     return {
         "synced": True, "conflict": False, "branch": branch,
         "ahead": ahead_count,
-        "commit_sha": short_sha,
+        "commit_sha": commit_sha,
         "changed": head_before != head_after,
     }
 
