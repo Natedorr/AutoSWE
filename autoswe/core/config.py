@@ -252,7 +252,7 @@ def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict = Non
     return {
         "backend": "claude_code",
         "model": model,
-        "cli_path": cfg.get("CLAUDE_CLI_PATH"),
+        "cli_path": cfg.get("CLAUDE_CLI_PATH") or None,
         "anthropic_base_url": repo_cfg.get("anthropic_base_url") or cfg.get("ANTHROPIC_BASE_URL"),
         "anthropic_auth_token": repo_cfg.get("anthropic_auth_token") or cfg.get("ANTHROPIC_AUTH_TOKEN"),
         "anthropic_api_key": repo_cfg.get("anthropic_api_key") or cfg.get("ANTHROPIC_API_KEY"),
