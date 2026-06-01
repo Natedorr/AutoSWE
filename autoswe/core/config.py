@@ -61,7 +61,7 @@ def load_config() -> dict:
         "AUTO_ASSIGN": os.environ.get("AUTO_ASSIGN", "true").lower() == "true",
         "ASSIGN_USER": os.environ.get("ASSIGN_USER", ""),
         "AUTO_CREATE_PR": os.environ.get("AUTO_CREATE_PR", "false").lower() == "true",
-        "CLAUDE_CLI_PATH": os.environ.get("CLAUDE_CLI_PATH", ""),
+        "CLAUDE_CLI_PATH": os.environ.get("CLAUDE_CLI_PATH") or None,
         "PLAN_MODEL": os.environ.get("PLAN_MODEL", ""),
         "FIX_MODEL": os.environ.get("FIX_MODEL", ""),
         "REVIEW_MODEL": os.environ.get("REVIEW_MODEL", ""),
