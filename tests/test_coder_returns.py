@@ -1268,3 +1268,25 @@ def test_resolve_sync_conflicts_passes_harness_model(tmp_path):
     # Harness profile model (via resolve_harness) should be forwarded.
     # The synthesized default picks repo_cfg fix_model > cfg FIX_MODEL > None.
     assert captured["model"] == "repo-model"
+
+
+# ---------------------------------------------------------------------------
+# Codex backend — success path (no MCP)
+
+
+def test_run_fix_codex_done_summary(tmp_path):
+    """When harness_cfg uses Codex backend (no MCP), a successful fix run
+    with summary text → DONE_SUMMARY."""
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with _fetch_comments_patch():
+            # Codex backend returns subtype="success" + summary text
+            with patch("autoswe.harness.runner.run", return_value=_r("Changed 2 files.", "sess-codex", "success")):
+                with patch("autoswe.harness.coder.commit_and_push", return_value=FAKE_COMMIT_RESULT):
+                    from autoswe.harness.coder import run_fix
+                    result = run_fix(task, cfg={})
+
+    assert result.done_content.startswith("DONE_SUMMARY\t")
+    assert "Changed 2 files." in result.done_content
+    assert task["session_id"] == "sess-codex"

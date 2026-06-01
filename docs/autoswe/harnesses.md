@@ -115,20 +115,20 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 - `codex_api_key` or `openai_api_key`: API key for the provider (optional for local providers)
 - `timeout`: Override the default timeout (optional)
 
-**Capabilities (Phase 4, core run only):** `resume`, `progress_stream`.
+**Capabilities (Phase 4, core run only):** `mode`, `resume`, `progress_stream`.
 
-**Capabilities (not yet supported):** `mode` (mode flags are mapped but not first-class), `mcp` (no MCP comment posting), `can_use_tool` (no per-tool gating), `plan_permission` (no dedicated plan mode). Handlers degrade gracefully when these are unavailable — e.g. the planner falls back to text parsing instead of MCP plan posting.
+**Capabilities (not yet supported):** `mcp` (no MCP comment posting), `can_use_tool` (no per-tool gating), `plan_permission` (no dedicated plan mode). Handlers degrade gracefully when these are unavailable — e.g. the planner falls back to text parsing instead of MCP plan posting.
 
 **Mode → sandbox mapping:**
 - `plan` / `read_only` → `--sandbox read-only`
 - `read_write` → `--sandbox workspace-write`
 
 **Command mapping:**
-- Fresh run: `codex exec --json --sandbox <mode> --model <model> -C <cwd> --ephemeral -- <prompt>`
-- Resume: `codex exec resume <session_id> --json --model <model>`
+- Fresh run: `codex exec --json --sandbox <mode> --model <model> -C <cwd> -- <prompt>` (session persisted)
+- Resume: `codex exec resume <session_id> --json --model <model>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`)
 
 **Known limitations:**
-- ``cost_usd`` is always ``None`` — the Codex JSONL stream reports token counts (`input_tokens`, `output_tokens`) but not dollar amounts, and no pricing table is maintained yet.
+- ``cost_usd`` is an **estimate** from a maintained price table (`codex_pricing.py`). Returns ``None`` for unknown models — never guesses.
 - ``plan_file_path`` is always ``None`` — Codex doesn't write to `~/.claude/plans/`.
 - ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting yet.
 - Duration is tracked via ``time.monotonic()`` locally.

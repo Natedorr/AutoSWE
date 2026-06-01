@@ -1237,3 +1237,45 @@ def test_run_plan_question_posted_beats_plan_posted(tmp_path, mock_gh_post_comme
     assert result.done_content.startswith("WAITING:")
     assert "questions" in result.done_content
 
+
+# ---------------------------------------------------------------------------
+# Codex backend — text-tag fallback (no MCP)
+
+
+def test_run_plan_codex_text_tag_plan_ready(tmp_path, mock_gh_post_comment):
+    """When harness_cfg uses Codex backend (no MCP), the planner falls back to
+    parsing <AUTOSWE_PLAN> tags from RunResult.text → PLAN_READY."""
+    claude_text = "Here is the plan:\n<AUTOSWE_PLAN>\nStep 1: Fix the bug\nStep 2: Add tests\n</AUTOSWE_PLAN>"
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            # Codex backend returns plan_posted=False (no MCP) — text-tag fallback
+            with patch("autoswe.harness.runner.run", return_value=_r(claude_text, "sess-codex")):
+                # Verify Codex harness has no mcp capability
+                with patch("autoswe.harness.runner.backend_has_capability", return_value=False):
+                    from autoswe.harness.planner import run_plan
+                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    assert task["session_id"] == "sess-codex"
+    assert len(mock_gh_post_comment.posted) == 1
+    assert "Step 1: Fix the bug" in mock_gh_post_comment.posted[0]["body"]
+
+
+def test_run_plan_codex_text_tag_questions(tmp_path, mock_gh_post_comment):
+    """When harness_cfg uses Codex backend (no MCP), <AUTOSWE_QUESTIONS> in text
+    → WAITING: questions (text-tag fallback)."""
+    claude_text = "I need clarification:\n<AUTOSWE_QUESTIONS>\n1. Which database?\n</AUTOSWE_QUESTIONS>"
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run", return_value=_r(claude_text, "sess-codex")):
+                with patch("autoswe.harness.runner.backend_has_capability", return_value=False):
+                    from autoswe.harness.planner import run_plan
+                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content.startswith("WAITING:")
+    assert len(mock_gh_post_comment.posted) == 1
+    assert "Which database" in mock_gh_post_comment.posted[0]["body"]

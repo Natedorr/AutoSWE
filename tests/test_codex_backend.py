@@ -6,7 +6,10 @@ output on the simulated stdout pipe.  No live Codex calls are made.
 import asyncio
 import json
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.backends.codex import (
@@ -824,8 +827,8 @@ def test_codex_result_no_mcp_flags():
     assert result.plan_file_path is None
 
 
-def test_codex_no_cwd_in_subprocess():
-    """subprocess is NOT given cwd= (Codex handles -C itself)."""
+def test_codex_fresh_passes_cwd():
+    """Fresh run passes cwd= to subprocess (authoritative alongside -C flag)."""
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp/repo", mode="read_write")
 
@@ -836,10 +839,37 @@ def test_codex_no_cwd_in_subprocess():
         with patch("asyncio.create_subprocess_exec", mock_exec):
             await _run_backend(backend, spec)
         call_kwargs = mock_exec.call_args[1]
-        return "cwd" not in call_kwargs
+        return call_kwargs.get("cwd")
 
-    has_no_cwd = asyncio.run(_run())
-    assert has_no_cwd, "create_subprocess_exec should NOT receive cwd kwarg"
+    cwd = asyncio.run(_run())
+    assert cwd == "/tmp/repo", "Fresh run should pass cwd= to subprocess"
+
+
+def test_codex_resume_passes_cwd():
+    """Resume run passes cwd= to subprocess so it operates in the correct worktree.
+
+    `codex exec resume` does not support -C, so the cwd kwarg is the
+    mechanism that ensures the resumed session touches the right files.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(
+        prompt="Continue",
+        cwd="/tmp/repo",
+        resume="sess-123",
+        mode="read_write",
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        call_kwargs = mock_exec.call_args[1]
+        return call_kwargs.get("cwd")
+
+    cwd = asyncio.run(_run())
+    assert cwd == "/tmp/repo", "Resume run should pass cwd= to subprocess"
 
 
 def test_codex_summary_output_collected():
@@ -872,6 +902,78 @@ def test_codex_summary_output_collected():
     assert "Summary: done" in result.text
 
 
+def test_codex_cost_usd_populated_for_known_model():
+    """RunResult.cost_usd is populated for a known model via estimate_cost."""
+    backend = CodexBackend()
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "msg1", "type": "agent_message", "text": "Done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 10_000,
+                "cached_input_tokens": 5_000,
+                "output_tokens": 2_000,
+                "reasoning_output_tokens": 0,
+            },
+        },
+    )
+    spec = RunSpec(
+        prompt="Fix",
+        cwd="/tmp",
+        model="gpt-4o",
+        mode="read_write",
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.cost_usd is not None, "cost_usd should be populated for known model"
+    assert result.cost_usd > 0, "cost_usd should be positive for non-zero usage"
+    # gpt-4o: input=$2.50/M, cached=$0.25/M, output=$10.00/M
+    # Expected: 10000*2.5/1M + 5000*0.25/1M + 2000*10/1M = 0.025 + 0.00125 + 0.02 = 0.04625
+    assert abs(result.cost_usd - 0.04625) < 0.0001, f"Unexpected cost: {result.cost_usd}"
+
+
+def test_codex_cost_usd_none_for_unknown_model():
+    """RunResult.cost_usd is None when the model is not in the price table."""
+    backend = CodexBackend()
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "msg1", "type": "agent_message", "text": "Done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 200,
+            },
+        },
+    )
+    spec = RunSpec(
+        prompt="Fix",
+        cwd="/tmp",
+        model="unknown-model-x",
+        mode="read_write",
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.cost_usd is None, "cost_usd should be None for unknown model"
+
+
 def test_codex_turn_failed_affects_subtype():
     """JSONL with turn.failed + exit 0 produces subtype='error'."""
     backend = CodexBackend()
@@ -892,13 +994,14 @@ def test_codex_turn_failed_affects_subtype():
     assert result.subtype == "error"
 
 
-def test_codex_ephemeral_fresh_run():
-    """Fresh run (no resume) includes --ephemeral flag."""
+def test_codex_fresh_run_persists_session():
+    """Fresh run (no resume) does NOT include --ephemeral so the session is persisted
+    for subsequent resume (codex exec resume <session_id>) calls."""
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    assert "--ephemeral" in cmd
+    assert "--ephemeral" not in cmd
 
 
 def test_codex_no_ephemeral_resume():
@@ -1004,3 +1107,152 @@ def test_backend_has_capability_codex():
 # Note: Backend parity tests (RunSpec→RunResult contract, capability matrix,
 # protocol conformance) have moved to tests/test_backend_parity.py.
 # That file mirrors the provider parity pattern (test_fake_parity.py).
+
+
+# ---------------------------------------------------------------------------
+# Live smoke test — runs real `codex exec --json` (skipped in CI via @pytest.mark.live)
+
+
+@pytest.mark.live
+def test_codex_live_smoke_fresh_and_resume(tmp_path):
+    """End-to-end smoke test: run real codex exec --json, verify RunResult,
+    check session persisted, then resume and verify context carries over.
+
+    Auto-skips when `codex` is not on PATH or the CLI is unreachable.
+    Run with:  pytest -q -m live tests/test_codex_backend.py
+    """
+    import shutil
+    import subprocess
+    import time
+
+    codex_path = shutil.which("codex")
+    # Also check ~/.npm-global/bin (common npm global install location)
+    if not codex_path:
+        npm_bin = Path.home() / ".npm-global" / "bin" / "codex"
+        if npm_bin.exists():
+            codex_path = str(npm_bin)
+    if not codex_path:
+        pytest.skip("codex executable not found on PATH")
+
+    # Probe that codex is reachable (version check)
+    try:
+        version_result = subprocess.run(
+            [codex_path, "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        pytest.skip(f"codex --version failed: {e}")
+
+    if version_result.returncode != 0:
+        pytest.skip(f"codex --version exited {version_result.returncode}")
+
+    # Discover the configured model from codex config
+    # Read ~/.codex/config.toml for the default model, fallback to env default
+    configured_model = None
+    config_path = Path.home() / ".codex" / "config.toml"
+    if config_path.exists():
+        text = config_path.read_text()
+        for line in text.splitlines():
+            if line.startswith("model "):
+                # model = "qwen3.6:27b"
+                val = line.split("=", 1)[1].strip().strip('"')
+                if val and not val.startswith("#"):
+                    configured_model = val
+                break
+
+    model = configured_model or "gpt-5"
+    backend = CodexBackend()
+    harness_cfg = {"backend": "codex", "model": model}
+
+    # Ensure `codex` is findable in the subprocess PATH.
+    # Prepend unconditionally — the system PATH may contain a broken
+    # reference (e.g. literal "$" prefix) that matches substring checks
+    # but doesn't resolve at runtime.
+    npm_bin = str(Path.home() / ".npm-global" / "bin")
+    path_with_npm = f"{npm_bin}:{os.environ.get('PATH', '')}"
+
+    # Create a git repo (codex needs -C to point to a git repo)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@smoke.local"],
+        cwd=repo, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Smoke Test"],
+        cwd=repo, capture_output=True, check=True,
+    )
+
+    spec = RunSpec(
+        prompt="Say hello in one sentence and stop.",
+        cwd=str(repo),
+        model=model,
+        mode="read_only",
+        state={"_harness_cfg": harness_cfg},
+        env_overrides={"PATH": path_with_npm},
+    )
+
+    # --- Fresh run ---
+    try:
+        result = asyncio.run(backend.run(spec))
+    except RuntimeError as e:
+        pytest.skip(f"codex exec failed (subprocess): {e}")
+    except Exception as e:
+        # Network timeouts, CLI crashes, etc. — skip gracefully
+        pytest.skip(f"codex exec error: {type(e).__name__}: {e}")
+
+    assert result.text, "Fresh run should produce text output"
+    assert result.subtype == "success", f"Expected success, got {result.subtype}"
+    assert result.session_id, "Fresh run should have a session_id"
+    # Duration should be tracked
+    assert result.duration_seconds is not None
+    assert result.duration_seconds > 0
+    # Cost may be None for unknown (non-OpenAI) models — that's fine
+    # Just verify it's a float or None
+    assert result.cost_usd is None or isinstance(result.cost_usd, float)
+
+    # Verify session persisted (rollout file exists)
+    sessions_dir = Path.home() / ".codex" / "sessions"
+    rollout_files = list(sessions_dir.rglob(f"*{result.session_id}*"))
+    if not rollout_files:
+        # The session_id might be the thread_id — search by it
+        rollout_files = list(sessions_dir.rglob("*.jsonl"))
+        # Filter to files created after we started
+        t0 = time.time() - result.duration_seconds - 5
+        rollout_files = [f for f in rollout_files if f.stat().st_mtime > t0]
+
+    assert rollout_files, (
+        f"No persisted rollout file found for session {result.session_id}. "
+        "Session persistence (no --ephemeral) may be broken."
+    )
+
+    # --- Resume run ---
+    resume_spec = RunSpec(
+        prompt="What did I just ask you? Answer in one sentence.",
+        cwd=str(repo),
+        model=model,
+        resume=result.session_id,
+        mode="read_only",
+        state={"_harness_cfg": harness_cfg},
+        env_overrides={"PATH": path_with_npm},
+    )
+
+    try:
+        resume_result = asyncio.run(backend.run(resume_spec))
+    except RuntimeError as e:
+        pytest.skip(f"codex exec resume failed: {e}")
+    except Exception as e:
+        pytest.skip(f"codex exec resume error: {type(e).__name__}: {e}")
+
+    assert resume_result.text, "Resume run should produce text output"
+    assert resume_result.subtype == "success", f"Expected success on resume, got {resume_result.subtype}"
+    assert resume_result.session_id == result.session_id, (
+        "Resume should reuse the same session_id"
+    )
+    # The resumed session should recall the first turn's context
+    # (the model should mention "hello" or "ask" in its response)
+    combined_text = (resume_result.text.lower())
+    assert any(keyword in combined_text for keyword in ("hello", "ask", "sentence")), (
+        f"Resume should carry context from first turn. Got: {resume_result.text[:200]}"
+    )

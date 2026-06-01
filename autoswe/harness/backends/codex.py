@@ -25,6 +25,7 @@ from typing import Awaitable
 
 from autoswe.core.logging_utils import log
 from autoswe.harness.backends.base import RunResult, RunSpec
+from autoswe.harness.backends.codex_pricing import estimate_cost
 
 # ---------- Streaming accumulator ----------
 
@@ -174,10 +175,9 @@ class CodexBackend:
     resumption), streams the JSONL event lines for live progress, and
     returns a RunResult.
 
-    **Known limitation (Phase 4):** ``cost_usd`` is always ``None`` because
-    the Codex JSONL stream reports token counts but not dollar amounts, and
-    no pricing table is maintained yet.  Duration is tracked via
-    ``time.monotonic()``.  A future phase will add token→cost conversion.
+    ``cost_usd`` is an **estimate** derived from a maintained price table
+    (``codex_pricing.py``). Returns ``None`` for unknown models — never
+    guesses. Duration is tracked via ``time.monotonic()``.
     """
 
     CAPABILITIES: set[str] = {"mode", "resume", "progress_stream"}
@@ -242,8 +242,7 @@ class CodexBackend:
                 "--model", model,
                 "-C", spec.cwd,
             ])
-            # Ephemeral: don't persist session files (unless resuming, which needs them)
-            cmd.append("--ephemeral")
+            # Persist session files so resume (codex exec resume <id>) can restore context.
 
         # Limit turns to prevent runaway sessions (only add flag when non-default)
         if spec.max_turns and spec.max_turns != _DEFAULT_MAX_TURNS:
@@ -269,6 +268,9 @@ class CodexBackend:
         t0 = time.monotonic()
 
         # Start subprocess with streaming stdout/stderr
+        # Resume runs: -C is not supported by `codex exec resume`, so pass cwd=
+        # to ensure the subprocess operates in the correct worktree.
+        # Fresh runs: -C is already in the command, cwd= is harmless (codex uses -C).
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -276,6 +278,7 @@ class CodexBackend:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=spec.cwd,
             )
         except FileNotFoundError as e:
             raise RuntimeError(
@@ -344,15 +347,14 @@ class CodexBackend:
         else:
             subtype = "error"
 
-        # TODO(Phase 5): Parse cost from turn.completed usage token counts
-        # once a pricing table (model → $/token) is available.  The JSONL
-        # parser accumulates usage in acc.usage; a simple multiplier would
-        # populate cost_usd.
+        # Estimate cost from accumulated token usage
+        estimated_cost = estimate_cost(model, acc.usage)
+
         return RunResult(
             text="\n".join(acc.text_chunks),
             session_id=acc.session_id,
             subtype=subtype,
-            cost_usd=None,
+            cost_usd=estimated_cost,
             duration_seconds=duration,
             plan_file_path=None,
             plan_posted=False,
