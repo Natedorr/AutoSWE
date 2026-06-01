@@ -582,6 +582,36 @@ class TestApplyEffectCreatePrBranchLinking:
                 # Should not raise
                 apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
 
+    def test_github_create_pr_missing_scope_error_handled(self):
+        """MissingScopeError should be caught (not silently swallowed by generic except)."""
+        tracker = MagicMock()
+        queue = {}
+
+        class MissingScopeVCS:
+            def find_existing_pr(self, *a, **kw):
+                return None
+            def open_pull_request(self, *a, **kw):
+                return PRResult(url="https://github.com/o/r/pull/42", number=42)
+            def link_branch_to_issue(self, issue_number, commit_sha, branch):
+                from autoswe.providers.github.vcs import MissingScopeError
+                raise MissingScopeError("PAT missing check_runs:write scope")
+
+        repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=MissingScopeVCS()):
+            with patch("autoswe.providers.github.adapter.get_remote_branch_sha",
+                       return_value="abcdef1"):
+                from autoswe.providers.github.adapter import apply_effect
+                effect = Effect(
+                    kind="create_pr",
+                    pr_title="Fixes #1: Test",
+                    pr_body="Fixes #1",
+                    pr_head="autoswe/issue-1",
+                    pr_base="main",
+                )
+                # Should not raise — MissingScopeError is caught
+                apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
+
     def test_github_create_pr_no_link_when_sha_unknown(self):
         """When branch SHA fetch returns None, link_branch_to_issue is skipped."""
         tracker = MagicMock()
@@ -616,10 +646,15 @@ class TestApplyEffectCreatePrBranchLinking:
 
 
 class TestApplyEffectAzureCreatePr:
-    """Azure adapter create_pr should call link_branch_to_issue (issue #49 fix)."""
+    """Azure adapter create_pr — link_branch_to_issue is a no-op for Azure."""
 
-    def test_azure_create_pr_calls_link_branch(self):
-        """Azure adapter should call link_branch_to_issue after PR creation."""
+    def test_azure_create_pr_no_link_branch_call(self):
+        """Azure adapter does NOT call link_branch_to_issue (documented no-op).
+
+        Azure DevOps has no equivalent to GitHub's Development section, so
+        link_branch_to_issue is a no-op. The adapter omits the call entirely
+        to avoid dead code.
+        """
         tracker = MagicMock()
         queue = {}
         link_calls = []
@@ -648,14 +683,14 @@ class TestApplyEffectAzureCreatePr:
             )
             apply_effect(tracker, effect, repo_cfg, 1, queue, "ado__owner_repo_1")
 
-        assert len(link_calls) == 1
-        assert link_calls[0][0] == 1
+        # Azure does not call link_branch_to_issue — it's a documented no-op
+        assert len(link_calls) == 0
 
     def test_azure_create_pr_no_link_when_existing(self):
-        """When PR already exists on Azure, link_branch_to_issue is not called."""
+        """When PR already exists on Azure, open_pull_request is not called."""
         tracker = MagicMock()
         queue = {}
-        link_calls = []
+        open_calls = []
 
         class MockVCS:
             def find_existing_pr(self, *a, **kw):
@@ -664,12 +699,11 @@ class TestApplyEffectAzureCreatePr:
                     number=15,
                 )
             def open_pull_request(self, *a, **kw):
+                open_calls.append(True)
                 return PRResult(
                     url="https://dev.azure.com/o/p/_git/r/pr/42",
                     number=42,
                 )
-            def link_branch_to_issue(self, issue_number, commit_sha, branch):
-                link_calls.append((issue_number, commit_sha, branch))
 
         repo_cfg = {"provider": "azure", "org": "o", "project": "p", "repo": "r", "pat": "fake"}
 
@@ -684,4 +718,4 @@ class TestApplyEffectAzureCreatePr:
             )
             apply_effect(tracker, effect, repo_cfg, 1, queue, "ado__owner_repo_1")
 
-        assert len(link_calls) == 0
+        assert len(open_calls) == 0

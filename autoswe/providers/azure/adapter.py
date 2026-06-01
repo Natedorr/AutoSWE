@@ -178,8 +178,5 @@ def apply_effect(
                 title=effect.pr_title or "",
                 body=body,
             )
-            # Best-effort: link branch to issue in platform UI (no-op for Azure)
-            try:
-                vcs.link_branch_to_issue(issue_num, "", branch)
-            except Exception:
-                pass
+            # NOTE: Azure DevOps has no Development section equivalent;
+            # AzureVCS.link_branch_to_issue() is a documented no-op.

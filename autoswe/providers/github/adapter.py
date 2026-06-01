@@ -5,10 +5,15 @@ so the orchestrator can stay provider-agnostic.
 """
 from __future__ import annotations
 
+from autoswe.core.config import LOGS_DIR
+from autoswe.core.logging_utils import init_debug_logger
 from autoswe.orch.types import ApiState, Effect
 from autoswe.providers.base import IssueTracker, NormalizedComment
 from autoswe.providers.factory import get_vcs
+from autoswe.providers.github.vcs import MissingScopeError
 from autoswe.vcs.worktree import get_remote_branch_sha
+
+dbg = init_debug_logger(LOGS_DIR)
 
 
 def read_api(
@@ -154,7 +159,12 @@ def apply_effect(
 
 
 def _try_link_branch_to_issue(vcs, repo_cfg: dict, issue_num: int, branch: str) -> None:
-    """Best-effort link branch to issue after PR creation (adapter path)."""
+    """Best-effort link branch to issue after PR creation (adapter path).
+
+    Matches the error-handling pattern used in ship.py and coder.py:
+    MissingScopeError is caught explicitly (PAT may lack check_runs scope),
+    all other exceptions are logged at debug level.
+    """
     owner = repo_cfg.get("owner", "")
     repo = repo_cfg.get("repo", "")
     token = repo_cfg.get("pat", "") or repo_cfg.get("token", "")
@@ -165,5 +175,7 @@ def _try_link_branch_to_issue(vcs, repo_cfg: dict, issue_num: int, branch: str) 
     if commit_sha:
         try:
             vcs.link_branch_to_issue(issue_num, commit_sha, branch)
-        except Exception:
-            pass  # Silently ignore — best-effort only
+        except MissingScopeError:
+            pass  # PAT missing check_runs:write — expected, already warned elsewhere
+        except Exception as e:
+            dbg.warning("link_branch_to_issue failed in adapter: %s", e, exc_info=True)
