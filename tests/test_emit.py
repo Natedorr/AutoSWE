@@ -1383,3 +1383,93 @@ def test_fix_summary_preserves_tabs_in_summary():
         f"fix_summary must use rfind to preserve tabs in summary text. "
         f"Got: {summary!r}"
     )
+
+
+def test_plan_branch_persisted_in_queue_patch():
+    """When an Action has plan_branch set (e.g. /fix --branch develop),
+    the emitted queue_patch must persist it so subsequent commands (/pr,
+    /sync) use the correct base branch instead of falling back to 'main'."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=42, title="Bug", body="Body",
+        owner="o", repo="r", state="open",
+    )
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    # Task does NOT have plan_branch yet (first dispatch with --branch)
+    task = TaskState(
+        slug="gh:o_r_42", owner="o", repo="r", issue_number=42,
+        title="Bug", body="Body",
+        status=None, plan_branch=None, base_branch="main",
+        attempt_count=0, first_dispatched_at=None,
+        last_dispatched_command=None, last_dispatched_command_id=None,
+        last_consumed_reply_id=None, session_id=None,
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    # Action carries plan_branch from /fix --branch develop
+    action = Action(
+        kind="fix", slug="gh:o_r_42",
+        plan_branch="develop",  # --branch value
+        triggering_comment_id=1,
+        attempt_count=1,
+    )
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tFixed the bug\tabc123",
+        cost_usd=1.0, duration_seconds=60, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    assert patch.get("plan_branch") == "develop", (
+        f"plan_branch must be persisted in queue_patch. Got: {patch!r}"
+    )
+
+
+def test_plan_branch_used_for_auto_create_pr_base():
+    """When AUTO_CREATE_PR is enabled and fix completes with plan_branch,
+    the create_pr effect must use plan_branch as pr_base (not 'main')."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=42, title="Bug", body="Issue body",
+        owner="o", repo="r", state="open",
+    )
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_42", owner="o", repo="r", issue_number=42,
+        title="Bug", body="Issue body",
+        status="fixing", plan_branch="develop", base_branch="main",
+        attempt_count=1, first_dispatched_at=None,
+        last_dispatched_command="/fix", last_dispatched_command_id=1,
+        last_consumed_reply_id=1, session_id="s-fix",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    cfg = _default_cfg()
+    cfg["AUTO_CREATE_PR"] = True
+    world = World(api=api, task=task, cfg=cfg, repo_cfg={"pat": "tok"})
+
+    action = Action(
+        kind="fix", slug="gh:o_r_42",
+        triggering_comment_id=2,
+        attempt_count=1,
+    )
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tFixed the bug\tabc123",
+        cost_usd=1.0, duration_seconds=60, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    pr_effects = [e for e in effects if e.kind == "create_pr"]
+    assert len(pr_effects) == 1, f"Expected create_pr effect, got: {[e.kind for e in effects]}"
+    pr_effect = pr_effects[0]
+    assert pr_effect.pr_base == "develop", (
+        f"create_pr must use plan_branch as pr_base. Got pr_base={pr_effect.pr_base!r}"
+    )

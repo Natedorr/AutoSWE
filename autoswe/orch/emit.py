@@ -290,6 +290,10 @@ def emit(
         "pending_user_reply": None,
     }
 
+    # Persist plan_branch from --branch so subsequent commands (/pr, /sync) use it
+    if action.plan_branch:
+        queue_patch["plan_branch"] = action.plan_branch
+
     # Reset guard flag on retry so subsequent /fix is not blocked
     if kind == "retry":
         queue_patch["_guard_blocked"] = False
