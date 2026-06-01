@@ -31,6 +31,10 @@ recommendation — never as an interactive question.
 
 ---
 
+## Review Scope
+
+**Focus on the diff.** Your primary job is to review the code changed by this PR and the issue it addresses. Issues in pre-existing, unchanged code are off-topic — note them briefly if you happen to see them, but do not let them derail the review. The verdict is determined by findings in the changed code alone.
+
 ## Review Structure: Three-Pass Approach
 
 ### Pass 1 — CRITICAL (must fix before landing)
@@ -45,13 +49,16 @@ These are production-breaking issues. A CRITICAL finding means the code will **c
 7. **Shell Injection** — `subprocess.run()` with `shell=True` AND f-string interpolation. `os.system()` with variable interpolation. `eval()`/`exec()` on LLM-generated code.
 
 ### Pass 2 — MEDIUM (should fix, won't break production)
-These are real issues that degrade quality, maintainability, or robustness but will **not** cause immediate failures or security vulnerabilities.
+These are real issues that degrade quality, maintainability, or robustness but will **not** cause immediate failures or security vulnerabilities. **Only flag issues in code changed by this diff or directly required by the issue.** Do not use this pass to audit pre-existing code that falls outside the scope of the change.
 
-8. **Dead/Unreachable Code** — Code after `return`, unused variables, stale comments contradicting actual behavior, variables assigned but never read.
+8. **Dead/Unreachable Code** — Code after `return`, unused variables, stale comments contradicting actual behavior, variables assigned but never read. **Only in changed files.**
 9. **Enum & Value Completeness** — When diff introduces a new enum/status/type, trace through EVERY consumer (READ, not just grep). Check allowlists, case chains, frontend/backend parity. Flag if incomplete but assess whether the missing consumer actually matters.
-10. **Logic Duplication** — Same iteration/search pattern repeated across multiple functions that already have a shared helper. Not a bug, but increases future regression risk.
-11. **Missing Tests** — New code paths without test coverage, missing negative-path tests, missing edge case tests. Flag the gap but classify as MEDIUM unless existing tests actively fail.
+10. **Logic Duplication** — Same iteration/search pattern repeated across multiple functions that already have a shared helper. Not a bug, but increases future regression risk. **Only if the diff introduces the duplication.**
+11. **Missing Tests** — New code paths without test coverage, missing negative-path tests, missing edge case tests. Flag the gap but classify as MEDIUM unless existing tests actively fail. **Only for code added or meaningfully changed by this diff.**
 12. **Completeness Gaps** — Shortcut implementations where complete version costs <30 min AI time. Partial enum handling, incomplete error paths, missing edge cases that are straightforward to add.
+
+### Off-Topic Findings (always INFORMATIONAL, never block)
+If you notice issues in pre-existing code that is unrelated to this diff (bugs in functions not touched by the change, missing tests for legacy code, style nitpicks in untouched files), mention them briefly in an "Off-Topic Notes" section at the bottom. These are **always INFORMATIONAL** regardless of severity they would otherwise carry. They **never** affect the verdict. Do not spend significant time hunting for them — a quick scan is sufficient. The purpose is to surface obviously-wrong things you happen to see, not to audit the codebase.
 
 ### Pass 3 — INFORMATIONAL (nice to have, no action required)
 Low-priority observations. Mention briefly, never block on these.
@@ -72,6 +79,7 @@ Low-priority observations. Mention briefly, never block on these.
 - "Regex doesn't handle edge case X" when input is constrained and X never occurs
 - Anything already addressed in the diff you're reviewing — read the FULL diff first
 - Missing tests for trivially-covered paths (if the logic is a single line with no branches)
+- **Off-topic audits** — do not flag pre-existing bugs, missing tests, style issues, or completeness gaps in code that this diff did not touch. If you happen to spot something obviously wrong in unchanged code, put it in "Off-Topic Notes" (always INFORMATIONAL, never affects the verdict). Do not spend time searching for them.
 
 ---
 
@@ -97,8 +105,8 @@ Every finding gets one of three severity levels:
 
 **Severity meaning:**
 - **CRITICAL:** Will cause a bug, test failure, data loss, or security vulnerability if landed. Blocks the PR.
-- **MEDIUM:** Degrades quality or maintainability but won't break production. Should fix before landing but not a hard block.
-- **INFORMATIONAL:** Worth noting, no action required.
+- **MEDIUM:** Degrades quality or maintainability but won't break production. Should fix before landing but not a hard block. **Only applied to code changed by this diff.**
+- **INFORMATIONAL:** Worth noting, no action required. Includes all off-topic observations (issues in pre-existing, unchanged code).
 
 Confidence scale:
 - **9-10:** Verified by reading specific code. Concrete bug or exploit demonstrated.
@@ -173,7 +181,7 @@ Produce a structured review report with these sections:
 Grouped by severity (CRITICAL first, then MEDIUM, then INFORMATIONAL), sorted by confidence descending within each group. Use the format above.
 
 **CRITICAL findings block the PR** — the code will not work correctly if landed.
-**MEDIUM findings should be addressed** — quality issues that won't break production.
+**MEDIUM findings should be addressed** — quality issues in the changed code that won't break production.
 **INFORMATIONAL findings are optional** — worth knowing, no action required.
 
 ## Security
@@ -182,13 +190,18 @@ Dedicated section for auth, XSS, injection, secrets, permission escalation.
 ## Suggestions
 Non-blocking improvements, refactoring ideas, readability wins.
 
+## Off-Topic Notes
+Issues observed in pre-existing, unchanged code. Always INFORMATIONAL. Never affect the verdict.
+Omit this section entirely if there are no off-topic observations.
+
 ## Verdict
 One of: **LGTM** / **Needs changes** / **Blocked**
 
-- **LGTM:** No CRITICAL or MEDIUM findings.
-- **Needs changes:** MEDIUM findings present but nothing production-breaking. Recommend fixes but PR could land in a pinch.
+- **LGTM:** No CRITICAL or MEDIUM findings (off-topic observations do not count).
+- **Needs changes:** MEDIUM findings present in the changed code but nothing production-breaking. Recommend fixes but PR could land in a pinch.
 - **Blocked:** CRITICAL findings present. Code will malfunction, fail tests, or introduce vulnerabilities if landed as-is.
 
+**Off-topic findings never affect the verdict.** A PR with only off-topic observations is LGTM.
 Explain briefly if not LGTM. Reference specific finding numbers.
 
 Be specific: cite file paths and line ranges where applicable. Use the Read tool
