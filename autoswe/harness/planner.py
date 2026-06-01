@@ -121,8 +121,6 @@ def _extract_plan_output(text: str, plan_file: Path = None) -> tuple[str, str, O
     picking up another session's plan file during concurrent execution.
     (Regression fix for issue #36 — plan file collision.)
     """
-    used_file: Optional[Path] = None
-
     # 1. Check for captured plan file path (from Write tool call — per-session)
     captured_file = plan_file
     try:
