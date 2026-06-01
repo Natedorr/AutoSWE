@@ -117,7 +117,7 @@ def run_review(
         guidance=guidance,
     )
 
-    harness = resolve_harness("review", repo_cfg, cfg)
+    harness = resolve_harness("review", repo_cfg, cfg or {})
     review_model = harness.get("model")
     log(f"[REVIEW] {task['id']} session=NEW model={review_model or 'default'} diff_stat_lines={diff_stat.count(chr(10))}")
 
@@ -129,7 +129,7 @@ def run_review(
         result = runner.run(
             prompt,
             cwd=str(wt),
-            cfg=cfg,
+            cfg=cfg or {},
             repo_cfg=repo_cfg,
             resume=None,  # CRITICAL: one-off session
             model=review_model,

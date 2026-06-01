@@ -504,3 +504,64 @@ def test_resolve_harness_no_model_in_synthesized(isolated_autoswe_dir):
     result = resolve_harness("plan", repo_cfg, cfg)
     assert result["backend"] == "claude_code"
     assert result["model"] is None
+
+
+def test_resolve_harness_none_cfg(isolated_autoswe_dir):
+    """resolve_harness does not crash when cfg=None."""
+    from autoswe.core.config import resolve_harness
+
+    result = resolve_harness("plan", {}, None)
+    assert result["backend"] == "claude_code"
+
+
+def test_resolve_harness_none_repo_cfg(isolated_autoswe_dir):
+    """resolve_harness does not crash when repo_cfg=None."""
+    from autoswe.core.config import resolve_harness
+
+    cfg = {"PLAN_MODEL": "claude-sonnet-4-6", "PLAN_HARNESS": ""}
+    result = resolve_harness("plan", None, cfg)
+    assert result["backend"] == "claude_code"
+    assert result["model"] == "claude-sonnet-4-6"
+
+
+def test_resolve_harness_synthesized_includes_repo_api_key(isolated_autoswe_dir):
+    """Synthesized default checks repo_cfg for anthropic_api_key."""
+    from autoswe.core.config import resolve_harness
+
+    cfg = {"ANTHROPIC_API_KEY": "sk-cfg-key", "PLAN_HARNESS": ""}
+    repo_cfg = {"anthropic_api_key": "sk-repo-key"}
+
+    result = resolve_harness("plan", repo_cfg, cfg)
+    assert result["anthropic_api_key"] == "sk-repo-key"
+
+
+def test_resolve_harness_synthesized_cfg_api_key_fallback(isolated_autoswe_dir):
+    """Synthesized default falls back to cfg ANTHROPIC_API_KEY when repo_cfg is empty."""
+    from autoswe.core.config import resolve_harness
+
+    cfg = {"ANTHROPIC_API_KEY": "sk-cfg-key", "PLAN_HARNESS": ""}
+    repo_cfg = {}
+
+    result = resolve_harness("plan", repo_cfg, cfg)
+    assert result["anthropic_api_key"] == "sk-cfg-key"
+
+
+def test_expand_env_dict_raises_on_list(isolated_autoswe_dir):
+    """_expand_env_dict raises ValueError for list values."""
+    from autoswe.core.config import _expand_env_dict
+
+    try:
+        _expand_env_dict({"tools": ["Read", "Write"]})
+        assert False, "should have raised ValueError"
+    except ValueError as e:
+        assert "tools" in str(e)
+        assert "list" in str(e).lower()
+
+
+def test_claude_cli_path_defaults_to_empty_string(isolated_autoswe_dir):
+    """CLAUDE_CLI_PATH defaults to empty string (backward compat)."""
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["CLAUDE_CLI_PATH"] == ""
+    assert cfg["CLAUDE_CLI_PATH"] is not None
