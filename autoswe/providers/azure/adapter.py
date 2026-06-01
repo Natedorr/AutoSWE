@@ -154,10 +154,27 @@ def apply_effect(
         branch = effect.pr_head or ""
         existing = vcs.find_existing_pr(repo_cfg, branch)
         if existing is None:
+            # Enrich PR body if it only contains the bare "Fixes #N" text
+            body = effect.pr_body or ""
+            task_entry = queue.get(slug)
+            if task_entry and not body:
+                body = f"Fixes #{issue_num}"
+            elif task_entry and body == f"Fixes #{issue_num}":
+                # Backwards compat: old emit code produced bare body.
+                # Rebuild from queue entry data if available.
+                issue_body = task_entry.get("body", "") or ""
+                fix_summary = task_entry.get("fix_summary", "") or ""
+                body_parts = [f"Fixes #{issue_num}"]
+                if issue_body:
+                    body_parts.append(f"**Issue:**\n\n{issue_body}")
+                if fix_summary:
+                    body_parts.append(f"**Fix Summary:**\n\n{fix_summary}")
+                body_parts.append("\nOpened by autoSWE.")
+                body = "\n\n".join(body_parts)
             vcs.open_pull_request(
                 repo_cfg,
                 branch=branch,
                 base=effect.pr_base or "main",
                 title=effect.pr_title or "",
-                body=effect.pr_body or "",
+                body=body,
             )

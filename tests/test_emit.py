@@ -105,6 +105,7 @@ def _load_world(data: dict) -> World:
         created_at=task_data.get("created_at", ""),
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
+        fix_summary=task_data.get("fix_summary", ""),
     )
 
     cfg = _default_cfg()
@@ -1130,3 +1131,255 @@ def test_fix_waiting_emit_preserves_resume_phase_fix():
     )
     assert patch.get("last_phase") == "fix"
     assert patch.get("autoswe_status") == "waiting"
+
+
+# ---------------------------------------------------------------------------
+# Issue #43 — fix_summary persistence + auto-create PR body/branch
+# ---------------------------------------------------------------------------
+
+
+def test_fix_completed_persists_fix_summary():
+    """When fix completes with DONE_SUMMARY, fix_summary must be persisted
+    in the queue_patch so PR creation can include it in the body."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=43, title="PR merge issue", body="The PR body is uninformative",
+        owner="o", repo="r", state="open",
+    )
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
+        title="PR merge issue", body="The PR body is uninformative",
+        status="fixing", plan_branch="autoswe/issue-43", base_branch="main",
+        attempt_count=1, first_dispatched_at=None,
+        last_dispatched_command="/fix", last_dispatched_command_id=1,
+        last_consumed_reply_id=1, session_id="s-fix",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    action = Action(kind="fix", slug="gh:o_r_43", triggering_comment_id=2)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tRefactored PR body builder\tabc123",
+        cost_usd=1.0, duration_seconds=60, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    assert patch.get("fix_summary") == "Refactored PR body builder", (
+        "fix_summary must be extracted from DONE_SUMMARY and persisted"
+    )
+
+
+def test_fix_summary_not_set_on_failed():
+    """fix_summary should NOT be set when the status is failed."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=43, title="PR merge issue", body="Body",
+        owner="o", repo="r", state="open",
+    )
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
+        title="PR merge issue", body="Body",
+        status="fixing", plan_branch="autoswe/issue-43", base_branch="main",
+        attempt_count=1, first_dispatched_at=None,
+        last_dispatched_command="/fix", last_dispatched_command_id=1,
+        last_consumed_reply_id=1, session_id="s-fix",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    action = Action(kind="fix", slug="gh:o_r_43", triggering_comment_id=2)
+    result = DispatchResult(
+        done_content="FAILED: something went wrong",
+        cost_usd=0.5, duration_seconds=30, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    assert "fix_summary" not in patch, (
+        "fix_summary must NOT be set on FAILED status"
+    )
+
+
+def test_retry_fix_persists_fix_summary():
+    """retry->fix path also captures summary from DONE_SUMMARY."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=43, title="PR merge issue", body="Body",
+        owner="o", repo="r", state="open",
+    )
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
+        title="PR merge issue", body="Body",
+        status="failed", plan_branch="autoswe/issue-43", base_branch="main",
+        attempt_count=2, first_dispatched_at=None,
+        last_dispatched_command="/fix", last_dispatched_command_id=1,
+        last_consumed_reply_id=1, session_id="s-fix",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    action = Action(kind="retry", slug="gh:o_r_43", triggering_comment_id=3)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tRetry fix summary\tdef456",
+        cost_usd=1.5, duration_seconds=90, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    assert patch.get("fix_summary") == "Retry fix summary", (
+        "retry emit must also persist fix_summary from DONE_SUMMARY"
+    )
+
+
+def test_auto_create_pr_uses_plan_branch():
+    """Auto-created PRs must use plan_branch as pr_base (not base_branch)
+    to respect the --branch flag from the original /plan command."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=43, title="PR merge issue", body="Body",
+        owner="o", repo="r", state="open",
+    )
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
+        title="PR merge issue", body="Body",
+        status="fixing", plan_branch="codex", base_branch="main",
+        attempt_count=1, first_dispatched_at=None,
+        last_dispatched_command="/fix", last_dispatched_command_id=1,
+        last_consumed_reply_id=1, session_id="s-fix",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    cfg = _default_cfg()
+    cfg["AUTO_CREATE_PR"] = True
+    world = World(api=api, task=task, cfg=cfg, repo_cfg={"pat": "tok"})
+
+    action = Action(kind="fix", slug="gh:o_r_43", triggering_comment_id=2)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tFixed it\tabc123",
+        cost_usd=1.0, duration_seconds=60, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    pr_effects = [e for e in effects if e.kind == "create_pr"]
+    assert len(pr_effects) == 1, "AUTO_CREATE_PR must emit create_pr effect"
+    pr_effect = pr_effects[0]
+    assert pr_effect.pr_base == "codex", (
+        "auto-create PR must use plan_branch as pr_base, not base_branch"
+    )
+    assert pr_effect.pr_head == "autoswe/issue-43", (
+        "auto-create PR head should be the autoswe/issue-N branch"
+    )
+    # PR body should include fix_summary
+    assert "Fix Summary:" in (pr_effect.pr_body or ""), (
+        "auto-create PR body should include fix_summary"
+    )
+    assert "Fixed it" in (pr_effect.pr_body or ""), (
+        "auto-create PR body should contain the fix summary text"
+    )
+
+
+def test_auto_create_pr_body_includes_issue_body():
+    """Auto-created PR body must include the issue body for reviewer context."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=43, title="PR merge issue", body="The original issue description here",
+        owner="o", repo="r", state="open",
+    )
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
+        title="PR merge issue", body="The original issue description here",
+        status="fixing", plan_branch=None, base_branch="main",
+        attempt_count=1, first_dispatched_at=None,
+        last_dispatched_command="/fix", last_dispatched_command_id=1,
+        last_consumed_reply_id=1, session_id="s-fix",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    cfg = _default_cfg()
+    cfg["AUTO_CREATE_PR"] = True
+    world = World(api=api, task=task, cfg=cfg, repo_cfg={"pat": "tok"})
+
+    action = Action(kind="fix", slug="gh:o_r_43", triggering_comment_id=2)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tApplied fix\tabc123",
+        cost_usd=1.0, duration_seconds=60, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    pr_effects = [e for e in effects if e.kind == "create_pr"]
+    assert len(pr_effects) == 1
+    pr_body = pr_effects[0].pr_body or ""
+    assert "The original issue description here" in pr_body, (
+        "auto-create PR body must include issue body"
+    )
+    assert "**Issue:**" in pr_body
+    assert "Opened by autoSWE." in pr_body
+
+
+def test_fix_summary_preserves_tabs_in_summary():
+    """Regression: fix_summary extraction must use rfind('\t') not split('\t')[0]
+    to mirror _build_completion_comment. If the LLM summary contains a tab,
+    split('[\t')[0] silently truncates the persisted value while the
+    completion comment shows the full text — causing a mismatch."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=43, title="Tab issue", body="Body",
+        owner="o", repo="r", state="open",
+    )
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
+        title="Tab issue", body="Body",
+        status="fixing", plan_branch="autoswe/issue-43", base_branch="main",
+        attempt_count=1, first_dispatched_at=None,
+        last_dispatched_command="/fix", last_dispatched_command_id=1,
+        last_consumed_reply_id=1, session_id="s-fix",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    world = World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+    action = Action(kind="fix", slug="gh:o_r_43", triggering_comment_id=2)
+    # DONE_SUMMARY with a tab IN the summary text (LLM output with tables etc.)
+    # Format: DONE_SUMMARY\t<summary-with-tab>\t<commit-sha>
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tFixed bug in A\tand B\tabc123",
+        cost_usd=1.0, duration_seconds=60, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert len(patches) >= 1
+    patch = patches[0].queue_patch
+    summary = patch.get("fix_summary", "")
+    assert summary == "Fixed bug in A\tand B", (
+        f"fix_summary must use rfind to preserve tabs in summary text. "
+        f"Got: {summary!r}"
+    )
