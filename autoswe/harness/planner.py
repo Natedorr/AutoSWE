@@ -134,6 +134,7 @@ def _extract_plan_output(text: str, plan_file: Path = None) -> tuple[str, str, O
                 comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
                 return comment, "PLAN_READY", captured_file
     except FileNotFoundError:
+        dbg.debug("PLAN: captured plan file disappeared: %s — falling through to tag detection", plan_file)
         captured_file = None
 
     # 2. Check for <AUTOSWE_PLAN> tags (session-correct, before filesystem scan)

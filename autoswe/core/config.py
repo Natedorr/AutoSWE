@@ -1,21 +1,42 @@
 import json
 import os
-import re
 from pathlib import Path
 
 # Expands ${VAR} and ${VAR:-default} inside JSON string values.
-_ENV_RE = re.compile(r"\$\{([^}]+)\}")
 
 
 def _expand_env(value: str) -> str:
-    """Expand ``${VAR}`` and ``${VAR:-default}`` inside a string."""
-    def _repl(m: re.Match) -> str:
-        expr = m.group(1)
-        if ":-" in expr:
-            var, default = expr.split(":-", 1)
-            return os.environ.get(var, default)
-        return os.environ.get(expr, "")
-    return _ENV_RE.sub(_repl, value)
+    """Expand ``${VAR}`` and ``${VAR:-default}`` inside a string.
+
+    Supports nested references (e.g. ``${OUTER:-${INNER}}``) via recursive
+    expansion of the inner content.
+    """
+    result: list[str] = []
+    i = 0
+    while i < len(value):
+        if value[i] == "$" and i + 1 < len(value) and value[i + 1] == "{":
+            # Find matching closing brace by tracking depth
+            depth = 1
+            j = i + 2
+            while j < len(value) and depth > 0:
+                if value[j] == "{":
+                    depth += 1
+                elif value[j] == "}":
+                    depth -= 1
+                j += 1
+            inner = value[i + 2: j - 1]
+            # Recursively expand inner content first (handles ${VAR:-${INNER}})
+            expanded_inner = _expand_env(inner)
+            if ":-" in expanded_inner:
+                var, default = expanded_inner.split(":-", 1)
+                result.append(os.environ.get(var, default))
+            else:
+                result.append(os.environ.get(expanded_inner, ""))
+            i = j
+        else:
+            result.append(value[i])
+            i += 1
+    return "".join(result)
 
 
 def _expand_env_dict(obj: dict) -> dict:

@@ -1067,6 +1067,22 @@ def test_config_expand_env_missing_no_default():
     assert _expand_env("${_NONEXISTENT_VAR_XYZ}") == ""
 
 
+def test_config_expand_env_nested():
+    """Nested ${VAR:-${INNER}} references expand correctly."""
+    from autoswe.core.config import _expand_env
+
+    os.environ["_TEST_INNER_NEST"] = "inner-val"
+    try:
+        # ${OUTER:-${INNER}} — OUTER not set, falls back to ${INNER} which resolves to "inner-val"
+        assert _expand_env("${_TEST_OUTER_NEST_XYZ:-${_TEST_INNER_NEST}}") == "inner-val"
+        # Literal text between references
+        assert _expand_env("a${_TEST_INNER_NEST}b") == "ainner-valb"
+        # Multiple references in one string
+        assert _expand_env("${_TEST_INNER_NEST}-${_TEST_INNER_NEST}") == "inner-val-inner-val"
+    finally:
+        del os.environ["_TEST_INNER_NEST"]
+
+
 # ---------- factory integration ----------
 
 
