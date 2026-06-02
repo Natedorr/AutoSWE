@@ -607,7 +607,7 @@ def test_run_fix_commit_message_default_when_no_guidance(tmp_path):
 
 
 def test_run_fix_commit_message_refs_issue(tmp_path):
-    """Commit message footer should use 'Refs #N' (not 'Fixes #N')."""
+    """Commit message footer should use 'Fixes #N' (enables auto-close-on-merge)."""
     task = make_task()
     commit_calls = []
 
@@ -624,8 +624,8 @@ def test_run_fix_commit_message_refs_issue(tmp_path):
 
     assert commit_calls
     msg = commit_calls[0]
-    assert "Refs #1" in msg, f"Footer should say 'Refs #1', got: {msg!r}"
-    assert "Fixes #1" not in msg, f"Should NOT say 'Fixes #1' (closes the issue), got: {msg!r}"
+    assert "Fixes #1" in msg, f"Footer should say 'Fixes #1', got: {msg!r}"
+    assert "Refs #1" not in msg, f"Should NOT say 'Refs #1' (use 'Fixes' for auto-close), got: {msg!r}"
 
 
 def test_run_fix_commit_message_includes_session_output(tmp_path):
@@ -964,6 +964,7 @@ def test_run_fix_link_branch_skipped_when_flag_false(tmp_path):
     # Reset the module-level flag
     import autoswe.harness.coder as coder_mod
     coder_mod._scope_error_warned = False
+    coder_mod._link_disabled_warned = False
 
     task = make_task()
     link_calls = []
@@ -1290,3 +1291,127 @@ def test_run_fix_codex_done_summary(tmp_path):
     assert result.done_content.startswith("DONE_SUMMARY\t")
     assert "Changed 2 files." in result.done_content
     assert task["session_id"] == "sess-codex"
+
+
+# ---------------------------------------------------------------------------
+# resolve_sync_conflicts — branch linking
+
+
+def test_resolve_sync_conflicts_links_branch_after_push(tmp_path):
+    """resolve_sync_conflicts should call link_branch_to_issue after push."""
+    task = make_task(session_id="s1")
+    task["plan_branch"] = "main"
+    task["_token"] = "ghp_fake"
+    link_calls = []
+
+    class FakeVCS:
+        def branch_name(self, n):
+            return "autoswe/issue-1"
+        def link_branch_to_issue(self, issue_number, commit_sha, branch):
+            link_calls.append((issue_number, commit_sha, branch))
+
+    class _FakeSubprocResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_subprocess_run(args, **kwargs):
+        r = _FakeSubprocResult()
+        if "rev-parse" in args:
+            r.stdout = "abc1234"
+        elif "log" in args:
+            r.stdout = "abc1234 fix\n"
+        return r
+
+    with _patch_resolve(tmp_path):
+        with patch("autoswe.harness.runner.run", return_value=_r("Resolved.", "s2", "success")):
+            with patch("autoswe.harness.coder.subprocess.run", side_effect=_fake_subprocess_run):
+                with patch("autoswe.harness.coder.get_vcs", return_value=FakeVCS()):
+                    from autoswe.harness.coder import resolve_sync_conflicts
+                    resolve_sync_conflicts(
+                        task, ["src/main.py"],
+                        repo_cfg={"provider": "github"}, cfg={},
+                    )
+
+    assert len(link_calls) == 1
+    assert link_calls[0][0] == 1  # issue_number
+    assert link_calls[0][1] == "abc1234"  # commit_sha
+    assert link_calls[0][2] == "autoswe/issue-1"  # branch
+
+
+def test_resolve_sync_conflicts_skip_link_when_flag_false(tmp_path):
+    """When LINK_BRANCH_TO_ISSUE=false, resolve_sync_conflicts skips linking."""
+    task = make_task(session_id="s1")
+    task["plan_branch"] = "main"
+    task["_token"] = "ghp_fake"
+    link_calls = []
+
+    class FakeVCS:
+        def branch_name(self, n):
+            return "autoswe/issue-1"
+        def link_branch_to_issue(self, issue_number, commit_sha, branch):
+            link_calls.append((issue_number, commit_sha, branch))
+
+    class _FakeSubprocResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_subprocess_run(args, **kwargs):
+        r = _FakeSubprocResult()
+        if "rev-parse" in args:
+            r.stdout = "abc1234"
+        elif "log" in args:
+            r.stdout = "abc1234 fix\n"
+        return r
+
+    with _patch_resolve(tmp_path):
+        with patch("autoswe.harness.runner.run", return_value=_r("Resolved.", "s2", "success")):
+            with patch("autoswe.harness.coder.subprocess.run", side_effect=_fake_subprocess_run):
+                with patch("autoswe.harness.coder.get_vcs", return_value=FakeVCS()):
+                    from autoswe.harness.coder import resolve_sync_conflicts
+                    resolve_sync_conflicts(
+                        task, ["src/main.py"],
+                        repo_cfg={"provider": "github"},
+                        cfg={"LINK_BRANCH_TO_ISSUE": False},
+                    )
+
+    assert len(link_calls) == 0
+
+
+def test_resolve_sync_conflicts_link_failure_does_not_fail_resolution(tmp_path):
+    """If link_branch_to_issue raises, resolution still returns DONE_SUMMARY."""
+    task = make_task(session_id="s1")
+    task["plan_branch"] = "main"
+    task["_token"] = "ghp_fake"
+
+    class FailingVCS:
+        def branch_name(self, n):
+            return "autoswe/issue-1"
+        def link_branch_to_issue(self, issue_number, commit_sha, branch):
+            raise RuntimeError("API down")
+
+    class _FakeSubprocResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_subprocess_run(args, **kwargs):
+        r = _FakeSubprocResult()
+        if "rev-parse" in args:
+            r.stdout = "abc1234"
+        elif "log" in args:
+            r.stdout = "abc1234 fix\n"
+        return r
+
+    with _patch_resolve(tmp_path):
+        with patch("autoswe.harness.runner.run", return_value=_r("Resolved.", "s2", "success")):
+            with patch("autoswe.harness.coder.subprocess.run", side_effect=_fake_subprocess_run):
+                with patch("autoswe.harness.coder.get_vcs", return_value=FailingVCS()):
+                    from autoswe.harness.coder import resolve_sync_conflicts
+                    result = resolve_sync_conflicts(
+                        task, ["src/main.py"],
+                        repo_cfg={"provider": "github"}, cfg={},
+                    )
+
+    assert result.done_content.startswith("DONE_SUMMARY\t")

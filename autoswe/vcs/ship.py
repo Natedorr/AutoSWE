@@ -4,10 +4,36 @@ from autoswe.core.config import LOGS_DIR
 from autoswe.core.logging_utils import init_debug_logger, log
 from autoswe.providers.base import PRResult
 from autoswe.providers.factory import get_tracker, get_vcs
+from autoswe.providers.github.vcs import MissingScopeError
+from autoswe.vcs.worktree import get_remote_branch_sha
 
 dbg = init_debug_logger(LOGS_DIR)
 
 AUTOSWE_BOT_FOOTER = "\n<!-- autoswe-bot -->"
+
+
+def _try_link_branch(
+    vcs,
+    owner: str,
+    repo: str,
+    issue_num: int,
+    branch: str,
+    token: str,
+    cfg: dict,
+    provider: str = "github",
+) -> None:
+    """Best-effort link branch to issue (same pattern as _finalize_fix)."""
+    if not cfg.get("LINK_BRANCH_TO_ISSUE", True):
+        return
+    commit_sha = get_remote_branch_sha(owner, repo, branch, token, provider)
+    if not commit_sha:
+        return
+    try:
+        vcs.link_branch_to_issue(issue_num, commit_sha, branch)
+    except MissingScopeError:
+        pass  # Already handled gracefully — PAT may lack check_runs scope
+    except Exception as e:
+        dbg.warning("link_branch_to_issue failed in ship: %s", e, exc_info=True)
 
 
 def _pr_ref(pr_url: str) -> str:
@@ -76,6 +102,9 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
                 f"Pull request already exists: {pr_url}{AUTOSWE_BOT_FOOTER}")
         except Exception:
             pass
+        # Best-effort: link branch to issue
+        provider = rcfg.get("provider", "github")
+        _try_link_branch(vcs, owner, repo, issue_num, branch, token, cfg, provider)
         return f"DONE: PR {pr_url}"
 
     try:
@@ -95,6 +124,9 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
                "Pull request opened: " + pr_url + AUTOSWE_BOT_FOOTER)
         except Exception:
             pass
+        # Best-effort: link branch to issue
+        provider = rcfg.get("provider", "github")
+        _try_link_branch(vcs, owner, repo, issue_num, branch, token, cfg, provider)
         return f"DONE: PR {pr_url}"
     except Exception as e:
         dbg.error("open_pr: failed: %s", e, exc_info=True)

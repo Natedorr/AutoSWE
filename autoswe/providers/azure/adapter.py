@@ -178,3 +178,5 @@ def apply_effect(
                 title=effect.pr_title or "",
                 body=body,
             )
+            # NOTE: Azure DevOps has no Development section equivalent;
+            # AzureVCS.link_branch_to_issue() is a documented no-op.
