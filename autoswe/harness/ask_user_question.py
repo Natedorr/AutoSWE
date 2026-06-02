@@ -166,9 +166,10 @@ def make_can_use_tool(
     """Build the async ``can_use_tool`` callback for the Claude Agent SDK.
 
     When Claude calls ``AskUserQuestion``, this callback formats the questions
-    as markdown, posts them as an issue comment, and returns PermissionResultAllow
-    with pre-filled answers so the agent completes its turn naturally.
-    The handler then checks ``state["asked_question_md"]`` to detect and return WAITING.
+    as markdown, posts them as an issue comment, and returns PermissionResultDeny
+    to immediately pause the agent. The denial message informs Claude that its
+    session is paused and will resume when the user replies. The handler then
+    checks ``state["asked_question_md"]`` to detect and return WAITING.
     All other tools are allowed through.
 
     Args:
@@ -225,16 +226,11 @@ def make_can_use_tool(
         except Exception:
             pass
 
-        questions = input_data.get("questions", [])
-        answers = {
-            q["question"]: "Question posted to issue. User will reply by commenting."
-            for q in questions
-        }
-        return PermissionResultAllow(
-            updated_input={
-                "questions": questions,
-                "answers": answers,
-            }
+        return PermissionResultDeny(
+            message=(
+                "Questions posted to the issue as a comment. "
+                "Your session is paused — it will resume when the user replies."
+            ),
         )
 
     return can_use_tool

@@ -962,6 +962,22 @@ def test_extract_plan_output_falls_back_when_plan_file_not_found(tmp_path):
         assert used_file == fallback_file
 
 
+def test_extract_plan_output_logs_when_plan_file_disappears(tmp_path):
+    """A debug log is emitted when the captured plan file is deleted mid-flow."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    plan_file = tmp_path / "vanishing.md"
+    plan_file.write_text("# Plan content\n\nStep 1.")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        # Delete the file between the existence check and the read
+        plan_file.unlink()
+        comment, done, used_file = _extract_plan_output("text", plan_file=plan_file)
+        # Should fall through to tag detection, then to fallback
+        assert done == "WAITING: see comment"
+        assert used_file is None
+
+
 # ---------------------------------------------------------------------------
 # Issue #36 regression tests — plan file collision
 

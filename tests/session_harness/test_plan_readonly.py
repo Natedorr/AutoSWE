@@ -209,14 +209,15 @@ class TestBashGitWriteBlocking:
 
 
 class TestAskUserQuestionPassthrough:
-    """AskUserQuestion should pass through even in read_only mode."""
+    """AskUserQuestion should be denied (to pause) even in read_only mode."""
 
-    def test_allows_ask_user_question(self, callback, context, task):
+    def test_denies_ask_user_question(self, callback, context, task):
         input_data = {
             "questions": [{"question": "What is the file path?"}]
         }
         result = _run(callback, "AskUserQuestion", input_data, context)
-        assert isinstance(result, PermissionResultAllow)
+        assert isinstance(result, PermissionResultDeny)
+        assert "paused" in result.message.lower()
 
 
 if __name__ == "__main__":

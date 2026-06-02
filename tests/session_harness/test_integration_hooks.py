@@ -184,7 +184,7 @@ def test_readonly_blocks_file_mutations(dummy_task, dummy_repo_cfg):
 # ==== TEST 4: AskUserQuestion interception ====
 
 def test_ask_user_question_interception(dummy_task, dummy_repo_cfg):
-    """make_can_use_tool intercepts AskUserQuestion, sets state, fills answers."""
+    """make_can_use_tool intercepts AskUserQuestion, sets state, denies to pause."""
     state = {}
     post_log = []
     cut = make_can_use_tool(
@@ -219,10 +219,9 @@ def test_ask_user_question_interception(dummy_task, dummy_repo_cfg):
     # on_post callback should have been called
     assert len(post_log) == 1
 
-    # Result should be PermissionResultAllow with pre-filled answers
-    assert result.behavior == "allow"
-    assert "answers" in result.updated_input
-    assert len(result.updated_input["answers"]) == 1
+    # Result should be PermissionResultDeny to pause the agent
+    assert result.behavior == "deny"
+    assert "paused" in result.message.lower()
 
 
 # ==== TEST 5: _extract_plan_output priority chain ===
