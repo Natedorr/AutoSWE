@@ -88,7 +88,8 @@ def _build_commit_url(provider: str, repo_cfg: dict | None, commit_sha: str) -> 
         if org and project and repo:
             org_e = _url_quote(org, safe="")
             proj_e = _url_quote(project, safe="")
-            repo_e = _url_quote(repo, safe="")
+            repo_id = repo_cfg.get("repo_id")
+            repo_e = _url_quote(repo_id, safe="") if repo_id else _url_quote(repo, safe="")
             return f"https://dev.azure.com/{org_e}/{proj_e}/_git/{repo_e}/commit/{commit_sha}"
     return None
 
@@ -107,7 +108,8 @@ def _build_branch_url(provider: str, repo_cfg: dict | None, branch: str) -> str 
         if org and project and repo:
             org_e = _url_quote(org, safe="")
             proj_e = _url_quote(project, safe="")
-            repo_e = _url_quote(repo, safe="")
+            repo_id = repo_cfg.get("repo_id")
+            repo_e = _url_quote(repo_id, safe="") if repo_id else _url_quote(repo, safe="")
             branch_e = _url_quote(branch, safe="")
             return f"https://dev.azure.com/{org_e}/{proj_e}/_git/{repo_e}?version=GB{branch_e}"
     return None

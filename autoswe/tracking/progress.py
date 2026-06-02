@@ -99,7 +99,10 @@ class ProgressComment:
             # Provider doesn't support comment editing; post a new comment instead
             _dbg.warning("progress: update_comment failed, falling back to post_comment", exc_info=True)
             try:
-                self._tracker.post_comment(self._repo_cfg, self._issue_num, tagged)
+                new_id = self._tracker.post_comment(self._repo_cfg, self._issue_num, tagged)
+                if new_id is not None:
+                    self._comment_id = new_id
+                    log(f"[PROGRESS] Switched to fallback comment={new_id}")
                 self._last_update = time.monotonic()
                 self._pending_body = None
             except Exception:
