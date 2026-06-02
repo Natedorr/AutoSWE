@@ -226,7 +226,7 @@ def test_progress_update_comment_gracefully_on_error(monkeypatch):
     assert progress.comment_id == 42
 
 
-def test_progress_flush_fallback_updates_comment_id(monkeypatch):
+def test_progress_flush_fallback_updates_comment_id():
     """When update_comment fails and post_comment succeeds, _comment_id updates
     to the new comment ID, preventing a cascade of orphan comments.
 
@@ -259,12 +259,9 @@ def test_progress_flush_fallback_updates_comment_id(monkeypatch):
     assert len(tracker.posts) == 1
 
     # update_comment fails → fallback to post_comment creates ID 101
-    # Patch to make update_comment raise on the first call
     original_update = tracker.update_comment
-    call_count = [0]
 
     def failing_update(*args, **kwargs):
-        call_count[0] += 1
         raise RuntimeError("API down")
 
     tracker.update_comment = failing_update
@@ -283,36 +280,29 @@ def test_progress_flush_fallback_updates_comment_id(monkeypatch):
     assert tracker.updates[-1]["id"] == 101
 
 
-def test_progress_flush_fallback_no_new_id(monkeypatch):
+def test_progress_flush_fallback_no_new_id():
     """When update_comment fails and post_comment returns None, _comment_id
-    is unchanged (no crash)."""
+    is unchanged (no crash). Directly exercises _flush() to test the fallback
+    path — not the update() early-exit path."""
     from autoswe.tracking.progress import ProgressComment
 
     class BrokenPostTracker:
-        def __init__(self):
-            self.posts = []
-            self.updates = []
-
         def post_comment(self, repo_cfg, issue_num, body):
-            self.posts.append(body)
-            return None  # simulates post that doesn't return an ID
+            return None  # post succeeds but returns no ID
 
         def update_comment(self, repo_cfg, issue_num, comment_id, body):
-            self.updates.append(body)
+            raise RuntimeError("API down")  # trigger fallback
 
     tracker = BrokenPostTracker()
     progress = ProgressComment(tracker, {}, 1)
+    progress._comment_id = 42  # simulate an existing comment
 
-    # create() returns None — comment_id stays None
-    progress.create("Starting...")
-    assert progress.comment_id is None
+    progress._flush("Step 1", force=True)  # directly exercise _flush
 
-    # update() is no-op without comment_id
-    progress.update("Step 1")
-    assert progress.comment_id is None
+    assert progress.comment_id == 42  # unchanged, not None
 
 
-def test_progress_flush_fallback_both_fail(monkeypatch):
+def test_progress_flush_fallback_both_fail():
     """When both update_comment and post_comment fail, no crash and _comment_id
     is preserved."""
     from autoswe.tracking.progress import ProgressComment
@@ -332,11 +322,11 @@ def test_progress_flush_fallback_both_fail(monkeypatch):
     tracker = TotallyBrokenTracker()
     progress = ProgressComment(tracker, {}, 1)
 
-    # Patch create to succeed directly (bypass the tracker's broken post)
+    # Simulate an existing comment ID (bypass broken create)
     progress._comment_id = 999
 
     # Make update_comment fail, then fallback post_comment also fails
-    tracker.update_comment = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("API down"))
+    tracker.update_comment = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("API down"))  # noqa: B028
     progress.update("Step 1")
 
     # Should not crash; comment_id preserved at 999
