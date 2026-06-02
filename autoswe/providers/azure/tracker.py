@@ -93,8 +93,10 @@ class AzureTracker(IssueTracker):
         self._repo_cfg = repo_cfg
         self._org = repo_cfg.get("org", "")
         self._project = repo_cfg.get("project", "")
+        self._repo = repo_cfg.get("repo", "")
         self._pat = repo_cfg.get("pat", "")
         self._authenticated_user: str | None = None
+        self._resolved_repo_id: str | None = None
 
         # Defensive fallback: when caller passes owner/repo instead of
         # org/project (e.g. from build_repo_cfg or other callers), parse
@@ -112,10 +114,39 @@ class AzureTracker(IssueTracker):
                 if proj_part:
                     self._org = owner
                     self._project = proj_part
+                    if _repo_part:
+                        self._repo = _repo_part
 
         # URL-encode for safe use in request URLs
         self._org_enc = _encode_path_segment(self._org)
         self._project_enc = _encode_path_segment(self._project)
+
+    # ---- Repo ID resolution ----
+
+    def resolve_repo_id(self) -> str | None:
+        """Resolve the Git repository UUID for this repo.
+
+        Azure DevOps web URLs require the repo UUID (not the display name)
+        in the `_git/{repo-id}/...` path segment. This method queries the
+        repos API, finds the repo matching self._repo by name, and returns
+        its UUID. Result is cached on first successful call.
+
+        Returns the UUID string, or None if lookup fails.
+        """
+        if self._resolved_repo_id is not None:
+            return self._resolved_repo_id
+        try:
+            repos_path = _ado_api_version(
+                f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories"
+            )
+            result = ado_get(repos_path, self._pat)
+            for repo_entry in result.get("value", []):
+                if repo_entry.get("name", "").lower() == self._repo.lower():
+                    self._resolved_repo_id = repo_entry.get("id", "")
+                    return self._resolved_repo_id
+        except Exception:
+            pass
+        return None
 
     # ---- Protocol: IssueTracker ----
 

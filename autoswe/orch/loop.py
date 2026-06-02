@@ -32,6 +32,7 @@ from autoswe.orch.run import DispatchResult, run
 from autoswe.orch.types import ApiState, TaskState, World
 from autoswe.providers.azure.adapter import apply_effect as azure_apply_effect
 from autoswe.providers.azure.adapter import read_api as azure_read_api
+from autoswe.providers.azure.tracker import AzureTracker
 from autoswe.providers.factory import build_repo_cfg, get_tracker
 from autoswe.providers.github.adapter import apply_effect as gh_apply_effect
 from autoswe.providers.github.adapter import read_api as gh_read_api
@@ -636,6 +637,16 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
 
             tracker = get_tracker(repo_cfg)
             provider = repo_cfg.get("provider", "github")
+
+            # Resolve repo UUID for Azure — web URLs require UUID, not display name
+            if provider == "azure" and isinstance(tracker, AzureTracker):
+                try:
+                    repo_id = tracker.resolve_repo_id()
+                    if repo_id:
+                        repo_cfg["repo_id"] = repo_id
+                except Exception:
+                    log(f"[WARN] {owner}/{repo}: failed to resolve repo_id, falling back to name")
+
             repo_override = repos_cfg.get(repo_path, {})
             base_branch = repo_override.get("base_branch", "main")
 
