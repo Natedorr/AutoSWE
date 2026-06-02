@@ -226,6 +226,124 @@ def test_progress_update_comment_gracefully_on_error(monkeypatch):
     assert progress.comment_id == 42
 
 
+def test_progress_flush_fallback_updates_comment_id(monkeypatch):
+    """When update_comment fails and post_comment succeeds, _comment_id updates
+    to the new comment ID, preventing a cascade of orphan comments.
+
+    Regression test for issue #38: extra comments appearing during Claude Code
+    runs because the fallback post_comment's ID was never captured.
+    """
+    from autoswe.tracking.progress import ProgressComment
+
+    class FallingBackTracker:
+        def __init__(self):
+            self.posts = []
+            self.updates = []
+            self._next_post_id = 100
+
+        def post_comment(self, repo_cfg, issue_num, body):
+            cid = self._next_post_id
+            self._next_post_id += 1
+            self.posts.append({"id": cid, "body": body})
+            return cid
+
+        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+            self.updates.append({"id": comment_id, "body": body})
+
+    tracker = FallingBackTracker()
+    progress = ProgressComment(tracker, {}, 1)
+
+    # create() posts initial comment with ID 100
+    progress.create("Starting...")
+    assert progress.comment_id == 100
+    assert len(tracker.posts) == 1
+
+    # update_comment fails → fallback to post_comment creates ID 101
+    # Patch to make update_comment raise on the first call
+    original_update = tracker.update_comment
+    call_count = [0]
+
+    def failing_update(*args, **kwargs):
+        call_count[0] += 1
+        raise RuntimeError("API down")
+
+    tracker.update_comment = failing_update
+    progress.update("Step 1")
+
+    # Should have fallen back to a new comment (ID 101)
+    assert progress.comment_id == 101
+    assert len(tracker.posts) == 2
+
+    # Restore update_comment so subsequent calls succeed on the new comment
+    tracker.update_comment = original_update
+    progress._last_update = 0  # release throttle
+    progress.update("Step 2")
+
+    # Step 2 should target the NEW comment ID (101), not the old one (100)
+    assert tracker.updates[-1]["id"] == 101
+
+
+def test_progress_flush_fallback_no_new_id(monkeypatch):
+    """When update_comment fails and post_comment returns None, _comment_id
+    is unchanged (no crash)."""
+    from autoswe.tracking.progress import ProgressComment
+
+    class BrokenPostTracker:
+        def __init__(self):
+            self.posts = []
+            self.updates = []
+
+        def post_comment(self, repo_cfg, issue_num, body):
+            self.posts.append(body)
+            return None  # simulates post that doesn't return an ID
+
+        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+            self.updates.append(body)
+
+    tracker = BrokenPostTracker()
+    progress = ProgressComment(tracker, {}, 1)
+
+    # create() returns None — comment_id stays None
+    progress.create("Starting...")
+    assert progress.comment_id is None
+
+    # update() is no-op without comment_id
+    progress.update("Step 1")
+    assert progress.comment_id is None
+
+
+def test_progress_flush_fallback_both_fail(monkeypatch):
+    """When both update_comment and post_comment fail, no crash and _comment_id
+    is preserved."""
+    from autoswe.tracking.progress import ProgressComment
+
+    class TotallyBrokenTracker:
+        def __init__(self):
+            self.posts = []
+            self.updates = []
+
+        def post_comment(self, repo_cfg, issue_num, body):
+            self.posts.append(body)
+            raise RuntimeError("API down")
+
+        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+            self.updates.append(body)
+
+    tracker = TotallyBrokenTracker()
+    progress = ProgressComment(tracker, {}, 1)
+
+    # Patch create to succeed directly (bypass the tracker's broken post)
+    progress._comment_id = 999
+
+    # Make update_comment fail, then fallback post_comment also fails
+    tracker.update_comment = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("API down"))
+    progress.update("Step 1")
+
+    # Should not crash; comment_id preserved at 999
+    assert progress.comment_id == 999
+    assert len(tracker.posts) == 1  # post_comment was attempted
+
+
 # ---------------------------------------------------------------------------
 # Provider update_comment tests
 # ---------------------------------------------------------------------------
