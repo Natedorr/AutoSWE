@@ -644,8 +644,8 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                     repo_id = tracker.resolve_repo_id()
                     if repo_id:
                         repo_cfg["repo_id"] = repo_id
-                except Exception:
-                    log(f"[WARN] {owner}/{repo}: failed to resolve repo_id, falling back to name")
+                except Exception as e:
+                    log(f"[WARN] {owner}/{repo}: failed to resolve repo_id ({type(e).__name__}: {e}), falling back to name")
 
             repo_override = repos_cfg.get(repo_path, {})
             base_branch = repo_override.get("base_branch", "main")

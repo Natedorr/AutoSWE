@@ -18,6 +18,7 @@ from autoswe.providers.azure.api import (
     ado_patch_json,
     ado_post,
     ado_post_patch,
+    dbg,
 )
 from autoswe.providers.base import IssueTracker, NormalizedComment, NormalizedIssue
 from autoswe.tracking.comments import _BOT_CONTENT_PATTERNS, BOT_MARKER
@@ -144,8 +145,11 @@ class AzureTracker(IssueTracker):
                 if repo_entry.get("name", "").lower() == self._repo.lower():
                     self._resolved_repo_id = repo_entry.get("id", "")
                     return self._resolved_repo_id
-        except Exception:
-            pass
+        except Exception as e:
+            dbg.warning(
+                "resolve_repo_id: failed to resolve UUID for %s/%s: %s: %s",
+                self._org, self._project, type(e).__name__, e,
+            )
         return None
 
     # ---- Protocol: IssueTracker ----
