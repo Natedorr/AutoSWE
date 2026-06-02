@@ -7,7 +7,7 @@ import subprocess
 from autoswe.core.config import LOGS_DIR
 from autoswe.core.logging_utils import init_debug_logger
 from autoswe.providers.base import PRResult, VCSProvider
-from autoswe.tracking.api import gh_post
+from autoswe.tracking.api import gh_get, gh_post
 
 dbg = init_debug_logger(LOGS_DIR)
 
@@ -60,7 +60,11 @@ class GitHubVCS(VCSProvider):
         title: str,
         body: str,
     ) -> PRResult:
-        """Open a GitHub pull request via gh CLI or API fallback."""
+        """Open a GitHub pull request via gh CLI or API fallback.
+
+        Extracts the PR's head commit SHA so callers can use it for
+        branch-to-issue linking when the remote SHA is unavailable.
+        """
         # gh CLI
         try:
             result = subprocess.run(
@@ -76,7 +80,18 @@ class GitHubVCS(VCSProvider):
             )
             if result.returncode == 0:
                 url = result.stdout.strip()
-                return PRResult(url=url)
+                head_sha = None
+                # Best-effort: fetch PR details to get head SHA
+                try:
+                    pr_num_from_url = url.rstrip("/").split("/")[-1]
+                    pr_details = gh_get(
+                        f"/repos/{self._owner}/{self._repo}/pulls/{pr_num_from_url}",
+                        self._token, max_retries=1,
+                    )
+                    head_sha = pr_details.get("head", {}).get("sha")
+                except Exception:
+                    pass
+                return PRResult(url=url, head_sha=head_sha)
             dbg.warning("gh pr create failed: %s", result.stderr)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             dbg.warning("gh CLI unavailable, falling back to API")
@@ -94,7 +109,8 @@ class GitHubVCS(VCSProvider):
         )
         pr_num = pr_data.get("number")
         pr_url = pr_data.get("html_url", f"#{pr_num}")
-        return PRResult(number=pr_num, url=pr_url)
+        head_sha = pr_data.get("head", {}).get("sha")
+        return PRResult(number=pr_num, url=pr_url, head_sha=head_sha)
 
     def link_branch_to_issue(
         self,
