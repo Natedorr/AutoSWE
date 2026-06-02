@@ -82,6 +82,7 @@ class GitHubFake:
         self.recorded_calls: list[dict] = []
         self.posted_comments: list[dict] = []
         self.inline_comments: list[dict] = []
+        self.check_runs: list[dict] = []
         self._next_pr_number = 1
         self._authenticated_user = T.github_user()
         self._owned_repos: list[dict] = []
@@ -352,6 +353,18 @@ class GitHubFake:
                         "id": len(self.recorded_calls) + 2000,
                     }
             return {}
+
+        # POST /repos/{o}/{r}/check-runs
+        if method == "POST" and "/check-runs" in path:
+            check_run = {
+                "id": len(self.recorded_calls) + 3000,
+                "name": (body or {}).get("name", ""),
+                "head_sha": (body or {}).get("head_sha", ""),
+                "status": (body or {}).get("status", "completed"),
+                "conclusion": (body or {}).get("conclusion", "success"),
+            }
+            self.check_runs.append(check_run)
+            return check_run
 
         # Unhandled route — return empty dict so tests don't crash silently
         return {}

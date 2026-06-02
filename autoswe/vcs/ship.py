@@ -21,17 +21,27 @@ def _try_link_branch(
     token: str,
     cfg: dict,
     provider: str = "github",
+    pr_result: PRResult | None = None,
 ) -> None:
-    """Best-effort link branch to issue (same pattern as _finalize_fix)."""
+    """Best-effort link branch to issue (same pattern as _finalize_fix).
+
+    When *pr_result* is provided and its *head_sha* is set, it is used as a
+    fallback when the remote branch SHA cannot be fetched (e.g. the branch
+    has not yet been pushed, or *git ls-remote* fails).
+    """
     if not cfg.get("LINK_BRANCH_TO_ISSUE", True):
         return
     commit_sha = get_remote_branch_sha(owner, repo, branch, token, provider)
+    if not commit_sha and pr_result is not None and pr_result.head_sha:
+        dbg.info("SHIP: using PR head_sha as fallback for branch linking")
+        commit_sha = pr_result.head_sha
     if not commit_sha:
+        dbg.warning("SHIP: cannot link branch — no commit SHA available")
         return
     try:
         vcs.link_branch_to_issue(issue_num, commit_sha, branch)
     except MissingScopeError:
-        pass  # Already handled gracefully — PAT may lack check_runs scope
+        dbg.warning("SHIP: link_branch_to_issue skipped — PAT missing check_runs:write scope")
     except Exception as e:
         dbg.warning("link_branch_to_issue failed in ship: %s", e, exc_info=True)
 
@@ -124,9 +134,10 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
                "Pull request opened: " + pr_url + AUTOSWE_BOT_FOOTER)
         except Exception:
             pass
-        # Best-effort: link branch to issue
+        # Best-effort: link branch to issue (pass pr_result for head_sha fallback)
         provider = rcfg.get("provider", "github")
-        _try_link_branch(vcs, owner, repo, issue_num, branch, token, cfg, provider)
+        _try_link_branch(vcs, owner, repo, issue_num, branch, token, cfg, provider,
+                         pr_result=pr_result)
         return f"DONE: PR {pr_url}"
     except Exception as e:
         dbg.error("open_pr: failed: %s", e, exc_info=True)

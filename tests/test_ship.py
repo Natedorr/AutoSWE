@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from autoswe.providers.base import PRResult
-from autoswe.vcs.ship import _pr_ref
+from autoswe.vcs.ship import _pr_ref, dbg
 
 
 def make_task(pr_number=None):
@@ -561,3 +561,95 @@ def test_open_pr_link_failure_does_not_fail_pr(mock_gh_post_comment):
         result = open_pr(task, {"GITHUB_TOKEN": "tok"})
 
     assert result.startswith("DONE: PR")
+
+
+# ---------------------------------------------------------------------------
+# open_pr — head_sha fallback linking (issue #60)
+# ---------------------------------------------------------------------------
+
+def test_open_pr_uses_head_sha_fallback_when_remote_fails(mock_gh_post_comment):
+    """When get_remote_branch_sha returns None, PRResult.head_sha is used as fallback."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship.get_remote_branch_sha", return_value=None):
+        mock_vcs = _mock_vcs_with_link(
+            pr_url="https://github.com/o/r/pull/42",
+            pr_num=42,
+            existing_pr=None,
+        )
+        # Override open_pull_request to return a PRResult with head_sha
+        mock_vcs.open_pull_request = lambda *a, **kw: PRResult(
+            url="https://github.com/o/r/pull/42",
+            number=42,
+            head_sha="pr_head_abc",
+        )
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")
+    assert len(mock_vcs.link_calls) == 1
+    assert mock_vcs.link_calls[0][1] == "pr_head_abc"
+
+
+def test_open_pr_link_logs_warning_on_missing_scope(mock_gh_post_comment):
+    """MissingScopeError from link_branch_to_issue produces a dbg.warning call."""
+    task = make_task()
+
+    class MissingScopeVCS:
+        def find_existing_pr(self, *a, **kw):
+            return None
+        def open_pull_request(self, *a, **kw):
+            return PRResult(url="https://github.com/o/r/pull/42", number=42)
+        def link_branch_to_issue(self, issue_number, commit_sha, branch):
+            from autoswe.providers.github.vcs import MissingScopeError
+            raise MissingScopeError("PAT missing check_runs:write scope")
+
+    with patch("autoswe.vcs.ship.get_vcs", return_value=MissingScopeVCS()), \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship.get_remote_branch_sha", return_value="abcdef1"), \
+         patch.object(type(dbg), "warning") as mock_warning:
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")
+    # Verify warning was called about MissingScopeError
+    warning_calls = [c[0][0] for c in mock_warning.call_args_list]
+    assert any("check_runs:write" in msg for msg in warning_calls)
+
+
+def test_open_pr_link_logs_warning_when_no_sha(mock_gh_post_comment):
+    """When both remote and PR head_sha unavailable, a warning is logged."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship.get_remote_branch_sha", return_value=None), \
+         patch.object(type(dbg), "warning") as mock_warning:
+        mock_vcs = _mock_vcs_with_link(
+            pr_url="https://github.com/o/r/pull/42",
+            existing_pr=None,
+        )
+        # Return a PRResult WITHOUT head_sha
+        mock_vcs.open_pull_request = lambda *a, **kw: PRResult(
+            url="https://github.com/o/r/pull/42",
+            number=42,
+        )
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")
+    # link_branch_to_issue should NOT be called
+    assert len(mock_vcs.link_calls) == 0
+    # But a warning should be logged
+    warning_calls = [c[0][0] for c in mock_warning.call_args_list]
+    assert any("no commit SHA" in msg for msg in warning_calls)

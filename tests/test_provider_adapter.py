@@ -645,6 +645,85 @@ class TestApplyEffectCreatePrBranchLinking:
         assert len(link_calls) == 0
 
 
+class TestApplyEffectCreatePrHeadShaFallback:
+    """create_pr effect uses PR head_sha as linking fallback (issue #60)."""
+
+    def test_adapter_create_pr_uses_head_sha_fallback(self):
+        """Adapter create_pr effect uses PR head_sha when get_remote_branch_sha returns None."""
+        tracker = MagicMock()
+        queue = {}
+        link_calls = []
+
+        class MockVCS:
+            def find_existing_pr(self, *a, **kw):
+                return None
+            def open_pull_request(self, *a, **kw):
+                return PRResult(
+                    url="https://github.com/o/r/pull/42",
+                    number=42,
+                    head_sha="pr_head_sha_123",
+                )
+            def link_branch_to_issue(self, issue_number, commit_sha, branch):
+                link_calls.append((issue_number, commit_sha, branch))
+
+        repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=MockVCS()):
+            with patch("autoswe.providers.github.adapter.get_remote_branch_sha",
+                       return_value=None):
+                from autoswe.providers.github.adapter import apply_effect
+                effect = Effect(
+                    kind="create_pr",
+                    pr_title="Fixes #1: Test",
+                    pr_body="Fixes #1",
+                    pr_head="autoswe/issue-1",
+                    pr_base="main",
+                )
+                apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
+
+        assert len(link_calls) == 1
+        assert link_calls[0][0] == 1
+        assert link_calls[0][1] == "pr_head_sha_123"
+        assert link_calls[0][2] == "autoswe/issue-1"
+
+    def test_adapter_create_pr_remote_sha_takes_precedence(self):
+        """When remote SHA is available, it takes precedence over head_sha."""
+        tracker = MagicMock()
+        queue = {}
+        link_calls = []
+
+        class MockVCS:
+            def find_existing_pr(self, *a, **kw):
+                return None
+            def open_pull_request(self, *a, **kw):
+                return PRResult(
+                    url="https://github.com/o/r/pull/42",
+                    number=42,
+                    head_sha="pr_head_sha_123",
+                )
+            def link_branch_to_issue(self, issue_number, commit_sha, branch):
+                link_calls.append((issue_number, commit_sha, branch))
+
+        repo_cfg = {"provider": "github", "owner": "o", "repo": "r"}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=MockVCS()):
+            with patch("autoswe.providers.github.adapter.get_remote_branch_sha",
+                       return_value="remote_sha_456"):
+                from autoswe.providers.github.adapter import apply_effect
+                effect = Effect(
+                    kind="create_pr",
+                    pr_title="Fixes #1: Test",
+                    pr_body="Fixes #1",
+                    pr_head="autoswe/issue-1",
+                    pr_base="main",
+                )
+                apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
+
+        assert len(link_calls) == 1
+        # Remote SHA should take precedence over head_sha
+        assert link_calls[0][1] == "remote_sha_456"
+
+
 class TestApplyEffectAzureCreatePr:
     """Azure adapter create_pr — link_branch_to_issue is a no-op for Azure."""
 

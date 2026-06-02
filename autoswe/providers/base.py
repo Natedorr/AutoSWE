@@ -57,6 +57,7 @@ class PRResult:
 
     url: str
     number: int | None = None
+    head_sha: str | None = None  # PR head commit SHA for branch linking
 
 
 # ---------------------------------------------------------------------------

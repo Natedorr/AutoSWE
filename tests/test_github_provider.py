@@ -445,3 +445,32 @@ class TestGitHubVCS:
         assert call_kwargs["max_retries"] == 1, "Should use max_retries=1 for best-effort call"
         assert call_kwargs["timeout"] == 5, "Should use short timeout for best-effort call"
         assert "/check-runs" in call_kwargs["path"]
+
+    def test_open_pr_api_returns_head_sha(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        """API fallback path extracts head.sha and includes it in PRResult."""
+        gh_route_table[("POST", "/repos/natedorr/autoswe/pulls")] = {
+            "number": 15,
+            "html_url": "https://github.com/natedorr/autoswe/pull/15",
+            "head": {"sha": "abcdef1234567890"},
+        }
+        result = vcs.open_pull_request(
+            {}, "autoswe/issue-42", "master",
+            "Fixes #42: title", "body",
+        )
+        assert result.number == 15
+        assert result.head_sha == "abcdef1234567890"
+
+    def test_link_branch_to_issue_recorded_in_fake(self, vcs, github_fake):
+        """Using github_fake, verify check-runs POST is recorded with correct payload."""
+        _, original = github_fake.patch()
+        try:
+            vcs.link_branch_to_issue(42, "abc1234", "autoswe/issue-42")
+        finally:
+            github_fake.unpatch(_, original)
+
+        assert len(github_fake.check_runs) == 1
+        cr = github_fake.check_runs[0]
+        assert cr["name"] == "autoSWE Fix #42"
+        assert cr["head_sha"] == "abc1234"
+        assert cr["status"] == "completed"
+        assert cr["conclusion"] == "success"
