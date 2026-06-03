@@ -50,7 +50,7 @@ def run_review(
     task: dict,
     repo_cfg: dict,
     cfg: dict,
-    guidance: str = None,
+    guidance: str | None = None,
     *,
     progress_callback=None,
 ) -> HandlerResult:
@@ -168,7 +168,7 @@ def run_review(
 def _run_git(wt: Path, args: list[str]) -> str:
     """Run a git command in the worktree. Returns stdout."""
     result = subprocess.run(
-        ["git", "-C", str(wt)] + args,
+        ["git", "-C", str(wt), *args],
         capture_output=True, text=True, timeout=30, check=True,
     )
     return result.stdout.strip()

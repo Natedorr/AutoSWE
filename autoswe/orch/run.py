@@ -83,8 +83,8 @@ def _build_task_dict(world: World, action: Action) -> dict:
 def run(
     action: Action,
     world: World,
-    progress_callback: "Callable[[str], None] | None" = None,
-) -> "DispatchResult | None":
+    progress_callback: Callable[[str], None] | None = None,
+) -> DispatchResult | None:
     """Run the Claude handler for this action.
 
     Returns None for pure actions (skip, abort, noop, post_welcome, etc)
@@ -155,7 +155,7 @@ def run(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_dispatch(hr: "HandlerResult", task: dict, review_file_path: str = None) -> "DispatchResult":
+def _to_dispatch(hr: HandlerResult, task: dict, review_file_path: str | None = None) -> DispatchResult:
     """Convert HandlerResult (from planner/coder) to DispatchResult."""
     return DispatchResult(
         done_content=hr.done_content,
@@ -171,8 +171,8 @@ def _run_sync(
     task: dict,
     repo_cfg: dict,
     cfg: dict,
-    progress_callback: "Callable[[str], None] | None",
-) -> "DispatchResult":
+    progress_callback: Callable[[str], None] | None,
+) -> DispatchResult:
     """Handle the sync_branch action — merge base into feature branch."""
     from autoswe.tracking.comments import BOT_MARKER
 
@@ -240,8 +240,8 @@ def _run_fix_with_sync(
     guidance: str,
     repo_cfg: dict,
     cfg: dict,
-    progress_callback: "Callable[[str], None] | None",
-) -> "HandlerResult":
+    progress_callback: Callable[[str], None] | None,
+) -> HandlerResult:
     """Pre-dispatch sync before /fix — merge base into feature branch, resolve conflicts.
 
     Ensures the feature branch is up to date with the base branch before running
@@ -288,11 +288,11 @@ def _run_fix_with_sync(
 def _run_plan_with_sync(
     task: dict,
     guidance: str,
-    user_reply_text: "str | None",
+    user_reply_text: str | None,
     repo_cfg: dict,
     cfg: dict,
-    progress_callback: "Callable[[str], None] | None",
-) -> "HandlerResult":
+    progress_callback: Callable[[str], None] | None,
+) -> HandlerResult:
     """Pre-dispatch sync before /plan — merge base into feature branch, resolve conflicts.
 
     Ensures the feature branch is up to date with the base branch before running
@@ -352,8 +352,8 @@ def _run_retry(
     task: dict,
     cfg: dict,
     repo_cfg: dict,
-    progress_callback: "Callable[[str], None] | None",
-) -> "DispatchResult":
+    progress_callback: Callable[[str], None] | None,
+) -> DispatchResult:
     """Handle retry — replay the last substantive command or resume from user reply.
 
     Non-replayable commands (/pr, /sync, /skip, /abort, /retry) are workflow

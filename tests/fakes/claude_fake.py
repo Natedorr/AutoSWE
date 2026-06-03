@@ -61,18 +61,18 @@ class ClaudeFake:
         """Schedule an exception to be raised on the next .run() call."""
         self._raises.append(exc)
 
-    def run(self, prompt: str, *, cwd: str, cfg: dict, repo_cfg: dict = None,
-            resume: str = None,
+    def run(self, prompt: str, *, cwd: str, cfg: dict, repo_cfg: dict | None = None,
+            resume: str | None = None,
             # Phase 3: generic intent
-            mode: str = None,
-            extra_tools: list = None,
-            disallowed_tools_override: list = None,
+            mode: str | None = None,
+            extra_tools: list | None = None,
+            disallowed_tools_override: list | None = None,
             # Legacy fields (backward compat)
             permission_mode: str = "default",
-            allowed_tools: list = None,
+            allowed_tools: list | None = None,
             max_turns: int = 200,
-            model: str = None, mcp_servers: dict = None,
-            progress_callback=None, disallowed_tools: list = None,
+            model: str | None = None, mcp_servers: dict | None = None,
+            progress_callback=None, disallowed_tools: list | None = None,
             **kwargs) -> RunResult:
         """Replacement for autoswe.harness.runner.run."""
         self.calls.append({
@@ -137,9 +137,8 @@ class ClaudeFake:
         for mod_name in ("autoswe.harness.planner", "autoswe.harness.coder"):
             if mod_name in sys.modules:
                 mod = sys.modules[mod_name]
-                if hasattr(mod, "runner"):
-                    if hasattr(mod.runner, "run"):
-                        mod.runner.run = self.run
+                if hasattr(mod, "runner") and hasattr(mod.runner, "run"):
+                    mod.runner.run = self.run
 
         return runner_mod, self._saved_original
 

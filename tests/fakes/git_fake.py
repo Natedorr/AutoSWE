@@ -67,13 +67,13 @@ class GitFake:
 
     def ensure_clone(self, owner: str, repo: str, token: str, cfg: dict,
                      base_branch: str = "main", provider: str = "github",
-                     default_branch: str = None) -> None:
+                     default_branch: str | None = None) -> None:
         self.calls.append({"func": "ensure_clone", "owner": owner, "repo": repo,
                            "base_branch": base_branch, "provider": provider})
 
     def create_worktree(self, owner: str, repo: str, issue_num: int,
                         base_branch: str, token: str, cfg: dict,
-                        provider: str = "github", default_branch: str = None,
+                        provider: str = "github", default_branch: str | None = None,
                         pull_strategy: str = "reset", push_new: bool = False) -> Path:
         key = f"{owner}/{repo}/{issue_num}"
         self.calls.append({"func": "create_worktree", "owner": owner, "repo": repo,
@@ -101,7 +101,7 @@ class GitFake:
         return result
 
     def sync_branch(self, wt: Path, owner: str, repo: str, issue_num: int,
-                    base_branch: str = "main", provider: str = "github", cfg: dict = None) -> dict:
+                    base_branch: str = "main", provider: str = "github", cfg: dict | None = None) -> dict:
         self.calls.append({"func": "sync_branch", "wt": str(wt), "owner": owner,
                            "repo": repo, "issue_num": issue_num,
                            "base_branch": base_branch, "provider": provider})

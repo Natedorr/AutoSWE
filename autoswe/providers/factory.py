@@ -38,8 +38,8 @@ def get_vcs(repo_cfg: dict) -> VCSProvider:
 # Helpers — build enriched repo_cfg from orchestrator args
 # ---------------------------------------------------------------------------
 
-def build_repo_cfg(owner: str, repo: str, cfg: dict, repos_cfg: dict = None,
-                   provider: str = None) -> dict:
+def build_repo_cfg(owner: str, repo: str, cfg: dict, repos_cfg: dict | None = None,
+                   provider: str | None = None) -> dict:
     """Build an enriched repo_cfg dict suitable for provider factory functions.
 
     Merges global config (GITHUB_TOKEN) with per-repo overrides and owner/repo.

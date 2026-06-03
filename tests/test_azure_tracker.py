@@ -43,7 +43,7 @@ def test_strip_html_preserves_autoswe_plan():
     """_strip_html preserves <AUTOSWE_PLAN> tags."""
     html = "<b><AUTOSWE_PLAN>Do the thing</AUTOSWE_PLAN></b>"
     result = _strip_html(html)
-    assert "<AUTOSWE_PLAN>Do the thing</AUTOSWE_PLAN>" == result
+    assert result == "<AUTOSWE_PLAN>Do the thing</AUTOSWE_PLAN>"
 
 
 # ---------------------------------------------------------------------------

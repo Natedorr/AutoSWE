@@ -44,7 +44,7 @@ def _get_branch_head_sha(wt, branch: str) -> str | None:
     return None
 
 
-def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict = None, *, progress_callback=None, wt=None) -> HandlerResult:
+def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = None, cfg: dict | None = None, *, progress_callback=None, wt=None) -> HandlerResult:
     """Run fix phase with bypassPermissions. Returns done-file content.
 
     Return format on success:

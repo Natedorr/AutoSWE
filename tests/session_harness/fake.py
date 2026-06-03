@@ -34,8 +34,9 @@ Can simulate:
 from __future__ import annotations
 
 import sys
+from collections.abc import AsyncIterator
 from contextlib import contextmanager
-from typing import Any, AsyncIterator
+from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -48,7 +49,6 @@ from claude_agent_sdk import (
 
 class ScriptedMessage:
     """A single message to yield from the fake query generator."""
-    pass
 
 
 class ScriptedText(ScriptedMessage):
@@ -143,7 +143,7 @@ class StreamingClaudeFake:
 
     # ---- Scripting helpers ----
 
-    def script_text(self, text: str, model: str = "claude-test", session_id: str | None = None) -> "StreamingClaudeFake":
+    def script_text(self, text: str, model: str = "claude-test", session_id: str | None = None) -> StreamingClaudeFake:
         self.script.append(ScriptedText(text, model, session_id))
         return self
 
@@ -154,7 +154,7 @@ class StreamingClaudeFake:
         tool_id: str | None = None,
         model: str = "claude-test",
         session_id: str | None = None,
-    ) -> "StreamingClaudeFake":
+    ) -> StreamingClaudeFake:
         self.script.append(ScriptedToolUse(name, input_data, tool_id, model, session_id))
         return self
 
@@ -165,7 +165,7 @@ class StreamingClaudeFake:
         tool_id: str | None = None,
         model: str = "claude-test",
         session_id: str | None = None,
-    ) -> "StreamingClaudeFake":
+    ) -> StreamingClaudeFake:
         self.script.append(ScriptedServerToolUse(name, input_data, tool_id, model, session_id))
         return self
 
@@ -176,14 +176,14 @@ class StreamingClaudeFake:
         cost_usd: float = 0.01,
         duration_ms: int = 1000,
         num_turns: int = 1,
-    ) -> "StreamingClaudeFake":
+    ) -> StreamingClaudeFake:
         self.script.append(ScriptedResult(session_id, subtype, cost_usd, duration_ms, num_turns))
         return self
 
     def script_crash(
         self,
         error: str = "aclose(): asynchronous generator is already running",
-    ) -> "StreamingClaudeFake":
+    ) -> StreamingClaudeFake:
         self.script.append(ScriptedCrash(error))
         return self
 
@@ -194,7 +194,7 @@ class StreamingClaudeFake:
         text: str,
         session_id: str = "s-normal",
         subtype: str = "success",
-    ) -> "StreamingClaudeFake":
+    ) -> StreamingClaudeFake:
         """Build a normal completion: text → result."""
         self.script_text(text)
         self.script_result(session_id, subtype)
@@ -207,7 +207,7 @@ class StreamingClaudeFake:
         question_input: dict | None = None,
         session_id: str | None = None,
         crash_after: bool = False,
-    ) -> "StreamingClaudeFake":
+    ) -> StreamingClaudeFake:
         """Build a question-asking flow.
 
         If crash_after=True, simulates the #208 bug: generator crashes after
@@ -232,7 +232,7 @@ class StreamingClaudeFake:
         plan_text: str,
         session_id: str = "s-plan",
         use_write_tool: bool = True,
-    ) -> "StreamingClaudeFake":
+    ) -> StreamingClaudeFake:
         """Build a plan completion: read → write plan file → result."""
         self.script_text("Reading project files...")
         if use_write_tool:
@@ -246,7 +246,7 @@ class StreamingClaudeFake:
         edit_text: str = "Editing source files...",
         session_id: str = "s-fix",
         num_edits: int = 1,
-    ) -> "StreamingClaudeFake":
+    ) -> StreamingClaudeFake:
         """Build a fix completion: edit → commit → result."""
         for i in range(num_edits):
             self.script_tool("Edit", {"path": f"src/file{i}.py", "content": edit_text})

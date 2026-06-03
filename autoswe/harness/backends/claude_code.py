@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Awaitable
 from pathlib import Path
-from typing import Awaitable
 
 from autoswe.core.config import LOGS_DIR
 from autoswe.core.logging_utils import init_debug_logger, log
@@ -161,7 +161,7 @@ def _parse_task_id(block):
                 return parsed.strip()
             if isinstance(parsed, dict):
                 for key in ("task_id", "id"):
-                    if key in parsed and parsed[key]:
+                    if parsed.get(key):
                         return str(parsed[key]).strip()
             # JSON parsed but yielded nothing useful — nothing to return
             return None

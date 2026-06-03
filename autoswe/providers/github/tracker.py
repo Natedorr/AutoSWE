@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from autoswe.core.config import LOGS_DIR
 from autoswe.core.logging_utils import init_debug_logger
-from autoswe.providers.base import IssueTracker, NormalizedComment, NormalizedIssue, PRResult  # noqa: F401
+from autoswe.providers.base import IssueTracker, NormalizedComment, NormalizedIssue
 from autoswe.tracking import api as gh_api
 from autoswe.tracking.assignment import _auto_assign_issue, _get_authenticated_user
 from autoswe.tracking.comments import BOT_MARKER

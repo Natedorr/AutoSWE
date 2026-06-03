@@ -83,9 +83,7 @@ def _is_author_allowed(
         return True
     if author_login in active:
         return True
-    if raw_author_login and raw_author_login in active:
-        return True
-    return False
+    return bool(raw_author_login and raw_author_login in active)
 
 
 def _has_user_reply_after(
@@ -647,7 +645,7 @@ def decide(world: World) -> Action:
     return Action(kind="noop", slug=task.slug)
 
 
-def _resume_kind(task: "object") -> str:  # type: ignore[type-arg]  # noqa: ANN001
+def _resume_kind(task: object) -> str:  # type: ignore[type-arg]
     """Determine the action kind for a user reply resume.
 
     Priority:

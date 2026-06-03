@@ -133,7 +133,7 @@ class GitHubFake:
         self.issues[number] = copy.deepcopy(payload)
         self.labels[number] = list(labels)
         self.issues[number]["labels"] = [
-            copy.deepcopy(_resolve_label(list(self.repo_labels.values())[0] if self.repo_labels else [], lb))
+            copy.deepcopy(_resolve_label(next(iter(self.repo_labels.values())) if self.repo_labels else [], lb))
             for lb in labels
         ]
         if comments:
@@ -147,7 +147,7 @@ class GitHubFake:
     # ------------------------------------------------------------------
 
     def handle_request(self, method: str, path: str, token: str,
-                       body: dict = None, max_retries: int = 3,
+                       body: dict | None = None, max_retries: int = 3,
                        timeout: float = 30) -> dict:
         """Route an API call and mutate state.
 
@@ -174,12 +174,11 @@ class GitHubFake:
             return T.github_list_repos()
 
         # ---- GET /repos/{o}/{r}/labels ----
-        if method == "GET" and re.match(r"^/repos/[^/]+/[^/]+/labels$", path):
-            if owner_repo:
-                key = f"{owner_repo[0]}/{owner_repo[1]}"
-                if key in self.repo_labels:
-                    return copy.deepcopy(self.repo_labels[key])
-                return T.github_list_repo_labels()
+        if method == "GET" and re.match(r"^/repos/[^/]+/[^/]+/labels$", path) and owner_repo:
+            key = f"{owner_repo[0]}/{owner_repo[1]}"
+            if key in self.repo_labels:
+                return copy.deepcopy(self.repo_labels[key])
+            return T.github_list_repo_labels()
 
         # ---- POST /repos/{o}/{r}/labels (ensure label creation) ----
         if method == "POST" and re.match(r"^/repos/[^/]+/[^/]+/labels$", path):

@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import re
 import shlex
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from autoswe.harness.prompts import BOT_MARKER
 from autoswe.providers.factory import get_tracker
@@ -87,7 +88,7 @@ def _git_subcommand(cmd: str) -> str | None:
         if not t.startswith("-"):
             return t.lower()
         # `-c key=val` / `--exec-path=foo` flags
-        if "=" in t or t.startswith("--") and "=" in t:
+        if "=" in t or (t.startswith("--") and "=" in t):
             i += 1
             continue
         if t in _GIT_FLAGS_WITH_VALUE:
@@ -160,7 +161,7 @@ def make_can_use_tool(
     repo_cfg: dict,
     state: dict,
     *,
-    on_post: Callable[[str], None] = None,
+    on_post: Callable[[str], None] | None = None,
     read_only: bool = False,
 ) -> CanUseToolCallback:
     """Build the async ``can_use_tool`` callback for the Claude Agent SDK.

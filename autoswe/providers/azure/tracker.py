@@ -35,10 +35,7 @@ def _is_bot_comment(body: str) -> bool:
     """
     if BOT_MARKER in body:
         return True
-    for pattern in _BOT_CONTENT_PATTERNS:
-        if pattern in body:
-            return True
-    return False
+    return any(pattern in body for pattern in _BOT_CONTENT_PATTERNS)
 
 
 _AUTOSWE_TAG_RE = re.compile(r"</?AUTOSWE_\w+>")

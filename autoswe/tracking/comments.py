@@ -69,10 +69,7 @@ def _is_autoswe_bot_comment(comment) -> bool:
     # Fallback: detect bot comments by content patterns.
     # These patterns are unique to autoSWE-posted comments and are unlikely
     # to appear in genuine user replies.
-    for pattern in _BOT_CONTENT_PATTERNS:
-        if pattern in body:
-            return True
-    return False
+    return any(pattern in body for pattern in _BOT_CONTENT_PATTERNS)
 
 
 # Content patterns that uniquely identify autoSWE bot comments.

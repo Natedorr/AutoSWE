@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -112,10 +113,8 @@ def load_config() -> dict:
                 k, _, v = line.partition("=")
                 cfg[k.strip()] = v.strip()
         for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES"):
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 cfg[int_key] = int(cfg.get(int_key, 0))
-            except (ValueError, TypeError):
-                pass
         cfg["SILENT_REPORTING"] = str(cfg.get("SILENT_REPORTING", "false")).lower() == "true"
         cfg["MINIMAL_POSTING"] = str(cfg.get("MINIMAL_POSTING", "false")).lower() == "true"
         cfg["AUTO_ASSIGN"] = str(cfg.get("AUTO_ASSIGN", "true")).lower() == "true"
@@ -228,7 +227,7 @@ def load_harnesses_config() -> dict:
     return dict(validated)
 
 
-def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict = None) -> dict:
+def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict | None = None) -> dict:
     """Resolve the harness profile for a coding phase (plan, fix, review).
 
     Resolution order (highest → lowest priority):

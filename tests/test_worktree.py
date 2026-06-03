@@ -1043,9 +1043,7 @@ def test_commit_and_push_logs_agent_commits(tmp_path, monkeypatch):
             result.stdout = "abc1234\n"
         elif "rev-parse" in args:
             result.stdout = "abc1234def5678\n"
-        elif "commit" in args:
-            result.stdout = ""
-        elif "push" in args:
+        elif "commit" in args or "push" in args:
             result.stdout = ""
         return result
 

@@ -59,10 +59,7 @@ def test_transition(
         pytest.skip(f"{transition_name} skipped for {provider}: known limitation")
     expect = row.get("expect", {})
 
-    if provider == "github":
-        state = build_github_state(row)
-    else:
-        state = build_azure_state(row)
+    state = build_github_state(row) if provider == "github" else build_azure_state(row)
 
     queue_task = build_queue_task(row, provider)
 

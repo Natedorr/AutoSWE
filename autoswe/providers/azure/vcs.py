@@ -121,4 +121,3 @@ class AzureVCS(VCSProvider):
         branch: str,
     ) -> None:
         """Azure DevOps does not have an equivalent feature — no-op."""
-        pass

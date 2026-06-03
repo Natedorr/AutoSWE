@@ -168,7 +168,7 @@ def assert_comments_posted(gh_fake, expected_comments: list[dict]) -> None:
         path = call.get("path", "")
         if call.get("method") in ("PATCH", "PUT") and (
             "/issues/comments/" in path or
-            "/workitems/" in path and "/comments/" in path
+            ("/workitems/" in path and "/comments/" in path)
         ):
             body = (call.get("body") or {}).get("body", "") or (call.get("body") or {}).get("text", "")
             if body:
@@ -311,7 +311,7 @@ def add_repo_to_repos_json(autoswe_dir: Path, owner: str, repo: str,
                            extra: dict | None = None) -> None:
     """Add an entry to repos.json for scenario tests."""
     key = f"{owner}/{repo}"
-    entry = {"provider": provider, "pat": "test-pat", **((extra or {}))}
+    entry = {"provider": provider, "pat": "test-pat", **(extra or {})}
     repos_path = autoswe_dir / "config" / "repos.json"
     data = json.loads(repos_path.read_text(encoding="utf-8")) if repos_path.exists() else {}
     data[key] = entry

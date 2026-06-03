@@ -43,7 +43,7 @@ def _ado_request(
     method: str,
     path: str,
     pat: str,
-    body: dict = None,
+    body: dict | None = None,
     content_type: str = "application/json",
     max_retries: int = 3,
 ):

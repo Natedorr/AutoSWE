@@ -135,7 +135,7 @@ def _set_autoswe_status(owner: str, repo: str, issue_number: int, status_label: 
     _validate_status(status_label)
     current = gh_get(f"/repos/{owner}/{repo}/issues/{issue_number}/labels", token)
     non_status = [lb["name"] for lb in current if not lb["name"].startswith(_PREFIX)]
-    new_labels = non_status + [status_label]
+    new_labels = [*non_status, status_label]
     gh_put(f"/repos/{owner}/{repo}/issues/{issue_number}/labels", token, {"labels": new_labels})
     log(f"[LABEL] {owner}/{repo}#{issue_number} -> {status_label}")
 

@@ -16,8 +16,9 @@ modes vs. Codex sandbox flags).  Backends advertise what they support via
 """
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 # ---------- Mode types ----------
 

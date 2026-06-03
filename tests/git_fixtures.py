@@ -345,7 +345,7 @@ class GitWorld:
         # Dirty (unstaged changes)
         status_result = _git(wt, "status", "--porcelain", check=False)
         status_lines = status_result.stdout.strip().split("\n") if status_result.stdout.strip() else []
-        state["dirty"] = any(line.startswith(" M") or line.startswith("M ") for line in status_lines)
+        state["dirty"] = any(line.startswith((" M", "M ")) for line in status_lines)
 
         # Untracked files
         state["untracked"] = [line[3:] for line in status_lines if line.startswith("??")]

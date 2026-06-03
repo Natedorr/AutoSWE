@@ -179,7 +179,7 @@ def _build_completion_comment(
 
 def emit(
     action: Action,
-    result: "DispatchResult | None",
+    result: DispatchResult | None,
     world: World,
 ) -> tuple[Effect, ...]:
     """Return the Effects to apply after an Action ran.

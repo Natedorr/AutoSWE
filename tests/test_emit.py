@@ -134,7 +134,7 @@ def _load_action(data: dict) -> Action:
     )
 
 
-def _load_result(path: Path) -> "DispatchResult | None":
+def _load_result(path: Path) -> DispatchResult | None:
     """Load a DispatchResult from JSON (null = no Claude run)."""
     raw = json.loads(path.read_text())
     if raw is None:
@@ -213,9 +213,8 @@ def assert_effect_matches(actual: Effect, expected: dict) -> None:
         if "pr_base" in expected:
             assert actual.pr_base == expected["pr_base"]
 
-    elif kind == "assign":
-        if "body" in expected:
-            assert actual.body == expected["body"]
+    elif kind == "assign" and "body" in expected:
+        assert actual.body == expected["body"]
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import contextlib
 from urllib.parse import urlparse
 
 from autoswe.core.config import LOGS_DIR
@@ -69,7 +70,7 @@ def _pr_ref(pr_url: str) -> str:
     return f"PR#{last}"
 
 
-def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
+def open_pr(task: dict, cfg: dict, repo_cfg: dict | None = None) -> str:
     """Open a PR from the worktree branch. Returns done-file content."""
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     token = task["_token"]
@@ -107,11 +108,9 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
         pr_ref = _pr_ref(pr_url)
         dbg.debug("SHIP: pr_url=%s", pr_url)
         log(f"[SHIP] PR already exists: {pr_ref} base={base_branch} head={branch}")
-        try:
+        with contextlib.suppress(Exception):
             tracker.post_comment(rcfg, issue_num,
                 f"Pull request already exists: {pr_url}{AUTOSWE_BOT_FOOTER}")
-        except Exception:
-            pass
         # Best-effort: link branch to issue
         provider = rcfg.get("provider", "github")
         _try_link_branch(vcs, owner, repo, issue_num, branch, token, cfg, provider)
@@ -129,11 +128,9 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict = None) -> str:
         pr_ref = _pr_ref(pr_url)
         dbg.debug("SHIP: pr_url=%s", pr_url)
         log(f"[SHIP] PR created: {pr_ref} base={base_branch} head={branch}")
-        try:
+        with contextlib.suppress(Exception):
             tracker.post_comment(rcfg, issue_num,
                "Pull request opened: " + pr_url + AUTOSWE_BOT_FOOTER)
-        except Exception:
-            pass
         # Best-effort: link branch to issue (pass pr_result for head_sha fallback)
         provider = rcfg.get("provider", "github")
         _try_link_branch(vcs, owner, repo, issue_num, branch, token, cfg, provider,

@@ -78,7 +78,7 @@ def worktree_path(owner: str, repo: str, issue_num: int, cfg: dict, provider: st
     return _repo_dir(owner, repo, cfg, provider) / f"issue-{issue_num}"
 
 
-def _run(args: list, cwd: Path = None, check: bool = True) -> subprocess.CompletedProcess:
+def _run(args: list, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check)
 
 
@@ -120,7 +120,7 @@ def _get_default_branch(main: Path, base_branch: str) -> str:
 def ensure_clone(
     owner: str, repo: str, token: str, cfg: dict,
     base_branch: str = "main", provider: str = "github",
-    default_branch: str = None,
+    default_branch: str | None = None,
 ) -> None:
     """Ensure _main/ clone exists and is up to date."""
     main = main_clone_path(owner, repo, cfg, provider)
@@ -236,7 +236,7 @@ def _apply_pull_strategy(wt: Path, branch: str, strategy: str) -> list[str]:
 def create_worktree(
     owner: str, repo: str, issue_num: int, base_branch: str,
     token: str, cfg: dict, provider: str = "github",
-    default_branch: str = None,
+    default_branch: str | None = None,
     pull_strategy: str = "reset",
     push_new: bool = False,
 ) -> Path:
@@ -390,7 +390,7 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
     return {"committed": True, "commit_sha": commit_sha, "branch": branch}
 
 
-def sync_branch(wt: Path, owner: str, repo: str, issue_num: int, base_branch: str = "main", provider: str = "github", cfg: dict = None) -> dict:
+def sync_branch(wt: Path, owner: str, repo: str, issue_num: int, base_branch: str = "main", provider: str = "github", cfg: dict | None = None) -> dict:
     """Merge or rebase the latest base branch into the worktree branch.
 
     Strategy is controlled by ``cfg["SYNC_STRATEGY"]``:

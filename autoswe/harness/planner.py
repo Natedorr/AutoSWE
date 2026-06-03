@@ -1,7 +1,6 @@
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from autoswe.core.config import LOGS_DIR, resolve_harness
 from autoswe.core.logging_utils import init_debug_logger, log
@@ -17,7 +16,7 @@ from autoswe.vcs.worktree import create_worktree
 dbg = init_debug_logger(LOGS_DIR)
 
 
-def _interpret_plan_result(result, state, harness: dict) -> tuple[str, Optional[str]]:
+def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | None]:
     """Interpret a plan-phase RunResult, returning (done_content, plan_file_path).
 
     Checks MCP-specific fields (plan_posted, question_posted) only when the
@@ -40,7 +39,7 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, Optional[
 
         # 3. MCP post_plan → PLAN_READY
         if result.plan_posted:
-            plan_file_path: Optional[str] = None
+            plan_file_path: str | None = None
             if result.plan_file_path:
                 pf = Path(result.plan_file_path)
                 if pf.exists():
@@ -50,12 +49,12 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, Optional[
             return "PLAN_READY", plan_file_path
 
     # 4. Text-parse fallback (always available)
-    plan_file: Optional[Path] = (
+    plan_file: Path | None = (
         Path(result.plan_file_path) if result.plan_file_path else None
     )
     comment, done_content, used_file = _extract_plan_output(result.text, plan_file=plan_file)
 
-    plan_file_path: Optional[str] = None
+    plan_file_path: str | None = None
     if done_content == "PLAN_READY" and used_file is not None:
         plan_file_path = str(used_file)
 
@@ -68,7 +67,7 @@ def _get_plans_dir() -> Path:
     return Path.home() / ".claude" / "plans"
 
 
-def _find_latest_plan_file() -> Optional[Path]:
+def _find_latest_plan_file() -> Path | None:
     """Find the most recently created plan file in ~/.claude/plans/.
 
     Returns None if the directory does not exist or contains no .md files.
@@ -104,7 +103,7 @@ def _plan_file_is_pending(plan_text: str) -> bool:
     return any(indicator in lower for indicator in pending_indicators)
 
 
-def _extract_plan_output(text: str, plan_file: Path = None) -> tuple[str, str, Optional[Path]]:
+def _extract_plan_output(text: str, plan_file: Path | None = None) -> tuple[str, str, Path | None]:
     """Return (comment_body, done_content, used_file_path) using the output priority chain.
 
     The third element is the Path of the plan file used (when content came from
@@ -153,7 +152,7 @@ def _extract_plan_output(text: str, plan_file: Path = None) -> tuple[str, str, O
         return comment, "WAITING: questions", None
 
     # 3. Filesystem scan — true last resort (may return another session's file)
-    fs_file: Optional[Path] = None
+    fs_file: Path | None = None
     try:
         fs_file = _find_latest_plan_file()
     except Exception:
@@ -195,7 +194,7 @@ def _post_and_return(task: dict, comment_body: str, done_content: str, repo_cfg:
     return done_content
 
 
-def _get_git_head(wt: Path) -> Optional[str]:
+def _get_git_head(wt: Path) -> str | None:
     """Return git HEAD SHA of the worktree, or None on error."""
     result = subprocess.run(
         ["git", "-C", str(wt), "rev-parse", "HEAD"],
@@ -206,7 +205,7 @@ def _get_git_head(wt: Path) -> Optional[str]:
     return None
 
 
-def _ensure_worktree_unchanged(wt: Path, head_before: Optional[str]) -> None:
+def _ensure_worktree_unchanged(wt: Path, head_before: str | None) -> None:
     """Reset the worktree if the agent modified it during plan phase."""
     head_after = _get_git_head(wt)
     if head_before and head_after and head_before != head_after:
@@ -215,7 +214,7 @@ def _ensure_worktree_unchanged(wt: Path, head_before: Optional[str]) -> None:
         subprocess.run(["git", "-C", str(wt), "clean", "-fd"], timeout=10, check=False)
 
 
-def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, progress_callback=None, wt=None) -> str:
+def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None, *, progress_callback=None, wt=None) -> str:
     """Run plan phase. Returns done-file content string.
 
     When *wt* is provided (e.g. from the sync-wrapped orchestrator), the

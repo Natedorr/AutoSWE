@@ -104,7 +104,7 @@ class AzureFake:
     # Patchable _ado_request replacement
     # ------------------------------------------------------------------
 
-    def handle_request(self, method: str, path: str, pat: str, body: dict = None,
+    def handle_request(self, method: str, path: str, pat: str, body: dict | None = None,
                        content_type: str = "application/json", max_retries: int = 3) -> dict:
         """Route an ADO API call and mutate state."""
         self.recorded_calls.append({
@@ -191,17 +191,16 @@ class AzureFake:
 
         # ---- PATCH work item (update fields/tags) ----
         if wi_num is not None and method in ("PATCH", "PUT"):
-            if wi_num in self.work_items and body:
-                if isinstance(body, list):
-                    for op in body:
-                        op_type = op.get("op", "")
-                        op_path = op.get("path", "")
-                        value = op.get("value")
-                        if op_type in ("add", "replace") and op_path.startswith("/fields/"):
-                            field = op_path.removeprefix("/fields/")
-                            self.work_items[wi_num].setdefault("fields", {})[
-                                field
-                            ] = value
+            if wi_num in self.work_items and body and isinstance(body, list):
+                for op in body:
+                    op_type = op.get("op", "")
+                    op_path = op.get("path", "")
+                    value = op.get("value")
+                    if op_type in ("add", "replace") and op_path.startswith("/fields/"):
+                        field = op_path.removeprefix("/fields/")
+                        self.work_items[wi_num].setdefault("fields", {})[
+                            field
+                        ] = value
             return copy.deepcopy(self.work_items.get(wi_num, {}))
 
         # ---- POST WIQL query (list work items) ----

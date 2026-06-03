@@ -46,15 +46,9 @@ _ANTHROPIC_KEYS = {"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_
 
 
 def _prompt(label: str, default: str = "", secret: bool = False) -> str:
-    if default:
-        display = f"{label} [{default}]: "
-    else:
-        display = f"{label}: "
+    display = f"{label} [{default}]: " if default else f"{label}: "
     try:
-        if secret:
-            val = getpass.getpass(display)
-        else:
-            val = input(display)
+        val = getpass.getpass(display) if secret else input(display)
     except (EOFError, KeyboardInterrupt):
         print()
         sys.exit(0)
@@ -455,7 +449,7 @@ def cmd_setup(args, cfg: dict) -> None:
         print(f"Wrote {env_path}.")
 
     # Smoke test
-    first_repo = list(new_repos.keys())[0] if new_repos else None
+    first_repo = next(iter(new_repos.keys())) if new_repos else None
     if first_repo and _prompt_yes_no(
         f"\nRun a sync smoke test against {first_repo}?", default=True
     ):

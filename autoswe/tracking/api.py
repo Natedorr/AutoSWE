@@ -10,7 +10,7 @@ dbg = init_debug_logger(LOGS_DIR)
 
 
 def _gh_request(
-    method: str, path: str, token: str, body: dict = None,
+    method: str, path: str, token: str, body: dict | None = None,
     max_retries: int = 3, timeout: float = 30,
 ):
     """Generic GitHub API request with exponential backoff on rate-limit/errors.

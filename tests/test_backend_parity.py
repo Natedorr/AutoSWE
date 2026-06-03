@@ -136,7 +136,7 @@ class TestRunResultShape:
             cost_usd=0.01,
             duration_seconds=5.0,
         )
-        text, session_id, subtype = r  # noqa: FAB319 (intentional unpacking test)
+        text, session_id, subtype = r
         assert text == "hello"
         assert session_id == "s1"
         assert subtype == "success"

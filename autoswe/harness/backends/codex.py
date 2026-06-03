@@ -20,8 +20,8 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import Awaitable
 
 from autoswe.core.logging_utils import log
 from autoswe.harness.backends.base import RunResult, RunSpec

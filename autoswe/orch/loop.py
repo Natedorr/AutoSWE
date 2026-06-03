@@ -10,6 +10,7 @@ CLI modes (controlled by ``mode`` param):
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from dataclasses import dataclass
@@ -427,10 +428,8 @@ def _finalize_handler(
 
     # --- Write done file ---
     done_path = RUNNING_DIR / f"{slug_to_filename(slug)}.done"
-    try:
+    with contextlib.suppress(OSError):
         done_path.write_text(done_content)
-    except OSError:
-        pass
 
     # --- Write structured result file ---
     result_path = RUNNING_DIR / f"{slug_to_filename(slug)}.result.json"
@@ -599,7 +598,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
     Returns the number of tasks processed (actions that weren't noop).
     """
     repos_cfg = load_repos_config()
-    repo_keys = [k for k in repos_cfg.keys() if not k.startswith("_")]
+    repo_keys = [k for k in repos_cfg if not k.startswith("_")]
 
     if repo_filter:
         repo_keys = [k for k in repo_keys if k == repo_filter]
@@ -840,10 +839,8 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                             task_entry.get("last_dispatched_command", "/fix").lstrip("/")
                         )
                         task_entry["autoswe_status"] = closed_status
-                        try:
+                        with contextlib.suppress(RuntimeError):
                             tracker.set_status(repo_cfg, task_entry["issue_number"], f"autoswe:{closed_status}")
-                        except RuntimeError:
-                            pass
                         log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
                     continue
                 if task_entry.get("gh_closed", False):
@@ -865,12 +862,10 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                 if qs in _MIRROR_STATUSES:
                     api_state = api_states.get(task_entry["issue_number"])
                     if api_state is not None and api_state.issue.status != qs:
-                        try:
+                        with contextlib.suppress(RuntimeError):
                             tracker.set_status(
                                 repo_cfg, task_entry["issue_number"], f"autoswe:{qs}"
                             )
-                        except RuntimeError:
-                            pass
 
     return tasks_processed
 

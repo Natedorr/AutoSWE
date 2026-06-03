@@ -12,13 +12,10 @@ Run from the AutoSWE repo root:
 
 import asyncio
 
-import pytest
-
 # Ensure AutoSWE source is importable
-pass
-
 from typing import Any
 
+import pytest
 from claude_agent_sdk import PermissionResultAllow
 
 from tests.session_harness.fake import StreamingClaudeFake
