@@ -104,13 +104,7 @@ class HTMLToMarkdown(HTMLParser):
         elif tag == "p":
             self.parts.append("\n\n")
 
-        elif tag == "br":
-            self.parts.append("\n")
-
-        elif tag == "ul":
-            self.parts.append("\n")
-
-        elif tag == "ol":
+        elif tag in ("br", "ul", "ol"):
             self.parts.append("\n")
 
         elif tag == "li":
@@ -274,10 +268,7 @@ def url_to_filename(url):
 
 def should_skip(url):
     """Check if URL matches skip patterns."""
-    for pattern in SKIP_PATTERNS:
-        if re.search(pattern, url):
-            return True
-    return False
+    return any(re.search(pattern, url) for pattern in SKIP_PATTERNS)
 
 
 # ── Main ────────────────────────────────────────────────────────────

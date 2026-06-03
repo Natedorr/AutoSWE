@@ -15,7 +15,7 @@ from typing import Literal
 
 # Re-export the existing RunResult so types.py is self-contained
 from autoswe.harness.runner import RunResult  # noqa: F401
-from autoswe.providers.base import NormalizedComment, NormalizedIssue  # noqa: F401
+from autoswe.providers.base import NormalizedComment, NormalizedIssue
 
 
 @dataclass(frozen=True)
