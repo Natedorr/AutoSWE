@@ -29,6 +29,67 @@ _KIND_TO_COMMAND = {
     "review": "/review",
 }
 
+# Action kind → phase name (for last_phase / resume_phase)
+_KIND_TO_PHASE = {
+    "plan": "plan",
+    "fix": "fix",
+    "retry": "fix",
+}
+
+
+def _field_lifecycle_patch(
+    kind: str,
+    new_status: str,
+    result: DispatchResult,
+) -> dict:
+    """Pure function: compute lifecycle field mutations for (kind, new_status, result).
+
+    Returns a dict of field_name → value to merge into the queue_patch.
+    Covers last_phase, resume_phase, plan_file_path, review_file_path,
+    first_dispatched_at, and _guard_blocked.
+
+    Computing this once up front (before the review early-return) eliminates
+    the ordering fragility of inlined mutations that *must* happen before
+    the early return.
+    """
+    patch: dict = {}
+
+    # last_phase + resume_phase
+    phase = _KIND_TO_PHASE.get(kind)
+    if phase:
+        patch["last_phase"] = phase
+        patch["resume_phase"] = phase
+
+    # plan_file_path lifecycle:
+    #  * plan + planned  -> persist the path the planner wrote
+    #  * plan + waiting  -> leave existing value alone (mid-conversation)
+    #  * fix / retry / sync / ship_pr -> always clear (consumed or N/A)
+    if kind == "plan":
+        if new_status == "planned" and result.plan_file_path:
+            patch["plan_file_path"] = result.plan_file_path
+        elif new_status != "waiting":
+            patch["plan_file_path"] = None
+    elif kind in ("fix", "retry", "sync_branch", "ship_pr"):
+        patch["plan_file_path"] = None
+
+    # review_file_path lifecycle:
+    #  * review + REVIEW_READY -> persist the path the reviewer wrote
+    #  * fix / plan / retry -> always clear (consumed by build_fix_prompt / plan)
+    if kind == "review" and result.review_file_path:
+        patch["review_file_path"] = result.review_file_path
+    elif kind in ("fix", "plan", "retry"):
+        patch["review_file_path"] = None
+
+    # first_dispatched_at: clear on terminal statuses
+    if new_status in TERMINAL_STATUSES:
+        patch["first_dispatched_at"] = None
+
+    # _guard_blocked: reset on retry
+    if kind == "retry":
+        patch["_guard_blocked"] = False
+
+    return patch
+
 # ---------------------------------------------------------------------------
 # Comment builders (pure functions, no I/O)
 # ---------------------------------------------------------------------------
@@ -296,53 +357,15 @@ def emit(
     if action.plan_branch:
         queue_patch["plan_branch"] = action.plan_branch
 
-    # Reset guard flag on retry so subsequent /fix is not blocked
-    if kind == "retry":
-        queue_patch["_guard_blocked"] = False
-
     # Update session_id if Claude returned one (skip for review — review
     # uses a throwaway session and should not overwrite the persistent fix session)
     if session_id and kind != "review":
         queue_patch["session_id"] = session_id
 
-    # Set last_phase + resume_phase so resume knows which handler to call.
-    # ``resume_phase`` is the authoritative source for _resume_kind();
-    # ``last_phase`` is kept for backwards-compatibility (fallback).
-    if kind in ("plan",):
-        queue_patch["last_phase"] = "plan"
-        queue_patch["resume_phase"] = "plan"
-    elif kind in ("fix", "retry"):
-        queue_patch["last_phase"] = "fix"
-        queue_patch["resume_phase"] = "fix"
-
-    # plan_file_path lifecycle:
-    #  * plan + planned  -> persist the path the planner wrote
-    #  * plan + waiting     -> leave existing value alone (mid-conversation)
-    #  * fix / retry / sync -> always clear (consumed or no longer applicable)
-    #  * terminal statuses  -> clear (the plan is no longer the current plan)
-    if kind == "plan":
-        if new_status == "planned" and result.plan_file_path:
-            queue_patch["plan_file_path"] = result.plan_file_path
-        elif new_status not in ("waiting",):
-            queue_patch["plan_file_path"] = None
-    elif kind in ("fix", "retry", "sync_branch", "ship_pr"):
-        queue_patch["plan_file_path"] = None
-
-    # review_file_path lifecycle:
-    #  * review + REVIEW_READY -> persist the path the reviewer wrote
-    #  * fix / plan / retry -> always clear (consumed by build_fix_prompt / build_plan_prompt)
-    if kind == "review" and result.review_file_path:
-        queue_patch["review_file_path"] = result.review_file_path
-    elif kind in ("fix", "plan", "retry"):
-        queue_patch["review_file_path"] = None
-
-    # Reset first_dispatched_at on terminal statuses — must happen BEFORE
-    # the review early return so that review-on-terminal (e.g. review on
-    # a fixed task) also clears the stale timestamp. Without this, the time
-    # guard in decide.py fires on follow-up commands posted hours after
-    # the original task completed.
-    if new_status in TERMINAL_STATUSES:
-        queue_patch["first_dispatched_at"] = None
+    # Merge lifecycle field mutations (last_phase, resume_phase, plan_file_path,
+    # review_file_path, first_dispatched_at, _guard_blocked). Computed once up
+    # front so the review early-return below cannot skip them.
+    queue_patch.update(_field_lifecycle_patch(kind, new_status, result))
 
     # Review is now terminal — transitions to "reviewed".
     # Keep not clearing plan_file_path/session_id so a later /fix still has the plan.

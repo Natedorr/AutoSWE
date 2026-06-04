@@ -194,6 +194,7 @@ def _post_and_return(task: dict, comment_body: str, done_content: str, repo_cfg:
 
     return done_content
 
+
 def _get_git_head(wt: Path) -> str | None:
     """Return git HEAD SHA of the worktree, or None on error."""
     result = subprocess.run(
@@ -214,11 +215,23 @@ def _ensure_worktree_unchanged(wt: Path, head_before: str | None) -> None:
         subprocess.run(["git", "-C", str(wt), "clean", "-fd"], timeout=10, check=False)
 
 
-def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None, *, progress_callback=None, wt=None) -> str:
-    """Run plan phase. Returns done-file content string.
+def _plan_session(
+    task: dict,
+    repo_cfg: dict,
+    cfg: dict,
+    *,
+    prompt: str,
+    resume_session_id: str | None,
+    label: str,
+    timeout_msg: str,
+    error_prefix: str,
+    progress_callback=None,
+    wt=None,
+) -> HandlerResult:
+    """Shared execution tail for run_plan and resume_plan.
 
-    When *wt* is provided (e.g. from the sync-wrapped orchestrator), the
-    pre-synced worktree is used directly without creating a new one.
+    Sets up the worktree, resolves the harness, runs the agent, ensures
+    the worktree is unchanged, and interprets the result into a HandlerResult.
     """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     base_branch = task.get("base_branch", "main")
@@ -227,15 +240,14 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
     provider = repo_cfg.get("provider", "github")
 
     if wt is None:
-        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
-                             default_branch=base_branch, pull_strategy="reset", push_new=False)
+        wt = create_worktree(
+            owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
+            default_branch=base_branch, pull_strategy="reset", push_new=False,
+        )
     dbg.debug("PLAN: worktree=%s", wt)
-    prompt = build_plan_prompt(task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance)
 
     harness = resolve_harness("plan", repo_cfg, cfg or {})
-    plan_model = harness.get("model")
-    log(f"[PLAN] {task['id']} session=NEW model={plan_model or 'default'} guidance_len={len(guidance or '')}")
-    dbg.debug("PLAN: model=%s guidance=%s", plan_model or "default", guidance)
+    log(f"[PLAN] {task['id']} {label}")
 
     state = {}
     cut = make_can_use_tool(task, repo_cfg, state, on_post=progress_callback, read_only=True)
@@ -248,7 +260,8 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
             cwd=str(wt),
             cfg=cfg or {},
             repo_cfg=repo_cfg,
-            model=plan_model,
+            resume=resume_session_id,
+            model=harness.get("model"),
             mode="plan",
             mcp_servers=build_mcp_comment_server(task, repo_cfg),
             progress_callback=progress_callback,
@@ -257,9 +270,9 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
             harness_cfg=harness,
         )
     except asyncio.TimeoutError:
-        return HandlerResult("FAILED: timeout during plan phase")
+        return HandlerResult(f"FAILED: {timeout_msg}")
     except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
-        dbg.error("run_plan: SDK error: %s", e, exc_info=True)
+        dbg.error(f"{error_prefix}: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 
     _ensure_worktree_unchanged(wt, head_before)
@@ -270,7 +283,6 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
 
     done_content, plan_file_path = _interpret_plan_result(result, state, harness)
 
-    # Helper returns "WAITING..." directly, or "_POST:done_content\tcomment" for posting
     if done_content.startswith("_POST:"):
         inner_done, comment = done_content[len("_POST:"):].split("\t", 1)
         _post_and_return(task, comment, inner_done, repo_cfg, progress_callback=progress_callback)
@@ -294,23 +306,39 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
     )
 
 
-def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progress_callback=None, wt=None) -> str:
-    """Resume plan session after user reply. Returns done-file content string.
+def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None, *, progress_callback=None, wt=None) -> HandlerResult:
+    """Run plan phase. Returns HandlerResult.
 
     When *wt* is provided (e.g. from the sync-wrapped orchestrator), the
     pre-synced worktree is used directly without creating a new one.
     """
-    owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
-    base_branch = task.get("base_branch", "main")
-    plan_branch = task.get("plan_branch") or base_branch
-    token = task["_token"]
-    session_id = task.get("session_id")
-    provider = repo_cfg.get("provider", "github")
+    wt_for_prompt = wt or Path(".")
+    prompt = build_plan_prompt(task, repo_root=str(wt_for_prompt), repo_cfg=repo_cfg, guidance=guidance)
 
-    if wt is None:
-        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
-                             default_branch=base_branch, pull_strategy="reset", push_new=False)
-    dbg.debug("PLAN_RESUME: worktree=%s session=%s", wt, session_id)
+    harness = resolve_harness("plan", repo_cfg, cfg or {})
+    plan_model = harness.get("model")
+    dbg.debug("PLAN: model=%s guidance=%s", plan_model or "default", guidance)
+    label = f"session=NEW model={plan_model or 'default'} guidance_len={len(guidance or '')}"
+
+    return _plan_session(
+        task, repo_cfg, cfg or {},
+        prompt=prompt,
+        resume_session_id=None,
+        label=label,
+        timeout_msg="timeout during plan phase",
+        error_prefix="run_plan",
+        progress_callback=progress_callback,
+        wt=wt,
+    )
+
+
+def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progress_callback=None, wt=None) -> HandlerResult:
+    """Resume plan session after user reply. Returns HandlerResult.
+
+    When *wt* is provided (e.g. from the sync-wrapped orchestrator), the
+    pre-synced worktree is used directly without creating a new one.
+    """
+    session_id = task.get("session_id")
 
     resume_prompt = (
         f"The user replied to your last question(s):\n\n{user_text}\n\n"
@@ -322,61 +350,16 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
         "<AUTOSWE_QUESTIONS> block."
     )
 
-    harness = resolve_harness("plan", repo_cfg, cfg or {})
-    plan_model = harness.get("model")
-    log(f"[PLAN] {task['id']} session=RESUME from={session_id} reply_chars={len(user_text)}")
+    dbg.debug("PLAN_RESUME: session=%s", session_id)
+    label = f"session=RESUME from={session_id} reply_chars={len(user_text)}"
 
-    state = {}
-    cut = make_can_use_tool(task, repo_cfg, state, on_post=progress_callback, read_only=True)
-
-    head_before = _get_git_head(wt)
-
-    try:
-        result = runner.run(
-            resume_prompt,
-            cwd=str(wt),
-            cfg=cfg or {},
-            repo_cfg=repo_cfg,
-            resume=session_id,
-            model=plan_model,
-            mode="plan",
-            mcp_servers=build_mcp_comment_server(task, repo_cfg),
-            progress_callback=progress_callback,
-            can_use_tool=cut,
-            state=state,
-            harness_cfg=harness,
-        )
-    except asyncio.TimeoutError:
-        return HandlerResult("FAILED: timeout during plan resume")
-    except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
-        dbg.error("resume_plan: SDK error: %s", e, exc_info=True)
-        return HandlerResult(f"FAILED: {e}")
-
-    _ensure_worktree_unchanged(wt, head_before)
-
-    dbg.debug("PLAN_RESUME: sdk returned subtype=%s session=%s len=%d", result.subtype, result.session_id, len(result.text or ""))
-    dbg.debug("PLAN_RESUME OUTPUT (%d chars):\n%s", len(result.text or ""), (result.text or "")[:4000])
-
-    done_content, plan_file_path = _interpret_plan_result(result, state, harness)
-
-    if done_content.startswith("_POST:"):
-        inner_done, comment = done_content[len("_POST:"):].split("\t", 1)
-        _post_and_return(task, comment, inner_done, repo_cfg, progress_callback=progress_callback)
-        log(f"[PLAN] {task['id']} resume complete done={inner_done} plan_file={plan_file_path or 'none'}")
-        return HandlerResult(
-            inner_done,
-            cost_usd=result.cost_usd,
-            duration_seconds=result.duration_seconds,
-            session_id=result.session_id,
-            plan_file_path=plan_file_path,
-        )
-
-    if done_content == "PLAN_READY" and plan_file_path:
-        log(f"[PLAN] {task['id']} resume complete done=PLAN_READY plan_file={plan_file_path}")
-    return HandlerResult(
-        done_content,
-        cost_usd=result.cost_usd,
-        duration_seconds=result.duration_seconds,
-        session_id=result.session_id,
-        plan_file_path=plan_file_path,
+    return _plan_session(
+        task, repo_cfg, cfg or {},
+        prompt=resume_prompt,
+        resume_session_id=session_id,
+        label=label,
+        timeout_msg="timeout during plan resume",
+        error_prefix="resume_plan",
+        progress_callback=progress_callback,
+        wt=wt,
     )

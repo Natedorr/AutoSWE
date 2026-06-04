@@ -226,6 +226,51 @@ def _run_sync(
         return DispatchResult(done_content=f"FAILED: {e}")
 
 
+def _sync_before_dispatch(
+    task: dict,
+    repo_cfg: dict,
+    cfg: dict,
+    progress_callback: Callable[[str], None] | None,
+    *,
+    phase: str,
+    branch_for_create: str,
+) -> tuple:  # type: ignore[type-arg]
+    """Ensure worktree, sync branch, resolve conflicts — shared prologue.
+
+    Returns ``(wt, None)`` on success so the caller proceeds with the dispatch
+    using the worktree path. Returns ``(wt, error_HandlerResult)`` if sync
+    failed or conflict resolution could not complete, so the caller bails.
+    """
+    owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
+    provider = repo_cfg.get("provider", "github")
+    base_branch = task.get("base_branch", "main")
+    token = task["_token"]
+
+    wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
+    if not wt.exists():
+        wt = worktree_mod.create_worktree(
+            owner, repo, issue_num, branch_for_create, token, cfg, provider,
+            default_branch=base_branch, pull_strategy="reset", push_new=True,
+        )
+
+    sync_result = worktree_mod.sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)
+    log(f"[SYNC] {task['id']} pre-{phase} synced={sync_result.get('synced')} conflict={sync_result.get('conflict')}")
+
+    if sync_result.get("conflict") and not sync_result.get("rebase"):
+        files = sync_result["conflict_files"]
+        if progress_callback:
+            progress_callback(f"Pre-{phase} sync conflict in {len(files)} file(s) — invoking Claude to resolve...")
+        hr = coder.resolve_sync_conflicts(
+            task, files, repo_cfg=repo_cfg, cfg=cfg, progress_callback=progress_callback,
+        )
+        if not (hr.done_content or "").startswith("DONE_SUMMARY"):
+            return wt, hr
+    elif not sync_result.get("synced") and not sync_result.get("conflict"):
+        return wt, HandlerResult(f"FAILED: pre-{phase} sync error: {sync_result.get('error')}")
+
+    return wt, None
+
+
 def _run_fix_with_sync(
     task: dict,
     guidance: str,
@@ -233,44 +278,14 @@ def _run_fix_with_sync(
     cfg: dict,
     progress_callback: Callable[[str], None] | None,
 ) -> HandlerResult:
-    """Pre-dispatch sync before /fix — merge base into feature branch, resolve conflicts.
-
-    Ensures the feature branch is up to date with the base branch before running
-    the fix. If a merge conflict arises, invokes Claude to resolve it.
-    If resolution fails, bails before running fix.
-    """
-    owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
-    provider = repo_cfg.get("provider", "github")
+    """Pre-dispatch sync before /fix, then run the fix handler."""
     base_branch = task.get("base_branch", "main")
-    token = task["_token"]
-
-    # Ensure worktree exists and push new branches to remote
-    wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
-    if not wt.exists():
-        wt = worktree_mod.create_worktree(
-            owner, repo, issue_num, base_branch, token, cfg, provider,
-            default_branch=base_branch, pull_strategy="reset", push_new=True,
-        )
-
-    # Sync base branch into feature branch
-    sync_result = worktree_mod.sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)
-    log(f"[SYNC] {task['id']} pre-fix synced={sync_result.get('synced')} conflict={sync_result.get('conflict')}")
-
-    if sync_result.get("conflict") and not sync_result.get("rebase"):
-        # Merge conflict — invoke Claude to resolve before running fix
-        files = sync_result["conflict_files"]
-        if progress_callback:
-            progress_callback(f"Pre-fix sync conflict in {len(files)} file(s) — invoking Claude to resolve...")
-        hr = coder.resolve_sync_conflicts(
-            task, files, repo_cfg=repo_cfg, cfg=cfg, progress_callback=progress_callback,
-        )
-        if not (hr.done_content or "").startswith("DONE_SUMMARY"):
-            # Resolution failed — bail before running fix
-            return hr
-    elif not sync_result.get("synced") and not sync_result.get("conflict"):
-        return HandlerResult(f"FAILED: pre-fix sync error: {sync_result.get('error')}")
-
-    # Run fix with pre-synced worktree
+    wt, err = _sync_before_dispatch(
+        task, repo_cfg, cfg, progress_callback,
+        phase="fix", branch_for_create=base_branch,
+    )
+    if err is not None:
+        return err
     return coder.run_fix(
         task, guidance, repo_cfg, cfg, progress_callback=progress_callback, wt=wt,
     )
@@ -284,46 +299,16 @@ def _run_plan_with_sync(
     cfg: dict,
     progress_callback: Callable[[str], None] | None,
 ) -> HandlerResult:
-    """Pre-dispatch sync before /plan — merge base into feature branch, resolve conflicts.
-
-    Ensures the feature branch is up to date with the base branch before running
-    the plan. If a merge conflict arises, invokes Claude to resolve it.
-    If resolution fails, bails before running plan.
-    """
-    owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
-    provider = repo_cfg.get("provider", "github")
+    """Pre-dispatch sync before /plan, then run the plan handler."""
     base_branch = task.get("base_branch", "main")
     plan_branch = task.get("plan_branch") or base_branch
-    token = task["_token"]
+    wt, err = _sync_before_dispatch(
+        task, repo_cfg, cfg, progress_callback,
+        phase="plan", branch_for_create=plan_branch,
+    )
+    if err is not None:
+        return err
 
-    # Ensure worktree exists and push new branches to remote (needed so sync_branch
-    # can push the merge commit and fresh branches have a remote ref to reset against)
-    wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
-    if not wt.exists():
-        wt = worktree_mod.create_worktree(
-            owner, repo, issue_num, plan_branch, token, cfg, provider,
-            default_branch=base_branch, pull_strategy="reset", push_new=True,
-        )
-
-    # Sync base branch into feature branch
-    sync_result = worktree_mod.sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)
-    log(f"[SYNC] {task['id']} pre-plan synced={sync_result.get('synced')} conflict={sync_result.get('conflict')}")
-
-    if sync_result.get("conflict") and not sync_result.get("rebase"):
-        # Merge conflict — invoke Claude to resolve before running plan
-        files = sync_result["conflict_files"]
-        if progress_callback:
-            progress_callback(f"Pre-plan sync conflict in {len(files)} file(s) — invoking Claude to resolve...")
-        hr = coder.resolve_sync_conflicts(
-            task, files, repo_cfg=repo_cfg, cfg=cfg, progress_callback=progress_callback,
-        )
-        if not (hr.done_content or "").startswith("DONE_SUMMARY"):
-            # Resolution failed — bail before running plan
-            return hr
-    elif not sync_result.get("synced") and not sync_result.get("conflict"):
-        return HandlerResult(f"FAILED: pre-plan sync error: {sync_result.get('error')}")
-
-    # Run plan/resume with pre-synced worktree
     if user_reply_text is not None:
         return planner.resume_plan(
             task, user_reply_text, repo_cfg, cfg,
