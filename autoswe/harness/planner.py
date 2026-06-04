@@ -1,5 +1,6 @@
 import asyncio
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from autoswe.core.config import resolve_harness
@@ -220,7 +221,8 @@ def _plan_session(
     repo_cfg: dict,
     cfg: dict,
     *,
-    prompt: str,
+    prompt_factory: None | Callable[[Path], str] = None,
+    prompt: str | None = None,
     resume_session_id: str | None,
     label: str,
     timeout_msg: str,
@@ -246,6 +248,12 @@ def _plan_session(
         )
     dbg.debug("PLAN: worktree=%s", wt)
 
+    # Resolve prompt: use factory (deferred to after worktree setup) or pre-built
+    if prompt_factory is not None:
+        prompt_text = prompt_factory(wt)
+    else:
+        prompt_text = prompt or ""
+
     harness = resolve_harness("plan", repo_cfg, cfg or {})
     log(f"[PLAN] {task['id']} {label}")
 
@@ -256,7 +264,7 @@ def _plan_session(
 
     try:
         result = runner.run(
-            prompt,
+            prompt_text,
             cwd=str(wt),
             cfg=cfg or {},
             repo_cfg=repo_cfg,
@@ -312,9 +320,6 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
     When *wt* is provided (e.g. from the sync-wrapped orchestrator), the
     pre-synced worktree is used directly without creating a new one.
     """
-    wt_for_prompt = wt or Path(".")
-    prompt = build_plan_prompt(task, repo_root=str(wt_for_prompt), repo_cfg=repo_cfg, guidance=guidance)
-
     harness = resolve_harness("plan", repo_cfg, cfg or {})
     plan_model = harness.get("model")
     dbg.debug("PLAN: model=%s guidance=%s", plan_model or "default", guidance)
@@ -322,7 +327,7 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
 
     return _plan_session(
         task, repo_cfg, cfg or {},
-        prompt=prompt,
+        prompt_factory=lambda wt: build_plan_prompt(task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance),
         resume_session_id=None,
         label=label,
         timeout_msg="timeout during plan phase",
