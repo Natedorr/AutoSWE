@@ -32,10 +32,12 @@ from typing import Any
 
 from tests.fakes.azure_fake import AzureFake
 from tests.fakes.claude_fake import ClaudeFake
+from tests.fakes.codex_fake import CodexFake
 from tests.fakes.git_fake import GitFake
 from tests.fakes.github_fake import GitHubFake
 from tests.scenarios.runner import (  # noqa: F401
     assert_claude_calls,
+    assert_codex_calls,
     assert_comments_posted,
     assert_git_calls,
     assert_label_is,
@@ -56,10 +58,12 @@ class HarnessWorld:
     """Objects exposed to tests inside a ``patched_world`` block."""
 
     fake: GitHubFake | AzureFake
-    claude: ClaudeFake
+    claude: ClaudeFake | None
+    codex: CodexFake | None
     git: GitFake
     autoswe_dir: Path
     concurrent: bool = False
+    backend: str = "claude_code"
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +167,17 @@ class _PatchManager:
         cl_mod, cl_orig = cl_fake.patch()
         self.add(lambda: cl_fake.unpatch(cl_mod, cl_orig))
 
+    def patch_codex(self, cx_fake: CodexFake) -> None:
+        """Patch asyncio.create_subprocess_exec for Codex backend."""
+
+        orig = cx_fake._get_real_create()
+        asyncio_mod, _ = cx_fake.patch()
+
+        def restore():
+            asyncio_mod.create_subprocess_exec = orig
+
+        self.add(restore)
+
     def patch_concurrent(self, force: bool) -> None:
         """Stub _is_task_running to simulate a concurrent dispatch."""
         import autoswe.orch.loop as loop_mod
@@ -205,7 +220,35 @@ class _PatchManager:
 
 
 # ---------------------------------------------------------------------------
-# patched_world context manager
+# Codex harness setup
+
+
+def _setup_codex_harness(isolated_dir: Path) -> None:
+    """Write harnesses.json with a codex profile for scenario tests.
+
+    Creates ``config/harnesses.json`` with a ``"codex"`` profile so that
+    ``resolve_harness`` returns a codex backend for all phases.
+    """
+    import json
+
+    harnesses_dir = isolated_dir / "config"
+    harnesses_dir.mkdir(parents=True, exist_ok=True)
+
+    harnesses_cfg = {
+        "codex": {
+            "backend": "codex",
+            "model": "gpt-5.4",
+        }
+    }
+
+    harnesses_path = harnesses_dir / "harnesses.json"
+    harnesses_path.write_text(json.dumps(harnesses_cfg, indent=2), encoding="utf-8")
+
+    # Clear the harnesses cache so the next load picks up our file
+    import autoswe.core.config as cfg_mod
+
+    cfg_mod.HARNESSES_CONFIG_FILE = harnesses_path
+    cfg_mod._harnesses_cache.clear()
 
 
 @contextmanager
@@ -219,6 +262,7 @@ def patched_world(
     fake_subprocess: bool | None = None,
     isolated_dir: Path,
     row_meta: dict | None = None,
+    backend: str = "claude_code",
 ):
     """Patch all fakes into autoswe modules for one test turn.
 
@@ -236,6 +280,10 @@ def patched_world(
         involves ``resolve_sync_conflicts`` (the resolver invokes subprocess
         directly for the post-resolution push).
     :param isolated_dir: The per-test AUTOSWE_DIR path.
+    :param backend: ``"claude_code"`` (default, patches ``runner.run``) or
+        ``"codex"`` (patches ``asyncio.create_subprocess_exec`` so the real
+        CodexBackend runs end-to-end).  When ``"codex"``, the existing
+        ``claude_responses`` dicts are fed through ``CodexFake``.
     :yields: ``HarnessWorld`` with access to all fakes.
     """
     claude_responses = claude_responses or []
@@ -243,21 +291,32 @@ def patched_world(
 
     # ---- Create fakes ----
     fake = (GitHubFake() if provider.lower() == "github" else AzureFake())
-    cl_fake = ClaudeFake()
     gt_fake = GitFake()
+
+    if backend == "codex":
+        cx_fake = CodexFake()
+        cl_fake = None
+        # Feed the existing claude_responses dicts through CodexFake
+        for resp in claude_responses:
+            cx_fake.script_response(
+                resp["text"],
+                session_id=resp.get("session_id", "s1"),
+                subtype=resp.get("subtype", "success"),
+            )
+    else:
+        cx_fake = None
+        cl_fake = ClaudeFake()
+        for resp in claude_responses:
+            cl_fake.script_response(
+                resp["text"],
+                session_id=resp.get("session_id", "s1"),
+                subtype=resp.get("subtype", "success"),
+                plan_posted=resp.get("plan_posted", False),
+                question_posted=resp.get("question_posted", False),
+            )
 
     # Load state into the API fake
     fake.load(state)
-
-    # Script Claude responses
-    for resp in claude_responses:
-        cl_fake.script_response(
-            resp["text"],
-            session_id=resp.get("session_id", "s1"),
-            subtype=resp.get("subtype", "success"),
-            plan_posted=resp.get("plan_posted", False),
-            question_posted=resp.get("question_posted", False),
-        )
 
     # Script git operations
     _script_git_ops(gt_fake, scripted_git, state, row_meta or {})
@@ -273,12 +332,21 @@ def patched_world(
     ):
         fake_subprocess = True
 
+    # For codex backend, write harnesses.json and set cfg harness vars
+    if backend == "codex":
+        _setup_codex_harness(isolated_dir)
+
     # ---- Apply all patches ----
     with _PatchManager() as pm:
         pm.patch_subprocess(fake_subprocess)
         pm.patch_concurrent(concurrent)
         pm.patch_plan_file()
-        pm.patch_claude(cl_fake)
+
+        if backend == "codex":
+            pm.patch_codex(cx_fake)
+        else:
+            pm.patch_claude(cl_fake)
+
         pm.patch_git(gt_fake)
         pm.patch_gh_post_comment(fake)
         pm.patch_api_fake(fake)
@@ -286,9 +354,11 @@ def patched_world(
         yield HarnessWorld(
             fake=fake,
             claude=cl_fake,
+            codex=cx_fake,
             git=gt_fake,
             autoswe_dir=isolated_dir,
             concurrent=concurrent,
+            backend=backend,
         )
 
 
@@ -344,9 +414,14 @@ def _script_git_ops(
 # Config helpers
 
 
-def build_test_cfg(isolated_dir: Path, provider: str = "github") -> dict:
-    """Build a standard config dict for scenario tests."""
-    return {
+def build_test_cfg(isolated_dir: Path, provider: str = "github", backend: str = "claude_code") -> dict:
+    """Build a standard config dict for scenario tests.
+
+    When *backend* is ``"codex"``, the returned config sets ``PLAN_HARNESS``,
+    ``FIX_HARNESS``, and ``REVIEW_HARNESS`` to ``"codex"`` so that all three
+    phases resolve to the Codex backend.
+    """
+    cfg: dict[str, Any] = {
         "AGENT_TIMEOUT": 7200,
         "MAX_ATTEMPTS": 3,
         "MAX_TOTAL_HOURS": 2,
@@ -364,6 +439,11 @@ def build_test_cfg(isolated_dir: Path, provider: str = "github") -> dict:
         "ANTHROPIC_BASE_URL": "",
         "WORKTREE_DIR": str(isolated_dir / "worktrees"),
     }
+    if backend == "codex":
+        cfg["PLAN_HARNESS"] = "codex"
+        cfg["FIX_HARNESS"] = "codex"
+        cfg["REVIEW_HARNESS"] = "codex"
+    return cfg
 
 
 def setup_repos(isolated_dir: Path, provider: str, state: dict) -> None:

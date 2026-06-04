@@ -1166,6 +1166,7 @@ TRANSITIONS: list[dict[str, Any]] = [
             "label_after": "autoswe:synced",
             "autoswe_status": "synced",
             "comment_contains": ["Completed with command", "Resolved merge conflicts"],
+            "claude_permission": "bypassPermissions",
         },
     },
     {
@@ -1209,6 +1210,7 @@ TRANSITIONS: list[dict[str, Any]] = [
             "label_after": "autoswe:failed",
             "autoswe_status": "failed",
             "comment_contains": ["Failed:", "/retry"],
+            "claude_permission": "bypassPermissions",
         },
     },
     # ---- Review transitions ----
@@ -1483,6 +1485,46 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Codex backend transition rows
+
+# Curated set of high-value transition names to run against the Codex backend.
+# These cover backend-divergent paths: sandbox/mode translation, JSONL→RunResult,
+# text-parse fallback (has_mcp == False), and per-backend assertions.
+# MCP-only rows (waiting_resume_mcp_post_plan) are excluded — Claude only.
+
+CODEX_TRANSITIONS: list[str] = [
+    "fresh_plan_command",            # Plan with read-only sandbox
+    "fresh_plan_with_questions",     # Questions → waiting
+    "fresh_fix_command",             # Fix with workspace-write sandbox
+    "fresh_fix_fails",               # Error subtype → failed
+    "plan_ready_then_fix",           # Resume fix from planned
+    "waiting_user_plain_reply",      # Resume plan from waiting
+    "sync_conflict_resolved",        # Conflict resolution → synced
+    "sync_conflict_unresolved",      # Conflict resolution fails → failed
+    "planned_then_review",           # Review phase
+]
+
+
+# ---------------------------------------------------------------------------
+# Helper: translate claude_permission → codex sandbox
+
+
+def _permission_to_sandbox(permission: str) -> str:
+    """Map a claude_permission expectation to the Codex sandbox value.
+
+    ``"plan"`` → ``"read-only"``
+    ``"bypassPermissions"`` → ``"workspace-write"``
+    ``"read_only"`` → ``"read-only"``
+    """
+    mapping = {
+        "plan": "read-only",
+        "bypassPermissions": "workspace-write",
+        "read_only": "read-only",
+    }
+    return mapping.get(permission, "read-only")
 
 
 # ---------------------------------------------------------------------------

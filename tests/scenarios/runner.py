@@ -112,14 +112,17 @@ def run_one_turn(owner: str, repo: str, cfg: dict,
     cfg_mod.CONFIG_FILE = autoswe_dir / "config" / "autoswe.env"
     cfg_mod.REPOS_CONFIG_FILE = autoswe_dir / "config" / "repos.json"
     cfg_mod.WELCOME_FILE = autoswe_dir / "config" / "welcome_comment.txt"
+    cfg_mod.HARNESSES_CONFIG_FILE = autoswe_dir / "config" / "harnesses.json"
 
     qs_mod.AUTOSWE_DIR = autoswe_dir
     qs_mod.QUEUE_FILE = autoswe_dir / "data" / "queue.json"
 
-    # Force repos.json reload by clearing cache
+    # Force repos.json and harnesses.json reload by clearing caches
     repos_cfg_path = autoswe_dir / "config" / "repos.json"
     if repos_cfg_path.exists():
         cfg_mod.REPOS_CONFIG_FILE = repos_cfg_path
+
+    cfg_mod._harnesses_cache.clear()
 
     from autoswe.orch.loop import poll as orch_poll
     return orch_poll(cfg, mode="full")
@@ -265,6 +268,42 @@ def assert_claude_calls(cl_fake, expected_calls: list[dict]) -> None:
             assert call["model"] == exp["model"], (
                 f"Call {i}: expected model={exp['model']!r}, "
                 f"got {call['model']!r}"
+            )
+
+
+def assert_codex_calls(cx_fake, expected_calls: list[dict]) -> None:
+    """Assert Codex subprocess calls match expectations.
+
+    Each entry in *expected_calls* is a dict with optional keys:
+        sandbox - expected sandbox value (``"read-only"`` or ``"workspace-write"``)
+        is_resume - True for resume mode, False for fresh exec
+        model - expected model
+    """
+    if not expected_calls:
+        return
+
+    for i, exp in enumerate(expected_calls):
+        if i >= len(cx_fake.calls):
+            raise AssertionError(
+                f"Expected {len(expected_calls)} Codex call(s), "
+                f"only {len(cx_fake.calls)} made."
+            )
+
+        call = cx_fake.calls[i]
+        if "sandbox" in exp:
+            assert call.get("sandbox") == exp["sandbox"], (
+                f"Call {i}: expected sandbox={exp['sandbox']!r}, "
+                f"got {call.get('sandbox')!r}"
+            )
+        if "is_resume" in exp:
+            assert call.get("is_resume") == exp["is_resume"], (
+                f"Call {i}: expected is_resume={exp['is_resume']!r}, "
+                f"got {call.get('is_resume')!r}"
+            )
+        if "model" in exp:
+            assert call.get("model") == exp["model"], (
+                f"Call {i}: expected model={exp['model']!r}, "
+                f"got {call.get('model')!r}"
             )
 
 

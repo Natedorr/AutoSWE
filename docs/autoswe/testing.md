@@ -389,8 +389,47 @@ The fakes monkeypatch these internal functions:
 | `_gh_request` | `autoswe.tracking.api` | `GitHubFake` |
 | `_ado_request` | `autoswe.providers.azure.api` | `AzureFake` |
 | `runner.run` | `autoswe.harness.runner` | `ClaudeFake` |
+| `asyncio.create_subprocess_exec` | `asyncio` | `CodexFake` |
 | `worktree.*` | `autoswe.vcs.worktree` | `GitFake` |
 | `gh_post_comment` | `autoswe.tracking.api` + import sites | harness |
+
+### CodexFake — Subprocess-Level Fake
+
+`tests/fakes/codex_fake.py` replaces `asyncio.create_subprocess_exec` with a stub returning a `FakeProcess` that feeds JSONL event lines. Unlike ClaudeFake (which patches `runner.run`), CodexFake lets the **real** factory → CodexBackend → JSONL parser → RunResult path run unmodified.
+
+**How it works:**
+
+1. `CodexFake.script_response(text, session_id, subtype)` builds JSONL lines matching the canonical Codex event format (`thread.started`, `item.completed`, `turn.completed` for success; `turn.failed` for error; returncode -9 for killed).
+2. `patch()` monkeypatches `asyncio.create_subprocess_exec` with an async stub that returns a `FakeProcess` feeding the next scripted response.
+3. `unpatch()` restores the real function.
+
+**Builder API** (mirrors ClaudeFake so existing `claude_responses` dicts work verbatim):
+
+```python
+fake = CodexFake()
+fake.script_response("text", session_id="s1", subtype="success")
+fake.script_plan("1. Fix it", session_id="s-plan")
+fake.script_questions("What?", session_id="s-plan")
+fake.script_fail(session_id="s-err", error_msg="timeout")
+fake.script_killed(session_id="s-kill")
+```
+
+**`.calls` tracking:** Each codex command is parsed and recorded as `{model, sandbox, resume, prompt_prefix, is_resume}`. Tests assert sandbox values (`read-only` for plan, `workspace-write` for fix) to verify mode→sandbox translation.
+
+**Fidelity guard:** `tests/test_codex_fake.py` feeds CodexFake JSONL through the real `CodexBackend` and asserts the resulting `RunResult`. This pins the fake to the real parser — if the JSONL format changes, the fidelity test fails before transitions do.
+
+### Backend Axis in Scenario Harness
+
+The `patched_world()` context manager accepts a `backend` parameter (`"claude_code"` or `"codex"`). When set to `"codex"`:
+
+- A `CodexFake` is created (not `ClaudeFake`) and patched at the subprocess level.
+- `config/harnesses.json` is written with a `"codex"` profile.
+- Config `PLAN_HARNESS`, `FIX_HARNESS`, `REVIEW_HARNESS` are set to `"codex"` so `resolve_harness()` returns CodexBackend for all phases.
+- The `_harnesses_config` cache is cleared to pick up the test-specific config.
+
+The `HarnessWorld` exposes `hw.codex` (the `CodexFake` instance) and `hw.backend` (`"codex"`). Use `assert_codex_calls(hw.codex, [{"sandbox": "read-only"}])` for per-backend assertions.
+
+The transition test suite runs `CODEX_TRANSITIONS` (a curated subset of `TRANSITIONS`) against the Codex backend via `test_transition_codex`. Azure is excluded (GitHub-only) to keep the matrix manageable.
 
 ## Three-Layer Test Fixtures
 

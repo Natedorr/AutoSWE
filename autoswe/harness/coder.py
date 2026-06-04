@@ -2,6 +2,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 
+from autoswe.core.config import resolve_harness
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
@@ -139,6 +140,9 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
     state = {}
     cut = make_can_use_tool(task, repo_cfg or {}, state, on_post=progress_callback)
 
+    harness = resolve_harness("fix", rc, cfg or {})
+    fix_model = harness.get("model") or fix_model
+
     try:
         run_result = runner.run(
             prompt,
@@ -153,6 +157,7 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during fix phase")
@@ -301,6 +306,9 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
     state = {}
     cut = make_can_use_tool(task, repo_cfg or {}, state, on_post=progress_callback)
 
+    harness = resolve_harness("fix", rc, cfg or {})
+    fix_model = harness.get("model") or fix_model
+
     try:
         run_result = runner.run(
             resume_prompt,
@@ -315,6 +323,7 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during fix resume")
@@ -409,6 +418,9 @@ def resolve_sync_conflicts(
     state = {}
     cut = make_can_use_tool(task, repo_cfg or {}, state, on_post=progress_callback)
 
+    harness = resolve_harness("fix", rc, cfg or {})
+    fix_model = harness.get("model") or fix_model
+
     try:
         run_result = runner.run(
             prompt,
@@ -424,6 +436,7 @@ def resolve_sync_conflicts(
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during conflict resolution")

@@ -1414,3 +1414,102 @@ def test_resolve_sync_conflicts_link_failure_does_not_fail_resolution(tmp_path):
                     )
 
     assert result.done_content.startswith("DONE_SUMMARY\t")
+
+
+# ---------------------------------------------------------------------------
+# Backend awareness (harness_cfg threading)
+
+
+def test_run_fix_passes_harness_cfg(tmp_path):
+    """run_fix must resolve harness and pass harness_cfg to runner.run."""
+    task = make_task()
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        return _r("Done.")
+
+    with _patch_worktree(tmp_path):
+        with _fetch_comments_patch():
+            with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                with patch("autoswe.harness.coder.commit_and_push", return_value=FAKE_COMMIT_RESULT):
+                    from autoswe.harness.coder import run_fix
+                    run_fix(task, cfg={})
+
+    assert len(run_calls) == 1
+    harness_cfg = run_calls[0].get("harness_cfg")
+    assert harness_cfg is not None, "harness_cfg should be passed to runner.run"
+    assert harness_cfg.get("backend") == "claude_code", \
+        f"Default backend should be claude_code, got {harness_cfg.get('backend')!r}"
+
+
+def test_resume_fix_passes_harness_cfg(tmp_path):
+    """resume_fix must resolve harness and pass harness_cfg to runner.run."""
+    task = make_task(session_id="sess-previous")
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        return _r("Done.", "sess-new")
+
+    with _patch_worktree(tmp_path):
+        with _fetch_comments_patch():
+            with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                with patch("autoswe.harness.coder.commit_and_push", return_value=FAKE_COMMIT_RESULT):
+                    from autoswe.harness.coder import resume_fix
+                    resume_fix(task, "Answer to question.", {}, {})
+
+    assert len(run_calls) == 1
+    harness_cfg = run_calls[0].get("harness_cfg")
+    assert harness_cfg is not None, "harness_cfg should be passed to runner.run"
+    assert harness_cfg.get("backend") == "claude_code"
+
+
+def test_resolve_sync_conflicts_passes_harness_cfg(tmp_path):
+    """resolve_sync_conflicts must resolve harness and pass harness_cfg to runner.run."""
+    task = make_task()
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        return _r("Resolved.", "s1", "success")
+
+    with _patch_resolve(tmp_path):
+        with patch("autoswe.harness.runner.run", side_effect=fake_run):
+            with patch("autoswe.harness.coder.subprocess.run") as mock_run:
+                mock_run.returncode = 0
+                mock_run.stdout = "abc1234"
+                from autoswe.harness.coder import resolve_sync_conflicts
+                resolve_sync_conflicts(
+                    task, ["src/main.py"], repo_cfg={"provider": "github"}, cfg={},
+                )
+
+    assert len(run_calls) == 1
+    harness_cfg = run_calls[0].get("harness_cfg")
+    assert harness_cfg is not None, "harness_cfg should be passed to runner.run"
+    assert harness_cfg.get("backend") == "claude_code"
+
+
+def test_run_fix_codex_harness_cfg(tmp_path):
+    """When FIX_HARNESS selects a codex profile, harness_cfg should reflect codex backend."""
+    task = make_task()
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        return _r("Done.")
+
+    with _patch_worktree(tmp_path):
+        with _fetch_comments_patch():
+            with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                with patch("autoswe.harness.coder.commit_and_push", return_value=FAKE_COMMIT_RESULT):
+                    with patch("autoswe.core.config.load_harnesses_config",
+                               return_value={"codex-fix": {"backend": "codex", "model": "gpt-5.4"}}):
+                        from autoswe.harness.coder import run_fix
+                        run_fix(task, cfg={"FIX_HARNESS": "codex-fix"})
+
+    assert len(run_calls) == 1
+    harness_cfg = run_calls[0].get("harness_cfg")
+    assert harness_cfg is not None
+    assert harness_cfg.get("backend") == "codex"
+    assert harness_cfg.get("model") == "gpt-5.4"
