@@ -229,6 +229,10 @@ def isolated_autoswe_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(qs, "AUTOSWE_DIR", tmp_path)
     monkeypatch.setattr(qs, "QUEUE_FILE", tmp_path / "data" / "queue.json")
 
+    # Patch cli module paths so CLI commands (prune, list, status) use the isolated dir
+    import autoswe.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "QUEUE_FILE", tmp_path / "data" / "queue.json")
+
     return tmp_path
 
 # ---------------------------------------------------------------------------

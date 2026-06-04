@@ -147,8 +147,8 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
             repo_cfg=rc,
             resume=None if use_fresh_session else session_id,
             model=fix_model,
-            permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools,
+            mode="read_write",
+            extra_tools=allowed_tools,
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -205,9 +205,9 @@ def _finalize_fix(
     subject = f"autoswe: {guidance[:60]}" if guidance else "autoswe: automated fix"
     body_text = "\n".join(summary_lines[-15:]) if summary_lines else ""
     if body_text:
-        commit_msg = f"{subject}\n\n{body_text}\n\nRefs #{issue_num}"
+        commit_msg = f"{subject}\n\n{body_text}\n\nFixes #{issue_num}"
     else:
-        commit_msg = f"{subject}\n\nRefs #{issue_num}"
+        commit_msg = f"{subject}\n\nFixes #{issue_num}"
 
     log(f"[FIX] {task['id']} committing subject={subject!r}")
     dbg.debug("FIX: committing with subject=%r", subject)
@@ -295,8 +295,8 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
             repo_cfg=rc,
             resume=session_id,
             model=fix_model,
-            permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools,
+            mode="read_write",
+            extra_tools=allowed_tools,
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -383,6 +383,9 @@ def resolve_sync_conflicts(
         f"session_id={session_id or 'none'} conflicts={len(conflict_files)}"
     )
 
+    fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
+    dbg.debug("RESOLVE: model=%s", fix_model or "default")
+
     state = {}
     cut = make_can_use_tool(task, repo_cfg or {}, state, on_post=progress_callback)
 
@@ -393,8 +396,10 @@ def resolve_sync_conflicts(
             cfg=cfg or {},
             repo_cfg=rc,
             resume=session_id,  # None if first conflict with no prior session
-            permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools,
+            model=fix_model,
+            mode="read_write",
+            extra_tools=allowed_tools,
+            disallowed_tools_override=["AskUserQuestion"],
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -446,6 +451,27 @@ def resolve_sync_conflicts(
             cost_usd=run_result.cost_usd,
             duration_seconds=run_result.duration_seconds,
         )
+
+    # Get full commit SHA for linking
+    try:
+        full_sha_result = subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        commit_sha = full_sha_result.stdout.strip()
+    except Exception:  # Best-effort; fallback to short SHA below.
+        commit_sha = None
+
+    # Best-effort: link branch to issue in platform UI
+    token = task.get("_token")
+    if cfg.get("LINK_BRANCH_TO_ISSUE", True) and token:
+        try:
+            _link_repo_cfg = dict(rc, token=token)
+            get_vcs(_link_repo_cfg).link_branch_to_issue(
+                issue_num, commit_sha or "unknown", branch,
+            )
+        except Exception as e:
+            dbg.warning("link_branch_to_issue failed: %s", e, exc_info=True)
 
     # Compute summary stats
     try:
