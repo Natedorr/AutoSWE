@@ -1250,7 +1250,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "claude_responses": [
             {"text": "## Summary\n\nGood.\n\n## Verdict\n\nLGTM", "session_id": "s-review-42", "subtype": "success"},
         ],
-        "git_calls": ["worktree_path"],
+        "git_calls": ["worktree_path", "create_worktree", "sync_branch"],
         "expect": {
             "label_after": "autoswe:reviewed",
             "autoswe_status": "reviewed",
@@ -1294,7 +1294,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "claude_responses": [
             {"text": "## Summary\n\nGood.\n\n## Verdict\n\nLGTM", "session_id": "s-review-42", "subtype": "success"},
         ],
-        "git_calls": ["worktree_path"],
+        "git_calls": ["worktree_path", "create_worktree", "sync_branch"],
         "expect": {
             "label_after": "autoswe:reviewed",
             "autoswe_status": "reviewed",
@@ -1338,7 +1338,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "claude_responses": [
             {"text": "## Summary\n\nPlan looks solid.\n\n## Verdict\n\nLGTM", "session_id": "s-review-42", "subtype": "success"},
         ],
-        "git_calls": ["worktree_path"],
+        "git_calls": ["worktree_path", "create_worktree", "sync_branch"],
         "expect": {
             "label_after": "autoswe:reviewed",
             "autoswe_status": "reviewed",

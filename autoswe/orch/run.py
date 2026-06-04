@@ -125,12 +125,8 @@ def run(
         return dr
 
     if kind == "review":
-        # Deferred import: avoids loading reviewer module unless a review action is dispatched;
-        # most tasks are plan/fix, so keeping this out of the fast path improves cold-start.
-        from autoswe.harness import reviewer
-
-        hr = reviewer.run_review(
-            task, rc, cfg, guidance,
+        hr = _run_review_with_sync(
+            task, guidance, rc, cfg,
             progress_callback=progress_callback,
         )
         return _to_dispatch(hr, task, review_file_path=hr.review_file_path)
@@ -320,6 +316,31 @@ def _run_plan_with_sync(
     )
 
 
+def _run_review_with_sync(
+    task: dict,
+    guidance: str,
+    repo_cfg: dict,
+    cfg: dict,
+    progress_callback: Callable[[str], None] | None,
+) -> HandlerResult:
+    """Pre-dispatch sync before /review, then run the review handler."""
+    base_branch = task.get("base_branch", "main")
+    wt, err = _sync_before_dispatch(
+        task, repo_cfg, cfg, progress_callback,
+        phase="review", branch_for_create=base_branch,
+    )
+    if err is not None:
+        return err
+    # Deferred import: avoids loading reviewer module unless a review action is
+    # dispatched; most tasks are plan/fix, so keeping this out of the fast path
+    # improves cold-start.
+    from autoswe.harness import reviewer
+    return reviewer.run_review(
+        task, repo_cfg, cfg, guidance,
+        progress_callback=progress_callback, wt=wt,
+    )
+
+
 _NON_REPLAYABLE_COMMANDS = frozenset(("/pr", "/sync", "/skip", "/abort", "/retry"))
 
 def _run_retry(
@@ -360,6 +381,9 @@ def _run_retry(
     if last_cmd == "/plan":
         hr = _run_plan_with_sync(task, action.guidance, None, repo_cfg, cfg,
                                   progress_callback=progress_callback)
+    elif last_cmd == "/review":
+        hr = _run_review_with_sync(task, action.guidance, repo_cfg, cfg,
+                                   progress_callback=progress_callback)
     else:
         hr = _run_fix_with_sync(task, action.guidance, repo_cfg, cfg,
                                 progress_callback=progress_callback)
