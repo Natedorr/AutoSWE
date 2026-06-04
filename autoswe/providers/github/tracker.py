@@ -1,8 +1,7 @@
 """GitHub IssueTracker — wraps existing autoswe.tracking modules."""
 from __future__ import annotations
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger
+from autoswe.core.logging_utils import get_debug_logger
 from autoswe.providers.base import IssueTracker, NormalizedComment, NormalizedIssue
 from autoswe.tracking import api as gh_api
 from autoswe.tracking.assignment import _auto_assign_issue, _get_authenticated_user
@@ -13,7 +12,7 @@ from autoswe.tracking.labels import (
     _set_autoswe_status,
 )
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 _PREFIX = "autoswe:"
 

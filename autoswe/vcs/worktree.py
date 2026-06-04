@@ -1,11 +1,11 @@
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import AUTOSWE_DIR, LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import AUTOSWE_DIR
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.factory import get_vcs
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def get_remote_branch_sha(

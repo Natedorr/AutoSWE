@@ -5,15 +5,14 @@ so the orchestrator can stay provider-agnostic.
 """
 from __future__ import annotations
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger
+from autoswe.core.logging_utils import get_debug_logger
 from autoswe.orch.types import ApiState, Effect
 from autoswe.providers.base import IssueTracker, NormalizedComment
 from autoswe.providers.factory import get_vcs
 from autoswe.providers.github.vcs import MissingScopeError
 from autoswe.vcs.worktree import get_remote_branch_sha
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def read_api(

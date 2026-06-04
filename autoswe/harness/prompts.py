@@ -2,11 +2,11 @@ import os
 import re
 from pathlib import Path
 
-from autoswe.core.config import AUTOSWE_DIR, FIX_PROMPT_FILE, LOGS_DIR, PLAN_PROMPT_FILE, REVIEW_PROMPT_FILE
-from autoswe.core.logging_utils import init_debug_logger
+from autoswe.core.config import AUTOSWE_DIR, FIX_PROMPT_FILE, PLAN_PROMPT_FILE, REVIEW_PROMPT_FILE
+from autoswe.core.logging_utils import get_debug_logger
 from autoswe.providers.base import NormalizedComment
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 CONFLICT_RESOLUTION_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "conflict_resolution.txt"
 

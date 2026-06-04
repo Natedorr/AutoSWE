@@ -2,10 +2,10 @@ import json
 
 import portalocker
 
-from autoswe.core.config import AUTOSWE_DIR, LOGS_DIR, QUEUE_FILE
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import AUTOSWE_DIR, QUEUE_FILE
+from autoswe.core.logging_utils import get_debug_logger, log
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def _atomic_write(path, data) -> None:

@@ -3,10 +3,9 @@ import time
 from urllib import error as url_error
 from urllib import request
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log, mask_sensitive
+from autoswe.core.logging_utils import get_debug_logger, log, mask_sensitive
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def _gh_request(

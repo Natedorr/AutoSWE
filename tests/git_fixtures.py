@@ -79,7 +79,6 @@ class GitWorld:
 
         self.mp.setattr(qs_mod, "AUTOSWE_DIR", self._autoswe_dir)
         self.mp.setattr(qs_mod, "QUEUE_FILE", self._autoswe_dir / "data" / "queue.json")
-        self.mp.setattr(qs_mod, "LOGS_DIR", self._autoswe_dir / "logs")
 
         # Patch worktree module
         import autoswe.vcs.worktree as wt_mod

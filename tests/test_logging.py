@@ -9,6 +9,7 @@ from autoswe.core.logging_utils import (
     MASK,
     SensitiveFormatter,
     SensitiveLogFilter,
+    get_debug_logger,
     init_debug_logger,
     init_issue_logger,
     log,
@@ -263,6 +264,20 @@ def test_init_issue_logger_handler_uses_sensitive_formatter(tmp_path):
         "per-issue handler must use SensitiveFormatter to mask exception tracebacks"
     )
     remove_issue_logger(handler)
+
+
+def test_get_debug_logger_returns_existing_logger(tmp_path):
+    """get_debug_logger() should return the same logger instance on repeated calls."""
+    logger1 = init_debug_logger(tmp_path)
+    logger2 = get_debug_logger()
+    assert logger1 is logger2, "get_debug_logger() should return the initialized logger"
+
+
+def test_get_debug_logger_with_custom_path(tmp_path):
+    """get_debug_logger(logs_dir=...) should accept an explicit path."""
+    logger = get_debug_logger(logs_dir=tmp_path)
+    assert logger.name == "autoswe.debug"
+    assert logger.handlers, "custom path should trigger initialization"
 
 
 def test_sensitive_formatter_masks_full_output():

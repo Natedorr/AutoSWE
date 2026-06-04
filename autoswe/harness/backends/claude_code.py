@@ -16,11 +16,10 @@ import os
 from collections.abc import Awaitable
 from pathlib import Path
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness.backends.base import PROGRESS_TOOLS, RunResult, RunSpec
 
-_dbg = init_debug_logger(LOGS_DIR)
+_dbg = get_debug_logger()
 
 _RETRYABLE_SDK_EXCEPTIONS: tuple = ()
 _PLANS_DIR = Path.home() / ".claude" / "plans"

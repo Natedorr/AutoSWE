@@ -4,14 +4,14 @@ import sys
 from datetime import datetime, timezone
 
 from autoswe.commands import setup
-from autoswe.core.config import LOGS_DIR, QUEUE_FILE, load_config, load_repos_config
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import QUEUE_FILE, load_config, load_repos_config
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.core.queue_store import _atomic_write, _load_json
 from autoswe.core.slug import make_slug
 from autoswe.orch.loop import poll as orch_poll
 from autoswe.providers.factory import build_repo_cfg, get_tracker
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def main():

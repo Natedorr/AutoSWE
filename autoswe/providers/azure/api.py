@@ -13,10 +13,9 @@ from urllib import error as url_error
 from urllib import request
 from urllib.parse import quote as url_quote
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log, mask_sensitive
+from autoswe.core.logging_utils import get_debug_logger, log, mask_sensitive
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 _ADO_BASE = "https://dev.azure.com"
 _VSSPS_BASE = "https://app.vssps.visualstudio.com"

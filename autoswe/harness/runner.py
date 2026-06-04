@@ -8,8 +8,7 @@ All dataclasses and constants are re-exported here for backward compatibility
 """
 import asyncio
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import get_debug_logger, log
 
 # Re-export everything so existing importers need zero changes.
 from autoswe.harness.backends.base import (  # noqa: F401
@@ -28,7 +27,7 @@ from autoswe.harness.backends.claude_code import (  # noqa: F401
     _parse_task_id,
 )
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def _get_retryable_exceptions() -> tuple:

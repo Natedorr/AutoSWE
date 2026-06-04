@@ -2,8 +2,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server, build_mcp_inline_comment_server
@@ -19,7 +18,7 @@ from autoswe.vcs.worktree import (
     worktree_path,
 )
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 _scope_error_warned = False
 
@@ -51,7 +50,7 @@ def _get_branch_head_sha(wt, branch: str) -> str | None:
     return None
 
 
-def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict = None, *, progress_callback=None, wt=None) -> HandlerResult:
+def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = None, cfg: dict | None = None, *, progress_callback=None, wt=None) -> HandlerResult:
     """Run fix phase with bypassPermissions. Returns done-file content.
 
     Return format on success:

@@ -12,8 +12,8 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import LOGS_DIR, resolve_harness
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import resolve_harness
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.prompts import _find_plan_in_comments, build_review_prompt
@@ -21,7 +21,7 @@ from autoswe.harness.runner import HandlerResult
 from autoswe.providers.factory import get_tracker
 from autoswe.vcs.worktree import create_worktree, worktree_path
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 _REVIEW_MAX_DIFF_LINES = 2000
 

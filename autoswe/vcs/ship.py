@@ -1,14 +1,13 @@
 import contextlib
 from urllib.parse import urlparse
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.base import PRResult
 from autoswe.providers.factory import get_tracker, get_vcs
 from autoswe.providers.github.vcs import MissingScopeError
 from autoswe.vcs.worktree import get_remote_branch_sha
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 AUTOSWE_BOT_FOOTER = "\n<!-- autoswe-bot -->"
 

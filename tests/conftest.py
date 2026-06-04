@@ -228,7 +228,6 @@ def isolated_autoswe_dir(tmp_path, monkeypatch):
 
     monkeypatch.setattr(qs, "AUTOSWE_DIR", tmp_path)
     monkeypatch.setattr(qs, "QUEUE_FILE", tmp_path / "data" / "queue.json")
-    monkeypatch.setattr(qs, "LOGS_DIR", tmp_path / "logs")
 
     return tmp_path
 

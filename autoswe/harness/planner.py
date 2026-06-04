@@ -2,8 +2,8 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import LOGS_DIR, resolve_harness
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import resolve_harness
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server
@@ -13,7 +13,7 @@ from autoswe.providers.factory import get_tracker
 from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
 from autoswe.vcs.worktree import create_worktree
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | None]:

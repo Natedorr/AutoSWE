@@ -115,7 +115,6 @@ def run_one_turn(owner: str, repo: str, cfg: dict,
 
     qs_mod.AUTOSWE_DIR = autoswe_dir
     qs_mod.QUEUE_FILE = autoswe_dir / "data" / "queue.json"
-    qs_mod.LOGS_DIR = autoswe_dir / "logs"
 
     # Force repos.json reload by clearing cache
     repos_cfg_path = autoswe_dir / "config" / "repos.json"

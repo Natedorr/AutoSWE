@@ -24,7 +24,7 @@ from autoswe.core.config import (
     load_repos_config,
 )
 from autoswe.core.error_utils import capture_dispatch_error, format_error_comment
-from autoswe.core.logging_utils import init_debug_logger, init_issue_logger, log, remove_issue_logger
+from autoswe.core.logging_utils import get_debug_logger, init_issue_logger, log, remove_issue_logger
 from autoswe.core.queue_store import LockedQueue
 from autoswe.core.slug import make_slug, slug_to_filename
 from autoswe.orch.decide import decide
@@ -49,7 +49,7 @@ from autoswe.tracking.progress import ProgressComment
 # Statuses whose label mirror is synced in Phase 3
 _MIRROR_STATUSES = TERMINAL_STATUSES | {"planned", "waiting"}
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 AUTOSWE_BOT_FOOTER = "\n<!-- autoswe-bot -->"
 

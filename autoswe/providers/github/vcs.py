@@ -4,12 +4,11 @@ from __future__ import annotations
 import json
 import subprocess
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger
+from autoswe.core.logging_utils import get_debug_logger
 from autoswe.providers.base import PRResult, VCSProvider
 from autoswe.tracking.api import gh_get, gh_post
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 class MissingScopeError(RuntimeError):

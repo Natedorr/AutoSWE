@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import time
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.tracking.comments import BOT_MARKER
 
-_dbg = init_debug_logger(LOGS_DIR)
+_dbg = get_debug_logger()
 
 
 def _tag(body: str) -> str:

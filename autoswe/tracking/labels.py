@@ -1,8 +1,7 @@
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.tracking.api import gh_get, gh_get_all, gh_post, gh_put
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 # Label constants — autoswe: prefix (lowercase to match GitHub conventions)
 # Color families: blue (pending), orange (RUNNING), grey (COMPLETED),
