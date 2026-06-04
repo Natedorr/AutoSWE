@@ -2,13 +2,13 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import LOGS_DIR, resolve_harness
+from autoswe.core.config import LOGS_DIR
 from autoswe.core.logging_utils import init_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server, build_mcp_inline_comment_server
 from autoswe.harness.prompts import build_conflict_resolution_prompt, build_fix_prompt
-from autoswe.harness.runner import HandlerResult
+from autoswe.harness.runner import AGENT_TASK_TOOLS, HandlerResult
 from autoswe.providers.factory import get_vcs
 from autoswe.providers.github.vcs import MissingScopeError
 from autoswe.vcs.worktree import (
@@ -22,9 +22,15 @@ from autoswe.vcs.worktree import (
 dbg = init_debug_logger(LOGS_DIR)
 
 _scope_error_warned = False
-_link_disabled_warned = False
 
-# Inline comment MCP tool (only used when a PR exists, passed as extra_tools)
+
+_MCP_COMMENT_TOOL_PREFIX = "mcp__autoswe_comment__"
+_MCP_COMMENT_TOOLS = [
+    f"{_MCP_COMMENT_TOOL_PREFIX}update_progress",
+    f"{_MCP_COMMENT_TOOL_PREFIX}post_plan",
+    f"{_MCP_COMMENT_TOOL_PREFIX}post_question",
+]
+
 _MCP_INLINE_COMMENT_TOOLS = [
     "mcp__autoswe_inline_comment__post_inline_comment",
 ]
@@ -39,12 +45,13 @@ def _get_branch_head_sha(wt, branch: str) -> str | None:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception as e:
+    except Exception as e:  # Best-effort branch SHA lookup; returns None on failure.
         dbg.debug("_get_branch_head_sha failed: %s", e)
+
     return None
 
 
-def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = None, cfg: dict | None = None, *, progress_callback=None, wt=None) -> HandlerResult:
+def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict = None, *, progress_callback=None, wt=None) -> HandlerResult:
     """Run fix phase with bypassPermissions. Returns done-file content.
 
     Return format on success:
@@ -71,12 +78,13 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
         dbg.debug("FIX: worktree=%s", wt)
 
     # Check for merge conflicts produced by pull_strategy="merge"
+    branch = f"autoswe/issue-{issue_num}"
     conflict_files = get_merge_conflict_files(wt)
 
     # Build MCP server config: comment server (always) + inline comment server (if PR exists)
     rc = repo_cfg or {}
     mcp_servers = build_mcp_comment_server(task, rc) or {}
-    extra_tools: list[str] = []
+    allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
 
     # Register inline comment server if an existing PR exists for this branch
     branch = f"autoswe/issue-{issue_num}"
@@ -87,7 +95,7 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
             existing_pr = get_vcs(_link_rc).find_existing_pr(rc, branch)
             if existing_pr and existing_pr.number:
                 pr_number = existing_pr.number
-        except Exception as e:
+        except Exception as e:  # Best-effort PR lookup — missing inline comment server is non-fatal.
             dbg.debug("find_existing_pr failed: %s", e)
 
     if pr_number:
@@ -96,7 +104,7 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
             inline_cfg = build_mcp_inline_comment_server(task, rc, head_sha, pr_number)
             if inline_cfg:
                 mcp_servers.update(inline_cfg)
-                extra_tools.extend(_MCP_INLINE_COMMENT_TOOLS)
+                allowed_tools.extend(_MCP_INLINE_COMMENT_TOOLS)
                 dbg.debug("FIX: inline comment server registered (pr=%d sha=%s)", pr_number, head_sha[:8])
 
     plan_file_path = task.pop("plan_file_path", None)
@@ -124,8 +132,7 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
             "to complete the merge. Then proceed with the user's request."
         )
 
-    harness = resolve_harness("fix", rc, cfg or {})
-    fix_model = harness.get("model")
+    fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
     log(f"[FIX] {task['id']} session={'NEW' if use_fresh_session else 'RESUME'} session_id={session_id or 'none'} plan_file={plan_file_path or 'none'}")
     log(f"[FIX] {task['id']} model={fix_model or 'default'} guidance={str(guidance or '')[:200]!r} prompt_len={len(prompt)} conflict_files={len(conflict_files or [])}")
     dbg.debug("FIX: model=%s guidance=%s", fix_model or "default", guidance)
@@ -141,17 +148,16 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
             repo_cfg=rc,
             resume=None if use_fresh_session else session_id,
             model=fix_model,
-            mode="read_write",
-            extra_tools=extra_tools or None,
+            permission_mode="bypassPermissions",
+            allowed_tools=allowed_tools,
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
-            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during fix phase")
-    except Exception as e:
+    except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
         dbg.error("run_fix: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 
@@ -200,15 +206,15 @@ def _finalize_fix(
     subject = f"autoswe: {guidance[:60]}" if guidance else "autoswe: automated fix"
     body_text = "\n".join(summary_lines[-15:]) if summary_lines else ""
     if body_text:
-        commit_msg = f"{subject}\n\n{body_text}\n\nFixes #{issue_num}"
+        commit_msg = f"{subject}\n\n{body_text}\n\nRefs #{issue_num}"
     else:
-        commit_msg = f"{subject}\n\nFixes #{issue_num}"
+        commit_msg = f"{subject}\n\nRefs #{issue_num}"
 
     log(f"[FIX] {task['id']} committing subject={subject!r}")
     dbg.debug("FIX: committing with subject=%r", subject)
     try:
         commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider)
-    except Exception as e:
+    except Exception as e:  # Commit/push boundary — any provider or git error surfaces to the task result.
         dbg.error("_finalize_fix: commit/push failed: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: commit/push error: {e}")
 
@@ -228,12 +234,11 @@ def _finalize_fix(
             if not _scope_error_warned:
                 _scope_error_warned = True
                 log("[FIX] link_branch_to_issue skipped: PAT missing check_runs:write scope (set LINK_BRANCH_TO_ISSUE=false to silence)")
-        except Exception as e:
+        except Exception as e:  # Provider call is best-effort; log warning and continue past it.
             dbg.warning("link_branch_to_issue failed: %s", e, exc_info=True)
     else:
-        global _link_disabled_warned
-        if not _link_disabled_warned:
-            _link_disabled_warned = True
+        if not _scope_error_warned:
+            _scope_error_warned = True
             log("[FIX] link_branch_to_issue disabled by LINK_BRANCH_TO_ISSUE=false")
 
     log(f"[FIX] {task['id']} committed sha={commit_result['commit_sha']} branch={commit_result['branch']}")
@@ -275,9 +280,9 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
 
     rc = repo_cfg or {}
     mcp_servers = build_mcp_comment_server(task, rc) or {}
+    allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
 
-    harness = resolve_harness("fix", rc, cfg or {})
-    fix_model = harness.get("model")
+    fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
     log(f"[FIX] {task['id']} session=RESUME from={session_id} user_reply_chars={len(user_text)}")
 
     state = {}
@@ -291,16 +296,16 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
             repo_cfg=rc,
             resume=session_id,
             model=fix_model,
-            mode="read_write",
+            permission_mode="bypassPermissions",
+            allowed_tools=allowed_tools,
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
-            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during fix resume")
-    except Exception as e:
+    except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
         dbg.error("resume_fix: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 
@@ -372,9 +377,8 @@ def resolve_sync_conflicts(
 
     # Focused tool set — no AskUserQuestion (keep autonomous), no inline comments
     mcp_servers = build_mcp_comment_server(task, rc) or {}
+    allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
 
-    harness = resolve_harness("fix", rc, cfg or {})
-    fix_model = harness.get("model")
     log(
         f"[RESOLVE] {task['id']} session={'RESUME' if session_id else 'NEW'} "
         f"session_id={session_id or 'none'} conflicts={len(conflict_files)}"
@@ -390,18 +394,16 @@ def resolve_sync_conflicts(
             cfg=cfg or {},
             repo_cfg=rc,
             resume=session_id,  # None if first conflict with no prior session
-            model=fix_model,
-            mode="read_write",
-            disallowed_tools_override=["AskUserQuestion"],
+            permission_mode="bypassPermissions",
+            allowed_tools=allowed_tools,
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
-            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during conflict resolution")
-    except Exception as e:
+    except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
         dbg.error("resolve_sync_conflicts: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 
@@ -439,22 +441,22 @@ def resolve_sync_conflicts(
             ["git", "-C", str(wt), "push", "origin", branch],
             capture_output=True, text=True, timeout=60, check=True,
         )
-    except Exception as e:
+    except Exception as e:  # subprocess can raise TimeoutExpired, CalledProcessError, OSError
         return HandlerResult(
             f"FAILED: push after resolution failed: {e}",
             cost_usd=run_result.cost_usd,
             duration_seconds=run_result.duration_seconds,
         )
 
-    # Compute summary stats — use full SHA (ADO commit URLs require 40-char hash)
+    # Compute summary stats
     try:
-        full_sha_result = subprocess.run(
-            ["git", "-C", str(wt), "rev-parse", "HEAD"],
+        short_sha_result = subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=10, check=True,
         )
-        full_sha = full_sha_result.stdout.strip()
-    except Exception:
-        full_sha = "unknown"
+        short_sha = short_sha_result.stdout.strip()
+    except Exception:  # Subprocess call (git rev-parse) is best-effort; fallback to "unknown".
+        short_sha = "unknown"
 
     try:
         ahead_result = subprocess.run(
@@ -462,24 +464,8 @@ def resolve_sync_conflicts(
             capture_output=True, text=True, timeout=10, check=False,
         )
         ahead_count = len(ahead_result.stdout.strip().split("\n")) if ahead_result.stdout.strip() else 0
-    except Exception:
+    except Exception:  # Subprocess call (git log) is best-effort; fallback to 0.
         ahead_count = 0
-
-    # Best-effort: link branch to issue in platform UI
-    token = task.get("_token")
-    if cfg.get("LINK_BRANCH_TO_ISSUE", True) and token and full_sha != "unknown":
-        try:
-            _link_repo_cfg = dict(repo_cfg or {}, token=token)
-            get_vcs(_link_repo_cfg).link_branch_to_issue(
-                issue_num, full_sha, branch,
-            )
-        except MissingScopeError:
-            global _scope_error_warned
-            if not _scope_error_warned:
-                _scope_error_warned = True
-                log("[RESOLVE] link_branch_to_issue skipped: PAT missing check_runs:write scope")
-        except Exception as e:
-            dbg.warning("link_branch_to_issue failed in resolve_sync: %s", e, exc_info=True)
 
     summary = (
         f"Resolved merge conflicts in {len(conflict_files)} file(s) "
@@ -488,7 +474,7 @@ def resolve_sync_conflicts(
     )
 
     return HandlerResult(
-        f"DONE_SUMMARY\t{summary}\t{full_sha}",
+        f"DONE_SUMMARY\t{summary}\t{short_sha}",
         cost_usd=run_result.cost_usd,
         duration_seconds=run_result.duration_seconds,
     )

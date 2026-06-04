@@ -60,7 +60,7 @@ class ProgressComment:
             )
             log(f"[PROGRESS] POST comment={self._comment_id}")
             return self._comment_id
-        except Exception:
+        except Exception:  # Progress comment creation is best-effort; handler should continue
             _dbg.warning("progress: create comment failed", exc_info=True)
             return None
 
@@ -95,8 +95,7 @@ class ProgressComment:
             self._tracker.update_comment(self._repo_cfg, self._issue_num, self._comment_id, tagged)
             self._last_update = time.monotonic()
             self._pending_body = None
-        except Exception:
-            # Provider doesn't support comment editing; post a new comment instead
+        except Exception:  # Provider doesn't support comment editing; post a new comment instead
             _dbg.warning("progress: update_comment failed, falling back to post_comment", exc_info=True)
             try:
                 new_id = self._tracker.post_comment(self._repo_cfg, self._issue_num, tagged)
@@ -105,7 +104,7 @@ class ProgressComment:
                     log(f"[PROGRESS] Switched to fallback comment={new_id}")
                 self._last_update = time.monotonic()
                 self._pending_body = None
-            except Exception:
+            except Exception:  # Both update and fallback post failed — silently give up
                 _dbg.warning("progress: fallback post_comment also failed", exc_info=True)
 
     def drain(self) -> None:

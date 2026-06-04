@@ -56,6 +56,7 @@ def read_api(
     When an issue's ``last_updated`` matches its stored value, the comment fetch
     is skipped and ``comments_fetched=False`` is set on the returned ApiState.
     """
+    # Deferred import: avoids circular dependency (azure.adapter <-> azure.tracker).
     from autoswe.providers.azure.tracker import _is_bot_comment
 
     bot_ids = bot_ids or set()

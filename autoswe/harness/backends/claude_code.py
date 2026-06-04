@@ -10,6 +10,7 @@ canonical mapping, so handlers no longer carry Claude-specific tool names.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import Awaitable
@@ -66,14 +67,18 @@ _MODE_CONFIG = {
 
 
 def _get_retryable_exceptions() -> tuple:
-    """Lazily build the tuple of SDK exception types to retry on."""
-    import asyncio
+    """Lazily build the tuple of SDK exception types to retry on.
+
+    NOTE: All claude_agent_sdk imports in this module are deferred — the SDK is a
+    heavy dependency that may not be installed (e.g., Codex-only deploys).  Lazy
+    loads avoid slow cold-start and ImportError at module import time.
+    """
 
     global _RETRYABLE_SDK_EXCEPTIONS
     if _RETRYABLE_SDK_EXCEPTIONS:
         return _RETRYABLE_SDK_EXCEPTIONS
     try:
-        from claude_agent_sdk import ClaudeSDKError, CLIConnectionError, ProcessError
+        from claude_agent_sdk import ClaudeSDKError, CLIConnectionError, ProcessError  # deferred import: SDK may not be installed  # noqa: I001
         _RETRYABLE_SDK_EXCEPTIONS = (asyncio.TimeoutError, ProcessError, CLIConnectionError, ClaudeSDKError)
     except ImportError:
         _RETRYABLE_SDK_EXCEPTIONS = (asyncio.TimeoutError,)
@@ -85,7 +90,7 @@ def _get_retryable_exceptions() -> tuple:
 
 def _format_tool_progress(block) -> str | None:
     """Format a tool-use block into a short progress string."""
-    from claude_agent_sdk import ServerToolUseBlock, ToolUseBlock
+    from claude_agent_sdk import ServerToolUseBlock, ToolUseBlock  # deferred import: SDK may not be installed
 
     if isinstance(block, ToolUseBlock):
         name = block.name
@@ -119,7 +124,7 @@ def _extract_plan_file_path(block) -> str | None:
     directory.  We accept both ``file_path`` and ``path`` input keys
     (the SDK / Claude CLI use either depending on version).
     """
-    from claude_agent_sdk import ToolUseBlock
+    from claude_agent_sdk import ToolUseBlock  # deferred import: SDK may not be installed
 
     if not isinstance(block, ToolUseBlock) or block.name != "Write":
         return None
@@ -352,7 +357,7 @@ class ClaudeCodeBackend:
 
     async def _run_async(self, spec: RunSpec) -> RunResult:
         """Run Claude Agent SDK. Returns a RunResult dataclass."""
-        from claude_agent_sdk import (
+        from claude_agent_sdk import (  # deferred import: SDK may not be installed
             AssistantMessage,
             ClaudeAgentOptions,
             ResultMessage,
@@ -419,7 +424,7 @@ class ClaudeCodeBackend:
 
             # --- Setup phase: can_use_tool requires streaming prompt + hooks ---
             if spec.can_use_tool is not None:
-                from claude_agent_sdk import HookMatcher
+                from claude_agent_sdk import HookMatcher  # deferred import: SDK may not be installed
 
                 async def dummy_hook(input_data, tool_use_id, ctx):
                     return {"continue_": True}

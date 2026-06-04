@@ -1,6 +1,21 @@
+"""Logging setup with sensitive-data redaction.
+
+Provides ``init_debug_logger()`` (stdout + rotating file), per-issue handlers,
+a module-level ``log()`` helper for user-facing stdout lines, and the
+SensitiveLogFilter / SensitiveFormatter pair that mask credentials before any
+formatter sees them.  Use ``get_debug_logger()`` to obtain the shared debug logger
+without importing ``LOGS_DIR`` in every module.
+
+The debug logger (name = ``autoswe.debug``) is intended for internal diagnostics.
+Always use lazy %-style formatting with it (e.g. ``dbg.info("x=%s", x)``), so that
+SensitiveLogFilter can mask format args before interpolation.  Reserve the
+top-level ``log()`` helper for user-facing stdout lines that must be visible to
+the operator regardless of log level.
+"""
 import logging
 import logging.handlers
 import re
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,17 +133,29 @@ class SensitiveFormatter(logging.Formatter):
 
 
 def log(msg: str) -> None:
+    """Print a timestamped line to stdout and emit to the debug logger.
+
+    Intended for user-facing status lines (dispatch start/end, commit info).
+    Use lazy %-style ``dbg.*`` calls for internal diagnostics so that format args
+    pass through SensitiveLogFilter before interpolation.
+    """
     masked = mask_sensitive(msg)
     print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] {masked}", flush=True)
     # Also emit to the debug logger so per-issue handlers capture it.
     # Uses a direct getLogger call — safe even if init_debug_logger not yet called.
     try:
         logging.getLogger("autoswe.debug").info(masked)
-    except Exception:
-        pass  # logger not initialized or misconfigured — stdout is the safety net
+    except Exception:  # poller-resilience; stdout is the safety net
+        pass
 
 
 def init_debug_logger(logs_dir: Path) -> logging.Logger:
+    """Build (once) the shared ``autoswe.debug`` logger.
+
+    Subsequent calls return the existing instance without adding duplicate handlers.
+    Prefer :func:`get_debug_logger()` in module-level code so modules don't need to
+    import ``LOGS_DIR`` separately.
+    """
     logger = logging.getLogger("autoswe.debug")
     if logger.handlers:
         return logger
@@ -141,36 +168,58 @@ def init_debug_logger(logs_dir: Path) -> logging.Logger:
         handler = logging.handlers.RotatingFileHandler(
             log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
         )
-    except OSError as e:
+    except OSError as e:  # poller-resilience; fall back to NullHandler
         logger.addHandler(logging.NullHandler())
         print(f"[WARN] could not open debug log {log_path}: {e}", flush=True)
         return logger
-    fmt = SensitiveFormatter(
-        "%(asctime)s %(levelname)-8s %(funcName)s:%(lineno)d — %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%SZ",
-    )
-    fmt.converter = __import__("time").gmtime
+    fmt = _get_fmt()
     handler.setFormatter(fmt)
     logger.addHandler(handler)
     stderr_handler = logging.StreamHandler()
     stderr_handler.setLevel(logging.WARNING)
-    stderr_handler.setFormatter(fmt)
+    stderr_handler.setFormatter(_get_fmt())
     logger.addHandler(stderr_handler)
     return logger
 
 
-def _get_fmt():
+def get_debug_logger(logs_dir: Path | None = None) -> logging.Logger:
+    """Return the shared ``autoswe.debug`` logger, initializing it lazily.
+
+    Modules should use this instead of calling ``init_debug_logger(LOGS_DIR)`` so
+    they don't need to import ``LOGS_DIR`` at module level on every import.
+
+    If *logs_dir* is not provided (or None), the default ``LOGS_DIR`` from config
+    is used.  The logger name is always ``"autoswe.debug"``; calls are idempotent —
+    subsequent invocations return the existing instance immediately without adding
+    duplicate handlers.
+
+    Returns a :class:`logging.Logger` configured with SensitiveLogFilter (so
+    credentials in log messages and format args are masked before any handler)."""
+    if logs_dir is None:
+        # Deferred import to avoid circular dependency at module load time
+        from autoswe.core.config import LOGS_DIR as default_logs_dir
+        logs_dir = default_logs_dir
+
+    existing = logging.getLogger("autoswe.debug")
+    if existing.handlers:
+        return existing
+    return init_debug_logger(logs_dir)
+
+
+def _get_fmt() -> SensitiveFormatter:
+    """Build the standard log formatter with UTC datefmt."""
     fmt = SensitiveFormatter(
         "%(asctime)s %(levelname)-8s %(funcName)s:%(lineno)d — %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%SZ",
     )
-    fmt.converter = __import__("time").gmtime
+    fmt.converter = time.gmtime  # type: ignore[assignment]
     return fmt
 
 
-def init_issue_logger(logs_dir: Path, slug: str) -> logging.Handler:
+def init_issue_logger(logs_dir: Path, slug: str) -> logging.Handler | None:
     """Add a handler that writes to logs/{slug}/{slug}.log.
-    Returns the handler for later cleanup (pass to remove_issue_logger).
+
+    Returns the handler for later cleanup (pass to ``remove_issue_logger``).
 
     The slug is sanitized (':' and '/' replaced with '_') so that Azure DevOps
     slugs like ``ado:org_proj_repo/70`` produce valid file paths.
@@ -184,7 +233,7 @@ def init_issue_logger(logs_dir: Path, slug: str) -> logging.Handler:
         handler = logging.handlers.RotatingFileHandler(
             log_path, maxBytes=1_000_000, backupCount=2, encoding="utf-8"
         )
-    except OSError as e:
+    except OSError as e:  # poller-resilience; warn and return None
         print(f"[WARN] could not open issue log {log_path}: {e}", flush=True)
         return None
     handler.setFormatter(_get_fmt())
@@ -192,7 +241,7 @@ def init_issue_logger(logs_dir: Path, slug: str) -> logging.Handler:
     return handler
 
 
-def remove_issue_logger(handler: logging.Handler) -> None:
+def remove_issue_logger(handler: logging.Handler | None) -> None:
     """Remove and close a per-issue handler."""
     if handler is None:
         return

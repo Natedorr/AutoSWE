@@ -138,7 +138,10 @@ def run(
         return dr
 
     if kind == "review":
+        # Deferred import: avoids loading reviewer module unless a review action is dispatched;
+        # most tasks are plan/fix, so keeping this out of the fast path improves cold-start.
         from autoswe.harness import reviewer
+
         hr = reviewer.run_review(
             task, rc, cfg, guidance,
             progress_callback=progress_callback,
@@ -174,6 +177,7 @@ def _run_sync(
     progress_callback: Callable[[str], None] | None,
 ) -> DispatchResult:
     """Handle the sync_branch action — merge base into feature branch."""
+    # Deferred import: avoids circular dependency (run <- comments <-> providers).
     from autoswe.tracking.comments import BOT_MARKER
 
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
@@ -231,7 +235,7 @@ def _run_sync(
             return DispatchResult(
                 done_content=f"FAILED: {result.get('error', 'sync failed')}",
             )
-    except Exception as e:
+    except Exception as e:  # Poller resilience — any sync dispatch failure is caught and reported
         return DispatchResult(done_content=f"FAILED: {e}")
 
 

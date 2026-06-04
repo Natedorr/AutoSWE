@@ -188,5 +188,5 @@ def _try_link_branch_to_issue(vcs, repo_cfg: dict, issue_num: int, branch: str,
         vcs.link_branch_to_issue(issue_num, commit_sha, branch)
     except MissingScopeError:
         dbg.warning("ADAPTER: link_branch_to_issue skipped — PAT missing check_runs:write scope")
-    except Exception as e:
+    except Exception as e:  # Fallback for any non-scope error from link_branch_to_issue
         dbg.warning("link_branch_to_issue failed in adapter: %s", e, exc_info=True)

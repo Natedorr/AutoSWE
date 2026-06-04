@@ -43,7 +43,7 @@ def _try_link_branch(
         vcs.link_branch_to_issue(issue_num, commit_sha, branch)
     except MissingScopeError:
         dbg.warning("SHIP: link_branch_to_issue skipped — PAT missing check_runs:write scope")
-    except Exception as e:
+    except Exception as e:  # Fallback for any non-scope error from link_branch_to_issue
         dbg.warning("link_branch_to_issue failed in ship: %s", e, exc_info=True)
 
 
@@ -136,6 +136,6 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict | None = None) -> str:
         _try_link_branch(vcs, owner, repo, issue_num, branch, token, cfg, provider,
                          pr_result=pr_result)
         return f"DONE: PR {pr_url}"
-    except Exception as e:
+    except Exception as e:  # Poller resilience — any PR creation failure is caught and reported
         dbg.error("open_pr: failed: %s", e, exc_info=True)
         return f"FAILED: could not create PR: {e}"

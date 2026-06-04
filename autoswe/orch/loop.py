@@ -213,7 +213,7 @@ def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
-        import ctypes
+        import ctypes  # deferred import: Windows-only; kept local so this module imports cleanly on POSIX
         handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
         if handle:
             ctypes.windll.kernel32.CloseHandle(handle)
@@ -492,15 +492,17 @@ def _handle_dispatch_error(
     # function; failure is caught below.
     worktree = None
     if "WORKTREE_DIR" in cfg:
+        # Deferred import: only needed for error diagnostics; avoids circular dependency.
         from autoswe.vcs.worktree import worktree_path as _worktree_path
+
         try:
             worktree = _worktree_path(
                 owner, repo, queue_entry["issue_number"],
                 cfg,
                 provider=provider,
             )
-        except Exception:
-            pass  # Best effort
+        except Exception:  # Best-effort worktree path lookup for diagnostics; failure is harmless
+            pass
 
     # 1. Capture diagnostics
     ctx = capture_dispatch_error(exc, slug, worktree)
@@ -510,7 +512,7 @@ def _handle_dispatch_error(
         comment_body = format_error_comment(ctx)
         tracker.post_comment(repo_cfg, issue_num, comment_body)
         log(f"[ERROR] {slug}: posted error comment")
-    except Exception as post_err:
+    except Exception as post_err:  # Post is best-effort; log and continue if the provider API fails
         dbg.error("dispatch error: failed to post comment for %s: %s", slug, post_err, exc_info=True)
         log(f"[ERROR] {slug}: failed to post error comment: {post_err}")
 
@@ -566,7 +568,7 @@ def _post_pending_welcomes(
                 task["welcome_comment_id"] = welcome_id
                 task.setdefault("bot_comment_ids", []).append(welcome_id)
             log(f"[WELCOME] posted to {slug}")
-        except Exception as e:
+        except Exception as e:  # Per-repo resilience; one failed welcome must not block the rest.
             dbg.error("post_welcome_comments: failed for %s: %s", slug, e, exc_info=True)
             log(f"[WARN] welcome comment failed for {slug}: {e}")
 
@@ -630,7 +632,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
 
             try:
                 repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg)
-            except Exception as e:
+            except Exception as e:  # Config parse failure is per-repo; skip repo, continue to next.
                 log(f"[ERROR] {owner}/{repo}: failed to build repo_cfg: {e}")
                 continue
 
@@ -643,7 +645,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                     repo_id = tracker.resolve_repo_id()
                     if repo_id:
                         repo_cfg["repo_id"] = repo_id
-                except Exception as e:
+                except Exception as e:  # Azure repo_id resolution is optional — fallback to repo name
                     log(f"[WARN] {owner}/{repo}: failed to resolve repo_id ({type(e).__name__}: {e}), falling back to name")
 
             repo_override = repos_cfg.get(repo_path, {})
@@ -781,7 +783,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
 
                 try:
                     _dispatch_task(pt, action, tracker, repo_cfg, provider, cfg, queue, now_iso)
-                except Exception as e:
+                except Exception as e:  # Dispatch state-machine boundary; ANY failure must become a handled error.
                     dbg.error("poll: dispatch failed for %s: %s", slug, e, exc_info=True)
                     log(f"[ERROR] {slug}: dispatch failed: {e}")
                     _handle_dispatch_error(

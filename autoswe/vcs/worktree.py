@@ -23,7 +23,7 @@ def get_remote_branch_sha(
     repo_cfg = {"owner": owner, "repo": repo, "token": token, "provider": provider}
     try:
         clone_url = get_vcs(repo_cfg).clone_url(repo_cfg)
-    except Exception as e:
+    except Exception as e:  # VCS provider clone_url() can fail for missing token, bad provider, etc.
         dbg.debug("get_remote_branch_sha: clone_url failed: %s", e)
         return None
     try:
@@ -33,7 +33,7 @@ def get_remote_branch_sha(
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.split()[0]
-    except Exception as e:
+    except Exception as e:  # subprocess can raise TimeoutExpired, OSError, etc.
         dbg.debug("get_remote_branch_sha: ls-remote failed: %s", e)
     return None
 

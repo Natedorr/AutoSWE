@@ -184,10 +184,14 @@ def make_can_use_tool(
             shell redirects, tee, python -c with open/write, curl -o, wget, etc.).
             TodoWrite and the sub-agent task family (TaskCreate, etc.) are
             allowed — they are progress/orchestration tools that do not mutate
+            allowed — they are progress/orchestration tools that do not mutate
             the repo. Used by plan phase as a safeguard against the CLI exiting
             plan mode via the native ExitPlanMode command or bash-based bypasses.
     """
+    # Deferred import: SDK may not be installed; only needed when ask_user_question
+    # safeguards are active (plan-phase can_use_tool callback).
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
 
     async def can_use_tool(tool_name: str, input_data: Any, context: Any) -> Any:
         if read_only:
@@ -224,7 +228,7 @@ def make_can_use_tool(
                 rc.setdefault("pat", task.get("_token", ""))
                 tracker = get_tracker(rc)
                 tracker.post_comment(rc, task["issue_number"], full_body)
-        except Exception:
+        except Exception:  # Post failure is non-fatal; session still pauses via PermissionResultDeny.
             pass
 
         return PermissionResultDeny(

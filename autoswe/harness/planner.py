@@ -155,7 +155,7 @@ def _extract_plan_output(text: str, plan_file: Path | None = None) -> tuple[str,
     fs_file: Path | None = None
     try:
         fs_file = _find_latest_plan_file()
-    except Exception:
+    except Exception:  # Filesystem scan is best-effort last resort; any failure is ignored
         fs_file = None
     if fs_file is not None:
         plan_text = fs_file.read_text(encoding="utf-8").strip()
@@ -189,10 +189,10 @@ def _post_and_return(task: dict, comment_body: str, done_content: str, repo_cfg:
     tracker = get_tracker(rc)
     try:
         tracker.post_comment(rc, task["issue_number"], comment_body + BOT_MARKER)
-    except Exception as e:
+    except Exception as e:  # Provider call failure is non-fatal; proceed without posting comment.
         dbg.error("planner: comment failed: %s", e)
-    return done_content
 
+    return done_content
 
 def _get_git_head(wt: Path) -> str | None:
     """Return git HEAD SHA of the worktree, or None on error."""
@@ -258,7 +258,7 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during plan phase")
-    except Exception as e:
+    except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
         dbg.error("run_plan: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 
@@ -352,7 +352,7 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during plan resume")
-    except Exception as e:
+    except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
         dbg.error("resume_plan: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 

@@ -137,7 +137,7 @@ class GitHubTracker(IssueTracker):
             return self._authenticated_login
         try:
             self._authenticated_login = _get_authenticated_user(self._token) or None
-        except Exception:
+        except Exception:  # API call is optional — failure just means AUTHOR normalization is skipped
             self._authenticated_login = None
         return self._authenticated_login
 

@@ -25,9 +25,12 @@ def get_backend(harness_cfg: dict) -> CodingBackend:
     if backend_name == "claude_code":
         return ClaudeCodeBackend()
     if backend_name == "codex":
+        # Deferred import: only loads the codex submodule when a codex profile is configured,
+        # avoiding ImportError on deploys that use claude_code exclusively.
         from autoswe.harness.backends.codex import CodexBackend
 
         return CodexBackend()
+
     raise ValueError(
         f"Unknown coding backend: '{backend_name}'. "
         "Supported backends: claude_code, codex"

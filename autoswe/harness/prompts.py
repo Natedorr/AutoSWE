@@ -121,6 +121,7 @@ def build_plan_prompt(
     repo_cfg: dict | None = None, guidance: str | None = None,
 ) -> str:
     """Build the plan prompt from template + task data."""
+    # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
     from autoswe.providers.factory import get_tracker
 
     owner, repo = task["owner"], task["repo"]
@@ -165,6 +166,7 @@ def _find_plan_in_comments(comments: list[NormalizedComment] | None) -> str:
     1. MCP-posted plan: comment body starting with "## Plan"
     2. Legacy tag format: <AUTOSWE_PLAN>...</AUTOSWE_PLAN>
     """
+    # Deferred import: avoids circular dependency (prompts <- tracking.comments).
     from autoswe.tracking.comments import _PLAN_RE
 
     for comment in reversed(comments or []):
@@ -195,6 +197,7 @@ def build_fix_prompt(
     plan_text: str | None = None,
 ) -> str:
     """Build the fix prompt from template + task data."""
+    # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
     from autoswe.providers.factory import get_tracker
 
     owner, repo = task["owner"], task["repo"]

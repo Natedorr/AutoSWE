@@ -89,7 +89,7 @@ class GitHubVCS(VCSProvider):
                         self._token, max_retries=1,
                     )
                     head_sha = pr_details.get("head", {}).get("sha")
-                except Exception:
+                except Exception:  # Best-effort SHA lookup — PR is valid even if we can't fetch head SHA
                     pass
                 return PRResult(url=url, head_sha=head_sha)
             dbg.warning("gh pr create failed: %s", result.stderr)

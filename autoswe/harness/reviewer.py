@@ -101,7 +101,7 @@ def run_review(
     try:
         comments = tracker.fetch_comments(rc, issue_num)
         plan_text = _find_plan_in_comments(comments)
-    except Exception as e:
+    except Exception as e:  # Provider resilience -- fetch_comments may fail (network, auth); proceed with empty plan.
         dbg.debug("REVIEW: fetch_comments failed: %s", e)
         comments = []
         plan_text = ""
@@ -142,9 +142,8 @@ def run_review(
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during review phase")
-    except Exception as e:
-        dbg.error("run_review: SDK error: %s", e, exc_info=True)
-        return HandlerResult(f"FAILED: {e}")
+    except Exception as e:  # State-machine boundary -- any handler failure becomes a FAILED result for emit().
+        return HandlerResult(f"FAILED: review error: {e}")
 
     log(f"[REVIEW] {task['id']} session={result.session_id} cost=${result.cost_usd or 0:.4f}")
 

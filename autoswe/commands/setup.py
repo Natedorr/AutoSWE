@@ -96,16 +96,20 @@ def _gh_verify(token: str) -> str | None:
             if scopes and "repo" not in scopes and "workflow" not in scopes:
                 print(f"  Warning: token scopes are '{scopes}' — 'repo' scope may be needed.")
             return login
-    except (url_error.HTTPError, url_error.URLError, Exception):
+    except (url_error.HTTPError, url_error.URLError):  # Network/API failures are expected during PAT verification.
         return None
+
+
 
 
 def _gh_list_repos(token: str) -> list[str]:
     """Return list of 'owner/repo' strings for repos the token can access."""
+    # Deferred import: avoids pulling in the tracking/api module when this function isn't called,
+    # keeping wizard startup fast.  Wrapped so a missing dependency doesn't crash setup.
     try:
         from autoswe.tracking.api import fetch_owned_repos
         return fetch_owned_repos(token)
-    except Exception:
+    except Exception:  # pragma: no cover — network/provider failures during setup are expected fallbacks
         return []
 
 
@@ -189,9 +193,8 @@ def _gh_default_branch(token: str, repo_path: str) -> str | None:
         with request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
             return data.get("default_branch")
-    except Exception:
+    except (url_error.HTTPError, url_error.URLError):  # GitHub API failures are non-fatal; fall back to "main".
         return None
-
 
 # ---------------------------------------------------------------------------
 # Azure DevOps flow
@@ -199,6 +202,7 @@ def _gh_default_branch(token: str, repo_path: str) -> str | None:
 
 def _ado_verify(org: str, pat: str) -> bool:
     """Return True if the PAT can list projects in the org."""
+    # Deferred import: keeps Azure provider unloaded when only GitHub setup is needed.
     try:
         from autoswe.providers.azure.api import _ado_request
         _ado_request(
@@ -208,9 +212,8 @@ def _ado_verify(org: str, pat: str) -> bool:
             max_retries=1,
         )
         return True
-    except Exception:
+    except (ImportError, RuntimeError):  # ImportError = azure module not installed; RuntimeError = ADO API call failed.
         return False
-
 
 def _wizard_azure() -> dict:
     """Run the Azure DevOps flow. Returns new repos_cfg entries."""
@@ -295,6 +298,9 @@ def _wizard_azure() -> dict:
 
 
 def _ado_list_projects(org: str, pat: str) -> list[str]:
+    # Deferred import: avoids loading Azure provider when not needed.  Three functions
+    # share this pattern (_ado_verify above, _ado_list_repos below); each one defers so the
+    # wizard can skip the entire azure.api submodule on GitHub-only setup runs.
     try:
         from autoswe.providers.azure.api import _ado_request
         data = _ado_request(
@@ -303,11 +309,12 @@ def _ado_list_projects(org: str, pat: str) -> list[str]:
             pat,
         )
         return [p["name"] for p in data.get("value", [])]
-    except Exception:
+    except (ImportError, RuntimeError):  # ImportError = azure module not installed; RuntimeError = ADO API failed.
         return []
 
 
 def _ado_list_repos(org: str, project: str, pat: str) -> list[str]:
+    # Deferred import (see _ado_list_projects above for rationale).
     try:
         from autoswe.providers.azure.api import _ado_request
         data = _ado_request(
@@ -316,7 +323,7 @@ def _ado_list_repos(org: str, project: str, pat: str) -> list[str]:
             pat,
         )
         return [r["name"] for r in data.get("value", [])]
-    except Exception:
+    except (ImportError, RuntimeError):  # ImportError = azure module not installed; RuntimeError = ADO API failed.
         return []
 
 
@@ -369,13 +376,14 @@ def _write_env(path: Path, values: dict[str, str]) -> None:
 def _run_smoke_test(repo_path: str, cfg: dict) -> None:
     """Run a single poll cycle (sync-only) to verify credentials work."""
     print(f"\n  Running sync smoke test for {repo_path} …")
+    # Deferred import: avoids loading the orchestrator at module load (reduces cold-start time).
     try:
         from autoswe.orch.loop import poll as orch_poll
         orch_poll(cfg, mode="sync", repo_filter=repo_path)
         print("  Smoke test passed.")
-    except Exception as e:
-        print(f"  Smoke test failed: {mask_sensitive(str(e))}")
+    except Exception as e:  # Broad catch is correct here — smoke test exercises many subsystems; surface gracefully.
 
+        print(f"  Smoke test failed: {mask_sensitive(str(e))}")
 
 # ---------------------------------------------------------------------------
 # Entry point

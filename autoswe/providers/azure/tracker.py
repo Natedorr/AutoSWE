@@ -142,7 +142,7 @@ class AzureTracker(IssueTracker):
                 if repo_entry.get("name", "").lower() == self._repo.lower():
                     self._resolved_repo_id = repo_entry.get("id", "")
                     return self._resolved_repo_id
-        except Exception as e:
+        except (RuntimeError) as e:  # ADO API raises RuntimeError on HTTP error.
             dbg.warning(
                 "resolve_repo_id: failed to resolve UUID for %s/%s: %s: %s",
                 self._org, self._project, type(e).__name__, e,
@@ -208,7 +208,7 @@ class AzureTracker(IssueTracker):
         # Resolve the authenticated PAT owner for comparison
         try:
             pat_owner = self.authenticated_user(repo_cfg)
-        except Exception:
+        except RuntimeError:  # ADO API lookup failure is non-fatal; skip OWNER normalization.
             pat_owner = None
 
         results = []
@@ -281,7 +281,7 @@ class AzureTracker(IssueTracker):
             )
             if self._authenticated_user:
                 return self._authenticated_user
-        except Exception:
+        except RuntimeError:  # Profile API call failed; fall through to workitem fallback.
             pass
 
         # Fallback: work item #1 CreatedBy
@@ -292,7 +292,7 @@ class AzureTracker(IssueTracker):
             raw = ado_get(path, self._pat)
             created_by = raw.get("fields", {}).get("System.CreatedBy", {})
             self._authenticated_user = created_by.get("uniqueName", "")
-        except Exception:
+        except RuntimeError:  # Work item lookup also failed; leave _authenticated_user as None.
             pass
 
         return self._authenticated_user or ""

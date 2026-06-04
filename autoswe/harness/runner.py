@@ -32,8 +32,11 @@ dbg = init_debug_logger(LOGS_DIR)
 
 
 def _get_retryable_exceptions() -> tuple:
-    """Lazily build the tuple of SDK exception types to retry on."""
+    """Lazily build the tuple of SDK exception types to retry on.
 
+    Deferred import: avoids pulling in backend internals at module load time;
+    runner delegates, so it only loads when a handler actually calls this path.
+    """
     from autoswe.harness.backends.claude_code import _get_retryable_exceptions as _backend_get
 
     return _backend_get()
@@ -49,6 +52,7 @@ def backend_has_capability(harness_cfg: dict, capability: str) -> bool:
     (e.g. check ``"mcp"`` before trusting ``plan_posted`` / ``question_posted``).
     """
     if harness_cfg is not None:
+        # Deferred import: avoids loading the backend factory when default path runs.
         from autoswe.harness.backends.factory import get_backend
 
         backend = get_backend(harness_cfg)
@@ -186,6 +190,7 @@ def run(
     )
 
     if harness_cfg is not None:
+        # Deferred import (see backend_has_capability above for rationale).
         from autoswe.harness.backends.factory import get_backend
 
         backend = get_backend(harness_cfg)
