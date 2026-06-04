@@ -267,33 +267,29 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
     log(f"[PLAN] {task['id']} session={result.session_id} subtype={result.subtype} duration={result.duration_seconds:.1f}s cost=${result.cost_usd or 0:.4f}")
     dbg.debug("PLAN: sdk returned subtype=%s session=%s len=%d", result.subtype, result.session_id, len(result.text or ""))
     dbg.debug("PLAN OUTPUT (%d chars):\n%s", len(result.text or ""), (result.text or "")[:4000])
-    if result.session_id:
-        task["session_id"] = result.session_id
-    task["last_phase"] = "plan"
 
     done_content, plan_file_path = _interpret_plan_result(result, state, harness)
 
     # Helper returns "WAITING..." directly, or "_POST:done_content\tcomment" for posting
     if done_content.startswith("_POST:"):
         inner_done, comment = done_content[len("_POST:"):].split("\t", 1)
-        if plan_file_path:
-            task["plan_file_path"] = plan_file_path
         _post_and_return(task, comment, inner_done, repo_cfg, progress_callback=progress_callback)
         log(f"[PLAN] {task['id']} complete done={inner_done} plan_file={plan_file_path or 'none'}")
         return HandlerResult(
             inner_done,
             cost_usd=result.cost_usd,
             duration_seconds=result.duration_seconds,
+            session_id=result.session_id,
             plan_file_path=plan_file_path,
         )
 
     if done_content == "PLAN_READY" and plan_file_path:
-        task["plan_file_path"] = plan_file_path
         log(f"[PLAN] {task['id']} complete done=PLAN_READY plan_file={plan_file_path}")
     return HandlerResult(
         done_content,
         cost_usd=result.cost_usd,
         duration_seconds=result.duration_seconds,
+        session_id=result.session_id,
         plan_file_path=plan_file_path,
     )
 
@@ -360,31 +356,27 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
 
     dbg.debug("PLAN_RESUME: sdk returned subtype=%s session=%s len=%d", result.subtype, result.session_id, len(result.text or ""))
     dbg.debug("PLAN_RESUME OUTPUT (%d chars):\n%s", len(result.text or ""), (result.text or "")[:4000])
-    if result.session_id:
-        task["session_id"] = result.session_id
-    task["last_phase"] = "plan"
 
     done_content, plan_file_path = _interpret_plan_result(result, state, harness)
 
     if done_content.startswith("_POST:"):
         inner_done, comment = done_content[len("_POST:"):].split("\t", 1)
-        if plan_file_path:
-            task["plan_file_path"] = plan_file_path
         _post_and_return(task, comment, inner_done, repo_cfg, progress_callback=progress_callback)
         log(f"[PLAN] {task['id']} resume complete done={inner_done} plan_file={plan_file_path or 'none'}")
         return HandlerResult(
             inner_done,
             cost_usd=result.cost_usd,
             duration_seconds=result.duration_seconds,
+            session_id=result.session_id,
             plan_file_path=plan_file_path,
         )
 
     if done_content == "PLAN_READY" and plan_file_path:
-        task["plan_file_path"] = plan_file_path
         log(f"[PLAN] {task['id']} resume complete done=PLAN_READY plan_file={plan_file_path}")
     return HandlerResult(
         done_content,
         cost_usd=result.cost_usd,
         duration_seconds=result.duration_seconds,
+        session_id=result.session_id,
         plan_file_path=plan_file_path,
     )

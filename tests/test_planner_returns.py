@@ -57,7 +57,7 @@ def test_run_plan_returns_plan_ready_on_plan_block(tmp_path, mock_gh_post_commen
                 result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert task["session_id"] == "sess-1"
+    assert result.session_id == "sess-1"
     assert len(mock_gh_post_comment.posted) == 1
     assert "Step 1" in mock_gh_post_comment.posted[0]["body"]
     assert "<!-- autoswe-bot -->" in mock_gh_post_comment.posted[0]["body"]
@@ -132,7 +132,7 @@ def test_resume_plan_returns_plan_ready(tmp_path, mock_gh_post_comment):
             result = resume_plan(task, "Use approach A.", {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert task["session_id"] == "sess-new"
+    assert result.session_id == "sess-new"
 
 
 def test_resume_plan_passes_session_id_to_runner(tmp_path, mock_gh_post_comment):
@@ -157,7 +157,7 @@ def test_resume_plan_passes_session_id_to_runner(tmp_path, mock_gh_post_comment)
 # ---------------------------------------------------------------------------
 
 def test_run_plan_records_plan_file_path_on_plan_ready(tmp_path, mock_gh_post_comment):
-    """When run_plan produces PLAN_READY from a valid plan file, task['plan_file_path'] is set."""
+    """When run_plan produces PLAN_READY from a valid plan file, HandlerResult.plan_file_path is set."""
     plan_file = tmp_path / "my-plan.md"
     plan_file.write_text("# My Plan\n\nStep 1: do stuff")
     task = make_task()
@@ -170,11 +170,11 @@ def test_run_plan_records_plan_file_path_on_plan_ready(tmp_path, mock_gh_post_co
                     result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert task.get("plan_file_path") == str(plan_file)
+    assert result.plan_file_path == str(plan_file)
 
 
 def test_run_plan_does_not_record_plan_file_when_pending(tmp_path, mock_gh_post_comment):
-    """When the plan file is a pending placeholder, task['plan_file_path'] is NOT set."""
+    """When the plan file is a pending placeholder, HandlerResult.plan_file_path is None."""
     plan_file = tmp_path / "pending-plan.md"
     plan_file.write_text("# Plan\n\nWaiting for user to provide more information.")
     task = make_task()
@@ -188,11 +188,11 @@ def test_run_plan_does_not_record_plan_file_when_pending(tmp_path, mock_gh_post_
                     result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert "plan_file_path" not in task
+    assert result.plan_file_path is None
 
 
 def test_run_plan_does_not_record_plan_file_on_waiting(tmp_path, mock_gh_post_comment):
-    """When planner returns WAITING (questions, no plan file), task['plan_file_path'] is NOT set."""
+    """When planner returns WAITING (questions, no plan file), HandlerResult.plan_file_path is None."""
     task = make_task()
     claude_text = "<AUTOSWE_QUESTIONS>\n1. Which approach?\n</AUTOSWE_QUESTIONS>"
 
@@ -203,7 +203,7 @@ def test_run_plan_does_not_record_plan_file_on_waiting(tmp_path, mock_gh_post_co
                 result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content.startswith("WAITING:")
-    assert "plan_file_path" not in task
+    assert result.plan_file_path is None
 
 
 def test_run_plan_both_plan_and_questions(tmp_path, mock_gh_post_comment):
@@ -657,8 +657,8 @@ def test_run_plan_ask_user_question_returns_waiting(tmp_path, mock_gh_post_comme
     assert result.done_content.startswith("WAITING:")
 
 
-def test_run_plan_records_last_phase_plan(tmp_path, mock_gh_post_comment):
-    """run_plan should set last_phase=plan on the task."""
+def test_run_plan_returns_plan_ready_phase(tmp_path, mock_gh_post_comment):
+    """run_plan returns PLAN_READY — last_phase is managed by emit() from action.kind."""
     task = make_task()
 
     with _patch_worktree(tmp_path):
@@ -666,22 +666,22 @@ def test_run_plan_records_last_phase_plan(tmp_path, mock_gh_post_comment):
             with patch("autoswe.harness.runner.run",
                        return_value=_r("<AUTOSWE_PLAN>" + chr(10) + "Plan" + chr(10) + "</AUTOSWE_PLAN>")):
                 from autoswe.harness.planner import run_plan
-                run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    assert task.get("last_phase") == "plan"
+    assert result.done_content == "PLAN_READY"
 
 
-def test_resume_plan_records_last_phase_plan(tmp_path, mock_gh_post_comment):
-    """resume_plan should set last_phase=plan on the task."""
+def test_resume_plan_returns_plan_ready_phase(tmp_path, mock_gh_post_comment):
+    """resume_plan returns PLAN_READY — last_phase is managed by emit() from action.kind."""
     task = make_task(session_id="sess-existing")
 
     with _patch_worktree(tmp_path):
         with patch("autoswe.harness.runner.run",
                    return_value=_r("<AUTOSWE_PLAN>" + chr(10) + "Plan" + chr(10) + "</AUTOSWE_PLAN>")):
             from autoswe.harness.planner import resume_plan
-            resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tok"})
+            result = resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tok"})
 
-    assert task.get("last_phase") == "plan"
+    assert result.done_content == "PLAN_READY"
 
 
 def test_run_plan_ask_user_question_in_mode(tmp_path, mock_gh_post_comment):
@@ -843,7 +843,7 @@ def test_run_plan_uses_plan_file_path_from_runner_result(tmp_path, mock_gh_post_
     assert result.done_content == "PLAN_READY"
     assert "from captured path" in mock_gh_post_comment.posted[0]["body"]
     assert "Decoy" not in mock_gh_post_comment.posted[0]["body"]
-    assert task.get("plan_file_path") == str(plan_file)
+    assert result.plan_file_path == str(plan_file)
 
 
 def test_run_plan_falls_back_to_filesystem_when_no_plan_file_path(tmp_path, mock_gh_post_comment):
@@ -1274,7 +1274,7 @@ def test_run_plan_codex_text_tag_plan_ready(tmp_path, mock_gh_post_comment):
                     result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert task["session_id"] == "sess-codex"
+    assert result.session_id == "sess-codex"
     assert len(mock_gh_post_comment.posted) == 1
     assert "Step 1: Fix the bug" in mock_gh_post_comment.posted[0]["body"]
 

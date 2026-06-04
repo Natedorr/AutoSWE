@@ -50,30 +50,17 @@ class DispatchResult:
 def _build_task_dict(world: World, action: Action) -> dict:
     """Build the mutable task dict that existing handlers expect.
 
-    The handlers (planner, coder, ship) take a dict with owner/repo/issue_num
-    plus internal fields (_token, session_id). This bridges World -> task dict.
-    Action fields (plan_branch, session_id) override World when set.
+    Derived from the TASK_FIELDS registry via TaskState.to_handler_dict().
+    Action fields (plan_branch, session_id) override TaskState when set.
     """
     task = world.task
-    rc = world.repo_cfg
-    token = rc.get("pat") or rc.get("token", "")
-    return {
-        "id": f"{task.owner}/{task.repo}#{task.issue_number}",
-        "owner": task.owner,
-        "repo": task.repo,
-        "issue_number": task.issue_number,
-        "title": task.title,
-        "body": task.body,
-        "base_branch": task.base_branch,
-        "plan_branch": action.plan_branch or task.plan_branch,
-        "session_id": action.resume_session_id or task.session_id,
-        "last_phase": task.last_phase,
-        "pr_number": task.pr_number,
-        "plan_file_path": task.plan_file_path,
-        "review_file_path": task.review_file_path,
-        "fix_summary": task.fix_summary,
-        "_token": token,
-    }
+    d = task.to_handler_dict(world.repo_cfg)
+    # Action overrides (plan_branch from --branch flag, resume session)
+    if action.plan_branch:
+        d["plan_branch"] = action.plan_branch
+    if action.resume_session_id:
+        d["session_id"] = action.resume_session_id
+    return d
 
 
 # ---------------------------------------------------------------------------

@@ -127,41 +127,9 @@ def _build_poll_task(
     # Update queue entry in-place if normalized
     if status != raw_status:
         t["autoswe_status"] = status
-    ts = TaskState(
-        slug=slug,
-        owner=t["owner"],
-        repo=t["repo"],
-        issue_number=t["issue_number"],
-        title=t["title"],
-        body=t["body"],
-        status=status,
-        plan_branch=t.get("plan_branch"),
-        base_branch=t.get("base_branch", "main"),
-        attempt_count=t.get("attempt_count", 0),
-        first_dispatched_at=t.get("first_dispatched_at"),
-        last_dispatched_command=t.get("last_dispatched_command"),
-        last_dispatched_command_id=t.get("last_dispatched_command_id"),
-        last_consumed_reply_id=t.get("last_consumed_reply_id"),
-        session_id=t.get("session_id"),
-        pr_number=t.get("pr_number"),
-        guard_blocked=t.get("_guard_blocked", False),
-        gh_closed=t.get("gh_closed", False),
-        pending_command=t.get("pending_command"),
-        pending_guidance=t.get("pending_guidance"),
-        pending_user_reply=t.get("pending_user_reply"),
-        suppress_welcome=t.get("suppress_welcome", False),
-        welcome_comment_id=t.get("welcome_comment_id"),
-        bot_comment_ids=tuple(t.get("bot_comment_ids", [])),
-        last_phase=t.get("last_phase", "plan"),
-        resume_phase=t.get("resume_phase"),
-        created_at=t.get("created_at", ""),
-        last_synced=t.get("last_synced", ""),
-        provider=t.get("provider", "github"),
-        plan_file_path=t.get("plan_file_path"),
-        review_file_path=t.get("review_file_path"),
-        creator_login=t.get("creator_login", ""),
-        fix_summary=t.get("fix_summary", ""),
-    )
+    # Override the registry-read status with the normalised value
+    t["autoswe_status"] = status
+    ts = TaskState.from_queue(slug, t)
     world = World(api=api, task=ts, cfg=cfg, repo_cfg=repo_cfg)
     return PollTask(slug=slug, task_state=ts, world=world)
 

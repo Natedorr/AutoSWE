@@ -59,10 +59,10 @@ class HandlerResult:
     done_content: "DONE_SUMMARY\t...", "FAILED: ...", "PLAN_READY", etc.
     cost_usd: cost reported by the agent API (None for local overrides).
     duration_seconds: wall-clock time the agent spent running.
-    session_id: the agent session ID for this handler run. Set by the
-        reviewer (throwaway session) so completion comments show the correct
-        session. Plan/fix handlers leave this None — they update the task's
-        session_id in-place and _to_dispatch falls back to task.get("session_id").
+    session_id: the agent session ID for this handler run. All handlers
+        (plan, fix, review, resolve) return the session_id from the SDK run.
+        _to_dispatch passes it through to DispatchResult; emit() persists
+        it to the queue via the queue_patch.
     plan_file_path: absolute path to the ~/.claude/plans/<...>.md file the
         planner wrote on PLAN_READY. Persisted to queue so the next /fix
         dispatch can start a fresh session seeded with it instead of

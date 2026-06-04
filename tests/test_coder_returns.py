@@ -70,7 +70,7 @@ def test_run_fix_returns_done_summary_when_committed(tmp_path):
     assert result.done_content.startswith("DONE_SUMMARY\t")
     assert "Changed 3 files." in result.done_content
     assert "\tabc1234" in result.done_content
-    assert task["session_id"] == "sess-1"
+    assert result.session_id == "sess-1"
 
 
 def test_run_fix_returns_done_no_changes(tmp_path):
@@ -294,7 +294,7 @@ def test_run_fix_mode_provides_full_tool_set(tmp_path):
 
 
 def test_run_fix_updates_task_session_id(tmp_path):
-    """Task session_id should be updated with new session from SDK."""
+    """HandlerResult.session_id contains the new session from SDK."""
     task = make_task(session_id="old-sess")
 
     with _patch_worktree(tmp_path):
@@ -302,9 +302,9 @@ def test_run_fix_updates_task_session_id(tmp_path):
             with patch("autoswe.harness.runner.run", return_value=_r("Done.", "new-sess")):
                 with patch("autoswe.harness.coder.commit_and_push", return_value=FAKE_COMMIT_RESULT):
                     from autoswe.harness.coder import run_fix
-                    run_fix(task, cfg={})
+                    result = run_fix(task, cfg={})
 
-    assert task["session_id"] == "new-sess"
+    assert result.session_id == "new-sess"
 
 
 def test_run_fix_non_success_subtype_details(tmp_path):
@@ -784,8 +784,8 @@ def test_run_fix_ask_user_question_returns_waiting(tmp_path):
     assert result.done_content.startswith("WAITING:")
 
 
-def test_run_fix_records_last_phase_fix(tmp_path):
-    """run_fix should set last_phase=fix on the task."""
+def test_run_fix_returns_done_summary(tmp_path):
+    """run_fix returns DONE_SUMMARY — last_phase is managed by emit() from action.kind."""
     task = make_task()
 
     with _patch_worktree(tmp_path):
@@ -793,9 +793,9 @@ def test_run_fix_records_last_phase_fix(tmp_path):
             with patch("autoswe.harness.runner.run", return_value=_r("Done.", "sess-1")):
                 with patch("autoswe.harness.coder.commit_and_push", return_value=FAKE_COMMIT_RESULT):
                     from autoswe.harness.coder import run_fix
-                    run_fix(task, cfg={})
+                    result = run_fix(task, cfg={})
 
-    assert task.get("last_phase") == "fix"
+    assert result.done_content.startswith("DONE_SUMMARY\t")
 
 
 def test_run_fix_ask_user_question_in_mode(tmp_path):
@@ -908,7 +908,6 @@ def test_resume_fix_ask_user_question_double_wait(tmp_path):
                     result = resume_fix(task, "Answer.", {}, {})
 
     assert result.done_content.startswith("WAITING:")
-    assert task.get("last_phase") == "fix"
 
 
 def test_resume_fix_completes_on_success(tmp_path):
@@ -1222,7 +1221,7 @@ def test_resolve_sync_conflicts_push_failure_returns_failed(tmp_path):
 
 
 def test_resolve_sync_conflicts_persists_session_id(tmp_path):
-    """Resolver should persist the session_id from runner.run result."""
+    """Resolver should return session_id from runner.run result in HandlerResult."""
     task = make_task(session_id="s-prev")
 
     with _patch_resolve(tmp_path):
@@ -1231,11 +1230,11 @@ def test_resolve_sync_conflicts_persists_session_id(tmp_path):
                 mock_run.returncode = 0
                 mock_run.stdout = "abc1234"
                 from autoswe.harness.coder import resolve_sync_conflicts
-                resolve_sync_conflicts(
+                result = resolve_sync_conflicts(
                     task, ["src/main.py"], repo_cfg={"provider": "github"}, cfg={},
                 )
 
-    assert task["session_id"] == "s-new"
+    assert result.session_id == "s-new"
 
 
 def test_resolve_sync_conflicts_passes_harness_model(tmp_path):
@@ -1290,7 +1289,7 @@ def test_run_fix_codex_done_summary(tmp_path):
 
     assert result.done_content.startswith("DONE_SUMMARY\t")
     assert "Changed 2 files." in result.done_content
-    assert task["session_id"] == "sess-codex"
+    assert result.session_id == "sess-codex"
 
 
 # ---------------------------------------------------------------------------

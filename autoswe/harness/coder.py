@@ -163,19 +163,25 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
     log(f"[FIX] {task['id']} sdk subtype={run_result.subtype} session={run_result.session_id} duration={run_result.duration_seconds:.1f}s cost=${run_result.cost_usd or 0:.4f} text_chars={len(run_result.text or '')}")
     dbg.debug("FIX: sdk returned subtype=%s session=%s", run_result.subtype, run_result.session_id)
     dbg.debug("FIX OUTPUT (%d chars):\n%s", len(run_result.text or ""), (run_result.text or "")[:4000])
-    if run_result.session_id:
-        task["session_id"] = run_result.session_id
-    task["last_phase"] = "fix"
 
     if state.get("asked_question_md"):
-        return HandlerResult("WAITING: questions", cost_usd=run_result.cost_usd, duration_seconds=run_result.duration_seconds)
+        return HandlerResult(
+            "WAITING: questions",
+            cost_usd=run_result.cost_usd,
+            duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
+        )
 
     if run_result.subtype != "success":
-        return HandlerResult(f"FAILED: agent ended with subtype={run_result.subtype}")
+        return HandlerResult(
+            f"FAILED: agent ended with subtype={run_result.subtype}",
+            session_id=run_result.session_id,
+        )
 
     summary = _finalize_fix(
         task, run_result, wt, owner, repo, issue_num,
         guidance, base_branch, provider, token, repo_cfg, cfg or {},
+        session_id=run_result.session_id,
     )
 
     return summary
@@ -194,6 +200,8 @@ def _finalize_fix(
     token: str,
     repo_cfg: dict,
     cfg: dict,
+    *,
+    session_id: str | None = None,
 ) -> HandlerResult:
     """Commit, push, and return the final HandlerResult after a successful fix run.
 
@@ -219,7 +227,12 @@ def _finalize_fix(
 
     if not commit_result["committed"]:
         log(f"[FIX] {task['id']} NO CHANGES DETECTED — worktree unmodified by session")
-        return HandlerResult("DONE: no changes detected", cost_usd=run_result.cost_usd, duration_seconds=run_result.duration_seconds)
+        return HandlerResult(
+            "DONE: no changes detected",
+            cost_usd=run_result.cost_usd,
+            duration_seconds=run_result.duration_seconds,
+            session_id=session_id,
+        )
 
     # Best-effort: link branch to issue in platform UI (e.g. GitHub Development section)
     if cfg.get("LINK_BRANCH_TO_ISSUE", True):
@@ -245,6 +258,7 @@ def _finalize_fix(
         f"DONE_SUMMARY\t{summary_text}\t{commit_result['commit_sha']}",
         cost_usd=run_result.cost_usd,
         duration_seconds=run_result.duration_seconds,
+        session_id=session_id,
     )
 
 
@@ -310,19 +324,25 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
 
     dbg.debug("FIX_RESUME: sdk returned subtype=%s session=%s", run_result.subtype, run_result.session_id)
     dbg.debug("FIX_RESUME OUTPUT (%d chars):\n%s", len(run_result.text or ""), (run_result.text or "")[:4000])
-    if run_result.session_id:
-        task["session_id"] = run_result.session_id
-    task["last_phase"] = "fix"
 
     if state.get("asked_question_md"):
-        return HandlerResult("WAITING: questions", cost_usd=run_result.cost_usd, duration_seconds=run_result.duration_seconds)
+        return HandlerResult(
+            "WAITING: questions",
+            cost_usd=run_result.cost_usd,
+            duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
+        )
 
     if run_result.subtype != "success":
-        return HandlerResult(f"FAILED: agent ended with subtype={run_result.subtype}")
+        return HandlerResult(
+            f"FAILED: agent ended with subtype={run_result.subtype}",
+            session_id=run_result.session_id,
+        )
 
     summary = _finalize_fix(
         task, run_result, wt, owner, repo, issue_num,
         None, base_branch, provider, token, repo_cfg, cfg or {},
+        session_id=run_result.session_id,
     )
 
     return summary
@@ -416,15 +436,12 @@ def resolve_sync_conflicts(
         f"session={run_result.session_id} duration={run_result.duration_seconds:.1f}s"
     )
 
-    if run_result.session_id:
-        task["session_id"] = run_result.session_id
-    task["last_phase"] = "sync"
-
     if run_result.subtype != "success":
         return HandlerResult(
             f"FAILED: conflict resolution ended subtype={run_result.subtype}",
             cost_usd=run_result.cost_usd,
             duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
         )
 
     # Verify conflicts are actually cleared
@@ -435,6 +452,7 @@ def resolve_sync_conflicts(
             f"FAILED: unresolved conflicts: {files_list}",
             cost_usd=run_result.cost_usd,
             duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
         )
 
     # Push the resolved merge commit
@@ -450,6 +468,7 @@ def resolve_sync_conflicts(
             f"FAILED: push after resolution failed: {e}",
             cost_usd=run_result.cost_usd,
             duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
         )
 
     # Get full commit SHA for linking
@@ -502,4 +521,5 @@ def resolve_sync_conflicts(
         f"DONE_SUMMARY\t{summary}\t{short_sha}",
         cost_usd=run_result.cost_usd,
         duration_seconds=run_result.duration_seconds,
+        session_id=run_result.session_id,
     )

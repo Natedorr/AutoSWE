@@ -133,15 +133,17 @@ class TaskState:
     welcome_comment_id: int | None = None
     bot_comment_ids: tuple[int, ...] = ()
     last_phase: str = "plan"
+    resume_phase: str | None = None
     created_at: str = ""
     last_synced: str = ""
     provider: str = "github"
+    creator_login: str = ""
     plan_file_path: str | None = None
     review_file_path: str | None = None
     fix_summary: str = ""
 ```
 
-Built from the queue entry by `_build_poll_task()`. Transient fields (`_token`, `_comment_id`) are excluded — they belong in the dispatch runtime, not the decision boundary.
+Built from the queue entry by `TaskState.from_queue(slug, entry)` using the `TASK_FIELDS` registry in `types.py`. The registry is the single source of truth for field ↔ queue key ↔ default mappings — the drift test (`tests/test_no_field_drift.py`) fails CI if a field is added to one without the other. Transient fields (`_token`, `_comment_id`) are excluded — they belong in the dispatch runtime, not the decision boundary.
 
 ### `World` — Full decision context
 

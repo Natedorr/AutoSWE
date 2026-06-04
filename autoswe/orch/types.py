@@ -10,12 +10,72 @@ Each type is an immutable snapshot at one boundary of the pipeline:
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 # Re-export the existing RunResult so types.py is self-contained
 from autoswe.harness.runner import RunResult  # noqa: F401
 from autoswe.providers.base import NormalizedComment, NormalizedIssue
+
+# --------------------------------------------------------------------------
+# Declarative field registry — single source of truth for TaskState ↔ queue
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TaskField:
+    """One persisted field: TaskState attr ↔ queue key ↔ default ↔ transform."""
+    name: str                  # TaskState attribute name
+    queue_key: str             # key in queue.json entry
+    default: Any               # value used when the queue key is absent
+    transform: Callable | None = None  # queue_value → TaskState field (e.g. list → tuple)
+
+
+def _identity(v: Any) -> Any:
+    return v
+
+
+# Every TaskState field must appear exactly once in this list.
+# Order matches the TaskState dataclass definition (required fields first,
+# optional fields with defaults second).
+TASK_FIELDS: tuple[TaskField, ...] = (
+    # --- Required fields (no default in dataclass) ---
+    TaskField("slug", "id", ""),
+    TaskField("owner", "owner", ""),
+    TaskField("repo", "repo", ""),
+    TaskField("issue_number", "issue_number", 0),
+    TaskField("title", "title", ""),
+    TaskField("body", "body", ""),
+    TaskField("status", "autoswe_status", None),
+    TaskField("plan_branch", "plan_branch", None),
+    TaskField("base_branch", "base_branch", "main"),
+    TaskField("attempt_count", "attempt_count", 0),
+    TaskField("first_dispatched_at", "first_dispatched_at", None),
+    TaskField("last_dispatched_command", "last_dispatched_command", None),
+    TaskField("last_dispatched_command_id", "last_dispatched_command_id", None),
+    TaskField("last_consumed_reply_id", "last_consumed_reply_id", None),
+    TaskField("session_id", "session_id", None),
+    TaskField("pr_number", "pr_number", None),
+    TaskField("guard_blocked", "_guard_blocked", False),
+    TaskField("gh_closed", "gh_closed", False),
+    TaskField("pending_command", "pending_command", None),
+    TaskField("pending_guidance", "pending_guidance", None),
+    TaskField("pending_user_reply", "pending_user_reply", None),
+    # --- Optional fields (dataclass default) ---
+    TaskField("suppress_welcome", "suppress_welcome", False),
+    TaskField("welcome_comment_id", "welcome_comment_id", None),
+    TaskField("bot_comment_ids", "bot_comment_ids", (),
+              transform=lambda v: tuple(v) if isinstance(v, list) else v),
+    TaskField("last_phase", "last_phase", "plan"),
+    TaskField("resume_phase", "resume_phase", None),
+    TaskField("created_at", "created_at", ""),
+    TaskField("last_synced", "last_synced", ""),
+    TaskField("provider", "provider", "github"),
+    TaskField("creator_login", "creator_login", ""),
+    TaskField("plan_file_path", "plan_file_path", None),
+    TaskField("review_file_path", "review_file_path", None),
+    TaskField("fix_summary", "fix_summary", ""),
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +150,43 @@ class TaskState:
     # Extracted from DONE_SUMMARY on fix/retry completion. Persisted in the
     # queue so PR creation can include it in the body.
     fix_summary: str = ""
+
+    @classmethod
+    def from_queue(cls, slug: str, entry: dict) -> TaskState:
+        """Build a TaskState from a queue.json entry using TASK_FIELDS registry.
+
+        Replaces the hand-written _build_poll_task constructor call.
+        The ``slug`` positional is deprecated — reads from entry["id"] via
+        the registry like every other field. This signature keeps the old
+        caller (_build_poll_task) shape for the transition period.
+        """
+        kwargs: dict[str, Any] = {}
+        for field in TASK_FIELDS:
+            raw = entry.get(field.queue_key)
+            if raw is None:
+                kwargs[field.name] = field.default
+            else:
+                kwargs[field.name] = field.transform(raw) if field.transform else raw
+        return cls(**kwargs)
+
+    def to_handler_dict(self, repo_cfg: dict) -> dict:
+        """Build the mutable task dict that handlers expect.
+
+        Derived from TASK_FIELDS so every persisted field is included
+        automatically. Two runtime extras are appended:
+          ``id`` — human-readable ``owner/repo#N`` for logs and prompts
+          ``_token`` — PAT from repo_cfg, injected at dispatch time
+        """
+        d: dict[str, Any] = {}
+        for field in TASK_FIELDS:
+            val = getattr(self, field.name)
+            # Copy list-as-tuple fields back to list for handler mutability
+            if field.name == "bot_comment_ids" and isinstance(val, tuple):
+                val = list(val)
+            d[field.queue_key] = val
+        d["id"] = f"{self.owner}/{self.repo}#{self.issue_number}"
+        d["_token"] = repo_cfg.get("pat") or repo_cfg.get("token", "")
+        return d
 
 
 @dataclass(frozen=True)
