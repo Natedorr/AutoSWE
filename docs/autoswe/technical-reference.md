@@ -28,7 +28,7 @@ CRON (e.g. every 10 min)
             3. For each non-noop Action:
                a. acquire PID file                   # concurrency gate
                b. set RUNNING status (planning/fixing/etc)
-               c. run(action, world)                # Layer B — Claude handler
+               c. run(action, world)                # Layer B — agent handler (backend dispatch)
                d. emit(action, result, world)       # Layer C — Action+Result → Effects
                e. apply_effect() per effect          # adapter → API calls
                f. release PID file
@@ -49,7 +49,7 @@ The pipeline is split into three pure layers separated by frozen dataclasses:
 ```
 
 - **Layer A (decide):** `decide(World) -> Action` — pure state machine. No I/O. Reads `World` (API snapshot + queue state + config) and returns what to do.
-- **Layer B (run):** `run(Action, World) -> DispatchResult` — Claude runner wrapper. Invokes planner/coder/ship modules. Returns handler output with cost/duration metrics.
+- **Layer B (run):** `run(Action, World) -> DispatchResult` — coding-backend wrapper. Invokes planner/coder/ship modules, each of which resolves a harness profile and dispatches to the configured backend (`claude_code` or `codex`). Returns handler output with cost/duration metrics.
 - **Layer C (emit):** `emit(Action, DispatchResult, World) -> tuple[Effect, ...]` — pure effect emission. Maps handler output to status changes, comments, queue patches, and PR creations.
 
 Each layer boundary is cached as a test seam — see [testing.md](testing.md).
@@ -120,8 +120,8 @@ After all dispatches in a cycle:
 
 - **→ pending** (set by `decide()`): First sight of an issue carrying a slash command (body or comment), or a user comment with a slash command whose ID is newer than `last_dispatched_command_id`, or any user reply on a task in `waiting`/`planned`.
 - **→ RUNNING statuses** (`planning`/`fixing`/`syncing`/`reviewing`/`shipping`; set by `_dispatch_task()`): Only from a non-noop Action. PID file is created first, then the status flips. The specific running status depends on the action kind.
-- **→ planned**: Planner returned `"PLAN_READY"` (`<AUTOSWE_PLAN>` block found).
-- **→ waiting**: Planner returned `"WAITING: …"` (`<AUTOSWE_QUESTIONS>` block, or no XML block).
+- **→ planned**: Planner returned `"PLAN_READY"` (MCP `post_plan` fired, or — deprecated fallback — an `<AUTOSWE_PLAN>` block / native plan file was found).
+- **→ waiting**: Planner returned `"WAITING: …"` (MCP `post_question`, an AskUserQuestion, or — deprecated fallback — an `<AUTOSWE_QUESTIONS>` block / no parseable plan).
 - **→ COMPLETED statuses** (`fixed`/`synced`/`shipped`/`reviewed`): Coder returned `"DONE*"` for `/fix` → `fixed`, or `/sync` succeeded → `synced`, or `/pr` succeeded → `shipped`, or `/review` succeeded → `reviewed`, or the issue was found closed at refresh time → `fixed`.
 - **→ failed**: Handler returned `"FAILED: …"`, or sync's attempt/time guard tripped.
 - **→ skipped**: `/skip`.

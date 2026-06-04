@@ -22,7 +22,7 @@ CRON (e.g. every 10 min)
             3. For each non-noop Action:
                a. acquire PID file                   # concurrency gate
                b. set RUNNING status (planning/fixing/etc)
-               c. run(action, world)                # Layer B — Claude handler
+               c. run(action, world)                # Layer B — agent handler (backend dispatch)
                d. emit(action, result, world)       # Layer C — Action+Result → Effects
                e. apply_effect() per effect          # adapter → API calls
                f. release PID file
@@ -43,7 +43,7 @@ The pipeline is split into three pure layers separated by frozen dataclasses:
 ```
 
 - **Layer A (decide):** `decide(World) -> Action` — pure state machine. No I/O. Reads `World` (API snapshot + queue state + config) and returns what to do.
-- **Layer B (run):** `run(Action, World) -> DispatchResult` — Claude runner wrapper. Invokes planner/coder/ship modules. Returns handler output with cost/duration metrics.
+- **Layer B (run):** `run(Action, World) -> DispatchResult` — coding-backend wrapper. Invokes planner/coder/ship modules, each of which resolves a harness profile (`resolve_harness()`) and dispatches to the configured backend (`claude_code` or `codex`) via `runner.run()`. Returns handler output with cost/duration metrics.
 - **Layer C (emit):** `emit(Action, DispatchResult, World) -> tuple[Effect, ...]` — pure effect emission. Maps handler output to status changes, comments, queue patches, and PR creations.
 
 Each layer boundary is cached as a test seam — see `testing.md`.
@@ -92,7 +92,7 @@ For each non-noop `Action`:
 1. Create running/{slug}.pid          # concurrency gate
 2. Set RUNNING status + autoswe:* label # mirror for humans
 3. Post progress comment              # "Dispatching `/plan`…"
-4. result = run(action, world)        # Layer B — Claude handler
+4. result = run(action, world)        # Layer B — agent handler (backend dispatch)
 5. effects = emit(action, result, world)  # Layer C — pure
 6. For each effect:
      post_comment → progress.finalize()   # update sticky comment in-place

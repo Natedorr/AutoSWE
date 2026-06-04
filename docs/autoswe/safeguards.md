@@ -2,14 +2,16 @@
 
 ## Deployment Model (the first "safeguard")
 
-autoSWE runs Claude with `bypassPermissions` + `Bash` for `/fix` (and `/sync` conflict resolution) **on purpose**. The expectation is that it runs on a **dedicated, isolated machine** that does nothing else: it can clone repos, write to `autoswe/issue-*` branches, and push them — and that's the whole blast radius. Don't run autoSWE on a shared workstation, a build box with secrets for other systems, or anywhere a compromised agent run could do damage beyond "messed up a feature branch." The free-permissions choice is only safe under that assumption — treat the isolation as a hard requirement, not a nice-to-have.
+autoSWE runs the coding agent with full read/write/`Bash` access for `/fix` (and `/sync` conflict resolution) **on purpose**. The expectation is that it runs on a **dedicated, isolated machine** that does nothing else: it can clone repos, write to `autoswe/issue-*` branches, and push them — and that's the whole blast radius. Don't run autoSWE on a shared workstation, a build box with secrets for other systems, or anywhere a compromised agent run could do damage beyond "messed up a feature branch." The free-permissions choice is only safe under that assumption — treat the isolation as a hard requirement, not a nice-to-have.
 
-The orchestrator's own privilege split still holds inside that machine:
+The orchestrator's own privilege split still holds inside that machine. Handlers express intent as a generic **`mode`** (see [harnesses.md](harnesses.md)); each backend translates it — Claude Code into permission modes + tool sets, Codex into a `--sandbox` level:
 
-- `/plan` and `resume_plan` → `permission_mode="plan"`, `allowed_tools=["Read", "Glob", "Grep"]` + `PROGRESS_TOOLS` — read-only (native plan mode produces plan files in `~/.claude/plans/`). `Write`/`Edit` blocked by `can_use_tool` callback; `Agent` excluded so sub-agents cannot bypass containment.
-- `/fix` → `permission_mode="bypassPermissions"`, `allowed_tools=["Read", "Edit", "Write", "Bash", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — full access.
-- `/sync` conflict resolution → same as `/fix`.
-- `/review` → `permission_mode="plan"`, `allowed_tools=["Read", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — read-only.
+- `/plan` and `resume_plan` → `mode="plan"`, tools `["Read", "Glob", "Grep"]` + `PROGRESS_TOOLS` — read-only. Claude Code: plan permission mode (native plan files in `~/.claude/plans/`), with `Write`/`Edit` blocked by the `can_use_tool` callback and `Agent` excluded so sub-agents can't bypass containment. Codex: `read-only` sandbox.
+- `/fix` → `mode="read_write"`, tools `["Read", "Edit", "Write", "Bash", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — full access. Claude Code: `bypassPermissions`. Codex: `workspace-write` sandbox.
+- `/sync` conflict resolution → same as `/fix` (minus `AskUserQuestion`, kept autonomous).
+- `/review` → `mode="read_only"`, tools `["Read", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — read-only.
+
+The read-only guarantee for `/plan` and `/review` is therefore enforced two different ways depending on backend: Claude Code gates each tool call via `can_use_tool`, while Codex relies on the OS-level `read-only` sandbox. On a backend that supports neither cleanly, treat the machine isolation as the real boundary.
 
 `PROGRESS_TOOLS` (`TodoWrite`, `TaskCreate`, `TaskUpdate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`) are available in every phase. `AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]` is used only for `/fix`, `/sync` conflict resolution, and `/review` — phases where sub-agent spawning is needed and safe. Plan phase uses `PROGRESS_TOOLS` directly to prevent `Agent` sub-agent escapes.
 
@@ -39,9 +41,9 @@ A label is never a steering input (`labels.md`).
 - **Terminal status completion** (`orch/emit.py`): after any COMPLETED status (`fixed`/`synced`/`shipped`/`reviewed`), `failed`, `error`, `skipped`, or `aborted` — each new dispatch cycle gets a fresh timer. The `patch_queue` Effect sets `first_dispatched_at: None`.
 - **Phase transition** (`orch/decide.py`): when restarting from `planned` or a RUNNING status — each pipeline phase (plan → fix → pr) gets its own timer so the time limit measures the current phase, not the cumulative time of completed phases (fixes #119).
 
-## `AGENT_TIMEOUT` Per Claude Session
+## `AGENT_TIMEOUT` Per Agent Session
 
-`asyncio.wait_for(coro, timeout=AGENT_TIMEOUT)` in `runner.py`. Default 7200 s (2 h); per-repo override via `repos.json` → `agent_timeout`. On timeout the handler returns `"FAILED: timeout during …"`.
+`asyncio.wait_for(backend.run(spec), timeout=AGENT_TIMEOUT)` in `harness/runner.py`. Default 7200 s (2 h); per-repo override via `repos.json` → `agent_timeout`. On timeout the handler returns `"FAILED: timeout during …"`.
 
 ## Comment-ID Restart Anchor
 

@@ -96,7 +96,7 @@ For each phase (plan, fix, review):
 1. ``repos.json`` phase-specific: ``plan_model`` (for `/plan`), ``fix_model`` (for `/fix`), or ``review_model`` (for `/review`)
 2. ``autoswe.env`` phase-specific: ``PLAN_MODEL``, ``FIX_MODEL``, or ``REVIEW_MODEL``
 3. ``repos.json`` generic: ``model``
-4. SDK default (Claude's built-in default)
+4. Backend default (e.g. Claude Code's or Codex's built-in default model)
 
 Code path: ``config.py:resolve_harness()`` → ``config.py:load_harnesses_config()``. Model fallback inside synthesized profile uses the same chain as handlers (e.g. ``planner.py``, ``coder.py``, ``reviewer.py``).
 
@@ -110,7 +110,7 @@ Variables: `{{OWNER}}`, `{{REPO}}`, `{{ISSUE_NUMBER}}`, `{{TITLE}}`, `{{BODY}}`,
 
 Variables: `{{OWNER}}`, `{{REPO}}`, `{{ISSUE_NUMBER}}`, `{{TITLE}}`, `{{BODY}}`, `{{COMMENTS}}`, `{{GUIDANCE_BLOCK}}`, `{{PLAN}}`
 
-The `{{PLAN}}` variable is extracted from `<AUTOSWE_PLAN>` blocks in existing comments (newest first, `prompts.py:126-131`).
+The `{{PLAN}}` variable is extracted from existing bot comments by `prompts.py:_find_plan_in_comments()` (newest first): primarily an MCP-posted plan comment (body starting with `## Plan`), falling back to the deprecated `<AUTOSWE_PLAN>` block.
 
 ### `config/prompts/review.txt`
 

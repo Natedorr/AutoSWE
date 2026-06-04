@@ -2,15 +2,24 @@
 
 `/plan`, `/fix`, and `/review` are the Claude-backed work — planning, coding, and code review. `/pr`, `/sync`, `/retry`, `/skip`, `/abort` are workflow plumbing borrowed from how you'd drive a branch by hand: a branch can be cut from a non-default parent, can drift from its base and need a sync, and a run can fail and need a retry. autoSWE just lets you do all of that from issue comments instead of a terminal.
 
-Each handler returns a done-content string; the dispatch loop maps it to an `autoswe_status` (and mirrors that to the `autoswe:*` label — see `pipeline.md` Stage 6).
+Each handler returns a `HandlerResult` (a done-content string plus cost/duration/session metadata); the dispatch loop maps `done_content` to an `autoswe_status` (and mirrors that to the `autoswe:*` label — see `pipeline.md` Stage 6).
+
+## Harness & Backend Resolution
+
+Every agent-backed handler (`plan`, `fix`, `review`, conflict resolution) follows the same two steps before invoking the agent:
+
+1. **Resolve the harness profile** for the phase: `resolve_harness("plan" | "fix" | "review", repo_cfg, cfg)` (from `core/config.py`) returns the profile dict — `{"backend": ..., "model": ..., ...}`. The profile's `model` takes precedence over the legacy `{phase}_model` / `{PHASE}_MODEL` fallback chain.
+2. **Invoke via the generic runner:** the handler calls `runner.run(..., mode=<intent>, harness_cfg=harness)`. `runner.run()` packs a `RunSpec` and dispatches to the resolved backend (`claude_code` or `codex`) through the factory. The `mode` strings are `"plan"` (plan), `"read_only"` (review), and `"read_write"` (fix/conflict resolution); each backend translates them into its own configuration. When `harness_cfg` is omitted, the runner defaults to `ClaudeCodeBackend`.
+
+MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_capability(harness, "mcp")` — when the backend can't post via MCP (e.g. Codex), the handler falls back to text parsing. See [harnesses.md](harnesses.md).
 
 ## `/plan` — `planner.run_plan(task, repo_cfg, cfg)`
 
-- **Permission mode:** `plan` (read-only: `Read`, `Glob`, `Grep` + `PROGRESS_TOOLS` for progress tracking)
+- **Mode:** `"plan"` (read-only: `Read`, `Glob`, `Grep` + `PROGRESS_TOOLS` for progress tracking). Claude Code translates this to its `plan` permission mode; Codex to a `read-only` sandbox.
 - **Prompt source:** `config/prompts/plan.txt` (loaded by `prompts.py:build_plan_prompt()`)
-- **Model resolution:** `repo_cfg.plan_model` → `cfg.PLAN_MODEL` → SDK default
+- **Model resolution:** `resolve_harness("plan", …).model` → `repo_cfg.plan_model` → `cfg.PLAN_MODEL` → backend default
 - **Worktree:** created via `create_worktree()` on `plan_branch` (or `base_branch`)
-- **Flow:** Runs Claude in read-only mode over the repo. Parses response for `<AUTOSWE_PLAN>` or `<AUTOSWE_QUESTIONS>` XML blocks (regexes in `tracking/comments.py:_PLAN_RE`, `_QUESTIONS_RE`)
+- **Flow:** Runs the agent in read-only mode over the repo. The **primary** signal is the MCP comment tools — `mcp__autoswe_comment__post_plan` → `PLAN_READY`, `mcp__autoswe_comment__post_question` → `WAITING` (gated on the backend's `"mcp"` capability). When MCP is unavailable (e.g. Codex) or wasn't used, `planner._interpret_plan_result()` falls back to scanning the response for the **deprecated** `<AUTOSWE_PLAN>` / `<AUTOSWE_QUESTIONS>` XML blocks (regexes in `tracking/comments.py:_PLAN_RE`, `_QUESTIONS_RE`), then a native `~/.claude/plans/*.md` file, then raw text.
 - **Returns:**
   - `"PLAN_READY"` — plan block found; posts plan as comment
   - `"WAITING: questions"` — questions block found; posts questions as comment
@@ -26,9 +35,9 @@ Each handler returns a done-content string; the dispatch loop maps it to an `aut
 
 ## `/fix` — `coder.run_fix(task, guidance, repo_cfg, cfg)`
 
-- **Permission mode:** `bypassPermissions` (full access: `Read`, `Edit`, `Write`, `Bash`, `Glob`, `Grep` + `AGENT_TASK_TOOLS`)
+- **Mode:** `"read_write"` (full access: `Read`, `Edit`, `Write`, `Bash`, `Glob`, `Grep` + `AGENT_TASK_TOOLS`). Claude Code translates this to `bypassPermissions`; Codex to a `workspace-write` sandbox.
 - **Prompt source:** `config/prompts/fix.txt` (loaded by `prompts.py:build_fix_prompt()`)
-- **Model resolution:** `repo_cfg.fix_model` → `cfg.FIX_MODEL` → SDK default
+- **Model resolution:** `resolve_harness("fix", …).model` → `repo_cfg.fix_model` → `cfg.FIX_MODEL` → backend default
 - **Worktree:** created via `create_worktree()` on `plan_branch` (or `base_branch`). When called from the orchestrator (`orch/run.py`), the worktree may be pre-created and pre-synced by `_run_fix_with_sync()` before `run_fix()` is invoked.
 - **Pre-dispatch sync:** Before running Claude, `_run_fix_with_sync()` calls `worktree_mod.sync_branch()` to merge `origin/{base_branch}` into the feature branch. On conflict, `coder.resolve_sync_conflicts()` resolves via Claude. On resolution failure, the dispatch bails before running fix. On clean sync, the pre-synced worktree is passed to `run_fix()` via `wt=` parameter, which reuses it instead of re-creating.
 - **Session strategy:**
@@ -81,9 +90,9 @@ Each handler returns a done-content string; the dispatch loop maps it to an `aut
 
 ## `/review` — `reviewer.run_review(task, repo_cfg, cfg)`
 
-- **Permission mode:** `plan` (read-only: `Read`, `Glob`, `Grep` + `PROGRESS_TOOLS`)
+- **Mode:** `"read_only"` (read-only: `Read`, `Glob`, `Grep` + `PROGRESS_TOOLS`). Translated per backend (Claude Code read-only tools; Codex `read-only` sandbox).
 - **Prompt source:** `config/prompts/review.txt` (loaded by `prompts.py:build_review_prompt()`)
-- **Model resolution:** `repo_cfg.review_model` → `cfg.REVIEW_MODEL` → SDK default
+- **Model resolution:** `resolve_harness("review", …).model` → `repo_cfg.review_model` → `cfg.REVIEW_MODEL` → backend default
 - **Worktree:** accessed via `worktree_path()` on the feature branch. Does not create a new worktree — uses the existing one from `/plan` or `/fix`.
 - **Session:** fresh one-off session (`resume=None`). Not resumable.
 - **Flow:** Computes `git diff` between feature branch and base branch. Extracts plan text from bot comments (if any). Runs Claude in read-only mode with the review prompt. Parses response for required sections (Summary, Correctness, Security, Tests, Style, Suggestions, Verdict). Posts review as a comment prefixed with `## Review`. Persists review report to `~/.claude/reviews/<slug>.md`.
@@ -96,10 +105,12 @@ Each handler returns a done-content string; the dispatch loop maps it to an `aut
 
 ## Environment Override Path
 
-All Claude-invoking handlers pass env overrides through `runner.run()`:
+All agent-invoking handlers route through `runner.run(..., harness_cfg=harness)`, which builds a `RunSpec` and dispatches to the resolved backend. Backend-specific auth/runtime settings come from the harness profile (see [harnesses.md](harnesses.md)) and, for Claude Code, the env-override chain:
 
 1. `repo_cfg.anthropic_base_url` → `ANTHROPIC_BASE_URL`
 2. `repo_cfg.anthropic_auth_token` → `ANTHROPIC_AUTH_TOKEN`
 3. `cfg.ANTHROPIC_API_KEY` → `ANTHROPIC_API_KEY`
 
-Timeout: `repo_cfg.agent_timeout` → `cfg.AGENT_TIMEOUT` (default 7200s), enforced via `asyncio.wait_for()`.
+(The Codex backend uses `codex_api_key` / `openai_api_key` from the profile instead — or no key for local providers.)
+
+Timeout: `repo_cfg.agent_timeout` → `cfg.AGENT_TIMEOUT` (default 7200s), enforced via `asyncio.wait_for()` around `backend.run(spec)`. `AGENT_RETRY_ON_FAILURE` controls retry attempts on retryable backend errors.

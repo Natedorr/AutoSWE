@@ -53,8 +53,8 @@ The transitions below happen by writing `autoswe_status` in `queue.json`; the la
   - a user comment with a slash command whose ID is *newer than `last_dispatched_command_id`*, on a task in a COMPLETED status (`fixed`/`synced`/`shipped`/`reviewed`)/`failed`/`skipped`/`planned`, or
   - any user reply on a task in `waiting`/`planned` (plain text → `pending_command = None`, `pending_user_reply = text`).
 - **→ RUNNING statuses** (`planning`/`fixing`/`syncing`/`reviewing`/`shipping`; set by `_dispatch_task()`): only from a non-noop Action. PID file is created first, then the status flips. The specific running status depends on the action kind (`plan` → `planning`, `fix` → `fixing`, `sync_branch` → `syncing`, `review` → `reviewing`, `ship_pr` → `shipping`).
-- **→ planned**: planner returned `"PLAN_READY"` (`<AUTOSWE_PLAN>` block found).
-- **→ waiting**: planner returned `"WAITING: …"` (`<AUTOSWE_QUESTIONS>` block, or no XML block).
+- **→ planned**: planner returned `"PLAN_READY"` (MCP `post_plan` fired, or — deprecated fallback — an `<AUTOSWE_PLAN>` block / native plan file).
+- **→ waiting**: planner returned `"WAITING: …"` (MCP `post_question`, an AskUserQuestion, or — deprecated fallback — an `<AUTOSWE_QUESTIONS>` block / no parseable plan).
 - **→ COMPLETED statuses** (`fixed`/`synced`/`shipped`/`reviewed`): coder returned `"DONE*"` for `/fix` → `fixed`, or `/sync` succeeded → `synced`, or `/pr` succeeded → `shipped`, or `/review` succeeded → `reviewed`, or the issue was found closed at refresh time → `fixed`.
 - **→ failed**: handler returned `"FAILED: …"`, or `sync`'s attempt/time guard tripped.
 - **→ skipped**: `/skip`.

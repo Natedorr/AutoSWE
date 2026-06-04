@@ -4,10 +4,10 @@ Comments are the only steering input. A slash command at the start of a comment 
 
 ## Command Table
 
-| Command | Syntax | Pre-state | Post-state | Claude? | Who can issue |
+| Command | Syntax | Pre-state | Post-state | Agent? | Who can issue |
 |---------|--------|-----------|------------|---------|---------------|
 | `/plan` | `/plan [--branch <name>]` | any | `planned` or `waiting` | Yes (read-only) | OWNER/AUTHOR |
-| `/fix` | `/fix [--branch <name>] [with <guidance>]` | any | `fixed` or `failed` | Yes (bypassPermissions) | OWNER/AUTHOR |
+| `/fix` | `/fix [--branch <name>] [with <guidance>]` | any | `fixed` or `failed` | Yes (write access) | OWNER/AUTHOR |
 | `/pr` | `/pr` | `fixed` (with commits) | `shipped` | No | OWNER/AUTHOR |
 | `/sync` | `/sync` | any (with worktree) | `synced` or `failed` | Only on conflict | OWNER/AUTHOR |
 | `/retry` | `/retry` | `failed` | `pending` → handler → final state | Yes (replayed) | OWNER/AUTHOR |

@@ -21,6 +21,7 @@ autoSWE is **queue-driven**, not label-driven:
 | [labels.md](labels.md) | The `autoswe:*` labels as a read-only mirror of `autoswe_status`; bot-marker convention |
 | [slash-commands.md](slash-commands.md) | User-facing commands, parsing, auto-resume, multi-command-last-wins |
 | [config.md](config.md) | autoswe.env keys, repos.json fields, model resolution, prompt templates |
+| [harnesses.md](harnesses.md) | Harness profiles (`harnesses.json`), pluggable coding backends (`claude_code`, `codex`), per-phase resolution, capability degradation |
 | [providers.md](providers.md) | IssueTracker/VCSProvider protocols, GitHub + Azure backends, factory |
 | [git-worktrees.md](git-worktrees.md) | Per-repo clones, per-issue worktrees, branch naming, GC |
 | [safeguards.md](safeguards.md) | MAX_CONCURRENT, MAX_ATTEMPTS, time limits, completion anchor |
