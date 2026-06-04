@@ -53,11 +53,17 @@ def run_review(
     guidance: str | None = None,
     *,
     progress_callback=None,
+    wt=None,
 ) -> HandlerResult:
     """Run a read-only code review on the feature branch.
 
+    When ``wt`` is provided (pre-synced worktree from the orchestrator), the
+    handler skips its own worktree creation and uses the synced path directly.
+    This mirrors the planner/coder pattern where _run_*_with_sync() ensures
+    base→feature merge before the agent runs.
+
     Steps:
-      1. Ensure worktree on autoswe/issue-{N}
+      1. Ensure worktree on autoswe/issue-{N} (or use pre-synced ``wt``)
       2. Compute git diff (base_branch..HEAD, stat + full)
       3. Extract plan text from issue comments
       4. Build review prompt (issue + plan + diff)
@@ -72,20 +78,24 @@ def run_review(
     token = task["_token"]
     provider = repo_cfg.get("provider", "github")
 
-    # 1. Worktree — reuse if present, create if missing
-    wt = worktree_path(owner, repo, issue_num, cfg or {}, provider)
-    if wt.exists():
-        log(f"[REVIEW] Reusing worktree {wt}")
+    # 1. Worktree — reuse pre-synced from orchestrator, or create/reset locally
+    if wt is not None:
+        # Pre-synced worktree from orchestrator — reuse directly
+        wt_path: Path = Path(wt)
     else:
-        wt = create_worktree(
-            owner, repo, issue_num, base_branch, token, cfg or {}, provider,
-            default_branch=base_branch, pull_strategy="reset", push_new=False,
-        )
+        wt_path = worktree_path(owner, repo, issue_num, cfg or {}, provider)
+        if wt_path.exists():
+            log(f"[REVIEW] Reusing worktree {wt_path}")
+        else:
+            wt_path = create_worktree(
+                owner, repo, issue_num, base_branch, token, cfg or {}, provider,
+                default_branch=base_branch, pull_strategy="reset", push_new=False,
+            )
 
     # 2. Compute diff
     try:
-        diff_stat = _run_git(wt, ["diff", "--stat", f"origin/{base_branch}...HEAD"])
-        diff_text = _run_git(wt, ["diff", f"origin/{base_branch}...HEAD"])
+        diff_stat = _run_git(wt_path, ["diff", "--stat", f"origin/{base_branch}...HEAD"])
+        diff_text = _run_git(wt_path, ["diff", f"origin/{base_branch}...HEAD"])
         diff_text = _truncate(diff_text, _REVIEW_MAX_DIFF_LINES)
     except subprocess.CalledProcessError as e:
         diff_stat = "(no diff)"
@@ -109,7 +119,7 @@ def run_review(
     # 4. Build prompt
     prompt = build_review_prompt(
         task,
-        repo_root=str(wt),
+        repo_root=str(wt_path),
         repo_cfg=repo_cfg,
         plan_text=plan_text,
         diff_stat=diff_stat,
@@ -128,7 +138,7 @@ def run_review(
     try:
         result = runner.run(
             prompt,
-            cwd=str(wt),
+            cwd=str(wt_path),
             cfg=cfg or {},
             repo_cfg=repo_cfg,
             resume=None,  # CRITICAL: one-off session
