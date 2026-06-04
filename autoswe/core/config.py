@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import json
 import os
@@ -64,6 +66,32 @@ def _expand_env_dict(obj: dict) -> dict:
 # Resolve repo root relative to this module (autoswe/core/config.py → repo root)
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AUTOSWE_DIR = Path(os.environ.get("AUTOSWE_DIR", _REPO_ROOT))
+
+
+# ---------------------------------------------------------------------------
+# Helpers — shared coercion logic so bool/int parsing isn't repeated inline
+# ---------------------------------------------------------------------------
+
+
+def _as_bool(value: str | None, default: str = "false") -> bool:
+    """Coerce a config value to bool via the ``.lower() == "true"`` idiom.
+
+    Used by both the defaults dict and the file-override loop so the coercion
+    logic lives in one place.
+    """
+    return str(value or default).lower() == "true"
+
+
+def _load_json_config(filepath: Path) -> dict:
+    """Read a JSON config file, returning ``{}`` on missing/corrupt file."""
+    if filepath.exists():
+        try:
+            return json.loads(filepath.read_text())
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
 CONFIG_FILE = AUTOSWE_DIR / "config" / "autoswe.env"
 REPOS_CONFIG_FILE = AUTOSWE_DIR / "config" / "repos.json"
 HARNESSES_CONFIG_FILE = AUTOSWE_DIR / "config" / "harnesses.json"
@@ -86,11 +114,11 @@ def load_config() -> dict:
         "MAX_CONCURRENT": int(os.environ.get("MAX_CONCURRENT", 1)),
         "MAX_DRAIN_CYCLES": int(os.environ.get("MAX_DRAIN_CYCLES", 50)),
         "WORKTREE_DIR": os.environ.get("WORKTREE_DIR", "worktrees"),
-        "SILENT_REPORTING": os.environ.get("SILENT_REPORTING", "false").lower() == "true",
-        "MINIMAL_POSTING": os.environ.get("MINIMAL_POSTING", "false").lower() == "true",
-        "AUTO_ASSIGN": os.environ.get("AUTO_ASSIGN", "true").lower() == "true",
+        "SILENT_REPORTING": _as_bool(os.environ.get("SILENT_REPORTING")),
+        "MINIMAL_POSTING": _as_bool(os.environ.get("MINIMAL_POSTING")),
+        "AUTO_ASSIGN": _as_bool(os.environ.get("AUTO_ASSIGN"), "true"),
         "ASSIGN_USER": os.environ.get("ASSIGN_USER", ""),
-        "AUTO_CREATE_PR": os.environ.get("AUTO_CREATE_PR", "false").lower() == "true",
+        "AUTO_CREATE_PR": _as_bool(os.environ.get("AUTO_CREATE_PR")),
         "CLAUDE_CLI_PATH": os.environ.get("CLAUDE_CLI_PATH", ""),
         "PLAN_MODEL": os.environ.get("PLAN_MODEL", ""),
         "FIX_MODEL": os.environ.get("FIX_MODEL", ""),
@@ -103,7 +131,7 @@ def load_config() -> dict:
         "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
         "BOT_NAME": os.environ.get("BOT_NAME", "autoswe"),
         "ALLOWED_AUTHORS": os.environ.get("ALLOWED_AUTHORS", ""),
-        "LINK_BRANCH_TO_ISSUE": os.environ.get("LINK_BRANCH_TO_ISSUE", "true").lower() == "true",
+        "LINK_BRANCH_TO_ISSUE": _as_bool(os.environ.get("LINK_BRANCH_TO_ISSUE"), "true"),
         "SYNC_STRATEGY": os.environ.get("SYNC_STRATEGY", "merge"),  # "merge" | "rebase"
     }
     if CONFIG_FILE.exists():
@@ -115,11 +143,11 @@ def load_config() -> dict:
         for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES"):
             with contextlib.suppress(ValueError, TypeError):
                 cfg[int_key] = int(cfg.get(int_key, 0))
-        cfg["SILENT_REPORTING"] = str(cfg.get("SILENT_REPORTING", "false")).lower() == "true"
-        cfg["MINIMAL_POSTING"] = str(cfg.get("MINIMAL_POSTING", "false")).lower() == "true"
-        cfg["AUTO_ASSIGN"] = str(cfg.get("AUTO_ASSIGN", "true")).lower() == "true"
-        cfg["AUTO_CREATE_PR"] = str(cfg.get("AUTO_CREATE_PR", "false")).lower() == "true"
-        cfg["LINK_BRANCH_TO_ISSUE"] = str(cfg.get("LINK_BRANCH_TO_ISSUE", "true")).lower() == "true"
+        cfg["SILENT_REPORTING"] = _as_bool(cfg.get("SILENT_REPORTING"))
+        cfg["MINIMAL_POSTING"] = _as_bool(cfg.get("MINIMAL_POSTING"))
+        cfg["AUTO_ASSIGN"] = _as_bool(cfg.get("AUTO_ASSIGN"), "true")
+        cfg["AUTO_CREATE_PR"] = _as_bool(cfg.get("AUTO_CREATE_PR"))
+        cfg["LINK_BRANCH_TO_ISSUE"] = _as_bool(cfg.get("LINK_BRANCH_TO_ISSUE"), "true")
     # Parse ALLOWED_AUTHORS as a set for O(1) lookup
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()
     cfg["ALLOWED_AUTHORS"] = {a.strip() for a in _raw.split(",") if a.strip()} if _raw else set()
@@ -135,13 +163,7 @@ def load_repos_config() -> dict:
     Rejects Azure DevOps entries that lack a ``pat`` field.
     Validates Azure entries have required fields.
     """
-    if REPOS_CONFIG_FILE.exists():
-        try:
-            raw = json.loads(REPOS_CONFIG_FILE.read_text())
-        except json.JSONDecodeError:
-            return {}
-    else:
-        raw = {}
+    raw = _load_json_config(REPOS_CONFIG_FILE)
 
     validated = {}
     for key, entry in raw.items():
@@ -196,13 +218,7 @@ def load_harnesses_config() -> dict:
     if _harnesses_cache:
         return dict(_harnesses_cache)
 
-    if HARNESSES_CONFIG_FILE.exists():
-        try:
-            raw = json.loads(HARNESSES_CONFIG_FILE.read_text())
-        except json.JSONDecodeError:
-            return {}
-    else:
-        raw = {}
+    raw = _load_json_config(HARNESSES_CONFIG_FILE)
 
     validated = {}
     for key, entry in raw.items():

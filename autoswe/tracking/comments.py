@@ -8,36 +8,60 @@ so both shapes work.
 from __future__ import annotations
 
 import re
+from typing import Any
+
+from autoswe.providers.base import NormalizedComment
 
 BOT_MARKER = "<!-- autoswe-bot -->"
+
+# T8: Type alias so the duck-typed accessors are properly annotated.
+# NormalizedComment carries the canonical shape; dict[str, Any] covers
+# raw API responses and test fixtures that don't go through the adapter.
+CommentLike = NormalizedComment | dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# Body normalization — shared by completion-detection functions (T7)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_body(body: str) -> str:
+    """Strip formatting chars and collapse whitespace for fuzzy matching.
+
+    Used by ``_find_last_completion_id`` and ``_find_last_completion`` so the
+    normalize-then-match logic lives in one place (T7 DRY refactor).
+    """
+    stripped = re.sub(r'[\`\*\_~]', '', body.lower())
+    return re.sub(r'\s+', ' ', stripped)
 
 
 # ---------------------------------------------------------------------------
 # Accessors — work with NormalizedComment or raw dicts (fixtures)
 # ---------------------------------------------------------------------------
 
-def _get_body(comment) -> str:
+
+def _get_body(comment: CommentLike) -> str:
     """Return the body string of a comment."""
     if hasattr(comment, "body"):
         return comment.body or ""
     return comment.get("body", "") or ""
 
 
-def _get_created_at(comment) -> str:
+def _get_created_at(comment: CommentLike) -> str:
     """Return the created_at ISO timestamp of a comment."""
     if hasattr(comment, "created_at"):
         return comment.created_at or ""
     return comment.get("created_at", "") or ""
 
 
-def _get_id(comment) -> int | None:
+def _get_id(comment: CommentLike) -> int | None:
     """Return the id of a comment."""
     if hasattr(comment, "id"):
         return comment.id
     return comment.get("id")
 
 
-def _get_is_bot(comment) -> bool:
+def _get_is_bot(comment: CommentLike) -> bool:
     """Return the is_bot flag of a comment."""
     if hasattr(comment, "is_bot"):
         return comment.is_bot
@@ -48,7 +72,7 @@ def _get_is_bot(comment) -> bool:
 # Bot comment detection
 # ---------------------------------------------------------------------------
 
-def _is_autoswe_bot_comment(comment) -> bool:
+def _is_autoswe_bot_comment(comment: CommentLike) -> bool:
     """Check if a comment was posted by autoSWE.
 
     Primary check: is_bot flag (set by adapter from bot_comment_ids membership).
@@ -86,7 +110,7 @@ _BOT_CONTENT_PATTERNS = (
 )
 
 
-def _find_last_completion_id(comments: list) -> int | None:
+def _find_last_completion_id(comments: list[CommentLike]) -> int | None:
     """Find ID of the last completion comment.
 
     Normalizes the body before checking so ADO body transformations
@@ -99,8 +123,7 @@ def _find_last_completion_id(comments: list) -> int | None:
     """
     for comment in reversed(comments):
         body = _get_body(comment)
-        normalized = re.sub(r'[\`\*\_~]', '', body.lower())
-        normalized = re.sub(r'\s+', ' ', normalized)
+        normalized = _normalize_body(body)
         if 'completed with command' in normalized:
             cid = _get_id(comment)
             if cid is not None:
@@ -109,7 +132,7 @@ def _find_last_completion_id(comments: list) -> int | None:
     return _find_last_completion(comments)
 
 
-def _find_last_bot_comment_id(comments: list) -> int | None:
+def _find_last_bot_comment_id(comments: list[CommentLike]) -> int | None:
     """ID of the last bot comment (any type, not just completions).
 
     Fallback: if no IDs are found, returns the timestamp of the last
@@ -134,24 +157,25 @@ _QUESTIONS_RE = re.compile(r"<AUTOSWE_QUESTIONS>(.*?)</AUTOSWE_QUESTIONS>", re.D
 # TODO: remove after queue migration
 # ---------------------------------------------------------------------------
 
-def _find_last_completion(comments: list):
+def _find_last_completion(comments: list[CommentLike]) -> str | None:
     """Timestamp of the last completion comment (compatibility alias).
 
     Used by legacy test files. Prefer `_find_last_completion_id` in new code.
+    TODO: remove after queue migration.
     """
     for comment in reversed(comments):
         body = _get_body(comment)
-        normalized = re.sub(r'[\`\*\_~]', '', body.lower())
-        normalized = re.sub(r'\s+', ' ', normalized)
+        normalized = _normalize_body(body)
         if 'completed with command' in normalized:
             return _get_created_at(comment) or ""
     return None
 
 
-def _find_last_bot_comment_ts(comments: list):
+def _find_last_bot_comment_ts(comments: list[CommentLike]) -> str | None:
     """Timestamp of the last bot comment (compatibility alias).
 
     Used by legacy test files. Prefer `_find_last_bot_comment_id` in new code.
+    TODO: remove after queue migration.
     """
     for comment in reversed(comments):
         if _is_autoswe_bot_comment(comment):

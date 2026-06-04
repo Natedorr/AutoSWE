@@ -1,6 +1,81 @@
 """Tests for autoswe.core.config — load_config defaults and override parsing."""
 
 
+# ---------------------------------------------------------------------------
+# _as_bool helper (T7 DRY refactor)
+# ---------------------------------------------------------------------------
+
+def test_as_bool_true_strings():
+    """_as_bool recognizes common truthy string values."""
+    from autoswe.core.config import _as_bool
+
+    assert _as_bool("true") is True
+    assert _as_bool("True") is True
+    assert _as_bool("TRUE") is True
+
+def test_as_bool_false_strings():
+    """_as_bool treats anything other than 'true' (case-insensitive) as False."""
+    from autoswe.core.config import _as_bool
+
+    assert _as_bool("false") is False
+    assert _as_bool("False") is False
+    assert _as_bool("0") is False
+    assert _as_bool("yes") is False
+    assert _as_bool("") is False
+
+def test_as_bool_none_uses_default():
+    """_as_bool(None) falls back to the default value."""
+    from autoswe.core.config import _as_bool
+
+    assert _as_bool(None) is False  # default="false"
+    assert _as_bool(None, "true") is True
+
+def test_as_bool_non_string_coerced():
+    """_as_bool coerces non-string values (e.g., int from env file)."""
+    from autoswe.core.config import _as_bool
+
+    assert _as_bool(1) is False  # str(1).lower() == "1" != "true"
+    assert _as_bool(0) is False
+
+
+# ---------------------------------------------------------------------------
+# _load_json_config helper (T7 DRY refactor)
+# ---------------------------------------------------------------------------
+
+def test_load_json_config_missing_file(isolated_autoswe_dir):
+    """Non-existent file returns empty dict."""
+    from pathlib import Path
+
+    from autoswe.core.config import _load_json_config
+
+    result = _load_json_config(Path("/nonexistent/path.json"))
+    assert result == {}
+
+
+def test_load_json_config_valid_file(isolated_autoswe_dir, tmp_path):
+    """Valid JSON file returns parsed dict."""
+    import json
+
+    from autoswe.core.config import _load_json_config
+
+    json_file = tmp_path / "test.json"
+    json_file.write_text(json.dumps({"key": "value", "num": 42}), encoding="utf-8")
+
+    result = _load_json_config(json_file)
+    assert result == {"key": "value", "num": 42}
+
+
+def test_load_json_config_corrupt_file(isolated_autoswe_dir, tmp_path):
+    """Corrupt JSON file returns empty dict (graceful degradation)."""
+    from autoswe.core.config import _load_json_config
+
+    json_file = tmp_path / "corrupt.json"
+    json_file.write_text("{not valid json}", encoding="utf-8")
+
+    result = _load_json_config(json_file)
+    assert result == {}
+
+
 
 def test_load_config_defaults(isolated_autoswe_dir):
     """Without autoswe.env present, all defaults should be applied."""
