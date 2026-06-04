@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from autoswe.core.logging_utils import log
-from autoswe.harness import coder, planner
+from autoswe.harness import coder, planner, reviewer
 from autoswe.harness.runner import HandlerResult
 from autoswe.orch.types import Action, World
 from autoswe.vcs import ship
@@ -137,9 +137,8 @@ def run(
         return dr
 
     if kind == "review":
-        from autoswe.harness import reviewer
-        hr = reviewer.run_review(
-            task, rc, cfg, guidance,
+        hr = _run_review_with_sync(
+            task, guidance, rc, cfg,
             progress_callback=progress_callback,
         )
         return _to_dispatch(hr, task, review_file_path=hr.review_file_path)
@@ -345,6 +344,57 @@ def _run_plan_with_sync(
 
 _NON_REPLAYABLE_COMMANDS = frozenset(("/pr", "/sync", "/skip", "/abort", "/retry"))
 
+
+def _run_review_with_sync(
+    task: dict,
+    guidance: str,
+    repo_cfg: dict,
+    cfg: dict,
+    progress_callback: "Callable[[str], None] | None",
+) -> "HandlerResult":
+    """Pre-dispatch sync before /review — merge base into feature branch.
+
+    Ensures the reviewer operates on up-to-date code by merging main->feature
+    (same pattern as plan/fix). On conflict, resolves via Claude; on failure,
+    bails before running review.
+    """
+    owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
+    provider = repo_cfg.get("provider", "github")
+    base_branch = task.get("base_branch", "main")
+    token = task["_token"]
+
+    # Ensure worktree exists
+    wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
+    if not wt.exists():
+        wt = worktree_mod.create_worktree(
+            owner, repo, issue_num, base_branch, token, cfg, provider,
+            default_branch=base_branch, pull_strategy="reset", push_new=False,
+        )
+
+    # Sync base branch into feature branch
+    sync_result = worktree_mod.sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)
+    log(f"[SYNC] {task['id']} pre-review synced={sync_result.get('synced')} conflict={sync_result.get('conflict')}")
+
+    if sync_result.get("conflict") and not sync_result.get("rebase"):
+        # Merge conflict — invoke Claude to resolve before running review
+        files = sync_result["conflict_files"]
+        if progress_callback:
+            progress_callback(f"Pre-review sync conflict in {len(files)} file(s) — invoking Claude to resolve...")
+        hr = coder.resolve_sync_conflicts(
+            task, files, repo_cfg=repo_cfg, cfg=cfg, progress_callback=progress_callback,
+        )
+        if not (hr.done_content or "").startswith("DONE_SUMMARY"):
+            # Resolution failed — bail before running review
+            return hr
+    elif not sync_result.get("synced") and not sync_result.get("conflict"):
+        return HandlerResult(f"FAILED: pre-review sync error: {sync_result.get('error')}")
+
+    # Run review with pre-synced worktree
+    return reviewer.run_review(
+        task, repo_cfg, cfg, guidance,
+        progress_callback=progress_callback, wt=wt,
+    )
+
 def _run_retry(
     action: Action,
     world: World,
@@ -383,6 +433,9 @@ def _run_retry(
     if last_cmd == "/plan":
         hr = _run_plan_with_sync(task, action.guidance, None, repo_cfg, cfg,
                                   progress_callback=progress_callback)
+    elif last_cmd == "/review":
+        hr = _run_review_with_sync(task, action.guidance, repo_cfg, cfg,
+                                    progress_callback=progress_callback)
     else:
         hr = _run_fix_with_sync(task, action.guidance, repo_cfg, cfg,
                                 progress_callback=progress_callback)

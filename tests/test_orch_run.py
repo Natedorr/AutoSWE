@@ -642,3 +642,249 @@ def test_run_plan_with_sync_pushes_new_branch():
     # Verify push_new=True (so sync_branch can push the branch to remote)
     create_kwargs = mock_create.call_args[1]
     assert create_kwargs.get("push_new") is True
+
+
+# ------ Review action routes through sync wrapper ------
+
+
+def test_run_review_calls_sync_wrapper():
+    """Review action routes through _run_review_with_sync, not direct reviewer call."""
+    world = _make_world(plan_branch="autoswe/issue-42")
+    action = Action(kind="review", slug=world.task.slug)
+
+    with patch("autoswe.orch.run._run_review_with_sync") as mock_review:
+        mock_review.return_value = HandlerResult(
+            "REVIEW_READY\tlooks good",
+            review_file_path="/tmp/review.md",
+        )
+        result = run(action, world)
+
+    assert isinstance(result, DispatchResult)
+    assert result.done_content.startswith("REVIEW_READY")
+    mock_review.assert_called_once()
+    # Verify review_file_path is passed through
+    assert result.review_file_path == "/tmp/review.md"
+
+
+def test_run_review_with_sync_creates_worktree_and_syncs():
+    """_run_review_with_sync creates worktree, syncs base, then runs review."""
+    from autoswe.orch.run import _run_review_with_sync
+
+    task = _make_plan_task()
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = False
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.create_worktree", return_value=mock_wt) as mock_create,
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.orch.run.reviewer.run_review") as mock_review,
+    ):
+        mock_sync.return_value = {
+            "synced": True,
+            "branch": "autoswe/issue-42",
+            "commit_sha": "abc123",
+            "changed": False,
+            "ahead": 0,
+        }
+        mock_review.return_value = HandlerResult(
+            "REVIEW_READY\tclean",
+            review_file_path="/tmp/r.md",
+        )
+
+        hr = _run_review_with_sync(task, None, repo_cfg, cfg, None)
+
+    assert hr.done_content.startswith("REVIEW_READY")
+    mock_create.assert_called_once()
+    mock_sync.assert_called_once()
+    mock_review.assert_called_once()
+
+
+def test_run_review_with_sync_reuses_existing_worktree():
+    """_run_review_with_sync reuses existing worktree, still syncs."""
+    from autoswe.orch.run import _run_review_with_sync
+
+    task = _make_plan_task()
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = True
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.create_worktree") as mock_create,
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.orch.run.reviewer.run_review") as mock_review,
+    ):
+        mock_sync.return_value = {
+            "synced": True,
+            "branch": "autoswe/issue-42",
+            "commit_sha": "def456",
+            "changed": True,
+            "ahead": 3,
+        }
+        mock_review.return_value = HandlerResult(
+            "REVIEW_READY\thas issues",
+            review_file_path="/tmp/r.md",
+        )
+
+        hr = _run_review_with_sync(task, None, repo_cfg, cfg, None)
+
+    assert hr.done_content.startswith("REVIEW_READY")
+    # Worktree exists — create_worktree should NOT be called
+    mock_create.assert_not_called()
+    # sync_branch should still be called
+    mock_sync.assert_called_once()
+    mock_review.assert_called_once()
+
+
+def test_run_review_with_sync_passes_wt_to_reviewer():
+    """_run_review_with_sync passes the pre-synced worktree path to reviewer."""
+    from autoswe.orch.run import _run_review_with_sync
+
+    task = _make_plan_task()
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = True
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.orch.run.reviewer.run_review") as mock_review,
+    ):
+        mock_sync.return_value = {
+            "synced": True,
+            "branch": "autoswe/issue-42",
+            "commit_sha": "abc123",
+            "changed": False,
+            "ahead": 0,
+        }
+        mock_review.return_value = HandlerResult("REVIEW_READY\tok", review_file_path="/tmp/r.md")
+
+        _run_review_with_sync(task, None, repo_cfg, cfg, None)
+
+    # Verify wt keyword argument is passed to reviewer
+    assert mock_review.call_args[1].get("wt") is mock_wt
+
+
+def test_run_review_with_sync_resolves_merge_conflict():
+    """_run_review_with_sync invokes Claude to resolve merge conflicts before review."""
+    from autoswe.orch.run import _run_review_with_sync
+
+    task = _make_plan_task()
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = True
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.orch.run.coder.resolve_sync_conflicts") as mock_resolve,
+        patch("autoswe.orch.run.reviewer.run_review") as mock_review,
+    ):
+        mock_sync.return_value = {
+            "synced": False,
+            "conflict": True,
+            "branch": "autoswe/issue-42",
+            "conflict_files": ["a.py", "b.py"],
+            "error": "merge conflict",
+        }
+        mock_resolve.return_value = HandlerResult("DONE_SUMMARY\tresolved\tabc")
+        mock_review.return_value = HandlerResult("REVIEW_READY\tok", review_file_path="/tmp/r.md")
+
+        hr = _run_review_with_sync(task, None, repo_cfg, cfg, None)
+
+    assert hr.done_content.startswith("REVIEW_READY")
+    mock_resolve.assert_called_once()
+    assert "a.py" in mock_resolve.call_args[0][1]
+    mock_review.assert_called_once()
+
+
+def test_run_review_with_sync_bails_on_conflict_resolution_failure():
+    """_run_review_with_sync bails without running review when conflict resolution fails."""
+    from autoswe.orch.run import _run_review_with_sync
+
+    task = _make_plan_task()
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = True
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.orch.run.coder.resolve_sync_conflicts") as mock_resolve,
+        patch("autoswe.orch.run.reviewer.run_review") as mock_review,
+    ):
+        mock_sync.return_value = {
+            "synced": False,
+            "conflict": True,
+            "branch": "autoswe/issue-42",
+            "conflict_files": ["a.py"],
+            "error": "merge conflict",
+        }
+        mock_resolve.return_value = HandlerResult("FAILED: could not resolve")
+
+        hr = _run_review_with_sync(task, None, repo_cfg, cfg, None)
+
+    assert hr.done_content.startswith("FAILED:")
+    # Review should NOT run when conflict resolution fails
+    mock_review.assert_not_called()
+
+
+def test_run_review_with_sync_returns_error_on_sync_failure():
+    """_run_review_with_sync returns FAILED when sync neither syncs nor conflicts."""
+    from autoswe.orch.run import _run_review_with_sync
+
+    task = _make_plan_task()
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = True
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.orch.run.reviewer.run_review") as mock_review,
+    ):
+        mock_sync.return_value = {
+            "synced": False,
+            "conflict": False,
+            "branch": "autoswe/issue-42",
+            "error": "something went wrong",
+        }
+
+        hr = _run_review_with_sync(task, None, repo_cfg, cfg, None)
+
+    assert hr.done_content.startswith("FAILED: pre-review sync error")
+    mock_review.assert_not_called()
+
+
+# ------ Retry action replays review ------
+
+
+def test_run_retry_replays_review():
+    """When /review was last dispatched, retry should replay review."""
+    world = _make_world(last_dispatched_command="/review", last_phase="review")
+    action = Action(kind="retry", slug=world.task.slug)
+
+    with patch("autoswe.orch.run._run_review_with_sync") as mock_review:
+        mock_review.return_value = HandlerResult(
+            "REVIEW_READY\tretried review",
+            review_file_path="/tmp/r.md",
+        )
+        result = run(action, world)
+
+    assert isinstance(result, DispatchResult)
+    assert result.done_content.startswith("REVIEW_READY")
+    mock_review.assert_called_once()

@@ -53,8 +53,12 @@ def run_review(
     guidance: str = None,
     *,
     progress_callback=None,
+    wt=None,
 ) -> HandlerResult:
     """Run a read-only code review on the feature branch.
+
+    When *wt* is provided (e.g. from the sync-wrapped orchestrator), the
+    pre-synced worktree is used directly without creating a new one.
 
     Steps:
       1. Ensure worktree on autoswe/issue-{N}
@@ -72,15 +76,18 @@ def run_review(
     token = task["_token"]
     provider = repo_cfg.get("provider", "github")
 
-    # 1. Worktree — reuse if present, create if missing
-    wt = worktree_path(owner, repo, issue_num, cfg, provider)
-    if wt.exists():
-        log(f"[REVIEW] Reusing worktree {wt}")
+    # 1. Worktree — use pre-synced one if provided, else create/reuse
+    if wt is None:
+        wt = worktree_path(owner, repo, issue_num, cfg, provider)
+        if wt.exists():
+            log(f"[REVIEW] Reusing worktree {wt}")
+        else:
+            wt = create_worktree(
+                owner, repo, issue_num, base_branch, token, cfg, provider,
+                default_branch=base_branch, pull_strategy="reset", push_new=False,
+            )
     else:
-        wt = create_worktree(
-            owner, repo, issue_num, base_branch, token, cfg, provider,
-            default_branch=base_branch, pull_strategy="reset", push_new=False,
-        )
+        log(f"[REVIEW] Using pre-synced worktree {wt}")
 
     # 2. Compute diff
     try:

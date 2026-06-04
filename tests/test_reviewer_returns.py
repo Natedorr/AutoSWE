@@ -630,3 +630,31 @@ def test_full_review_injection_flow(tmp_path):
     assert "Bug found in auth.py:42" in prompt
     assert "null pointer" in prompt
     assert task_dict["review_file_path"] is None  # popped after first use
+
+
+# ---------------------------------------------------------------------------
+# Pre-synced worktree (wt parameter)
+# ---------------------------------------------------------------------------
+
+
+def test_run_review_skips_worktree_creation_when_wt_provided(tmp_path):
+    """When wt is provided (from orchestrator sync wrapper), run_review skips
+    worktree creation and uses the pre-synced path directly."""
+    from pathlib import Path
+
+    fake_wt = Path("/pre-synced/worktree")
+    task = make_task()
+
+    with patch("autoswe.harness.reviewer._run_git", return_value="stat"):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.reviewer.create_worktree") as mock_create:
+                with patch("autoswe.harness.reviewer.worktree_path") as mock_path:
+                    with patch("autoswe.harness.reviewer._get_reviews_dir", return_value=tmp_path / "reviews"):
+                        (tmp_path / "reviews").mkdir(parents=True, exist_ok=True)
+                        with patch("autoswe.harness.runner.run", return_value=_r("LGTM")):
+                            from autoswe.harness.reviewer import run_review
+                            run_review(task, {}, {"GITHUB_TOKEN": "tok"}, wt=fake_wt)
+
+    # Neither worktree_path nor create_worktree should be called
+    mock_create.assert_not_called()
+    mock_path.assert_not_called()
