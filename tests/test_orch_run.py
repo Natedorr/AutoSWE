@@ -10,6 +10,7 @@ from autoswe.harness.runner import HandlerResult
 from autoswe.orch.run import (
     DispatchResult,
     _build_task_dict,
+    _run_fix_with_sync,
     _run_plan_with_sync,
     _run_review_with_sync,
     _to_dispatch,
@@ -645,10 +646,93 @@ def test_run_plan_with_sync_pushes_new_branch():
     assert create_kwargs.get("push_new") is True
 
 
+# ------ _run_fix_with_sync ------
+
+
+def _make_fix_task(plan_branch=None, base_branch="main"):
+    """Build a minimal task dict for fix tests."""
+    return {
+        "id": "owner/repo#42",
+        "owner": "owner",
+        "repo": "repo",
+        "issue_number": 42,
+        "title": "Test issue",
+        "body": "/fix",
+        "base_branch": base_branch,
+        "plan_branch": plan_branch,
+        "_token": "ghp_fake",
+    }
+
+
+def test_run_fix_with_sync_uses_plan_branch():
+    """_run_fix_with_sync forks worktree from plan_branch when set, not base_branch."""
+    task = _make_fix_task(plan_branch="codex", base_branch="master")
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = False
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.create_worktree", return_value=mock_wt) as mock_create,
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.orch.run.coder.run_fix") as mock_fix,
+    ):
+        mock_sync.return_value = {
+            "synced": True,
+            "branch": "autoswe/issue-42",
+            "commit_sha": "abc123",
+            "changed": False,
+            "ahead": 0,
+        }
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+
+        hr = _run_fix_with_sync(task, None, repo_cfg, cfg, None)
+
+    assert hr.done_content.startswith("DONE_SUMMARY")
+    mock_create.assert_called_once()
+    # 4th positional arg to create_worktree is base_branch (branch_for_create)
+    create_args = mock_create.call_args[0]
+    assert create_args[3] == "codex"  # branch_for_create == plan_branch
+
+
+def test_run_fix_with_sync_falls_back_to_base_branch():
+    """_run_fix_with_sync falls back to base_branch when plan_branch is not set."""
+    task = _make_fix_task(plan_branch=None, base_branch="master")
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = False
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.create_worktree", return_value=mock_wt) as mock_create,
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.orch.run.coder.run_fix") as mock_fix,
+    ):
+        mock_sync.return_value = {
+            "synced": True,
+            "branch": "autoswe/issue-42",
+            "commit_sha": "abc123",
+            "changed": False,
+            "ahead": 0,
+        }
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+
+        hr = _run_fix_with_sync(task, None, repo_cfg, cfg, None)
+
+    assert hr.done_content.startswith("DONE_SUMMARY")
+    mock_create.assert_called_once()
+    create_args = mock_create.call_args[0]
+    assert create_args[3] == "master"  # branch_for_create == base_branch (fallback)
+
+
 # ------ _run_review_with_sync ------
 
 
-def _make_review_task(base_branch="main"):
+def _make_review_task(plan_branch=None, base_branch="main"):
     """Build a minimal task dict for review tests."""
     return {
         "id": "owner/repo#42",
@@ -658,6 +742,7 @@ def _make_review_task(base_branch="main"):
         "title": "Test issue",
         "body": "/plan",
         "base_branch": base_branch,
+        "plan_branch": plan_branch,
         "_token": "ghp_fake",
     }
 
@@ -863,6 +948,71 @@ def test_run_review_with_sync_passes_worktree_to_reviewer():
     # Verify wt= kwarg is passed to reviewer.run_review
     call_kwargs = mock_review.call_args[1]
     assert call_kwargs.get("wt") is mock_wt
+
+
+def test_run_review_with_sync_uses_plan_branch():
+    """_run_review_with_sync forks worktree from plan_branch when set, not base_branch."""
+    task = _make_review_task(plan_branch="codex", base_branch="master")
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = False
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.create_worktree", return_value=mock_wt) as mock_create,
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.harness.reviewer.run_review") as mock_review,
+    ):
+        mock_sync.return_value = {
+            "synced": True,
+            "branch": "autoswe/issue-42",
+            "commit_sha": "abc123",
+            "changed": False,
+            "ahead": 0,
+        }
+        mock_review.return_value = HandlerResult("REVIEW_READY\tLGTM")
+
+        hr = _run_review_with_sync(task, None, repo_cfg, cfg, None)
+
+    assert hr.done_content.startswith("REVIEW_READY")
+    mock_create.assert_called_once()
+    # 4th positional arg to create_worktree is base_branch (branch_for_create)
+    create_args = mock_create.call_args[0]
+    assert create_args[3] == "codex"  # branch_for_create == plan_branch
+
+
+def test_run_review_with_sync_falls_back_to_base_branch():
+    """_run_review_with_sync falls back to base_branch when plan_branch is not set."""
+    task = _make_review_task(plan_branch=None, base_branch="master")
+    repo_cfg = {"provider": "github"}
+    cfg = {}
+
+    mock_wt = MagicMock(spec=Path)
+    mock_wt.exists.return_value = False
+
+    with (
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=mock_wt),
+        patch("autoswe.orch.run.worktree_mod.create_worktree", return_value=mock_wt) as mock_create,
+        patch("autoswe.orch.run.worktree_mod.sync_branch") as mock_sync,
+        patch("autoswe.harness.reviewer.run_review") as mock_review,
+    ):
+        mock_sync.return_value = {
+            "synced": True,
+            "branch": "autoswe/issue-42",
+            "commit_sha": "abc123",
+            "changed": False,
+            "ahead": 0,
+        }
+        mock_review.return_value = HandlerResult("REVIEW_READY\tLGTM")
+
+        hr = _run_review_with_sync(task, None, repo_cfg, cfg, None)
+
+    assert hr.done_content.startswith("REVIEW_READY")
+    mock_create.assert_called_once()
+    create_args = mock_create.call_args[0]
+    assert create_args[3] == "master"  # branch_for_create == base_branch (fallback)
 
 
 def test_run_retry_replays_review():

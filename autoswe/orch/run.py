@@ -276,9 +276,10 @@ def _run_fix_with_sync(
 ) -> HandlerResult:
     """Pre-dispatch sync before /fix, then run the fix handler."""
     base_branch = task.get("base_branch", "main")
+    plan_branch = task.get("plan_branch") or base_branch
     wt, err = _sync_before_dispatch(
         task, repo_cfg, cfg, progress_callback,
-        phase="fix", branch_for_create=base_branch,
+        phase="fix", branch_for_create=plan_branch,
     )
     if err is not None:
         return err
@@ -325,9 +326,10 @@ def _run_review_with_sync(
 ) -> HandlerResult:
     """Pre-dispatch sync before /review, then run the review handler."""
     base_branch = task.get("base_branch", "main")
+    plan_branch = task.get("plan_branch") or base_branch
     wt, err = _sync_before_dispatch(
         task, repo_cfg, cfg, progress_callback,
-        phase="review", branch_for_create=base_branch,
+        phase="review", branch_for_create=plan_branch,
     )
     if err is not None:
         return err
