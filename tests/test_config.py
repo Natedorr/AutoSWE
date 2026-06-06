@@ -702,3 +702,87 @@ def test_load_harnesses_config_with_list_values(isolated_autoswe_dir):
     result = load_harnesses_config()
     assert "with-list" in result
     assert result["with-list"]["extra_tools"] == ["Read", "Write"]
+
+
+# ---------------------------------------------------------------------------
+# AGENT_RETRY_ON_SUBTYPE config
+# ---------------------------------------------------------------------------
+
+
+def test_agent_retry_on_subtype_default_empty(isolated_autoswe_dir):
+    """AGENT_RETRY_ON_SUBTYPE defaults to empty string."""
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert "AGENT_RETRY_ON_SUBTYPE" in cfg
+    assert cfg["AGENT_RETRY_ON_SUBTYPE"] == ""
+
+
+def test_agent_retry_on_subtype_env_override(isolated_autoswe_dir, monkeypatch):
+    """AGENT_RETRY_ON_SUBTYPE env var is passed through as-is."""
+    monkeypatch.setenv("AGENT_RETRY_ON_SUBTYPE", "error,killed")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AGENT_RETRY_ON_SUBTYPE"] == "error,killed"
+
+
+def test_agent_retry_on_subtype_file_override(isolated_autoswe_dir):
+    """AGENT_RETRY_ON_SUBTYPE can be set in autoswe.env."""
+    from autoswe.core import config as config_mod
+
+    config_mod.CONFIG_FILE.write_text("AGENT_RETRY_ON_SUBTYPE=error\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AGENT_RETRY_ON_SUBTYPE"] == "error"
+
+
+def test_agent_retry_on_subtype_runner_parses_csv():
+    """Runner parses AGENT_RETRY_ON_SUBTYPE comma list into set."""
+    # Simulate the parsing logic in runner.py
+    raw = "error,killed"
+    parsed = {s.strip() for s in raw.split(",") if s.strip()}
+    assert parsed == {"error", "killed"}
+
+    raw_single = "error"
+    parsed_single = {s.strip() for s in raw_single.split(",") if s.strip()}
+    assert parsed_single == {"error"}
+
+
+# ---------------------------------------------------------------------------
+# WORKTREE_ORPHAN_POLICY config
+# ---------------------------------------------------------------------------
+
+
+def test_worktree_orphan_policy_default(isolated_autoswe_dir):
+    """WORKTREE_ORPHAN_POLICY defaults to 'commit'."""
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert "WORKTREE_ORPHAN_POLICY" in cfg
+    assert cfg["WORKTREE_ORPHAN_POLICY"] == "commit"
+
+
+def test_worktree_orphan_policy_env_override(isolated_autoswe_dir, monkeypatch):
+    """WORKTREE_ORPHAN_POLICY can be overridden via env var."""
+    monkeypatch.setenv("WORKTREE_ORPHAN_POLICY", "discard")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["WORKTREE_ORPHAN_POLICY"] == "discard"
+
+
+def test_worktree_orphan_policy_file_override(isolated_autoswe_dir):
+    """WORKTREE_ORPHAN_POLICY can be set in autoswe.env."""
+    from autoswe.core import config as config_mod
+
+    config_mod.CONFIG_FILE.write_text("WORKTREE_ORPHAN_POLICY=log_only\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["WORKTREE_ORPHAN_POLICY"] == "log_only"

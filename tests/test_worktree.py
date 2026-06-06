@@ -374,6 +374,88 @@ def test_commit_and_push_multi_fix_preserves_history(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# is_dirty / reset_clean
+# ---------------------------------------------------------------------------
+
+
+def test_is_dirty_returns_true_when_changes(tmp_path):
+    """is_dirty returns True when git status --porcelain has output."""
+    from autoswe.vcs.worktree import is_dirty
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = " M modified_file.py\n"
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        assert is_dirty(tmp_path) is True
+
+
+def test_is_dirty_returns_false_when_clean(tmp_path):
+    """is_dirty returns False when git status --porcelain is empty."""
+    from autoswe.vcs.worktree import is_dirty
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        assert is_dirty(tmp_path) is False
+
+
+def test_is_dirty_calls_porcelain(tmp_path):
+    """is_dirty issues git status --porcelain against the worktree path."""
+    from autoswe.vcs.worktree import is_dirty
+
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(args)
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        is_dirty(tmp_path)
+
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert "status" in cmd
+    assert "--porcelain" in cmd
+    assert str(tmp_path) in cmd
+
+
+def test_reset_clean_issues_correct_commands(tmp_path):
+    """reset_clean calls git reset --hard and git clean -fd."""
+    from autoswe.vcs.worktree import reset_clean
+
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        reset_clean(tmp_path, "autoswe/issue-7")
+
+    assert len(calls) == 2
+    reset_cmd = calls[0]
+    clean_cmd = calls[1]
+    assert "reset" in reset_cmd
+    assert "--hard" in reset_cmd
+    assert "origin/autoswe/issue-7" in reset_cmd
+    assert "clean" in clean_cmd
+    assert "-fd" in clean_cmd
+
+
+# ---------------------------------------------------------------------------
 # sync_branch
 # ---------------------------------------------------------------------------
 

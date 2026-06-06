@@ -125,6 +125,8 @@ async def post_plan(*, body: str) -> list[TextContent]:
     Call this when you have a complete plan. The plan should include the
     approach, files to modify, and any questions for the user.
     """
+    if not body or not body.strip():
+        return [TextContent(type="text", text="Error: body cannot be empty — provide the plan content")]
     if SUPPRESS_POSTING:
         return [TextContent(type="text", text="suppressed (minimal posting)")]
     if PROVIDER != "github":
@@ -143,6 +145,8 @@ async def post_question(*, body: str) -> list[TextContent]:
     Call this when you need clarification before proceeding. The comment
     will signal that autoSWE is waiting for a user reply.
     """
+    if not body or not body.strip():
+        return [TextContent(type="text", text="Error: body cannot be empty — provide the question text")]
     if SUPPRESS_POSTING:
         return [TextContent(type="text", text="suppressed (minimal posting)")]
     if PROVIDER != "github":

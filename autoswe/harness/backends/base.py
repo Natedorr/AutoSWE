@@ -168,6 +168,17 @@ class CodingBackend(Protocol):
         """Return the set of supported capability strings."""
         ...
 
+    @classmethod
+    def retryable_subtypes(cls) -> set[str]:
+        """Return the set of RunResult.subtype values that trigger a retry.
+
+        Called by the runner when AGENT_RETRY_ON_FAILURE > 0.  Return an
+        empty set (the default contract) to rely solely on exception-based
+        retries.  Override in backends whose failures are return-value-driven
+        rather than exception-driven (e.g. Codex exit-code failures).
+        """
+        ...
+
     def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec and return an awaitable yielding RunResult."""
         ...

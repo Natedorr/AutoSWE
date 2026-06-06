@@ -213,7 +213,10 @@ class TestAskUserQuestionPassthrough:
 
     def test_denies_ask_user_question(self, callback, context, task):
         input_data = {
-            "questions": [{"question": "What is the file path?"}]
+            "questions": [{
+                "question": "What is the file path?",
+                "options": [{"label": "src/main.py", "description": ""}],
+            }]
         }
         result = _run(callback, "AskUserQuestion", input_data, context)
         assert isinstance(result, PermissionResultDeny)

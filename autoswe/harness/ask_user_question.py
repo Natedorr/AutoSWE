@@ -110,6 +110,14 @@ def _is_git_commit_push(cmd: str) -> bool:
     return sub in {"commit", "push", "force-push"}
 
 
+def _is_valid_question_input(input_data: dict) -> bool:
+    """Return True if input_data has at least one question with text and options."""
+    return any(
+        q.get("question", "").strip() and q.get("options")
+        for q in input_data.get("questions", [])
+    )
+
+
 def format_ask_user_question(input_data: dict) -> str:
     """Render the SDK AskUserQuestion input as markdown for an issue comment.
 
@@ -212,6 +220,11 @@ def make_can_use_tool(
 
         if tool_name != "AskUserQuestion":
             return PermissionResultAllow(updated_input=input_data)
+
+        if not _is_valid_question_input(input_data):
+            return PermissionResultDeny(
+                message="AskUserQuestion input had no real questions — provide at least one question with options.",
+            )
 
         md = format_ask_user_question(input_data)
         state["asked_question_md"] = md

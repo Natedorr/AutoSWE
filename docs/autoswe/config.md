@@ -11,6 +11,8 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | `MAX_TOTAL_HOURS` | `2` | Max total time per issue in hours |
 | `AGENT_TIMEOUT` | `7200` | Max Claude session runtime in seconds (2 hours) |
 | `AGENT_RETRY_ON_FAILURE` | `0` | Auto-retry failed handler runs (0 = disabled) |
+| `AGENT_RETRY_ON_SUBTYPE` | `""` | Comma-separated list of `RunResult.subtype` values that trigger a retry (e.g. `"error,killed"`). When set, overrides the backend's default retryable-subtype set. Empty string = use backend default (Codex: `"error,killed"`; Claude Code: `""` — relies on exception-based retry). |
+| `WORKTREE_ORPHAN_POLICY` | `commit` | Policy when a worktree is left dirty by a SIGKILL'd dispatch: `"commit"` = commit + push orphaned changes before re-dispatch; `"discard"` = hard-reset; `"log_only"` = log but take no git action. |
 | `MAX_DRAIN_CYCLES` | `50` | Max drain cycles for `poller --drain` |
 | `WORKTREE_DIR` | `worktrees` | Worktree root (relative to AUTOSWE_DIR, or absolute path) |
 | `SILENT_REPORTING` | `false` | Skip welcome comments |

@@ -321,6 +321,56 @@ class TestCapabilityHonesty:
 
 
 # ---------------------------------------------------------------------------
+# 4b. Retryable-subtypes parity
+# ---------------------------------------------------------------------------
+
+
+class TestRetryableSubtypesParity:
+    """Each backend must implement retryable_subtypes() with the correct contract."""
+
+    def test_both_have_retryable_subtypes(self):
+        """Both backends expose retryable_subtypes as a classmethod."""
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+        from autoswe.harness.backends.codex import CodexBackend
+
+        for cls in (ClaudeCodeBackend, CodexBackend):
+            assert hasattr(cls, "retryable_subtypes"), (
+                f"{cls.__name__} missing retryable_subtypes()"
+            )
+            result = cls.retryable_subtypes()
+            assert isinstance(result, set), (
+                f"{cls.__name__}.retryable_subtypes() must return a set"
+            )
+
+    def test_claude_retryable_subtypes_is_empty(self):
+        """ClaudeCodeBackend.retryable_subtypes() returns empty (uses exceptions)."""
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+
+        assert ClaudeCodeBackend.retryable_subtypes() == set()
+
+    def test_codex_retryable_subtypes(self):
+        """CodexBackend.retryable_subtypes() returns {'error', 'killed'}."""
+        from autoswe.harness.backends.codex import CodexBackend
+
+        result = CodexBackend.retryable_subtypes()
+        assert result == {"error", "killed"}, (
+            f"CodexBackend.retryable_subtypes() changed: got {result}"
+        )
+
+    def test_retryable_subtypes_returns_copy(self):
+        """retryable_subtypes() must return a copy so callers can't mutate state."""
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+        from autoswe.harness.backends.codex import CodexBackend
+
+        for cls in (ClaudeCodeBackend, CodexBackend):
+            a = cls.retryable_subtypes()
+            b = cls.retryable_subtypes()
+            assert a is not b, f"{cls.__name__}.retryable_subtypes() must return a new set"
+            a.add("__tamper__")
+            assert "__tamper__" not in b
+
+
+# ---------------------------------------------------------------------------
 # 5. Factory + dispatcher integration parity
 # ---------------------------------------------------------------------------
 

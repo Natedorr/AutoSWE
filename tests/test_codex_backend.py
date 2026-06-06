@@ -137,8 +137,23 @@ def test_codex_capabilities_returns_copy():
     """capabilities() returns a copy, not the class-level set."""
     caps = CodexBackend.capabilities()
     assert caps is not CodexBackend.CAPABILITIES
-    caps.add("fake")
-    assert "fake" not in CodexBackend.capabilities()
+
+
+def test_codex_retryable_subtypes():
+    """CodexBackend.retryable_subtypes() returns {'error', 'killed'}."""
+    result = CodexBackend.retryable_subtypes()
+    assert result == {"error", "killed"}
+
+
+def test_codex_retryable_subtypes_returns_copy():
+    """retryable_subtypes() returns a new set each call."""
+    a = CodexBackend.retryable_subtypes()
+    b = CodexBackend.retryable_subtypes()
+    assert a is not b
+    assert a is not CodexBackend.RETRYABLE_SUBTYPES
+    a.add("__tamper__")
+    assert "__tamper__" not in b
+    assert "__tamper__" not in CodexBackend.RETRYABLE_SUBTYPES
 
 
 # ---------- Protocol conformance ----------

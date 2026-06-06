@@ -133,6 +133,8 @@ def load_config() -> dict:
         "ALLOWED_AUTHORS": os.environ.get("ALLOWED_AUTHORS", ""),
         "LINK_BRANCH_TO_ISSUE": _as_bool(os.environ.get("LINK_BRANCH_TO_ISSUE"), "false"),
         "SYNC_STRATEGY": os.environ.get("SYNC_STRATEGY", "merge"),  # "merge" | "rebase"
+        "AGENT_RETRY_ON_SUBTYPE": os.environ.get("AGENT_RETRY_ON_SUBTYPE", ""),
+        "WORKTREE_ORPHAN_POLICY": os.environ.get("WORKTREE_ORPHAN_POLICY", "commit"),
     }
     if CONFIG_FILE.exists():
         for line in CONFIG_FILE.read_text().splitlines():

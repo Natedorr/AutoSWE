@@ -347,6 +347,11 @@ class ClaudeCodeBackend:
     def capabilities(cls) -> set[str]:
         return cls.CAPABILITIES.copy()
 
+    @classmethod
+    def retryable_subtypes(cls) -> set[str]:
+        # Claude retries via SDK exceptions (_get_retryable_exceptions), not subtypes.
+        return set()
+
     def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec via Claude Agent SDK.
 
@@ -465,9 +470,11 @@ class ClaudeCodeBackend:
                                         spec.progress_callback(body)
                                 if isinstance(block, ToolUseBlock):
                                     if block.name == "mcp__autoswe_comment__post_plan":
-                                        plan_posted = True
+                                        if (block.input or {}).get("body", "").strip():
+                                            plan_posted = True
                                     elif block.name == "mcp__autoswe_comment__post_question":
-                                        question_posted = True
+                                        if (block.input or {}).get("body", "").strip():
+                                            question_posted = True
                                     plan_path = _extract_plan_file_path(block)
                                     if plan_path is not None:
                                         captured_plan_file = plan_path

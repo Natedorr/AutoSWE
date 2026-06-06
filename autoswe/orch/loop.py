@@ -545,6 +545,129 @@ def _post_pending_welcomes(
 # Main poll function
 # ---------------------------------------------------------------------------
 
+def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None:
+    """Recover worktrees left dirty by SIGKILL'd dispatch processes.
+
+    Runs at poll-cycle startup (inside the LockedQueue context, before dispatch).
+    For each queue entry with a dead PID file:
+    - Clears the stale PID.
+    - Resets any RUNNING status to "pending" so decide() re-dispatches.
+    - Depending on WORKTREE_ORPHAN_POLICY (default "commit"):
+        "commit"   — stage, commit, and push orphaned changes so the next
+                     dispatch's reset-to-origin keeps the work.
+        "discard"  — hard-reset the worktree (no commit).
+        "log_only" — log but take no git action.
+    """
+    if not RUNNING_DIR.exists():
+        return
+
+    policy = str(cfg.get("WORKTREE_ORPHAN_POLICY", "commit")).lower()
+
+    for slug, task in list(queue.items()):
+        pid_path = RUNNING_DIR / f"{slug_to_filename(slug)}.pid"
+        if not pid_path.exists():
+            continue
+
+        try:
+            pid = int(pid_path.read_text().strip())
+        except (ValueError, OSError):
+            pid_path.unlink(missing_ok=True)
+            continue
+
+        if _is_pid_alive(pid):
+            continue  # live dispatch owns this entry
+
+        # Dead PID — orphaned interrupted dispatch
+        pid_path.unlink(missing_ok=True)
+        log(f"[RECOVER] {slug}: cleared stale PID {pid}")
+
+        owner = task.get("owner")
+        repo = task.get("repo")
+        issue_num = task.get("issue_number")
+        provider = task.get("provider", "github")
+
+        if not (owner and repo and issue_num):
+            continue
+
+        # Reset any running status so decide() will re-dispatch
+        current_status = task.get("autoswe_status")
+        if current_status in RUNNING_STATUSES:
+            task["autoswe_status"] = "pending"
+            log(f"[RECOVER] {slug}: reset status {current_status!r} → 'pending'")
+
+        if policy == "log_only":
+            log(f"[RECOVER] {slug}: policy=log_only, skipping worktree recovery")
+            continue
+
+        # Deferred worktree imports (avoids circular dependency at module load)
+        try:
+            from autoswe.vcs.worktree import (
+                commit_and_push,
+                ensure_clone,
+                is_dirty,
+                reset_clean,
+                worktree_path,
+            )
+        except ImportError:
+            dbg.error("recover: worktree module unavailable for %s", slug, exc_info=True)
+            continue
+
+        wt = worktree_path(owner, repo, issue_num, cfg, provider)
+        if not wt.exists():
+            log(f"[RECOVER] {slug}: worktree {wt} does not exist, skipping")
+            continue
+
+        if not is_dirty(wt):
+            log(f"[RECOVER] {slug}: worktree clean, nothing to recover")
+            continue
+
+        try:
+            repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg)
+        except Exception as e:
+            dbg.error("recover: build_repo_cfg failed for %s: %s", slug, e, exc_info=True)
+            log(f"[RECOVER] {slug}: could not build repo_cfg: {e}")
+            continue
+
+        repo_override = repos_cfg.get(f"{owner}/{repo}", {})
+        base_branch = repo_override.get("base_branch", "main")
+
+        if policy == "discard":
+            try:
+                from autoswe.providers.factory import get_vcs as _get_vcs
+                branch = _get_vcs(repo_cfg).branch_name(issue_num)
+                reset_clean(wt, branch)
+                log(f"[RECOVER] {slug}: discarded orphaned changes")
+            except Exception as e:
+                dbg.error("recover: discard failed for %s: %s", slug, e, exc_info=True)
+                log(f"[RECOVER] {slug}: discard failed: {e}")
+            continue
+
+        # Default policy: commit + push
+        try:
+            token = repo_cfg.get("token", "")
+            ensure_clone(owner, repo, token, cfg, base_branch=base_branch, provider=provider)
+            msg = f"autoswe: recovered orphaned changes from interrupted run (issue #{issue_num})"
+            commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider)
+            log(f"[RECOVER] {slug}: committed and pushed orphaned changes")
+        except Exception as e:
+            dbg.error("recover: commit_and_push failed for %s: %s", slug, e, exc_info=True)
+            log(f"[RECOVER] {slug}: commit_and_push failed: {e}")
+            continue
+
+        # Best-effort recovery comment
+        try:
+            tracker = get_tracker(repo_cfg)
+            tracker.post_comment(
+                repo_cfg, issue_num,
+                f"**autoSWE recovery**: found orphaned changes from an interrupted run "
+                f"— committed and pushed them to `autoswe/issue-{issue_num}`."
+                f"{AUTOSWE_BOT_FOOTER}",
+            )
+        except Exception as e:
+            dbg.error("recover: comment post failed for %s: %s", slug, e, exc_info=True)
+            log(f"[RECOVER] {slug}: recovery comment failed: {e}")
+
+
 def poll(cfg: dict, mode: str = "full", repo_filter: str | None = None) -> int:
     """Run one poll cycle: sync + decide + dispatch for all repos.
 
@@ -589,6 +712,9 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
 
     with LockedQueue() as lq:
         queue = lq.queue
+
+        if run_actions and cfg.get("WORKTREE_DIR"):
+            _recover_orphaned_worktrees(cfg, queue, repos_cfg)
 
         for repo_path in repo_keys:
             owner, _, repo = repo_path.partition("/")

@@ -8,6 +8,7 @@ Batch 12 — Concurrency & race conditions:
 - Welcome posts interleaving across multiple issues
 """
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -270,6 +271,201 @@ class TestDispatchedProtection:
         assert _is_task_running("gh:o_r_1") is True
         # Even if new comments arrive, the PID check in the dispatch loop
         # prevents re-dispatch until PID file is removed.
+
+
+# ---------------------------------------------------------------------------
+# _recover_orphaned_worktrees
+# ---------------------------------------------------------------------------
+
+
+class TestRecoverOrphanedWorktrees:
+    """_recover_orphaned_worktrees — startup recovery pass."""
+
+    @pytest.fixture
+    def recovery_setup(self, running_dir, tmp_path, monkeypatch):
+        """Set up AUTOSWE_DIR + RUNNING_DIR for recovery tests."""
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", running_dir)
+
+        cfg = {
+            "WORKTREE_DIR": str(tmp_path / "worktrees"),
+            "WORKTREE_ORPHAN_POLICY": "commit",
+        }
+        repos_cfg = {
+            "o/r": {"owner": "o", "repo": "r", "token": "tok", "base_branch": "main"},
+        }
+        return cfg, repos_cfg, running_dir, tmp_path
+
+    def _make_task(self, status: str = "fixing") -> dict:
+        return {
+            "id": "gh:o_r_1",
+            "owner": "o",
+            "repo": "r",
+            "issue_number": 1,
+            "autoswe_status": status,
+            "provider": "github",
+        }
+
+    def test_alive_pid_not_touched(self, recovery_setup, monkeypatch):
+        """Alive PID → entry untouched."""
+        cfg, repos_cfg, running_dir, tmp_path = recovery_setup
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", running_dir)
+
+        my_pid = os.getpid()
+        (running_dir / "gh_o_r_1.pid").write_text(str(my_pid))
+
+        queue = {"gh:o_r_1": self._make_task("fixing")}
+        from autoswe.orch.loop import _recover_orphaned_worktrees
+        _recover_orphaned_worktrees(cfg, queue, repos_cfg)
+
+        # PID file still present (process alive)
+        assert (running_dir / "gh_o_r_1.pid").exists()
+        # Status unchanged
+        assert queue["gh:o_r_1"]["autoswe_status"] == "fixing"
+
+    def test_dead_pid_cleared_clean_worktree(self, recovery_setup, monkeypatch):
+        """Dead PID + clean worktree → PID cleared, status reset, no commit."""
+        cfg, repos_cfg, running_dir, tmp_path = recovery_setup
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", running_dir)
+
+        (running_dir / "gh_o_r_1.pid").write_text("99999999")
+
+        # Create worktree directory (required for path.exists())
+        wt_dir = tmp_path / "worktrees" / "o_r" / "issue-1"
+        wt_dir.mkdir(parents=True)
+
+        queue = {"gh:o_r_1": self._make_task("fixing")}
+
+        with patch("autoswe.vcs.worktree.is_dirty", return_value=False), \
+             patch("autoswe.vcs.worktree.commit_and_push") as mock_cap:
+            from autoswe.orch.loop import _recover_orphaned_worktrees
+            _recover_orphaned_worktrees(cfg, queue, repos_cfg)
+
+        assert not (running_dir / "gh_o_r_1.pid").exists()
+        assert queue["gh:o_r_1"]["autoswe_status"] == "pending"
+        mock_cap.assert_not_called()
+
+    def test_dead_pid_dirty_worktree_commits(self, recovery_setup, monkeypatch):
+        """Dead PID + dirty worktree + policy=commit → commit_and_push called."""
+        cfg, repos_cfg, running_dir, tmp_path = recovery_setup
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", running_dir)
+
+        (running_dir / "gh_o_r_1.pid").write_text("99999999")
+
+        wt_dir = tmp_path / "worktrees" / "o_r" / "issue-1"
+        wt_dir.mkdir(parents=True)
+
+        queue = {"gh:o_r_1": self._make_task("fixing")}
+
+        commit_calls = []
+
+        def fake_cap(wt, owner, repo, issue_num, msg, base_branch, provider="github"):
+            commit_calls.append({
+                "owner": owner, "repo": repo,
+                "issue_num": issue_num, "msg": msg,
+            })
+            return {"committed": True, "commit_sha": "abc123", "branch": "autoswe/issue-1"}
+
+        with patch("autoswe.vcs.worktree.is_dirty", return_value=True), \
+             patch("autoswe.vcs.worktree.ensure_clone"), \
+             patch("autoswe.vcs.worktree.commit_and_push", side_effect=fake_cap), \
+             patch("autoswe.orch.loop.build_repo_cfg", return_value={
+                 "owner": "o", "repo": "r", "token": "tok", "provider": "github",
+             }), \
+             patch("autoswe.orch.loop.get_tracker") as mock_tracker:
+            mock_tracker.return_value.post_comment = lambda *a, **kw: None
+            from autoswe.orch.loop import _recover_orphaned_worktrees
+            _recover_orphaned_worktrees(cfg, queue, repos_cfg)
+
+        assert not (running_dir / "gh_o_r_1.pid").exists()
+        assert queue["gh:o_r_1"]["autoswe_status"] == "pending"
+        assert len(commit_calls) == 1
+        assert "issue #1" in commit_calls[0]["msg"]
+
+    def test_discard_policy_resets_no_commit(self, recovery_setup, monkeypatch):
+        """WORKTREE_ORPHAN_POLICY=discard → reset_clean called, not commit_and_push."""
+        cfg, repos_cfg, running_dir, tmp_path = recovery_setup
+        cfg = dict(cfg, WORKTREE_ORPHAN_POLICY="discard")
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", running_dir)
+
+        (running_dir / "gh_o_r_1.pid").write_text("99999999")
+
+        wt_dir = tmp_path / "worktrees" / "o_r" / "issue-1"
+        wt_dir.mkdir(parents=True)
+
+        queue = {"gh:o_r_1": self._make_task("fixing")}
+
+        reset_calls = []
+        commit_calls = []
+
+        with patch("autoswe.vcs.worktree.is_dirty", return_value=True), \
+             patch("autoswe.vcs.worktree.reset_clean", side_effect=lambda wt, branch: reset_calls.append(branch)), \
+             patch("autoswe.vcs.worktree.commit_and_push", side_effect=lambda *a, **kw: commit_calls.append(True)), \
+             patch("autoswe.orch.loop.build_repo_cfg", return_value={
+                 "owner": "o", "repo": "r", "token": "tok", "provider": "github",
+             }):
+            from autoswe.orch.loop import _recover_orphaned_worktrees
+            _recover_orphaned_worktrees(cfg, queue, repos_cfg)
+
+        assert len(reset_calls) == 1
+        assert len(commit_calls) == 0
+        assert not (running_dir / "gh_o_r_1.pid").exists()
+
+    def test_log_only_policy_no_git_action(self, recovery_setup, monkeypatch):
+        """WORKTREE_ORPHAN_POLICY=log_only → no git operations performed."""
+        cfg, repos_cfg, running_dir, tmp_path = recovery_setup
+        cfg = dict(cfg, WORKTREE_ORPHAN_POLICY="log_only")
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", running_dir)
+
+        (running_dir / "gh_o_r_1.pid").write_text("99999999")
+        queue = {"gh:o_r_1": self._make_task("fixing")}
+
+        with patch("autoswe.vcs.worktree.is_dirty") as mock_dirty, \
+             patch("autoswe.vcs.worktree.commit_and_push") as mock_cap, \
+             patch("autoswe.vcs.worktree.reset_clean") as mock_reset:
+            from autoswe.orch.loop import _recover_orphaned_worktrees
+            _recover_orphaned_worktrees(cfg, queue, repos_cfg)
+
+        mock_dirty.assert_not_called()
+        mock_cap.assert_not_called()
+        mock_reset.assert_not_called()
+
+    def test_no_running_dir_is_noop(self, recovery_setup, monkeypatch, tmp_path):
+        """Non-existent RUNNING_DIR → function returns early, no errors."""
+        cfg, repos_cfg, running_dir, _ = recovery_setup
+        absent_dir = tmp_path / "nonexistent_running"
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", absent_dir)
+
+        queue = {"gh:o_r_1": self._make_task("fixing")}
+        from autoswe.orch.loop import _recover_orphaned_worktrees
+        _recover_orphaned_worktrees(cfg, queue, repos_cfg)  # Should not raise
+
+        # Queue unchanged (no PID file found)
+        assert queue["gh:o_r_1"]["autoswe_status"] == "fixing"
+
+    def test_running_status_reset_to_pending(self, recovery_setup, monkeypatch):
+        """All RUNNING_STATUSES are reset to 'pending' on dead-PID detection."""
+        from autoswe.tracking.labels import RUNNING_STATUSES
+        cfg, repos_cfg, running_dir, tmp_path = recovery_setup
+        cfg = dict(cfg, WORKTREE_ORPHAN_POLICY="log_only")
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", running_dir)
+
+        for status in RUNNING_STATUSES:
+            slug = f"gh:o_r_{status}"
+            stem = f"gh_o_r_{status}"
+            (running_dir / f"{stem}.pid").write_text("99999999")
+
+            queue = {slug: {
+                "id": slug, "owner": "o", "repo": "r",
+                "issue_number": 1, "autoswe_status": status,
+                "provider": "github",
+            }}
+
+            from autoswe.orch.loop import _recover_orphaned_worktrees
+            _recover_orphaned_worktrees(cfg, queue, repos_cfg)
+
+            assert queue[slug]["autoswe_status"] == "pending", (
+                f"Status {status!r} should be reset to 'pending'"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,8 @@ Verifies:
 import asyncio
 from unittest.mock import patch
 
+from autoswe.harness.backends.base import RunResult
+
 # ---------- CodingBackend Protocol conformance ----------
 
 
@@ -50,8 +52,40 @@ def test_claude_code_backend_satisfies_protocol():
     # Check the required methods exist
     assert hasattr(ClaudeCodeBackend, "capabilities")
     assert hasattr(ClaudeCodeBackend, "run")
+    assert hasattr(ClaudeCodeBackend, "retryable_subtypes")
     assert callable(ClaudeCodeBackend.capabilities)
     assert callable(ClaudeCodeBackend.run)
+    assert callable(ClaudeCodeBackend.retryable_subtypes)
+
+
+def test_protocol_has_retryable_subtypes():
+    """CodingBackend Protocol declares retryable_subtypes classmethod."""
+    from autoswe.harness.backends.base import CodingBackend
+
+    assert hasattr(CodingBackend, "retryable_subtypes")
+    assert callable(CodingBackend.retryable_subtypes)
+
+
+def test_claude_code_retryable_subtypes_is_empty():
+    """ClaudeCodeBackend.retryable_subtypes() returns empty set (uses exceptions)."""
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+
+    result = ClaudeCodeBackend.retryable_subtypes()
+    assert isinstance(result, set)
+    assert result == set()
+
+
+def test_retryable_subtypes_returns_copy():
+    """retryable_subtypes() must return a copy so callers cannot mutate shared state."""
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+    from autoswe.harness.backends.codex import CodexBackend
+
+    for cls in (ClaudeCodeBackend, CodexBackend):
+        a = cls.retryable_subtypes()
+        b = cls.retryable_subtypes()
+        assert a is not b, f"{cls.__name__}.retryable_subtypes() must return a new set"
+        a.add("__tamper__")
+        assert "__tamper__" not in b
 
 
 # ---------- RunSpec dataclass ----------
@@ -235,7 +269,7 @@ def test_run_builds_run_spec():
     with patch.object(asyncio, "run") as mock_run:
         def fake_run(coro):
             coro.close()
-            return ("t", "s", "success")
+            return RunResult(text="t", session_id="s", subtype="success")
         mock_run.side_effect = fake_run
 
         run("p", cwd="/tmp", cfg=cfg, repo_cfg=repo_cfg)

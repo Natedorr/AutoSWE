@@ -159,6 +159,7 @@ def run(
     rc = repo_cfg or {}
     timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
     max_retries = int(rc.get("agent_retry_on_failure", cfg.get("AGENT_RETRY_ON_FAILURE", 0)))
+    raw_subtype_override = rc.get("agent_retry_on_subtype", cfg.get("AGENT_RETRY_ON_SUBTYPE", ""))
 
     # Thread harness_cfg into spec.state so the backend can read
     # backend-specific fields (cli_path, anthropic_api_key, etc.).
@@ -203,15 +204,31 @@ def run(
         )
 
     retryable = _get_retryable_exceptions()
+
+    # Resolve retryable subtypes: config override takes precedence over backend default.
+    if raw_subtype_override:
+        retryable_subtypes: set[str] = {
+            s.strip() for s in str(raw_subtype_override).split(",") if s.strip()
+        }
+    elif hasattr(backend, "retryable_subtypes"):
+        retryable_subtypes = backend.retryable_subtypes()
+    else:
+        retryable_subtypes = set()
+
     for attempt in range(max_retries + 1):
         try:
-            return asyncio.run(_with_timeout())
+            result = asyncio.run(_with_timeout())
         except retryable as e:
             if attempt < max_retries:
                 log(f"[RUNNER] Attempt {attempt + 1} failed ({type(e).__name__}: {e}), retrying ({attempt + 2}/{max_retries + 1})")
+                continue
             else:
                 if isinstance(e, asyncio.TimeoutError):
                     log(f"[RUNNER] Timeout after {timeout}s (attempt {attempt + 1}/{max_retries + 1})")
                 else:
                     log(f"[RUNNER] Agent failed after {attempt + 1} attempt(s): {type(e).__name__}: {e}")
                 raise
+        if result.subtype in retryable_subtypes and attempt < max_retries:
+            log(f"[RUNNER] subtype={result.subtype!r}, retrying ({attempt + 2}/{max_retries + 1})")
+            continue
+        return result

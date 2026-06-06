@@ -31,7 +31,8 @@ def test_run_builds_env_overrides():
     with patch.object(asyncio, "run") as mock_async_run:
         def fake_run(coro):
             coro.close()  # Discard unawaited coroutine to avoid GC warnings
-            return ("text", "sess-1", "success")
+            from autoswe.harness.backends.base import RunResult
+            return RunResult(text="text", session_id="sess-1", subtype="success")
         mock_async_run.side_effect = fake_run
 
         from autoswe.harness.runner import run
@@ -53,7 +54,8 @@ def test_run_resolves_model_from_repo_cfg():
     with patch.object(asyncio, "run") as mock_async_run:
         def fake_run(coro):
             coro.close()  # Discard unawaited coroutine to avoid GC warnings
-            return ("text", "sess-1", "success")
+            from autoswe.harness.backends.base import RunResult
+            return RunResult(text="text", session_id="sess-1", subtype="success")
         mock_async_run.side_effect = fake_run
 
         from autoswe.harness.runner import run
@@ -75,7 +77,8 @@ def test_respects_explicit_model():
     with patch.object(asyncio, "run") as mock_async_run:
         def fake_run(coro):
             coro.close()  # Discard unawaited coroutine to avoid GC warnings
-            return ("text", "sess-1", "success")
+            from autoswe.harness.backends.base import RunResult
+            return RunResult(text="text", session_id="sess-1", subtype="success")
         mock_async_run.side_effect = fake_run
 
         from autoswe.harness.runner import run
@@ -107,7 +110,8 @@ def test_run_reads_timeout_from_cfg():
     with patch.object(asyncio, "run") as mock_async_run:
         def fake_run(coro):
             coro.close()  # Discard unawaited coroutine to avoid GC warnings
-            return ("text", "sess-1", "success")
+            from autoswe.harness.backends.base import RunResult
+            return RunResult(text="text", session_id="sess-1", subtype="success")
         mock_async_run.side_effect = fake_run
 
         from autoswe.harness.runner import run
@@ -124,7 +128,8 @@ def test_run_uses_repo_agent_timeout():
     with patch.object(asyncio, "run") as mock_async_run:
         def fake_run(coro):
             coro.close()  # Discard unawaited coroutine to avoid GC warnings
-            return ("text", "sess-1", "success")
+            from autoswe.harness.backends.base import RunResult
+            return RunResult(text="text", session_id="sess-1", subtype="success")
         mock_async_run.side_effect = fake_run
 
         from autoswe.harness.runner import run
@@ -145,7 +150,8 @@ def test_model_resolution_order():
     with patch.object(asyncio, "run") as mock_async_run:
         def fake_run(coro):
             coro.close()  # Discard unawaited coroutine to avoid GC warnings
-            return ("text", "sess-1", "success")
+            from autoswe.harness.backends.base import RunResult
+            return RunResult(text="text", session_id="sess-1", subtype="success")
         mock_async_run.side_effect = fake_run
 
         from autoswe.harness.runner import run

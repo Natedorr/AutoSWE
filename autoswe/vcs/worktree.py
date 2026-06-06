@@ -165,6 +165,18 @@ def ensure_clone(
         _run(["git", "-C", str(main), "reset", "--hard", f"origin/{branch_for_main}"])
 
 
+def is_dirty(wt: Path) -> bool:
+    """Return True if the worktree has uncommitted changes or untracked files."""
+    result = _run(["git", "-C", str(wt), "status", "--porcelain"], check=False)
+    return bool(result.stdout.strip())
+
+
+def reset_clean(wt: Path, branch: str) -> None:
+    """Hard-reset to origin/<branch> and remove untracked files/dirs."""
+    _run(["git", "-C", str(wt), "reset", "--hard", f"origin/{branch}"])
+    _run(["git", "-C", str(wt), "clean", "-fd"])
+
+
 def get_merge_conflict_files(wt: Path) -> list[str]:
     """Return paths with conflict markers when a merge is in progress, else []."""
     result = _run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U"], check=False)

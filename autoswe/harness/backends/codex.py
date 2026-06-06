@@ -181,10 +181,15 @@ class CodexBackend:
     """
 
     CAPABILITIES: set[str] = {"mode", "resume", "progress_stream"}
+    RETRYABLE_SUBTYPES: set[str] = {"error", "killed"}
 
     @classmethod
     def capabilities(cls) -> set[str]:
         return cls.CAPABILITIES.copy()
+
+    @classmethod
+    def retryable_subtypes(cls) -> set[str]:
+        return cls.RETRYABLE_SUBTYPES.copy()
 
     def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec via Codex CLI.
