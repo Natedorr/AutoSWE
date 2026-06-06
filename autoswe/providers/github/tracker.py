@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from autoswe.core.logging_utils import get_debug_logger
+from autoswe.core.redact import redact_worktree_paths
 from autoswe.providers.base import IssueTracker, NormalizedComment, NormalizedIssue
 from autoswe.tracking import api as gh_api
 from autoswe.tracking.assignment import _auto_assign_issue, _get_authenticated_user
@@ -145,7 +146,7 @@ class GitHubTracker(IssueTracker):
         raw = gh_api.gh_post(
             f"/repos/{self._owner}/{self._repo}/issues/{issue_number}/comments",
             self._token,
-            body={"body": body},
+            body={"body": redact_worktree_paths(body)},
         )
         return raw.get("id") if raw else None
 
@@ -154,7 +155,7 @@ class GitHubTracker(IssueTracker):
         gh_api.gh_patch(
             f"/repos/{self._owner}/{self._repo}/issues/comments/{comment_id}",
             self._token,
-            body={"body": body},
+            body={"body": redact_worktree_paths(body)},
         )
 
     def create_issue(self, repo_cfg: dict, title: str, body: str) -> int:

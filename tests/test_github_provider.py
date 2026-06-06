@@ -393,22 +393,40 @@ class TestGitHubVCS:
         assert result.number == 15
         assert "pull/15" in result.url
 
-    def test_link_branch_to_issue_calls_check_runs_api(self, vcs, fake_token, mock_gh_request, gh_route_table):
-        gh_route_table[("POST", "/repos/natedorr/autoswe/check-runs")] = {
-            "id": 999,
-            "name": "autoSWE Fix #42",
+    def test_link_branch_to_issue_uses_graphql(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        """link_branch_to_issue issues a createLinkedBranch GraphQL mutation."""
+        # Return the issue with a node_id when fetched
+        gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42")] = {
+            "number": 42,
+            "node_id": "I_kwGOAB1234",
+        }
+        # GraphQL endpoint
+        gh_route_table[("POST", "/graphql")] = {
+            "data": {
+                "createLinkedBranch": {
+                    "linkedBranch": {
+                        "id": "BV_kwOO",
+                        "ref": {"name": "autoswe/issue-42"},
+                    }
+                }
+            }
         }
 
-        vcs.link_branch_to_issue(42, "abc1234", "autoswe/issue-42")
+        vcs.link_branch_to_issue(42, "abcdef12345", "autoswe/issue-42")
 
-        assert len(mock_gh_request.calls) == 1
-        call = mock_gh_request.calls[0]
-        assert call["method"] == "POST"
-        assert call["path"] == "/repos/natedorr/autoswe/check-runs"
-        assert call["body"]["name"] == "autoSWE Fix #42"
-        assert call["body"]["head_sha"] == "abc1234"
-        assert call["body"]["status"] == "completed"
-        assert call["body"]["conclusion"] == "success"
+        # Verify: 1 GET for issue, 1 POST for graphql
+        assert len(mock_gh_request.calls) == 2
+        get_call = mock_gh_request.calls[0]
+        assert get_call["method"] == "GET"
+        assert get_call["path"] == "/repos/natedorr/autoswe/issues/42"
+
+        post_call = mock_gh_request.calls[1]
+        assert post_call["method"] == "POST"
+        assert post_call["path"] == "/graphql"
+        assert "createLinkedBranch" in post_call["body"]["query"]
+        assert post_call["body"]["variables"]["issueId"] == "I_kwGOAB1234"
+        assert post_call["body"]["variables"]["oid"] == "abcdef12345"
+        assert post_call["body"]["variables"]["name"] == "autoswe/issue-42"
 
     def test_link_branch_to_issue_no_op_without_token(self):
         """link_branch_to_issue returns without calling API when token is empty."""
@@ -421,56 +439,81 @@ class TestGitHubVCS:
         # Should not raise, should be a no-op
         vcs.link_branch_to_issue(42, "abc1234", "autoswe/issue-42")
 
-    def test_link_branch_to_issue_fails_fast_on_403(self, vcs, monkeypatch):
-        """link_branch_to_issue uses max_retries=1 so 403 raises immediately
-        without sleeping (regression for #75: 1h hang on check-runs 403)."""
-        call_kwargs = {}
+    def test_link_branch_to_issue_already_exists_is_idempotent(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        """GraphQL 'already exists' error is swallowed (idempotent re-link)."""
+        gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42")] = {
+            "number": 42,
+            "node_id": "I_kwGOAB1234",
+        }
+        gh_route_table[("POST", "/graphql")] = {
+            "errors": [{
+                "type": "ALREADY_EXISTS",
+                "message": "Reference 'refs/heads/autoswe/issue-42' already exists.",
+            }],
+        }
 
-        def capture_gh_post(path, token, body, max_retries=3, timeout=30):
-            call_kwargs.update({
-                "max_retries": max_retries,
-                "timeout": timeout,
-                "path": path,
-            })
-            raise RuntimeError("GitHub API /check-runs -> HTTP 403: forbidden")
+        # Should not raise
+        vcs.link_branch_to_issue(42, "abcdef12345", "autoswe/issue-42")
 
-        monkeypatch.setattr("autoswe.providers.github.vcs.gh_post", capture_gh_post)
+    def test_link_branch_to_issue_raises_missing_scope_on_403(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        """403 from the issue fetch or GraphQL call raises MissingScopeError."""
+        gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42")] = {
+            "number": 42,
+            "node_id": "I_kwGOAB1234",
+        }
+
+        def fail_graphql(method, path, token, body, max_retries=3, timeout=30):
+            raise RuntimeError("GitHub API /graphql -> HTTP 403: forbidden")
+
+        gh_route_table[("POST", "/graphql")] = fail_graphql
 
         from autoswe.providers.github.vcs import MissingScopeError
 
-        with pytest.raises(MissingScopeError, match="PAT missing"):
+        with pytest.raises(MissingScopeError, match="permission"):
             vcs.link_branch_to_issue(42, "abc1234", "autoswe/issue-42")
 
-        # Verify it uses fail-fast settings
-        assert call_kwargs["max_retries"] == 1, "Should use max_retries=1 for best-effort call"
-        assert call_kwargs["timeout"] == 5, "Should use short timeout for best-effort call"
-        assert "/check-runs" in call_kwargs["path"]
-
-    def test_open_pr_api_returns_head_sha(self, vcs, fake_token, mock_gh_request, gh_route_table):
-        """API fallback path extracts head.sha and includes it in PRResult."""
-        gh_route_table[("POST", "/repos/natedorr/autoswe/pulls")] = {
-            "number": 15,
-            "html_url": "https://github.com/natedorr/autoswe/pull/15",
-            "head": {"sha": "abcdef1234567890"},
+    def test_link_branch_to_issue_raises_on_unknown_graphql_error(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        """Unknown GraphQL errors propagate as RuntimeError."""
+        gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42")] = {
+            "number": 42,
+            "node_id": "I_kwGOAB1234",
         }
-        result = vcs.open_pull_request(
-            {}, "autoswe/issue-42", "master",
-            "Fixes #42: title", "body",
-        )
-        assert result.number == 15
-        assert result.head_sha == "abcdef1234567890"
+        gh_route_table[("POST", "/graphql")] = {
+            "errors": [{
+                "type": "UNABLE_TO_CREATE",
+                "message": "Some unknown error occurred.",
+            }],
+        }
+
+        with pytest.raises(RuntimeError, match="createLinkedBranch GraphQL error"):
+            vcs.link_branch_to_issue(42, "abc1234", "autoswe/issue-42")
 
     def test_link_branch_to_issue_recorded_in_fake(self, vcs, github_fake):
-        """Using github_fake, verify check-runs POST is recorded with correct payload."""
+        """Using github_fake, verify GraphQL createLinkedBranch call is recorded."""
+        # Load issue state so the fake can return node_id
+        github_fake.load({
+            "owner": "natedorr",
+            "repo": "autoswe",
+            "issue": {"number": 42, "title": "Test"},
+            "labels": [],
+            "comments": [],
+            "repo_labels": [],
+        })
         _, original = github_fake.patch()
         try:
             vcs.link_branch_to_issue(42, "abc1234", "autoswe/issue-42")
         finally:
             github_fake.unpatch(_, original)
 
-        assert len(github_fake.check_runs) == 1
-        cr = github_fake.check_runs[0]
-        assert cr["name"] == "autoSWE Fix #42"
-        assert cr["head_sha"] == "abc1234"
-        assert cr["status"] == "completed"
-        assert cr["conclusion"] == "success"
+        graphql_calls = [c for c in github_fake.recorded_calls if c["path"] == "/graphql"]
+        assert len(graphql_calls) == 1
+        call = graphql_calls[0]
+        assert "createLinkedBranch" in call["body"]["query"]
+        assert call["body"]["variables"]["oid"] == "abc1234"
+        assert call["body"]["variables"]["name"] == "autoswe/issue-42"

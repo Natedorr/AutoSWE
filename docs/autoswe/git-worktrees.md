@@ -35,6 +35,7 @@ Path helpers (`vcs/worktree.py`):
 3. Checks if branch `autoswe/issue-{N}` exists on remote via VCS `branch_name()`
 4. If branch exists → `git worktree add <path> <branch>`
 5. If branch doesn't exist → `git worktree add <path> -b autoswe/issue-{N} origin/{base_branch}`
+6. **Branch linking (GitHub only, best-effort):** When `cfg["LINK_BRANCH_TO_ISSUE"]` is `true` and a new branch was created, calls `VCSProvider.link_branch_to_issue()` to link the branch to the issue in the platform's UI (GitHub Development sidebar). Uses the full base SHA from `origin/{base_branch}`. Runs **before** pushing the remote branch so the GraphQL `createLinkedBranch` mutation can create the ref. Already-linked branches are silently skipped (idempotent). Requires a PAT with `contents` + `issues` write scope.
 
 ### `commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider)`
 

@@ -9,8 +9,6 @@ from autoswe.core.logging_utils import get_debug_logger
 from autoswe.orch.types import ApiState, Effect
 from autoswe.providers.base import IssueTracker, NormalizedComment
 from autoswe.providers.factory import get_vcs
-from autoswe.providers.github.vcs import MissingScopeError
-from autoswe.vcs.worktree import get_remote_branch_sha
 
 dbg = get_debug_logger()
 
@@ -146,46 +144,10 @@ def apply_effect(
                     body_parts.append(f"**Fix Summary:**\n\n{fix_summary}")
                 body_parts.append("\nOpened by autoSWE.")
                 body = "\n\n".join(body_parts)
-            pr_result = vcs.open_pull_request(
+            vcs.open_pull_request(
                 repo_cfg,
                 branch=branch,
                 base=effect.pr_base or "main",
                 title=effect.pr_title or "",
                 body=body,
             )
-            # Best-effort: link branch to issue in platform UI
-            _try_link_branch_to_issue(vcs, repo_cfg, issue_num, branch,
-                                     pr_head_sha=pr_result.head_sha)
-
-
-def _try_link_branch_to_issue(vcs, repo_cfg: dict, issue_num: int, branch: str,
-                              pr_head_sha: str | None = None) -> None:
-    """Best-effort link branch to issue after PR creation (adapter path).
-
-    When *pr_head_sha* is provided it is used as a fallback when the remote
-    branch SHA cannot be fetched (e.g. the branch has not yet been pushed,
-    or *git ls-remote* fails).
-
-    Matches the error-handling pattern used in ship.py and coder.py:
-    MissingScopeError is caught explicitly (PAT may lack check_runs scope),
-    all other exceptions are logged at warning level.
-    """
-    owner = repo_cfg.get("owner", "")
-    repo = repo_cfg.get("repo", "")
-    token = repo_cfg.get("pat", "") or repo_cfg.get("token", "")
-    provider = repo_cfg.get("provider", "github")
-    if not owner or not repo:
-        return
-    commit_sha = get_remote_branch_sha(owner, repo, branch, token, provider)
-    if not commit_sha and pr_head_sha:
-        dbg.info("ADAPTER: using PR head_sha as fallback for branch linking")
-        commit_sha = pr_head_sha
-    if not commit_sha:
-        dbg.warning("ADAPTER: cannot link branch — no commit SHA available")
-        return
-    try:
-        vcs.link_branch_to_issue(issue_num, commit_sha, branch)
-    except MissingScopeError:
-        dbg.warning("ADAPTER: link_branch_to_issue skipped — PAT missing check_runs:write scope")
-    except Exception as e:  # Fallback for any non-scope error from link_branch_to_issue
-        dbg.warning("link_branch_to_issue failed in adapter: %s", e, exc_info=True)

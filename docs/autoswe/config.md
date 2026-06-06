@@ -30,7 +30,7 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | `ANTHROPIC_BASE_URL` | `""` | e.g. `http://localhost:11434` |
 | `BOT_NAME` | `autoswe` | Bot identifier used in label prefix and comment markers |
 | `ALLOWED_AUTHORS` | `""` | Comma-separated list of allowed author logins (empty = no restriction). Controls who can trigger slash commands AND who can create issues that autoSWE processes. For GitHub, use usernames (e.g. "natedorr"). For Azure, use UPN/email (e.g. "jane@example.com") |
-| `LINK_BRANCH_TO_ISSUE` | `true` | Link feature branches to issues in the provider UI (e.g. GitHub Development section) |
+| `LINK_BRANCH_TO_ISSUE` | `false` | Link feature branches to issues in the provider UI (e.g. GitHub Development sidebar). When `true`, the branch is linked at worktree creation time via GraphQL `createLinkedBranch` (GitHub only; no-op for Azure). Requires a PAT with `contents` + `issues` write scope. Defaults to `false` — only enable if you use the Development sidebar. |
 | `SYNC_STRATEGY` | `merge` | Strategy for `/sync`: `"merge"` (append-only merge commit) or `"rebase"` (linear history, force-pushes) |
 
 **Integer keys re-parsed:** After loading the file, `AGENT_TIMEOUT`, `AGENT_RETRY_ON_FAILURE`, `MAX_ATTEMPTS`, `MAX_TOTAL_HOURS`, `MAX_CONCURRENT`, and `MAX_DRAIN_CYCLES` are cast to `int` (`config.py:51-55`).

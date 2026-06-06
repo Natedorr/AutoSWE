@@ -43,7 +43,7 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
 - **Session strategy:**
   - If `task["plan_file_path"]` is set (written by planner when a native `~/.claude/plans/*.md` file exists), `/fix` starts a **fresh Claude session** and injects the plan file content into the prompt directly. `plan_file_path` is consumed (popped) on first use so subsequent `/fix` runs resume the fix session normally.
   - Otherwise, `/fix` resumes the previous session via `task["session_id"]` (the planner's session if this is the first fix, or the prior fix session on retry/iterate).
-- **Flow:** Runs Claude with code-editing permissions in worktree. After session, `commit_and_push()` preserves Claude's auto-commits as a commit trail (amending the last commit with a proper "Fixes #N" message) and pushes. If Claude did not auto-commit, working-tree changes are staged into a single commit. Then `VCSProvider.link_branch_to_issue()` is called (best-effort) to link the branch to the issue in the platform's UI (e.g. GitHub Development section).
+- **Flow:** Runs Claude with code-editing permissions in worktree. After session, `commit_and_push()` preserves Claude's auto-commits as a commit trail (amending the last commit with a proper "Fixes #N" message) and pushes. If Claude did not auto-commit, working-tree changes are staged into a single commit. Branch linking (when `LINK_BRANCH_TO_ISSUE=true`) happens at worktree creation time — see [git-worktrees.md](git-worktrees.md) `create_worktree()` step 6.
 - **Returns:**
   - `"DONE_SUMMARY\t<summary>\t<sha>"` — changes committed (summary = last 10 non-empty lines of Claude output)
   - `"DONE: no changes detected"` — no staged changes

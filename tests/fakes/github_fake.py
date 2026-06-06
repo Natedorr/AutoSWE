@@ -227,6 +227,9 @@ class GitHubFake:
                 current_labels = self.labels.get(issue_num, [])
                 repo_key = f"{owner_repo[0]}/{owner_repo[1]}" if owner_repo else ""
                 out["labels"] = [copy.deepcopy(_resolve_label(self.repo_labels.get(repo_key, []), lb)) for lb in current_labels]
+                # Ensure node_id is present (GitHub always returns it; needed by createLinkedBranch)
+                if "node_id" not in out:
+                    out["node_id"] = f"I_kwHO{issue_num}"
                 return out
             return {}
 
@@ -364,6 +367,34 @@ class GitHubFake:
             }
             self.check_runs.append(check_run)
             return check_run
+
+        # POST /graphql
+        if method == "POST" and path == "/graphql":
+            graphql_result = {"data": {}}
+            if body and "createLinkedBranch" in body.get("query", ""):
+                vars_data = body.get("variables", {})
+                branch_name = vars_data.get("name", "")
+                # Check if branch already exists (simulate idempotent error)
+                if hasattr(self, "_linked_branches") and branch_name in self._linked_branches:
+                    return {
+                        "errors": [{
+                            "type": "ALREADY_EXISTS",
+                            "message": f"Reference 'refs/heads/{branch_name}' already exists.",
+                        }]
+                    }
+                if not hasattr(self, "_linked_branches"):
+                    self._linked_branches = set()
+                self._linked_branches.add(branch_name)
+                self.linked_branches = self._linked_branches  # Public alias for assertions
+                graphql_result["data"] = {
+                    "createLinkedBranch": {
+                        "linkedBranch": {
+                            "id": "branch_id_1",
+                            "ref": {"name": branch_name},
+                        }
+                    }
+                }
+            return graphql_result
 
         # Unhandled route — return empty dict so tests don't crash silently
         return {}

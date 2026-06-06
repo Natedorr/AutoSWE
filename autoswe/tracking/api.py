@@ -4,6 +4,7 @@ from urllib import error as url_error
 from urllib import request
 
 from autoswe.core.logging_utils import get_debug_logger, log, mask_sensitive
+from autoswe.core.redact import redact_worktree_paths
 
 dbg = get_debug_logger()
 
@@ -101,7 +102,7 @@ def fetch_owned_repos(token: str) -> list:
 def gh_post_comment(owner: str, repo: str, issue_number: int, body: str, token: str) -> None:
     """Post a comment on a GitHub issue."""
     url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments"
-    payload = json.dumps({"body": body}).encode()
+    payload = json.dumps({"body": redact_worktree_paths(body)}).encode()
     req = request.Request(url, data=payload, method="POST", headers={
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",

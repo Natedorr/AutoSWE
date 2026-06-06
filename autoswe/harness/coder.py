@@ -10,7 +10,6 @@ from autoswe.harness.mcp_config import build_mcp_comment_server, build_mcp_inlin
 from autoswe.harness.prompts import build_conflict_resolution_prompt, build_fix_prompt
 from autoswe.harness.runner import AGENT_TASK_TOOLS, HandlerResult
 from autoswe.providers.factory import get_vcs
-from autoswe.providers.github.vcs import MissingScopeError
 from autoswe.vcs.worktree import (
     commit_and_push,
     create_worktree,
@@ -20,8 +19,6 @@ from autoswe.vcs.worktree import (
 )
 
 dbg = get_debug_logger()
-
-_scope_error_warned = False
 
 
 _MCP_COMMENT_TOOL_PREFIX = "mcp__autoswe_comment__"
@@ -329,25 +326,6 @@ def _finalize_fix(
             session_id=session_id,
         )
 
-    # Best-effort: link branch to issue in platform UI (e.g. GitHub Development section)
-    if cfg.get("LINK_BRANCH_TO_ISSUE", True):
-        try:
-            _link_repo_cfg = dict(repo_cfg or {}, token=token)
-            get_vcs(_link_repo_cfg).link_branch_to_issue(
-                issue_num, commit_result["commit_sha"], commit_result["branch"],
-            )
-        except MissingScopeError:
-            global _scope_error_warned
-            if not _scope_error_warned:
-                _scope_error_warned = True
-                log("[FIX] link_branch_to_issue skipped: PAT missing check_runs:write scope (set LINK_BRANCH_TO_ISSUE=false to silence)")
-        except Exception as e:  # Provider call is best-effort; log warning and continue past it.
-            dbg.warning("link_branch_to_issue failed: %s", e, exc_info=True)
-    else:
-        if not _scope_error_warned:
-            _scope_error_warned = True
-            log("[FIX] link_branch_to_issue disabled by LINK_BRANCH_TO_ISSUE=false")
-
     log(f"[FIX] {task['id']} committed sha={commit_result['commit_sha']} branch={commit_result['branch']}")
     return HandlerResult(
         f"DONE_SUMMARY\t{summary_text}\t{commit_result['commit_sha']}",
@@ -483,27 +461,6 @@ def resolve_sync_conflicts(
             duration_seconds=run_result.duration_seconds,
             session_id=run_result.session_id,
         )
-
-    # Get full commit SHA for linking
-    try:
-        full_sha_result = subprocess.run(
-            ["git", "-C", str(wt), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10, check=True,
-        )
-        commit_sha = full_sha_result.stdout.strip()
-    except Exception:  # Best-effort; fallback to short SHA below.
-        commit_sha = None
-
-    # Best-effort: link branch to issue in platform UI
-    token = task.get("_token")
-    if cfg.get("LINK_BRANCH_TO_ISSUE", True) and token:
-        try:
-            _link_repo_cfg = dict(rc, token=token)
-            get_vcs(_link_repo_cfg).link_branch_to_issue(
-                issue_num, commit_sha or "unknown", branch,
-            )
-        except Exception as e:
-            dbg.warning("link_branch_to_issue failed: %s", e, exc_info=True)
 
     # Compute summary stats
     try:

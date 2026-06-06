@@ -4,6 +4,7 @@ from pathlib import Path
 from autoswe.core.config import AUTOSWE_DIR
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.factory import get_vcs
+from autoswe.providers.github.vcs import MissingScopeError
 
 dbg = get_debug_logger()
 
@@ -289,6 +290,28 @@ def create_worktree(
         base_sha = base_sha_result.stdout.strip() if base_sha_result.returncode == 0 else "unknown"
         log(f"[WORKTREE] {owner}/{repo}#{issue_num} branch={branch} forked_from={base_branch}@{base_sha}")
         _run(["git", "-C", str(main), "worktree", "add", str(wt), "-b", branch, f"origin/{base_branch}"])
+
+        # Best-effort: link branch to issue in platform UI (Development sidebar).
+        # Runs BEFORE the remote branch is pushed, so the GraphQL createLinkedBranch
+        # mutation can create the ref. Reused branches (branch_exists=True) skip this.
+        if cfg.get("LINK_BRANCH_TO_ISSUE", False):
+            try:
+                full_sha_result = _run(
+                    ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],
+                    check=False,
+                )
+                full_base_sha = full_sha_result.stdout.strip()
+                if full_base_sha:
+                    get_vcs(repo_cfg).link_branch_to_issue(
+                        issue_num, full_base_sha, branch,
+                    )
+            except MissingScopeError:
+                dbg.warning(
+                    "WORKTREE: link_branch_to_issue skipped — "
+                    "PAT missing permission to create linked branch"
+                )
+            except Exception as e:  # Best-effort; log and continue.
+                dbg.warning("WORKTREE: link_branch_to_issue failed: %s", e, exc_info=True)
 
     if new_branch and push_new:
         _run(["git", "-C", str(main), "push", "-u", "origin", branch])
