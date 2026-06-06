@@ -161,6 +161,11 @@ class CodingBackend(Protocol):
     - ``"resume"``: backend supports resuming a prior session.
     - ``"progress_stream"``: backend fires progress_callback with rendered
       todo/command updates during execution.
+    - ``"plan_file"``: backend writes native plan files to ``~/.claude/plans/``;
+      the ``_find_latest_plan_file`` filesystem-scan fallback in the planner is
+      only meaningful for such backends.  Backends that lack this capability
+      (e.g. Codex) never produce plan files there, so the scan is skipped to
+      prevent cross-issue plan file pollution.
     """
 
     @classmethod

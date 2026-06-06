@@ -53,7 +53,8 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | Non
     plan_file: Path | None = (
         Path(result.plan_file_path) if result.plan_file_path else None
     )
-    comment, done_content, used_file = _extract_plan_output(result.text, plan_file=plan_file)
+    allow_fs_scan = runner.backend_has_capability(harness, "plan_file")
+    comment, done_content, used_file = _extract_plan_output(result.text, plan_file=plan_file, allow_fs_scan=allow_fs_scan)
 
     plan_file_path: str | None = None
     if done_content == "PLAN_READY" and used_file is not None:
@@ -104,7 +105,7 @@ def _plan_file_is_pending(plan_text: str) -> bool:
     return any(indicator in lower for indicator in pending_indicators)
 
 
-def _extract_plan_output(text: str, plan_file: Path | None = None) -> tuple[str, str, Path | None]:
+def _extract_plan_output(text: str, plan_file: Path | None = None, *, allow_fs_scan: bool = True) -> tuple[str, str, Path | None]:
     """Return (comment_body, done_content, used_file_path) using the output priority chain.
 
     The third element is the Path of the plan file used (when content came from
@@ -115,6 +116,9 @@ def _extract_plan_output(text: str, plan_file: Path | None = None) -> tuple[str,
     2. <AUTOSWE_PLAN> tags in text -> "## Plan" + "PLAN_READY" + None
     3. <AUTOSWE_QUESTIONS> tags in text -> "## Questions" + "WAITING: questions" + None
     4. Filesystem scan (_find_latest_plan_file) -> "## Plan" + "PLAN_READY" + path (last resort)
+       Only runs when allow_fs_scan=True (gated on the "plan_file" backend capability).
+       Backends that never write to ~/.claude/plans/ (e.g. Codex) pass False to
+       prevent stale cross-issue plan files from being posted.
     5. Fallback -> "## Claude's response" + "WAITING: see comment" + None
 
     Tags (steps 2-3) are checked BEFORE the filesystem scan (step 4) to avoid
@@ -152,17 +156,20 @@ def _extract_plan_output(text: str, plan_file: Path | None = None) -> tuple[str,
         comment = f"## Questions\n\n{q_text}\n\n_Reply in this thread to answer._"
         return comment, "WAITING: questions", None
 
-    # 3. Filesystem scan — true last resort (may return another session's file)
-    fs_file: Path | None = None
-    try:
-        fs_file = _find_latest_plan_file()
-    except Exception:  # Filesystem scan is best-effort last resort; any failure is ignored
-        fs_file = None
-    if fs_file is not None:
-        plan_text = fs_file.read_text(encoding="utf-8").strip()
-        if not _plan_file_is_pending(plan_text):
-            comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
-            return comment, "PLAN_READY", fs_file
+    # 3. Filesystem scan — true last resort (may return another session's file).
+    # Skipped when allow_fs_scan=False (backends that never write plan files
+    # to ~/.claude/plans/, such as Codex).
+    if allow_fs_scan:
+        fs_file: Path | None = None
+        try:
+            fs_file = _find_latest_plan_file()
+        except Exception:  # Filesystem scan is best-effort last resort; any failure is ignored
+            fs_file = None
+        if fs_file is not None:
+            plan_text = fs_file.read_text(encoding="utf-8").strip()
+            if not _plan_file_is_pending(plan_text):
+                comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
+                return comment, "PLAN_READY", fs_file
 
     # 4. Raw text fallback
     comment = f"## Claude's response\n\n{text or '(no response)'}"

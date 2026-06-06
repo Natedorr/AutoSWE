@@ -292,6 +292,43 @@ def test_extract_plan_output_fallback():
     assert used_file is None
 
 
+def test_extract_plan_output_allow_fs_scan_false_skips_stale_file(tmp_path):
+    """allow_fs_scan=False prevents a stale plan file from being used.
+
+    Even when ~/.claude/plans/ contains a file newer than this session, passing
+    allow_fs_scan=False must return the raw-text fallback (WAITING: see comment)
+    instead of PLAN_READY from the stale file.
+    """
+    from unittest.mock import patch
+    stale_file = tmp_path / "stale-plan.md"
+    stale_file.write_text("## Stale Plan\n\n1. Step from another issue")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=stale_file):
+        comment, done, used_file = _extract_plan_output(
+            "Prose only, no tags", plan_file=None, allow_fs_scan=False
+        )
+
+    assert done == "WAITING: see comment"
+    assert used_file is None
+    assert "Stale Plan" not in comment
+
+
+def test_extract_plan_output_allow_fs_scan_true_still_finds_file(tmp_path):
+    """allow_fs_scan=True (default) still returns PLAN_READY from a scanned file."""
+    from unittest.mock import patch
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("## My Plan\n\n1. Step A")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=plan_file):
+        comment, done, used_file = _extract_plan_output(
+            "Prose only, no tags", plan_file=None, allow_fs_scan=True
+        )
+
+    assert done == "PLAN_READY"
+    assert used_file == plan_file
+    assert "## My Plan" in comment
+
+
 # ==== TEST 6: _plan_file_is_pending detection ====
 
 def test_plan_file_is_pending():

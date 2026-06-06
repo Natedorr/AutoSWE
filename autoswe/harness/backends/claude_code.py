@@ -341,6 +341,7 @@ class ClaudeCodeBackend:
         "plan_permission",
         "resume",
         "progress_stream",
+        "plan_file",
     }
 
     @classmethod

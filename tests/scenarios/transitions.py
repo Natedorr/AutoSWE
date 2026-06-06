@@ -1484,6 +1484,25 @@ TRANSITIONS: list[dict[str, Any]] = [
             "claude_permission": "bypassPermissions",
         },
     },
+    {
+        "name": "codex_plan_prose_only",
+        "description": "Codex plan emits prose (no tags) → waiting via raw-text fallback",
+        "start": {
+            "issue": {"body": "/plan"},
+            "queue_task": None,
+        },
+        "claude_responses": [
+            {"text": "I need more context about the issue requirements.", "session_id": "s-plan-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree"],
+        "expect": {
+            "label_after": "autoswe:waiting",
+            "autoswe_status": "waiting",
+            "session_id": "s-plan-42",
+            "comment_contains": ["Claude's response"],
+            "claude_permission": "plan",
+        },
+    },
 ]
 
 
@@ -1498,6 +1517,7 @@ TRANSITIONS: list[dict[str, Any]] = [
 CODEX_TRANSITIONS: list[str] = [
     "fresh_plan_command",            # Plan with read-only sandbox
     "fresh_plan_with_questions",     # Questions → waiting
+    "codex_plan_prose_only",         # Prose-only output → waiting (fs scan skipped)
     "fresh_fix_command",             # Fix with workspace-write sandbox
     "fresh_fix_fails",               # Error subtype → failed
     "plan_ready_then_fix",           # Resume fix from planned

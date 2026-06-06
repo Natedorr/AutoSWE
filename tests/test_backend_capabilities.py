@@ -406,3 +406,58 @@ def test_plan_includes_ask_user_question():
 
     _perm, tools, _disallowed = _MODE_CONFIG["plan"]
     assert "AskUserQuestion" in tools
+
+
+# ---------- plan_file capability ----------
+
+
+def test_plan_file_capability_claude_code():
+    """ClaudeCodeBackend must advertise the 'plan_file' capability."""
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+
+    assert "plan_file" in ClaudeCodeBackend.capabilities()
+
+
+def test_plan_file_capability_codex():
+    """CodexBackend must NOT advertise the 'plan_file' capability."""
+    from autoswe.harness.backends.codex import CodexBackend
+
+    assert "plan_file" not in CodexBackend.capabilities()
+
+
+def test_interpret_plan_result_codex_prose_skips_fs_scan(tmp_path):
+    """Codex backend + prose-only output must land on WAITING: see comment.
+
+    Even when ~/.claude/plans/ contains a stale file from a prior run, the
+    codex path must not post it — the filesystem scan is capability-gated.
+    """
+    from autoswe.harness.planner import _interpret_plan_result
+    from autoswe.harness.runner import RunResult
+
+    stale = tmp_path / "stale.md"
+    stale.write_text("## Stale Plan\n\nStep from a different issue")
+
+    result = RunResult("Just some prose output", "s1", "success", plan_file_path=None)
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=stale):
+        done, pf = _interpret_plan_result(result, state={}, harness={"backend": "codex"})
+
+    assert "WAITING: see comment" in done
+    assert pf is None
+
+
+def test_interpret_plan_result_claude_code_prose_uses_fs_scan(tmp_path):
+    """Claude Code backend + prose-only output still scans ~/.claude/plans/."""
+    from autoswe.harness.planner import _interpret_plan_result
+    from autoswe.harness.runner import RunResult
+
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("## Plan\n\nStep 1: do the thing")
+
+    result = RunResult("Some prose output", "s1", "success", plan_file_path=None)
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=plan_file):
+        done, pf = _interpret_plan_result(result, state={}, harness={"backend": "claude_code"})
+
+    assert "PLAN_READY" in done
+    assert pf == str(plan_file)
