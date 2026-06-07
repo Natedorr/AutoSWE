@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from autoswe.core.config import load_config, load_repos_config
 from autoswe.providers.factory import build_repo_cfg, get_tracker
 
-
 REPO_KEY = "natedorr/testProject/testProject"
 
 

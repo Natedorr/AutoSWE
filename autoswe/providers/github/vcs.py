@@ -44,13 +44,31 @@ class GitHubVCS(VCSProvider):
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode != 0:
+                pass  # fall through to API
+            else:
+                prs = json.loads(result.stdout or "[]")
+                if prs:
+                    return PRResult(number=prs[0]["number"], url=prs[0]["url"])
                 return None
-            prs = json.loads(result.stdout or "[]")
-            if prs:
-                return PRResult(number=prs[0]["number"], url=prs[0]["url"])
-            return None
         except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
-            return None
+            pass  # fall through to API
+
+        # API fallback when gh CLI is unavailable
+        try:
+            prs = gh_get(
+                f"/repos/{self._owner}/{self._repo}/pulls?head={self._owner}:{branch}&state=open",
+                self._token,
+                max_retries=1,
+            )
+            if prs and isinstance(prs, list) and prs[0]:
+                return PRResult(
+                    number=prs[0]["number"],
+                    url=prs[0]["html_url"],
+                    head_sha=prs[0].get("head", {}).get("sha"),
+                )
+        except Exception:
+            pass  # best-effort
+        return None
 
     def open_pull_request(
         self,
