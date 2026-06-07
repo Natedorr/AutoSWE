@@ -222,7 +222,13 @@ def _apply_pull_strategy(wt: Path, branch: str, strategy: str) -> list[str]:
     if strategy == "none":
         return []
 
-    _run(["git", "-C", str(wt), "fetch", "origin", branch])
+    # A freshly-forked local branch (e.g. after read-only /plan, or before the
+    # first push) has no remote ref yet — fetching it errors 128. Treat a failed
+    # branch fetch as "nothing to pull" and reuse the local branch as-is.
+    fetched = _run(["git", "-C", str(wt), "fetch", "origin", branch], check=False)
+    if fetched.returncode != 0:
+        log(f"[WORKTREE] origin/{branch} not found — skipping pull (new branch)")
+        return []
 
     if strategy == "reset":
         _run(["git", "-C", str(wt), "reset", "--hard", f"origin/{branch}"])

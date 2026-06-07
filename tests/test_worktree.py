@@ -134,6 +134,87 @@ def test_create_worktree_reuses_existing(tmp_path, monkeypatch):
     assert not any("worktree" in " ".join(str(c)) for c in mock_run.call_args_list)
 
 
+def test_apply_pull_strategy_skips_when_branch_not_on_origin(tmp_path):
+    """fetch returning non-zero → _apply_pull_strategy returns [] and never resets."""
+    from autoswe.vcs.worktree import _apply_pull_strategy
+
+    reset_calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "fetch" in cmd and "origin" in cmd:
+            # Simulate missing remote ref
+            result.returncode = 128
+            result.stdout = ""
+            result.stderr = "fatal: couldn't find remote ref autoswe/issue-1"
+        elif "reset" in cmd:
+            reset_calls.append(args)
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        out = _apply_pull_strategy(tmp_path, "autoswe/issue-1", "reset")
+
+    assert out == []
+    assert reset_calls == [], "reset --hard must not run when fetch fails"
+
+
+def test_create_worktree_reuse_local_only_branch(tmp_path, monkeypatch):
+    """Reusing an existing worktree dir whose branch was never pushed must not raise."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt_mod
+    monkeypatch.setattr(wt_mod, "AUTOSWE_DIR", tmp_path)
+
+    main = tmp_path / "worktrees" / "o_r" / "_main"
+    main.mkdir(parents=True, exist_ok=True)
+    wt_path = tmp_path / "worktrees" / "o_r" / "issue-1"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "fetch" in cmd and "origin" in cmd and "autoswe" in cmd:
+            result.returncode = 128
+            result.stderr = "fatal: couldn't find remote ref autoswe/issue-1"
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import create_worktree
+        result = create_worktree("o", "r", 1, "main", "token", _cfg())
+
+    assert result == wt_path
+
+
+def test_apply_pull_strategy_reset_runs_when_fetch_succeeds(tmp_path):
+    """When fetch succeeds the reset still executes (guard must not over-suppress)."""
+    from autoswe.vcs.worktree import _apply_pull_strategy
+
+    reset_called = []
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "reset" in cmd:
+            reset_called.append(args)
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        out = _apply_pull_strategy(tmp_path, "autoswe/issue-1", "reset")
+
+    assert out == []
+    assert any("reset" in " ".join(str(a) for a in c) for c in reset_called), \
+        "reset --hard must run when fetch succeeds"
+
+
 # ---------------------------------------------------------------------------
 # commit_and_push
 # ---------------------------------------------------------------------------
