@@ -40,6 +40,10 @@ def _gh_request(
         except url_error.HTTPError as e:
             content = e.read().decode() if hasattr(e, 'read') else ""
             if e.code == 403:
+                # Distinguish archived-repo 403 from genuine rate-limit 403.
+                # Archived repos return 403 with "archived" in the body — no point sleeping.
+                if "archived" in content:
+                    raise RuntimeError(f"GitHub API {path} -> HTTP {e.code}: {mask_sensitive(content)}") from e
                 reset_ts = int(e.headers.get("X-RateLimit-Reset", 0))
                 if reset_ts and attempt < max_retries - 1:
                     wait_seconds = max(60, reset_ts - time.time())
