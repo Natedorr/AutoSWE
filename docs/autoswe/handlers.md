@@ -19,7 +19,7 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
 - **Prompt source:** `config/prompts/plan.txt` (loaded by `prompts.py:build_plan_prompt()`)
 - **Model resolution:** `resolve_harness("plan", …).model` → `repo_cfg.plan_model` → `cfg.PLAN_MODEL` → backend default
 - **Worktree:** created via `create_worktree()` on `plan_branch` (or `base_branch`)
-- **Flow:** Runs the agent in read-only mode over the repo. The **primary** signal is the MCP comment tools — `mcp__autoswe_comment__post_plan` → `PLAN_READY`, `mcp__autoswe_comment__post_question` → `WAITING` (gated on the backend's `"mcp"` capability). When MCP is unavailable (e.g. Codex) or wasn't used, `planner._interpret_plan_result()` falls back to scanning the response for the **deprecated** `<AUTOSWE_PLAN>` / `<AUTOSWE_QUESTIONS>` XML blocks (regexes in `tracking/comments.py:_PLAN_RE`, `_QUESTIONS_RE`), then a native `~/.claude/plans/*.md` file, then raw text.
+- **Flow:** Runs the agent in read-only mode over the repo. The **primary** signal is the MCP comment tools — `mcp__autoswe_comment__post_plan` → `PLAN_READY`, `mcp__autoswe_comment__post_question` → `WAITING` (gated on the backend's `"mcp"` capability). When MCP is unavailable (e.g. Codex) or wasn't used, `planner._interpret_plan_result()` falls back via `_extract_plan_output()`'s priority chain: (1) an explicit `Write` to `~/.claude/plans/*.md` captured during the run, (2) **ExitPlanMode plan text** — the model often exits plan mode through the native `ExitPlanMode` tool (which is disallowed, but its tool-use block, carrying the full plan markdown, still appears in the stream; the Claude Code backend captures it into `RunResult.plan_text`), (3) the **deprecated** `<AUTOSWE_PLAN>` / `<AUTOSWE_QUESTIONS>` XML blocks (regexes in `tracking/comments.py:_PLAN_RE`, `_QUESTIONS_RE`), (4) a filesystem scan for the latest `~/.claude/plans/*.md`, then (5) raw text. Capturing ExitPlanMode text fixes the case where a plan was written but only a bare `Tool: ExitPlanMode` progress line got posted.
 - **Returns:**
   - `"PLAN_READY"` — plan block found; posts plan as comment
   - `"WAITING: questions"` — questions block found; posts questions as comment
@@ -96,12 +96,16 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
 - **Worktree:** accessed via `worktree_path()` on the feature branch. Does not create a new worktree — uses the existing one from `/plan` or `/fix`.
 - **Session:** fresh one-off session (`resume=None`). Not resumable.
 - **Flow:** Computes `git diff` between feature branch and base branch. Extracts plan text from bot comments (if any). Runs Claude in read-only mode with the review prompt. Parses response for required sections (Summary, Correctness, Security, Tests, Style, Suggestions, Verdict). Posts review as a comment prefixed with `## Review`. Persists review report to `~/.claude/reviews/<slug>.md`.
-- **Returns:**
-  - `"REVIEW_READY"` — review completed; posts review comment, writes file, transitions status to `reviewed`
-  - `"FAILED: …"` — timeout or SDK error
+- **Returns:** `"REVIEW_READY\t<full review text>"` (review completed; posts review comment, writes file) or `"FAILED: …"` (timeout or SDK error).
+- **Verdict gating:** `_map_done_to_status()` runs `parse_review_verdict()` over the review text's `## Verdict` section and maps the outcome to a status:
+  - **LGTM / approved** (or no recognizable verdict) → `reviewed` (terminal; `/pr` allowed).
+  - **Needs changes** → `review_failed` (non-terminal; `/pr` blocked).
+  - **Blocked** (CRITICAL findings) → `review_blocked` (non-terminal; `/pr` blocked).
+
+  `parse_review_verdict` scopes to the `## Verdict` section so "Blocked"/"Needs changes" inside finding bodies don't false-trigger; the default is `reviewed` to preserve backward compatibility for reviews without a parseable verdict. In `review_failed`/`review_blocked`, `emit()` appends a "`/pr` is disabled" note to the review comment and `decide()` refuses `/pr`.
+- **Auto re-review after `/fix`:** A `/fix` dispatched from `review_failed`/`review_blocked` sets the `rereview_after_fix` queue flag on completion (and suppresses `AUTO_CREATE_PR`). On the next poll, `decide()` auto-dispatches `/review` (clearing the flag in `emit()`'s review branch) so the gating verdict is re-checked before the code can ship.
 - **Review injection:** On the next `/fix` or `/plan`, the review findings are injected into the prompt via the `## Review Findings` block. `review_file_path` follows a pop-after-first-use lifecycle — consumed by `build_fix_prompt()` / `build_plan_prompt()` and cleared after injection.
 - **Guidance input:** `/review` accepts an optional `with <guidance>` modifier (e.g. `/review with focus on error handling`). The guidance text is passed as `pending_command` guidance to `run_review()`, which appends it to the review prompt so Claude focuses on the specified area. See `slash-commands.md` for the full syntax.
-- **Terminal:** Transitions the task to `reviewed` status. The task can still be restarted with `/fix`, `/retry`, or other commands.
 
 ## Environment Override Path
 

@@ -1346,6 +1346,50 @@ TRANSITIONS: list[dict[str, Any]] = [
             "claude_permission": "plan",
         },
     },
+    {
+        "name": "planned_then_review_blocked",
+        "description": "Task at planned; /review finds a CRITICAL bug → Blocked verdict → review_blocked (gates /pr)",
+        "meta": {"script_review": True},
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:planned"],
+            "comments": [
+                {
+                    "body": "## Plan\n\n1. Implement count_vowels\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/review",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "planned",
+                "session_id": "s-plan-42",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "## Findings\n\n[CRITICAL] count_vowels misses uppercase.\n\n## Verdict\n\nBlocked", "session_id": "s-review-42", "subtype": "success"},
+        ],
+        "git_calls": ["worktree_path", "create_worktree", "sync_branch"],
+        "expect": {
+            "label_after": "autoswe:review_blocked",
+            "autoswe_status": "review_blocked",
+            "comment_contains": ["## Review", "Blocked", "/pr` is disabled"],
+            "claude_permission": "plan",
+        },
+    },
     # ---- WI #150: waiting -> planned via MCP post_plan during resume ----
     {
         "name": "waiting_resume_mcp_post_plan",
@@ -1525,6 +1569,7 @@ CODEX_TRANSITIONS: list[str] = [
     "sync_conflict_resolved",        # Conflict resolution → synced
     "sync_conflict_unresolved",      # Conflict resolution fails → failed
     "planned_then_review",           # Review phase
+    "planned_then_review_blocked",   # Review verdict gating (Blocked → review_blocked)
 ]
 
 

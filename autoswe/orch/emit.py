@@ -14,7 +14,12 @@ from urllib.parse import quote as _url_quote
 from autoswe.core.logging_utils import log
 from autoswe.orch.types import Action, Effect, World
 from autoswe.tracking.comments import BOT_MARKER
-from autoswe.tracking.labels import COMPLETED_STATUSES, TERMINAL_STATUSES, _map_done_to_status
+from autoswe.tracking.labels import (
+    COMPLETED_STATUSES,
+    REVIEW_BLOCKING_STATUSES,
+    TERMINAL_STATUSES,
+    _map_done_to_status,
+)
 
 if TYPE_CHECKING:
     from autoswe.orch.run import DispatchResult
@@ -80,8 +85,10 @@ def _field_lifecycle_patch(
     elif kind in ("fix", "plan", "retry"):
         patch["review_file_path"] = None
 
-    # first_dispatched_at: clear on terminal statuses
-    if new_status in TERMINAL_STATUSES:
+    # first_dispatched_at: clear on terminal statuses and on the non-terminal
+    # review-blocking states (the review phase completed; the follow-up /fix
+    # should start its time/attempt clock fresh).
+    if new_status in TERMINAL_STATUSES or new_status in REVIEW_BLOCKING_STATUSES:
         patch["first_dispatched_at"] = None
 
     # _guard_blocked: reset on retry
@@ -367,12 +374,32 @@ def emit(
     # front so the review early-return below cannot skip them.
     queue_patch.update(_field_lifecycle_patch(kind, new_status, result))
 
-    # Review is now terminal — transitions to "reviewed".
+    # Review verdict gates the next step. _map_done_to_status parsed the
+    # verdict embedded in the review text:
+    #   * LGTM / approved -> "reviewed"        (terminal, /pr allowed)
+    #   * Needs changes    -> "review_failed"   (non-terminal, /pr blocked)
+    #   * Blocked          -> "review_blocked"  (non-terminal, /pr blocked)
     # Keep not clearing plan_file_path/session_id so a later /fix still has the plan.
     if kind == "review":
         review_text = done[len("REVIEW_READY\t"):] if done.startswith("REVIEW_READY\t") else ""
+        if new_status == "review_blocked":
+            gate_note = (
+                "\n\n🚫 **Blocked** — critical findings must be addressed before this can ship. "
+                "`/pr` is disabled; post `/fix` to address the findings (the branch is re-reviewed automatically)."
+            )
+        elif new_status == "review_failed":
+            gate_note = (
+                "\n\n⚠️ **Needs changes** — `/pr` is disabled; post `/fix` to address the findings "
+                "(the branch is re-reviewed automatically)."
+            )
+        else:
+            gate_note = ""
         metrics = _format_metrics(result.cost_usd, result.duration_seconds, session_id)
-        review_comment = f"## Review\n\n{review_text}\n\n{metrics.strip()}{BOT_MARKER}" if metrics.strip() else f"## Review\n\n{review_text}\n\n{BOT_MARKER}"
+        metrics_str = metrics.strip()
+        body_core = f"## Review\n\n{review_text}{gate_note}"
+        review_comment = f"{body_core}\n\n{metrics_str}{BOT_MARKER}" if metrics_str else f"{body_core}\n\n{BOT_MARKER}"
+        # A review run resolves any prior re-review request.
+        queue_patch["rereview_after_fix"] = False
         return (
             Effect(kind="post_comment", body=review_comment),
             Effect(kind="set_status", status=new_status),
@@ -423,10 +450,18 @@ def emit(
             if summary_text:
                 queue_patch["fix_summary"] = summary_text
 
+        # Auto re-review: a /fix dispatched from a review_failed/review_blocked
+        # state must be re-reviewed before it can ship. Flag it so decide()
+        # auto-dispatches /review on the next poll; otherwise clear any stale flag.
+        rereview_pending = kind in ("fix", "retry") and old_status in REVIEW_BLOCKING_STATUSES
+        if kind in ("fix", "retry"):
+            queue_patch["rereview_after_fix"] = rereview_pending
+
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 
-        # Auto-create PR if fix completed and configured
-        if kind in ("fix", "retry") and cfg.get("AUTO_CREATE_PR") and task.pr_number is None:
+        # Auto-create PR if fix completed and configured (but never when a
+        # re-review is pending — the gating verdict has not cleared yet).
+        if kind in ("fix", "retry") and cfg.get("AUTO_CREATE_PR") and task.pr_number is None and not rereview_pending:
             pr_head = f"autoswe/issue-{task.issue_number}"
             pr_base = task.plan_branch or task.base_branch
             # Build PR body from task data for context

@@ -787,6 +787,102 @@ def test_review_does_not_overwrite_queue_session_id():
     )
 
 
+# ---------------------------------------------------------------------------
+# Review verdict gating — emit() (issue: review verdict ignored)
+# ---------------------------------------------------------------------------
+
+
+def _review_emit_world(status: str = "planned", *, pr_number=None):
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=42, title="Test", body="Body", owner="owner", repo="repo", state="open",
+    )
+    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    task = TaskState(
+        slug="gh:owner_repo_42", owner="owner", repo="repo", issue_number=42,
+        title="Test", body="Body", status=status, plan_branch="autoswe/issue-42",
+        base_branch="main", attempt_count=1, first_dispatched_at="2026-01-01T00:00:00Z",
+        last_dispatched_command="/review", last_dispatched_command_id=1,
+        last_consumed_reply_id=1, session_id="fix-session", pr_number=pr_number,
+        guard_blocked=False, gh_closed=False, pending_command=None,
+        pending_guidance=None, pending_user_reply=None,
+    )
+    return World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
+
+
+def test_review_blocked_verdict_transitions_to_review_blocked():
+    """A 'Blocked' verdict gates: status review_blocked, /pr gate note, no rereview flag set yet."""
+    world = _review_emit_world()
+    action = Action(kind="review", slug="gh:owner_repo_42", triggering_comment_id=5)
+    review_text = "## Findings\n\n[CRITICAL] count_vowels misses uppercase.\n\n## Verdict\n\n**Blocked**"
+    result = DispatchResult(
+        done_content="REVIEW_READY\t" + review_text,
+        cost_usd=0.5, duration_seconds=60, session_id="review-session",
+        review_file_path="/tmp/review.md",
+    )
+
+    effects = emit(action, result, world)
+    set_status = next(e for e in effects if e.kind == "set_status")
+    assert set_status.status == "review_blocked"
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["autoswe_status"] == "review_blocked"
+    assert patch["rereview_after_fix"] is False
+    post = next(e for e in effects if e.kind == "post_comment")
+    assert review_text in post.body
+    assert "/pr` is disabled" in post.body
+
+
+def test_review_needs_changes_verdict_transitions_to_review_failed():
+    world = _review_emit_world()
+    action = Action(kind="review", slug="gh:owner_repo_42", triggering_comment_id=5)
+    review_text = "## Findings\n\n[MEDIUM] no test for main().\n\n## Verdict\n\n**Needs changes**"
+    result = DispatchResult(
+        done_content="REVIEW_READY\t" + review_text,
+        cost_usd=0.5, duration_seconds=60, session_id="review-session",
+        review_file_path="/tmp/review.md",
+    )
+
+    effects = emit(action, result, world)
+    set_status = next(e for e in effects if e.kind == "set_status")
+    assert set_status.status == "review_failed"
+    post = next(e for e in effects if e.kind == "post_comment")
+    assert "/pr` is disabled" in post.body
+
+
+def test_fix_from_review_blocked_sets_rereview_and_skips_auto_pr():
+    """A /fix dispatched from review_blocked flags re-review and must NOT auto-open a PR."""
+    world = _review_emit_world(status="review_blocked")
+    world.cfg["AUTO_CREATE_PR"] = True
+    action = Action(kind="fix", slug="gh:owner_repo_42", triggering_comment_id=7)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tFixed the vowel bug\tabc1234",
+        cost_usd=1.0, duration_seconds=60, session_id="fix-session",
+    )
+
+    effects = emit(action, result, world)
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["rereview_after_fix"] is True, "fix from review_blocked must flag re-review"
+    assert patch["autoswe_status"] == "fixed"
+    pr_effects = [e for e in effects if e.kind == "create_pr"]
+    assert len(pr_effects) == 0, "must not auto-open PR while a re-review is pending"
+
+
+def test_fix_from_normal_state_clears_rereview_flag():
+    """A /fix from a normal (planned) state does not set the re-review flag."""
+    world = _review_emit_world(status="planned")
+    action = Action(kind="fix", slug="gh:owner_repo_42", triggering_comment_id=7)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tImplemented feature\tabc1234",
+        cost_usd=1.0, duration_seconds=60, session_id="fix-session",
+    )
+
+    effects = emit(action, result, world)
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["rereview_after_fix"] is False
+
+
 def test_fix_still_overwrites_queue_session_id():
     """Non-review actions (fix, plan) should still update session_id in
     the queue_patch when the handler returns one."""

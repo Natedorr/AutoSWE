@@ -453,6 +453,7 @@ class ClaudeCodeBackend:
             cost_usd = None
             duration_ms = 0
             captured_plan_file: str | None = None
+            captured_plan_text: str | None = None
             plan_posted, question_posted = False, False
             progress_state = ProgressState()
 
@@ -476,6 +477,14 @@ class ClaudeCodeBackend:
                                     elif block.name == "mcp__autoswe_comment__post_question":
                                         if (block.input or {}).get("body", "").strip():
                                             question_posted = True
+                                    elif block.name == "ExitPlanMode":
+                                        # ExitPlanMode is disallowed in plan mode, but the
+                                        # tool-use block (with the plan markdown) still
+                                        # appears in the stream. Capture it so the planner
+                                        # can post the plan instead of "Tool: ExitPlanMode".
+                                        exit_plan = (block.input or {}).get("plan", "").strip()
+                                        if exit_plan:
+                                            captured_plan_text = exit_plan
                                     plan_path = _extract_plan_file_path(block)
                                     if plan_path is not None:
                                         captured_plan_file = plan_path
@@ -521,6 +530,7 @@ class ClaudeCodeBackend:
                 plan_file_path=captured_plan_file,
                 plan_posted=plan_posted,
                 question_posted=question_posted,
+                plan_text=captured_plan_text,
             )
         finally:
             # Restore original environment — prevents credential leakage between tasks

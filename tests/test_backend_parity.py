@@ -113,7 +113,7 @@ class TestRunResultShape:
         """RunResult has the expected set of fields."""
         expected = {
             "text", "session_id", "subtype", "cost_usd", "duration_seconds",
-            "plan_file_path", "plan_posted", "question_posted",
+            "plan_file_path", "plan_posted", "question_posted", "plan_text",
         }
         actual = {f.name for f in fields(RunResult)}
         assert actual == expected, f"RunResult fields drifted: {actual ^ expected}"

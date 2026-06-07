@@ -256,6 +256,7 @@ class TestGitHubTracker:
                                          "autoswe:syncing", "autoswe:reviewing", "autoswe:shipping",
                                          "autoswe:planned", "autoswe:fixed", "autoswe:synced",
                                          "autoswe:shipped", "autoswe:reviewed",
+                                         "autoswe:review_failed", "autoswe:review_blocked",
                                          "autoswe:waiting", "autoswe:failed", "autoswe:skipped",
                                          "autoswe:aborted", "autoswe:error"}
         ]

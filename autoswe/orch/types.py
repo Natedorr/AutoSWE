@@ -75,6 +75,7 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("plan_file_path", "plan_file_path", None),
     TaskField("review_file_path", "review_file_path", None),
     TaskField("fix_summary", "fix_summary", ""),
+    TaskField("rereview_after_fix", "rereview_after_fix", False),
 )
 
 
@@ -150,6 +151,10 @@ class TaskState:
     # Extracted from DONE_SUMMARY on fix/retry completion. Persisted in the
     # queue so PR creation can include it in the body.
     fix_summary: str = ""
+    # Set by emit() when a /fix dispatched from a review_failed/review_blocked
+    # state completes. decide() then auto-dispatches a /review on the next poll
+    # (and clears the flag) so the gating verdict is re-checked before /pr.
+    rereview_after_fix: bool = False
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:

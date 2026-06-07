@@ -38,6 +38,7 @@ from autoswe.providers.factory import build_repo_cfg, get_tracker
 from autoswe.providers.github.adapter import apply_effect as gh_apply_effect
 from autoswe.providers.github.adapter import read_api as gh_read_api
 from autoswe.tracking.labels import (
+    REVIEW_BLOCKING_STATUSES,
     RUNNING_STATUSES,
     TERMINAL_STATUSES,
     completed_status_for,
@@ -47,7 +48,7 @@ from autoswe.tracking.labels import (
 from autoswe.tracking.progress import ProgressComment
 
 # Statuses whose label mirror is synced in Phase 3
-_MIRROR_STATUSES = TERMINAL_STATUSES | {"planned", "waiting"}
+_MIRROR_STATUSES = TERMINAL_STATUSES | {"planned", "waiting"} | REVIEW_BLOCKING_STATUSES
 
 dbg = get_debug_logger()
 

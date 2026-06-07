@@ -20,6 +20,7 @@ from autoswe.tracking.comments import (
 )
 from autoswe.tracking.labels import (
     COMPLETED_STATUSES,
+    REVIEW_BLOCKING_STATUSES,
     RUNNING_STATUSES,
     TERMINAL_STATUSES,
     _kind_from_command,
@@ -291,6 +292,12 @@ def _check_restart_or_guard(
     if task.guard_blocked and slash_cmd not in ("/retry", "/skip", "/abort"):
         return Action(kind="noop", slug=task.slug)
 
+    # Review gating: a review that found problems blocks shipping. Refuse /pr
+    # until the user posts /fix (which triggers an automatic re-review).
+    if slash_cmd == "/pr" and status in REVIEW_BLOCKING_STATUSES:
+        log(f"[DECIDE] {task.slug} /pr blocked — review status {status}")
+        return Action(kind="noop", slug=task.slug)
+
     # Find the reference ID (bot completion or last bot comment)
     if status in _COMPLETED_OR_TERMINAL_FOR_WATERMARK:
         last_autoswe = _find_last_completion_id(comments)
@@ -458,6 +465,24 @@ def decide(world: World) -> Action:
         slash_result = None
         slash_cmd_suppressed = True
 
+    # ------ Auto re-review after a fix that addressed review findings ------
+    # A /fix dispatched from review_failed/review_blocked set rereview_after_fix.
+    # Once that fix completes (status "fixed") and the user hasn't posted a new
+    # command since, re-run /review automatically so the gating verdict is
+    # rechecked before /pr can ship. emit() clears the flag when review runs.
+    if task.status == "fixed" and task.rereview_after_fix:
+        last_completion = _find_last_completion_id(comments)
+        if not _has_new_user_comment_after(comments, last_completion):
+            log(f"[DECIDE] {task.slug} auto re-review after fix from review")
+            return Action(
+                kind="review",
+                slug=task.slug,
+                plan_branch=task.plan_branch,
+                attempt_count=1,
+                triggering_comment_id=task.last_dispatched_command_id,
+                resume_session_id=task.session_id,
+            )
+
     # ------ No slash command ------
     if slash_cmd is None:
         status = task.status
@@ -517,8 +542,11 @@ def decide(world: World) -> Action:
     # ------ Has a slash command, task exists ------
     status = task.status
 
-    # Terminal state -> restart / guard logic
-    if status in TERMINAL_STATUSES:
+    # Terminal state (or a review-blocking resting state) -> restart / guard logic.
+    # Review-blocking states reuse the terminal restart machinery so /fix,
+    # /retry, /skip, /abort and new-comment restarts behave consistently; the
+    # /pr guard inside _check_restart_or_guard refuses shipping until re-review.
+    if status in TERMINAL_STATUSES or status in REVIEW_BLOCKING_STATUSES:
         action = _check_restart_or_guard(
             world, slash_cmd, guidance, branch, cmd_author, cmd_id
         )

@@ -54,7 +54,11 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | Non
         Path(result.plan_file_path) if result.plan_file_path else None
     )
     allow_fs_scan = runner.backend_has_capability(harness, "plan_file")
-    comment, done_content, used_file = _extract_plan_output(result.text, plan_file=plan_file, allow_fs_scan=allow_fs_scan)
+    exit_plan_text = getattr(result, "plan_text", None)
+    comment, done_content, used_file = _extract_plan_output(
+        result.text, plan_file=plan_file, allow_fs_scan=allow_fs_scan,
+        exit_plan_text=exit_plan_text,
+    )
 
     plan_file_path: str | None = None
     if done_content == "PLAN_READY" and used_file is not None:
@@ -105,25 +109,30 @@ def _plan_file_is_pending(plan_text: str) -> bool:
     return any(indicator in lower for indicator in pending_indicators)
 
 
-def _extract_plan_output(text: str, plan_file: Path | None = None, *, allow_fs_scan: bool = True) -> tuple[str, str, Path | None]:
+def _extract_plan_output(text: str, plan_file: Path | None = None, *, allow_fs_scan: bool = True, exit_plan_text: str | None = None) -> tuple[str, str, Path | None]:
     """Return (comment_body, done_content, used_file_path) using the output priority chain.
 
     The third element is the Path of the plan file used (when content came from
-    a file), or None when content came from tags / raw text.
+    a file), or None when content came from tags / ExitPlanMode / raw text.
 
     Priority:
     1. Captured plan file (from Write tool call) -> "## Plan" + "PLAN_READY" + path (unless pending)
-    2. <AUTOSWE_PLAN> tags in text -> "## Plan" + "PLAN_READY" + None
-    3. <AUTOSWE_QUESTIONS> tags in text -> "## Questions" + "WAITING: questions" + None
-    4. Filesystem scan (_find_latest_plan_file) -> "## Plan" + "PLAN_READY" + path (last resort)
+    2. ExitPlanMode plan text (from the native plan-mode exit) -> "## Plan" + "PLAN_READY" + None (unless pending)
+    3. <AUTOSWE_PLAN> tags in text -> "## Plan" + "PLAN_READY" + None
+    4. <AUTOSWE_QUESTIONS> tags in text -> "## Questions" + "WAITING: questions" + None
+    5. Filesystem scan (_find_latest_plan_file) -> "## Plan" + "PLAN_READY" + path (last resort)
        Only runs when allow_fs_scan=True (gated on the "plan_file" backend capability).
        Backends that never write to ~/.claude/plans/ (e.g. Codex) pass False to
        prevent stale cross-issue plan files from being posted.
-    5. Fallback -> "## Claude's response" + "WAITING: see comment" + None
+    6. Fallback -> "## Claude's response" + "WAITING: see comment" + None
 
-    Tags (steps 2-3) are checked BEFORE the filesystem scan (step 4) to avoid
+    Tags (steps 3-4) are checked BEFORE the filesystem scan (step 5) to avoid
     picking up another session's plan file during concurrent execution.
     (Regression fix for issue #36 — plan file collision.)
+
+    ExitPlanMode text (step 2) is session-correct (it comes from this run's
+    message stream), so it ranks above the deprecated tags and the filesystem
+    scan but below an explicit Write to the plans directory.
     """
     # 1. Check for captured plan file path (from Write tool call — per-session)
     captured_file = plan_file
@@ -141,7 +150,16 @@ def _extract_plan_output(text: str, plan_file: Path | None = None, *, allow_fs_s
         dbg.debug("PLAN: captured plan file disappeared: %s — falling through to tag detection", plan_file)
         captured_file = None
 
-    # 2. Check for <AUTOSWE_PLAN> tags (session-correct, before filesystem scan)
+    # 2. Check for ExitPlanMode plan text (session-correct, from the stream)
+    if exit_plan_text and exit_plan_text.strip():
+        ep = exit_plan_text.strip()
+        if _plan_file_is_pending(ep):
+            dbg.debug("PLAN: ExitPlanMode plan detected as pending — falling through to tag detection")
+        else:
+            comment = f"## Plan\n\n{ep}\n\n_Reply with `/fix` to start coding._"
+            return comment, "PLAN_READY", None
+
+    # 3. Check for <AUTOSWE_PLAN> tags (session-correct, before filesystem scan)
     plan_m = _PLAN_RE.search(text or "")
     questions_m = _QUESTIONS_RE.search(text or "")
 

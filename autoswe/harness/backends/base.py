@@ -44,6 +44,12 @@ class RunResult:
     plan_file_path: str | None = None
     plan_posted: bool = False
     question_posted: bool = False
+    # Plan markdown captured from an ExitPlanMode tool call. The model often
+    # exits plan mode via the native ExitPlanMode tool (even though it is
+    # disallowed, the tool-use block — and its plan content — still appears in
+    # the stream). Capturing it here lets the planner post the plan as a comment
+    # instead of leaking the bare "Tool: ExitPlanMode" progress line.
+    plan_text: str | None = None
 
     def __iter__(self):
         """Allow tuple-style unpacking: text, session_id, subtype = result."""

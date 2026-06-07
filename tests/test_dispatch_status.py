@@ -69,6 +69,55 @@ def test_map_review_ready():
     assert _map_done_to_label("REVIEW_READY") == "autoswe:reviewed"
 
 
+# ---------------------------------------------------------------------------
+# Review verdict gating — REVIEW_READY\t<text> maps by verdict
+# ---------------------------------------------------------------------------
+
+def test_map_review_lgtm_is_reviewed():
+    body = "## Summary\n\nClean.\n\n## Verdict\n\n**LGTM**"
+    assert _map_done_to_label(f"REVIEW_READY\t{body}") == "autoswe:reviewed"
+
+
+def test_map_review_needs_changes_is_review_failed():
+    body = "## Summary\n\nSome gaps.\n\n## Verdict\n\n**Needs changes** — see findings."
+    assert _map_done_to_label(f"REVIEW_READY\t{body}") == "autoswe:review_failed"
+
+
+def test_map_review_blocked_is_review_blocked():
+    body = "## Summary\n\nBug.\n\n## Verdict\n\n**Blocked** — 1 CRITICAL finding."
+    assert _map_done_to_label(f"REVIEW_READY\t{body}") == "autoswe:review_blocked"
+
+
+def test_map_review_no_verdict_section_defaults_reviewed():
+    """No ## Verdict section and no blocking tokens → reviewed (backward compat)."""
+    body = "## Findings\n\nThe code has critical issues described below."
+    assert _map_done_to_label(f"REVIEW_READY\t{body}") == "autoswe:reviewed"
+
+
+def test_map_review_no_issues_found_is_reviewed():
+    assert _map_done_to_label("REVIEW_READY\tLGTM, no issues found.") == "autoswe:reviewed"
+
+
+def test_parse_review_verdict_ignores_body_tokens_outside_verdict():
+    """'Blocked'/'Needs changes' in finding bodies must not gate when the
+    Verdict section itself is LGTM."""
+    from autoswe.tracking.labels import parse_review_verdict
+
+    body = (
+        "## Findings\n\n[MEDIUM] this would have blocked older clients.\n"
+        "Needs changes were considered but rejected.\n\n"
+        "## Verdict\n\n**LGTM**\n"
+    )
+    assert parse_review_verdict(body) == "reviewed"
+
+
+def test_parse_review_verdict_blocked_beats_needs_changes():
+    from autoswe.tracking.labels import parse_review_verdict
+
+    body = "## Verdict\n\nBlocked. (Needs changes alone would not be enough.)"
+    assert parse_review_verdict(body) == "review_blocked"
+
+
 def test_map_random_string():
     assert _map_done_to_label("something random") == "autoswe:fixed"
 

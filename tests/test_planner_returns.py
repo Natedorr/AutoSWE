@@ -1255,6 +1255,82 @@ def test_run_plan_question_posted_beats_plan_posted(tmp_path, mock_gh_post_comme
 
 
 # ---------------------------------------------------------------------------
+# ExitPlanMode plan capture — model exits plan mode via the native tool
+
+def test_run_plan_uses_exit_plan_mode_text(tmp_path, mock_gh_post_comment):
+    """When the model exits plan mode via ExitPlanMode (no MCP post_plan, no plan
+    file), the captured plan_text is posted and PLAN_READY is returned — instead
+    of leaking the bare 'Tool: ExitPlanMode' progress line."""
+    task = make_task()
+    plan_md = "# Plan\n\n1. Build the state machine\n2. Add tests"
+    runner_result = RunResult(
+        text="Tool: ExitPlanMode",  # final assistant text is unhelpful
+        session_id="sess-1",
+        subtype="success",
+        plan_text=plan_md,
+    )
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            # No filesystem plan file — exercise the ExitPlanMode capture path
+            with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+                with patch("autoswe.harness.runner.run", return_value=runner_result):
+                    from autoswe.harness.planner import run_plan
+                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    assert len(mock_gh_post_comment.posted) == 1
+    body = mock_gh_post_comment.posted[0]["body"]
+    assert "Build the state machine" in body
+    assert "Tool: ExitPlanMode" not in body
+
+
+def test_extract_plan_output_exit_plan_text_unit(tmp_path):
+    """_extract_plan_output uses exit_plan_text after a captured file but before
+    tags/filesystem scan."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(
+            "irrelevant text", plan_file=None,
+            exit_plan_text="# My Plan\n\nDo the thing.",
+        )
+    assert done == "PLAN_READY"
+    assert "Do the thing" in comment
+    assert used_file is None
+
+
+def test_extract_plan_output_pending_exit_plan_falls_through(tmp_path):
+    """A pending ExitPlanMode plan falls through to tag/raw detection."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(
+            "<AUTOSWE_PLAN>\nReal plan\n</AUTOSWE_PLAN>", plan_file=None,
+            exit_plan_text="Waiting for the user to clarify before implementing.",
+        )
+    assert done == "PLAN_READY"
+    assert "Real plan" in comment
+
+
+def test_extract_plan_output_captured_file_beats_exit_plan_text(tmp_path):
+    """An explicit Write to the plans dir outranks ExitPlanMode text."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    plan_file = tmp_path / "captured.md"
+    plan_file.write_text("# Captured\n\nFrom the write tool.")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(
+            "text", plan_file=plan_file,
+            exit_plan_text="# Exit\n\nFrom exit plan mode.",
+        )
+    assert done == "PLAN_READY"
+    assert "From the write tool" in comment
+    assert "From exit plan mode" not in comment
+
+
+# ---------------------------------------------------------------------------
 # Codex backend — text-tag fallback (no MCP)
 
 
