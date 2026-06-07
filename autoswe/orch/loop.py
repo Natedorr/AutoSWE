@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -398,7 +399,7 @@ def _finalize_handler(
     # --- Write done file ---
     done_path = RUNNING_DIR / f"{slug_to_filename(slug)}.done"
     with contextlib.suppress(OSError):
-        done_path.write_text(done_content)
+        done_path.write_text(done_content, encoding="utf-8")
 
     # --- Write structured result file ---
     result_path = RUNNING_DIR / f"{slug_to_filename(slug)}.result.json"
@@ -419,7 +420,7 @@ def _finalize_handler(
             "pr_number": task_entry.get("pr_number"),
             "session_id": task_entry.get("session_id"),
         }
-        result_path.write_text(json.dumps(result_data, indent=2))
+        result_path.write_text(json.dumps(result_data, indent=2), encoding="utf-8")
     except OSError:
         pass
 
@@ -505,10 +506,19 @@ def _post_pending_welcomes(
     cfg: dict,
     bot_name: str,
     silent_reporting: bool,
+    active_slugs: set | None = None,
 ) -> None:
-    """Post welcome comments to newly discovered issues that don't have one yet."""
+    """Post welcome comments to newly discovered issues that don't have one yet.
+
+    *active_slugs* — set of slugs currently open in the API.  When provided,
+    stale queue entries (issues closed on the platform between runs) are
+    skipped so we don't post welcome comments to closed issues.
+    """
     for slug, task in list(queue.items()):
         if task.get("suppress_welcome", False):
+            continue
+        # Skip stale entries not currently open in the API
+        if active_slugs is not None and slug not in active_slugs:
             continue
 
         owner = task["owner"]
@@ -537,6 +547,8 @@ def _post_pending_welcomes(
                 task["welcome_comment_id"] = welcome_id
                 task.setdefault("bot_comment_ids", []).append(welcome_id)
             log(f"[WELCOME] posted to {slug}")
+            # Throttle welcome posts to avoid API rate limits (10s between each).
+            time.sleep(10)
         except Exception as e:  # Per-repo resilience; one failed welcome must not block the rest.
             dbg.error("post_welcome_comments: failed for %s: %s", slug, e, exc_info=True)
             log(f"[WARN] welcome comment failed for {slug}: {e}")
@@ -801,12 +813,14 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             # --- Phase 0a: Ensure queue entries exist ---
             # Create queue entries for all open issues before Phase 0b (welcomes).
             # This ensures _post_pending_welcomes can find newly discovered tasks.
+            active_slugs: set[str] = set()
             for issue_number, api in api_states.items():
                 if api.issue.is_pull_request:
                     continue
                 if api.issue.state == "closed":
                     continue
                 slug = make_slug(provider, (owner, repo), issue_number)
+                active_slugs.add(slug)
                 _ensure_queue_entry(
                     queue, slug, api, owner, repo, issue_number,
                     now_iso, base_branch, provider, silent_reporting,
@@ -818,7 +832,8 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             # The queue is mutated in-place; _build_poll_task reads the
             # updated suppress_welcome flag for each issue.
             if run_actions:
-                _post_pending_welcomes(queue, repos_cfg, cfg, bot_name, silent_reporting)
+                _post_pending_welcomes(queue, repos_cfg, cfg, bot_name, silent_reporting,
+                                       active_slugs=active_slugs)
 
             # --- Phase 1: Process open issues ---
             for issue_number, api in api_states.items():

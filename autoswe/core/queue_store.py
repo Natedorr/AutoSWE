@@ -12,7 +12,7 @@ def _atomic_write(path, data) -> None:
     """Write JSON atomically via a temp file."""
     tmp = path.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(data, indent=2))
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(path)
     except OSError as e:
         dbg.error("_atomic_write: failed to write %s: %s", path, e, exc_info=True)
