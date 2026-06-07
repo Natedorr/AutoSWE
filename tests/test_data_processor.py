@@ -3,8 +3,13 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 from data_processor import process_file, validate_record
+
+# Resolve the script path relative to this test file, not CWD
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SCRIPT = _REPO_ROOT / "data_processor.py"
 
 # --- validate_record ---
 
@@ -117,11 +122,32 @@ def test_non_dict_json_values(tmp_path):
     assert process_file(str(f)) == {"valid": 0, "invalid": 3}
 
 
+def test_crlf_line_endings(tmp_path):
+    """Windows-style CRLF line endings are handled correctly."""
+    f = tmp_path / "test.ndjson"
+    f.write_text(
+        json.dumps({"name": "A", "age": 1}) + "\r\n"
+        + json.dumps({"name": "B", "age": 2}) + "\r\n"
+    )
+    assert process_file(str(f)) == {"valid": 2, "invalid": 0}
+
+
+def test_utf8_bom(tmp_path):
+    """Files with a UTF-8 BOM are handled via utf-8-sig encoding."""
+    f = tmp_path / "test.ndjson"
+    f.write_text(
+        "﻿" + json.dumps({"name": "A", "age": 1}) + "\n"
+        + json.dumps({"name": "B", "age": 2}) + "\n",
+        encoding="utf-8",
+    )
+    assert process_file(str(f)) == {"valid": 2, "invalid": 0}
+
+
 # --- CLI (main) via subprocess ---
 
 def test_no_args_exits_nonzero():
     result = subprocess.run(
-        [sys.executable, "data_processor.py"],
+        [sys.executable, str(_SCRIPT)],
         capture_output=True, text=True,
     )
     assert result.returncode == 1
@@ -130,7 +156,7 @@ def test_no_args_exits_nonzero():
 
 def test_file_not_found():
     result = subprocess.run(
-        [sys.executable, "data_processor.py", "nonexistent.ndjson"],
+        [sys.executable, str(_SCRIPT), "nonexistent.ndjson"],
         capture_output=True, text=True,
     )
     assert result.returncode == 1
@@ -145,7 +171,7 @@ def test_successful_run(tmp_path):
         + "invalid line\n"
     )
     result = subprocess.run(
-        [sys.executable, "data_processor.py", str(f)],
+        [sys.executable, str(_SCRIPT), str(f)],
         capture_output=True, text=True,
     )
     assert result.returncode == 0

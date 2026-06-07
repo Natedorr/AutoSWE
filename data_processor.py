@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 
-def validate_record(record) -> bool:
+def validate_record(record: object) -> bool:
     """Return True if *record* is a dict with ``name`` (str) and ``age`` (int).
 
     ``age`` must be a plain int — booleans are explicitly rejected (bool is a
@@ -25,25 +25,29 @@ def validate_record(record) -> bool:
 def process_file(filepath: str) -> dict:
     """Process an NDJSON file.
 
-    Reads every non-blank line, attempts JSON decode, then validates.
+    Streams the file line-by-line (no full-file materialisation), attempts
+    JSON decode, then validates.  ``utf-8-sig`` is used so files with a
+    BOM are handled transparently.
+
     Returns ``{"valid": <count>, "invalid": <count>}``.
     """
     valid = 0
     invalid = 0
-    for line in Path(filepath).read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            record = json.loads(stripped)
-        except json.JSONDecodeError:
-            invalid += 1
-            continue
+    with open(filepath, encoding="utf-8-sig") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                invalid += 1
+                continue
 
-        if validate_record(record):
-            valid += 1
-        else:
-            invalid += 1
+            if validate_record(record):
+                valid += 1
+            else:
+                invalid += 1
     return {"valid": valid, "invalid": invalid}
 
 
@@ -56,7 +60,11 @@ def main():
     if not Path(path).exists():
         print(f"Error: file not found: {path}", file=sys.stderr)
         sys.exit(1)
-    result = process_file(path)
+    try:
+        result = process_file(path)
+    except OSError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     total = result["valid"] + result["invalid"]
     print(f"Valid records: {result['valid']}")
     print(f"Invalid records: {result['invalid']}")
