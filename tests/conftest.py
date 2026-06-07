@@ -275,7 +275,22 @@ def git_world(tmp_path, monkeypatch):
     Returns a GitWorld instance with a bare remote, AUTOSWE_DIR tree,
     and monkeypatched clone URLs. Tests call world.init_remote() to seed
     content, then use production worktree functions against real git.
+
+    Also monkeypatches subprocess.run to capture output by default, so git
+    progress noise (enumerating objects, writing objects, etc.) doesn't
+    leak into the pytest output.
     """
+    import subprocess as _sub
+
+    _orig_run = _sub.run
+
+    def _quiet_run(*args, **kwargs):
+        kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("text", True)
+        return _orig_run(*args, **kwargs)
+
+    monkeypatch.setattr(_sub, "run", _quiet_run)
+
     from tests.git_fixtures import GitWorld
     return GitWorld(tmp_path, monkeypatch)
 

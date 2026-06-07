@@ -624,7 +624,7 @@ def test_codex_killed_subtype():
 def test_codex_timeout():
     """asyncio.TimeoutError is re-raised after killing the process."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", timeout=60)
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", timeout=0.5)
 
     mock_process = Mock()
     mock_process.stdout = None

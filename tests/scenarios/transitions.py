@@ -1616,6 +1616,10 @@ def build_queue_task(row: dict, provider: str) -> dict | None:
     if task is None:
         return None
     task = copy.deepcopy(task)
+    # A task that already exists in the queue has already been discovered,
+    # so a welcome comment would have been posted on first discovery.
+    # Suppress it here so _post_pending_welcomes doesn't hit time.sleep(10).
+    task.setdefault("suppress_welcome", True)
     if provider == "azure":
         task["id"] = "ado:testorg_testproj/testrepo_42"
         task["owner"] = "testorg"
