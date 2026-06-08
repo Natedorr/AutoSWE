@@ -390,5 +390,81 @@ def test_question_flow_session_id_preserved(fake):
     assert result.session_id == "s-question-preserve"
 
 
+# =============================================================================
+# Test 12: AskUserQuestion sticky comment not clobbered by subsequent progress
+# =============================================================================
+
+def test_question_not_clobbered_by_subsequent_progress(fake):
+    """After AskUserQuestion fires, subsequent tool-use progress must NOT
+    overwrite the sticky comment. The final progress_callback body must be
+    the question markdown, not a 'Reading ...' line.
+
+    This exercises the suppress + re-assert fix in claude_code.py:
+    - _question_asked() guards both in-loop progress callbacks
+    - The re-assert after the loop ensures the question is the last body emitted
+    """
+    from autoswe.harness.ask_user_question import make_can_use_tool
+    from autoswe.harness.runner import _run_async
+
+    state: dict = {}
+    progress_bodies: list[str] = []
+
+    def progress_callback(body: str) -> None:
+        progress_bodies.append(body)
+
+    # Script: text → AskUserQuestion → Read (progress-bearing) → result
+    fake.script_text("Reading the codebase...", session_id="s-q-noclobber")
+    fake.script_tool(
+        "AskUserQuestion",
+        {"questions": [{"question": "Which approach?", "options": [{"label": "A"}, {"label": "B"}]}]},
+        session_id="s-q-noclobber",
+    )
+    fake.script_tool(
+        "Read",
+        {"file_path": "/tmp/something.py"},
+        session_id="s-q-noclobber",
+    )
+    fake.script_result(session_id="s-q-noclobber")
+
+    # invoke_permissions=True so the fake calls can_use_tool for each ToolUseBlock
+    fake.invoke_permissions = True
+
+    # Use the real make_can_use_tool with on_post=progress_callback so AskUserQuestion
+    # sets state["asked_question_md"] and calls progress_callback with the question body.
+    can_use_tool_cb = make_can_use_tool(
+        state=state,
+        task={},
+        repo_cfg={},
+        on_post=progress_callback,
+        read_only=True,
+    )
+
+    async def run():
+        with fake.patched():
+            result = await _run_async(
+                "Plan the work",
+                cwd="/tmp",
+                permission_mode="plan",
+                allowed_tools=["Read", "AskUserQuestion"],
+                can_use_tool=can_use_tool_cb,
+                progress_callback=progress_callback,
+                state=state,
+            )
+        return result
+
+    asyncio.run(run())
+
+    assert state.get("asked_question_md"), "asked_question_md must be set"
+    assert progress_bodies, "progress_callback must have been called at least once"
+
+    last_body = progress_bodies[-1]
+    assert "## Questions" in last_body or "Which approach" in last_body, (
+        f"Expected question in last progress body, got: {last_body!r}\n"
+        f"All bodies: {progress_bodies}"
+    )
+    # The Read tool progress must NOT be the last entry
+    assert "Read" not in last_body or "## Questions" in last_body or "Which approach" in last_body
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

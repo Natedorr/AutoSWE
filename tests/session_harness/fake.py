@@ -140,6 +140,7 @@ class StreamingClaudeFake:
         self.script: list[ScriptedMessage] = []
         self.call_count = 0
         self.call_args: list[dict[str, Any]] = []
+        self.invoke_permissions: bool = False
 
     # ---- Scripting helpers ----
 
@@ -273,6 +274,14 @@ class StreamingClaudeFake:
             for msg in fake.script:
                 result = msg.to_message()
                 if result is not None:
+                    # When invoke_permissions is set, call can_use_tool for each
+                    # tool-use block before yielding, mirroring what the SDK does.
+                    if fake.invoke_permissions and options is not None:
+                        can_use_tool = getattr(options, "can_use_tool", None)
+                        if can_use_tool is not None and isinstance(result, AssistantMessage):
+                            for block in result.content:
+                                if isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
+                                    await can_use_tool(block.name, block.input or {}, None)
                     yield result
 
         return fake_query

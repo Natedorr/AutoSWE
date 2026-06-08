@@ -18,6 +18,7 @@ from pathlib import Path
 
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness.backends.base import PROGRESS_TOOLS, RunResult, RunSpec
+from autoswe.harness.prompts import BOT_MARKER
 
 _dbg = get_debug_logger()
 
@@ -457,6 +458,9 @@ class ClaudeCodeBackend:
             plan_posted, question_posted = False, False
             progress_state = ProgressState()
 
+            def _question_asked() -> bool:
+                return bool(spec.state and spec.state.get("asked_question_md"))
+
             try:
                 async for msg in query(prompt=prompt_source, options=options):
                     if isinstance(msg, AssistantMessage):
@@ -466,7 +470,7 @@ class ClaudeCodeBackend:
                             if isinstance(block, TextBlock):
                                 text_chunks.append(block.text)
                             elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
-                                if spec.progress_callback and progress_state.note_tool_use(block):
+                                if spec.progress_callback and not _question_asked() and progress_state.note_tool_use(block):
                                     body = progress_state.render()
                                     if body:
                                         spec.progress_callback(body)
@@ -489,7 +493,7 @@ class ClaudeCodeBackend:
                                     if plan_path is not None:
                                         captured_plan_file = plan_path
                     elif isinstance(msg, UserMessage):
-                        if spec.progress_callback:
+                        if spec.progress_callback and not _question_asked():
                             for block in msg.content:
                                 if isinstance(block, ToolResultBlock):
                                     if progress_state.note_tool_result(block):
@@ -520,6 +524,12 @@ class ClaudeCodeBackend:
                         f"(session_id={session_id}, subtype={subtype})")
                 else:
                     raise
+
+            # Re-assert the question as the final sticky-comment content. Guards
+            # against any progress update that fired in the same message as the
+            # AskUserQuestion call (before the flag became visible to the loop).
+            if _question_asked() and spec.progress_callback:
+                spec.progress_callback(spec.state["asked_question_md"] + BOT_MARKER)
 
             return RunResult(
                 text="\n".join(text_chunks),
