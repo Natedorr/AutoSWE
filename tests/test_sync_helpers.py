@@ -337,3 +337,119 @@ def test_ensure_queue_entry_does_not_overwrite_existing():
     assert entry["title"] == "T"
     assert entry["last_updated"] == "2026-01-01T00:00:00Z"  # Not overwritten
     assert entry["last_comment_sync"] == "2026-01-01T12:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# _sync_before_dispatch
+# ---------------------------------------------------------------------------
+
+def _make_task():
+    return {
+        "id": "gh:o_r_1",
+        "owner": "o",
+        "repo": "r",
+        "issue_number": 1,
+        "title": "T",
+        "body": "B",
+        "base_branch": "main",
+        "_token": "tok",
+    }
+
+
+def _patch_sync_before(tmp_path, sync_result, monkeypatch):
+    """Return a context-manager stack that patches the sync_branch seams."""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    stack = ExitStack()
+    # worktree_path returns a path that already exists so create_worktree is skipped
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    stack.enter_context(
+        patch("autoswe.orch.run.worktree_mod.worktree_path", return_value=tmp_path)
+    )
+    stack.enter_context(
+        patch("autoswe.orch.run.worktree_mod.sync_branch", return_value=sync_result)
+    )
+    return stack
+
+
+def test_sync_before_dispatch_merge_conflict_resolve_false_returns_wt_none(tmp_path):
+    """merge conflict + resolve_conflicts=False → (wt, None), no resolve_sync_conflicts call."""
+    from unittest.mock import patch
+
+    sync_result = {
+        "synced": False,
+        "conflict": True,
+        "branch": "autoswe/issue-1",
+        "ahead": 0,
+        "conflict_files": ["src/a.py"],
+    }
+    resolve_calls = []
+
+    with _patch_sync_before(tmp_path, sync_result, None):
+        with patch("autoswe.orch.run.coder.resolve_sync_conflicts", side_effect=resolve_calls.append):
+            from autoswe.orch.run import _sync_before_dispatch
+            wt, err = _sync_before_dispatch(
+                _make_task(), {}, {}, None,
+                phase="fix", branch_for_create="main", resolve_conflicts=False,
+            )
+
+    assert err is None, "should proceed without error when resolve_conflicts=False"
+    assert wt == tmp_path
+    assert resolve_calls == [], "resolve_sync_conflicts must NOT be called"
+
+
+def test_sync_before_dispatch_merge_conflict_resolve_true_calls_resolver(tmp_path):
+    """merge conflict + resolve_conflicts=True → resolve_sync_conflicts is called (plan/review path)."""
+    from unittest.mock import patch
+
+    from autoswe.harness.runner import HandlerResult
+
+    sync_result = {
+        "synced": False,
+        "conflict": True,
+        "branch": "autoswe/issue-1",
+        "ahead": 0,
+        "conflict_files": ["src/a.py"],
+    }
+
+    def fake_resolve(task, files, **kwargs):
+        return HandlerResult("DONE_SUMMARY\tok\t")
+
+    with _patch_sync_before(tmp_path, sync_result, None):
+        with patch("autoswe.orch.run.coder.resolve_sync_conflicts", side_effect=fake_resolve) as mock_resolve:
+            from autoswe.orch.run import _sync_before_dispatch
+            wt, err = _sync_before_dispatch(
+                _make_task(), {}, {}, None,
+                phase="plan", branch_for_create="main", resolve_conflicts=True,
+            )
+
+    assert err is None
+    mock_resolve.assert_called_once()
+
+
+def test_sync_before_dispatch_rebase_conflict_returns_failed_handler_result(tmp_path):
+    """rebase conflict → HandlerResult with FAILED message instead of silent pass-through."""
+    from autoswe.harness.runner import HandlerResult
+
+    sync_result = {
+        "synced": False,
+        "conflict": True,
+        "rebase": True,
+        "branch": "autoswe/issue-1",
+        "ahead": 0,
+        "conflict_files": ["src/b.py"],
+        "error": "rebase conflict: …",
+    }
+
+    with _patch_sync_before(tmp_path, sync_result, None):
+        from autoswe.orch.run import _sync_before_dispatch
+        wt, err = _sync_before_dispatch(
+            _make_task(), {}, {}, None,
+            phase="fix", branch_for_create="main",
+        )
+
+    assert err is not None, "rebase conflict must return an error HandlerResult"
+    assert isinstance(err, HandlerResult)
+    assert "FAILED" in (err.done_content or "")
+    assert "rebase conflict" in (err.done_content or "").lower()

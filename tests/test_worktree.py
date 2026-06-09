@@ -2046,3 +2046,49 @@ def test_fast_forward_worktree_warns_on_conflict(tmp_path, monkeypatch):
 
     assert result is False
     assert any("Could not fast-forward" in m for m in log_calls)
+
+
+# ---------------------------------------------------------------------------
+# sync_branch fetch resilience
+# ---------------------------------------------------------------------------
+
+def test_sync_branch_fetch_failure_does_not_raise(tmp_path, monkeypatch):
+    """sync_branch must not raise when 'git fetch origin' fails.
+
+    Regression for the unprotected check=True fetch: a transient network/auth
+    failure should log a warning and continue best-effort with local refs.
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt_mod
+    monkeypatch.setattr(wt_mod, "AUTOSWE_DIR", tmp_path)
+
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "fetch" in cmd and "origin" in cmd and "--git-path" not in cmd:
+            # Simulate network/auth failure on the bare 'git fetch origin'
+            result.returncode = 1
+            result.stderr = "fatal: unable to connect to origin"
+        elif "show-ref" in cmd:
+            result.returncode = 1  # remote ref does not exist
+        elif "rev-parse" in cmd and "HEAD" in cmd and "--git-path" not in cmd and "MERGE_HEAD" not in cmd:
+            result.stdout = "abc1234\n"
+        elif "log" in cmd:
+            result.stdout = ""
+        elif "merge" in cmd:
+            result.returncode = 0
+            result.stdout = "Already up to date."
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        with patch("autoswe.vcs.worktree._git_operation_in_progress", return_value=None):
+            from autoswe.vcs.worktree import sync_branch
+            result = sync_branch(wt_dir, "o", "r", 1, "main")
+
+    assert isinstance(result, dict), "sync_branch must return a dict even when fetch fails"

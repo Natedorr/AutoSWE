@@ -573,8 +573,13 @@ def test_run_sync_rebase_conflict_skips_resolver(tmp_path, monkeypatch):
     assert len(resolver_called) == 0, "Resolver should NOT be called for rebase conflicts"
 
 
-def test_run_fix_pre_dispatch_sync_on_conflict_invokes_resolver(tmp_path, monkeypatch):
-    """Pre-fix sync with conflict → resolver runs → if FAILED, fix not invoked."""
+def test_run_fix_pre_dispatch_sync_on_conflict_proceeds_to_fix(tmp_path, monkeypatch):
+    """Pre-fix sync with merge conflict → resolver NOT called → run_fix proceeds inline.
+
+    The fix path uses resolve_conflicts=False so the conflicted worktree is
+    passed directly to run_fix, which appends the resolution instructions to
+    the agent prompt rather than running a separate resolver agent.
+    """
     from autoswe.harness.runner import HandlerResult
     from autoswe.orch.run import run
     from autoswe.orch.types import Action, ApiState, TaskState, World
@@ -594,9 +599,9 @@ def test_run_fix_pre_dispatch_sync_on_conflict_invokes_resolver(tmp_path, monkey
         })
 
     import autoswe.harness.coder as coder_mod
-    # Resolver fails → fix should not run
+    resolve_called = []
     monkeypatch.setattr(coder_mod, "resolve_sync_conflicts",
-        lambda task, files, **kwargs: HandlerResult("FAILED: unresolved"))
+        lambda task, files, **kwargs: resolve_called.append(True) or HandlerResult("FAILED: unresolved"))
     fix_called = []
     monkeypatch.setattr(coder_mod, "run_fix",
         lambda *a, **kw: fix_called.append(True) or HandlerResult("DONE_SUMMARY\tfixed\tabc"))
@@ -620,8 +625,10 @@ def test_run_fix_pre_dispatch_sync_on_conflict_invokes_resolver(tmp_path, monkey
     result = run(action, world)
 
     assert result is not None
-    assert result.done_content.startswith("FAILED:")
-    assert len(fix_called) == 0, "Fix should NOT run when pre-fix sync resolver fails"
+    assert result.done_content.startswith("DONE_SUMMARY"), \
+        "Fix path with merge conflict should proceed to run_fix (conflict folded into prompt)"
+    assert len(fix_called) == 1, "run_fix must be called even when pre-sync has a merge conflict"
+    assert resolve_called == [], "resolve_sync_conflicts must NOT be called on the fix path"
 
 
 def test_run_fix_pre_dispatch_sync_clean_proceeds_to_fix(tmp_path, monkeypatch):

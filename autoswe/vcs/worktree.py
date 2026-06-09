@@ -475,7 +475,11 @@ def sync_branch(wt: Path, owner: str, repo: str, issue_num: int, base_branch: st
             log("[WORKTREE] Completed in-progress rebase before sync")
 
     # Fetch latest remote state
-    _run(["git", "-C", str(wt), "fetch", "origin"])
+    fetched = _run(["git", "-C", str(wt), "fetch", "origin"], check=False)
+    if fetched.returncode != 0:
+        err = (fetched.stdout + " " + fetched.stderr).strip()
+        log(f"[WORKTREE] fetch origin failed (continuing best-effort): {err}")
+        dbg.warning("WORKTREE: sync_branch fetch failed, using local refs: %s", err)
 
     # Capture HEAD before merge to detect if sync moved it
     head_before = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()

@@ -230,12 +230,17 @@ def _sync_before_dispatch(
     *,
     phase: str,
     branch_for_create: str,
+    resolve_conflicts: bool = True,
 ) -> tuple:  # type: ignore[type-arg]
     """Ensure worktree, sync branch, resolve conflicts — shared prologue.
 
     Returns ``(wt, None)`` on success so the caller proceeds with the dispatch
     using the worktree path. Returns ``(wt, error_HandlerResult)`` if sync
     failed or conflict resolution could not complete, so the caller bails.
+
+    When ``resolve_conflicts=False`` (fix path), merge conflicts are left in
+    place so ``run_fix`` can append resolution instructions to its own prompt.
+    Rebase conflicts always fail fast since resolution requires interactive steps.
     """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     provider = repo_cfg.get("provider", "github")
@@ -252,8 +257,15 @@ def _sync_before_dispatch(
     sync_result = worktree_mod.sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)
     log(f"[SYNC] {task['id']} pre-{phase} synced={sync_result.get('synced')} conflict={sync_result.get('conflict')}")
 
-    if sync_result.get("conflict") and not sync_result.get("rebase"):
+    if sync_result.get("conflict") and sync_result.get("rebase"):
+        files = sync_result.get("conflict_files", [])
+        file_list = ", ".join(files) if files else "unknown files"
+        return wt, HandlerResult(f"FAILED: pre-{phase} sync rebase conflict in {file_list}")
+    elif sync_result.get("conflict"):
         files = sync_result["conflict_files"]
+        if not resolve_conflicts:
+            # Leave worktree conflicted — run_fix will append resolution instructions
+            return wt, None
         if progress_callback:
             progress_callback(f"Pre-{phase} sync conflict in {len(files)} file(s) — invoking Claude to resolve...")
         hr = coder.resolve_sync_conflicts(
@@ -261,7 +273,7 @@ def _sync_before_dispatch(
         )
         if not (hr.done_content or "").startswith("DONE_SUMMARY"):
             return wt, hr
-    elif not sync_result.get("synced") and not sync_result.get("conflict"):
+    elif not sync_result.get("synced"):
         return wt, HandlerResult(f"FAILED: pre-{phase} sync error: {sync_result.get('error')}")
 
     return wt, None
@@ -279,7 +291,7 @@ def _run_fix_with_sync(
     plan_branch = task.get("plan_branch") or base_branch
     wt, err = _sync_before_dispatch(
         task, repo_cfg, cfg, progress_callback,
-        phase="fix", branch_for_create=plan_branch,
+        phase="fix", branch_for_create=plan_branch, resolve_conflicts=False,
     )
     if err is not None:
         return err

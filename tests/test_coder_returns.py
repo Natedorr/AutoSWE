@@ -135,6 +135,40 @@ def test_resolve_sync_conflicts_passes_harness_cfg(tmp_path):
     assert harness_cfg.get("backend") == "claude_code"
 
 
+def test_run_fix_appends_merge_conflict_block_when_worktree_conflicted(tmp_path):
+    """run_fix appends the '## Merge conflicts to resolve first' block when the
+    pre-synced worktree already contains conflict markers.
+
+    Verifies the end-to-end path: _sync_before_dispatch (resolve_conflicts=False)
+    leaves the worktree conflicted, then run_fix picks it up via get_merge_conflict_files.
+    """
+    task = make_task()
+    prompts_seen = []
+
+    def fake_run(prompt, **kwargs):
+        prompts_seen.append(prompt)
+        return _r("Done.")
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("autoswe.harness.coder.create_worktree", return_value=tmp_path))
+        stack.enter_context(patch("autoswe.harness.coder.fast_forward_worktree", return_value=True))
+        stack.enter_context(_fetch_comments_patch())
+        stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+        stack.enter_context(patch("autoswe.harness.coder.commit_and_push", return_value=FAKE_COMMIT_RESULT))
+        # Simulate the worktree having conflict markers (as left by sync_before_dispatch)
+        stack.enter_context(
+            patch("autoswe.harness.coder.get_merge_conflict_files", return_value=["src/main.py"])
+        )
+        from autoswe.harness.coder import run_fix
+        run_fix(task, cfg={})
+
+    assert len(prompts_seen) == 1
+    prompt = prompts_seen[0]
+    assert "## Merge conflicts to resolve first" in prompt, \
+        "run_fix must include the merge-conflict block when conflict files are present"
+    assert "src/main.py" in prompt
+
+
 def test_run_fix_codex_harness_cfg(tmp_path):
     """When FIX_HARNESS selects a codex profile, harness_cfg should reflect codex backend."""
     task = make_task()
