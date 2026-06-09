@@ -29,7 +29,7 @@ def get_remote_branch_sha(
         return None
     try:
         result = subprocess.run(
-            ["git", "ls-remote", clone_url, branch],
+            ["git", "-c", "credential.helper=", "ls-remote", clone_url, branch],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -80,6 +80,8 @@ def worktree_path(owner: str, repo: str, issue_num: int, cfg: dict, provider: st
 
 
 def _run(args: list, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    if args and args[0] == "git":
+        args = [args[0], "-c", "credential.helper=", *args[1:]]
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check)
 
 
