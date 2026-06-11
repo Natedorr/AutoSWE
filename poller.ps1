@@ -11,7 +11,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$AUTOSWE_DIR = if ($env:AUTOSWE_DIR) { $env:AUTOSWE_DIR } else { Join-Path $HOME ".autoswe" }
+$AUTOSWE_DIR = if ($env:AUTOSWE_DIR) { $env:AUTOSWE_DIR } else { $PSScriptRoot }
 $AUTOSWE_PY  = Join-Path $AUTOSWE_DIR "autoswe.py"
 $VENV_PY     = Join-Path $AUTOSWE_DIR ".venv\Scripts\python.exe"
 $LOGFILE     = Join-Path $AUTOSWE_DIR "logs\poller.log"

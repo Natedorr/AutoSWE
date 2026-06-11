@@ -657,7 +657,7 @@ def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None
 
         # Default policy: commit + push
         try:
-            token = repo_cfg.get("token", "")
+            token = os.environ.get("PAT", "") or repo_cfg.get("pat", "")
             ensure_clone(owner, repo, token, cfg, base_branch=base_branch, provider=provider)
             msg = f"autoswe: recovered orphaned changes from interrupted run (issue #{issue_num})"
             commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider)
