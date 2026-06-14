@@ -244,6 +244,10 @@ def test_init_debug_logger_handlers_use_sensitive_formatter(tmp_path):
     """All handlers from init_debug_logger should use SensitiveFormatter."""
     logger = init_debug_logger(tmp_path)
     for h in logger.handlers:
+        # Skip pytest-internal handlers (e.g. _LiveLoggingNullHandler) which
+        # carry their own formatter that autoSWE does not control.
+        if type(h).__module__.startswith("_pytest"):
+            continue
         if h.formatter:
             assert type(h.formatter).__name__ == "SensitiveFormatter", (
                 f"handler {type(h).__name__} should use SensitiveFormatter"
