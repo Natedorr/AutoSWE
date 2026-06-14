@@ -297,14 +297,41 @@ def create_worktree(
         _apply_pull_strategy(wt, branch, pull_strategy)
     else:
         new_branch = True
-        # Verify base_branch exists on origin before creating worktree
+        # Verify base_branch exists on origin before creating worktree.
         verify = _run(
             ["git", "-C", str(main), "rev-parse", "--verify", f"origin/{base_branch}"],
             check=False,
         )
         if verify.returncode != 0:
-            raise RuntimeError(
-                f"base branch '{base_branch}' does not exist on origin"
+            # The requested base (e.g. a user-supplied `/plan --branch strategy/X`)
+            # doesn't exist yet. If a distinct default branch is available, create
+            # the requested branch from it on origin and continue — this is the
+            # branch the eventual PR will target, so it must exist. Only when there
+            # is no usable fallback do we surface a hard (recoverable via /retry)
+            # error.
+            fork_point = default_branch
+            if not fork_point or fork_point == base_branch:
+                raise RuntimeError(
+                    f"base branch '{base_branch}' does not exist on origin"
+                )
+            default_verify = _run(
+                ["git", "-C", str(main), "rev-parse", "--verify", f"origin/{fork_point}"],
+                check=False,
+            )
+            if default_verify.returncode != 0:
+                raise RuntimeError(
+                    f"base branch '{base_branch}' does not exist on origin "
+                    f"(fallback branch '{fork_point}' is also missing)"
+                )
+            # Create the requested branch on origin from the default branch.
+            _run([
+                "git", "-C", str(main), "push", "origin",
+                f"origin/{fork_point}:refs/heads/{base_branch}",
+            ])
+            _run(["git", "-C", str(main), "fetch", "origin", base_branch], check=False)
+            log(
+                f"[WORKTREE] {owner}/{repo}#{issue_num} base branch "
+                f"'{base_branch}' missing — created from '{fork_point}' on origin"
             )
         base_sha_result = _run(["git", "-C", str(main), "rev-parse", "--short", f"origin/{base_branch}"], check=False)
         base_sha = base_sha_result.stdout.strip() if base_sha_result.returncode == 0 else "unknown"
