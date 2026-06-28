@@ -11,7 +11,7 @@ def _get_authenticated_user(token: str):
         return None
 
 
-def _auto_assign_issue(owner: str, repo: str, issue_number: int, token: str, username: str = None) -> None:
+def _auto_assign_issue(owner: str, repo: str, issue_number: int, token: str, username: str | None = None) -> None:
     """Auto-assign the authenticated user to the issue so it shows in their todo list.
     Idempotent — skips if already assigned."""
     if not username:

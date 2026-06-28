@@ -13,12 +13,14 @@ from datetime import datetime, timezone
 from autoswe.commands.parser import parse_slash_command
 from autoswe.core.logging_utils import log
 from autoswe.orch.types import Action, World
+from autoswe.providers.base import NormalizedComment
 from autoswe.tracking.comments import (
     _find_last_bot_comment_id,
     _find_last_completion_id,
 )
 from autoswe.tracking.labels import (
     COMPLETED_STATUSES,
+    REVIEW_BLOCKING_STATUSES,
     RUNNING_STATUSES,
     TERMINAL_STATUSES,
     _kind_from_command,
@@ -83,9 +85,7 @@ def _is_author_allowed(
         return True
     if author_login in active:
         return True
-    if raw_author_login and raw_author_login in active:
-        return True
-    return False
+    return bool(raw_author_login and raw_author_login in active)
 
 
 def _has_user_reply_after(
@@ -159,6 +159,111 @@ def _elapsed_hours_since(iso_ts: str | None) -> float | None:
         return None
 
 
+def _reset_attempt(task: object, new_count: int, reason: str) -> None:  # type: ignore[type-arg]
+    """Log an attempt-count reset and return silently.
+
+    Centralises the ``attempt_count X->Y (reason)`` log line so every
+    caller gets consistent output.
+    """
+    old_attempt = task.attempt_count
+    if old_attempt != new_count:
+        log(f"[DECIDE] {task.slug} attempt_count {old_attempt}->{new_count} ({reason})")
+
+
+# ---------------------------------------------------------------------------
+# Reply helpers
+# ---------------------------------------------------------------------------
+
+
+def _reply_transition(
+    world: World,
+    status: str,
+    *,
+    dispatch_slash: bool,
+) -> Action | None:
+    """Find a user reply and dispatch or resume — returns None for noop.
+
+    Shared by the waiting/planned reply paths. When *dispatch_slash* is True
+    a slash-command reply is dispatched directly; when False it is ignored
+    (noop), preserving the /plan-already-posted fallback behaviour.
+    """
+    task = world.task
+    api = world.api
+    comments = api.comments
+    bot_name = world.cfg.get("BOT_NAME", "autoswe")
+
+    last_consumed = task.last_consumed_reply_id or 0
+    last_autoswe_id = _find_last_bot_comment_id(comments)
+
+    # Bot detection failed (Azure DevOps failure mode) — skip
+    if last_autoswe_id is None and status == "planned":
+        return None
+
+    reply = _has_user_reply_after(comments, last_autoswe_id, last_consumed)
+    if reply is None:
+        return None
+
+    return _handle_reply(world, reply, bot_name, dispatch_slash=dispatch_slash)
+
+
+def _handle_reply(
+    world: World,
+    reply: NormalizedComment,
+    bot_name: str,
+    *,
+    dispatch_slash: bool,
+) -> Action:
+    """Process a user reply: allowlist → parse → dispatch/resume.
+
+    When *dispatch_slash* is True, a slash-command reply is dispatched with
+    attempt=1 and the branch from the command is honoured. When False, a
+    slash-command reply produces a noop (the /plan-already-posted fallback).
+    A plain-text reply always resumes the current phase.
+    """
+    task = world.task
+    cfg = world.cfg
+    repo_cfg = world.repo_cfg
+
+    if not _is_author_allowed(
+        reply.author_login or "", cfg, repo_cfg,
+        getattr(reply, "raw_author_login", ""),
+    ):
+        log(f"[DECIDE] {task.slug} reply from {reply.author_login} blocked: not in allowlist")
+        return Action(kind="noop", slug=task.slug)
+
+    cmd_result = parse_slash_command(reply.body, bot_name=bot_name)
+
+    if dispatch_slash and cmd_result and cmd_result[0] not in ("/skip",):
+        reply_branch = cmd_result[2] if len(cmd_result) > 2 else None
+        plan_branch = reply_branch or task.plan_branch
+        new_count = 1
+        _reset_attempt(task, new_count, f"reply cmd={cmd_result[0]}")
+        return Action(
+            kind=_kind_from_command(cmd_result[0]),
+            slug=task.slug,
+            plan_branch=plan_branch,
+            guidance=cmd_result[1],
+            attempt_count=new_count,
+            triggering_comment_id=reply.id,
+            resume_session_id=task.session_id,
+        )
+
+    if not dispatch_slash and cmd_result:
+        # Slash-command reply when dispatch is disabled → noop
+        return Action(kind="noop", slug=task.slug)
+
+    # Plain-text reply → resume
+    return Action(
+        kind=_resume_kind(task),
+        slug=task.slug,
+        plan_branch=task.plan_branch,
+        user_reply_text=reply.body or "",
+        attempt_count=task.attempt_count,
+        triggering_comment_id=reply.id,
+        resume_session_id=task.session_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Terminal / guard helpers
 # ---------------------------------------------------------------------------
@@ -185,6 +290,12 @@ def _check_restart_or_guard(
 
     # Guard-blocked tasks skip the entire restart cycle unless /retry, /skip, or /abort
     if task.guard_blocked and slash_cmd not in ("/retry", "/skip", "/abort"):
+        return Action(kind="noop", slug=task.slug)
+
+    # Review gating: a review that found problems blocks shipping. Refuse /pr
+    # until the user posts /fix (which triggers an automatic re-review).
+    if slash_cmd == "/pr" and status in REVIEW_BLOCKING_STATUSES:
+        log(f"[DECIDE] {task.slug} /pr blocked — review status {status}")
         return Action(kind="noop", slug=task.slug)
 
     # Find the reference ID (bot completion or last bot comment)
@@ -273,10 +384,8 @@ def _check_restart_or_guard(
         # Slash commands reset to 1; plain-text replies keep their existing
         # behavior (handled elsewhere, not in this block).
         max_attempts = cfg.get("MAX_ATTEMPTS", 3)
-        old_attempt = task.attempt_count
         attempt_count = 1
-        if old_attempt != attempt_count:
-            log(f"[DECIDE] {task.slug} attempt_count {old_attempt}->{attempt_count} (cmd={slash_cmd}, max={max_attempts})")
+        _reset_attempt(task, attempt_count, f"cmd={slash_cmd}, max={max_attempts}")
 
         # Guard: max attempts (checked before failed-task gate)
         if attempt_count > max_attempts and not task.guard_blocked:
@@ -356,6 +465,24 @@ def decide(world: World) -> Action:
         slash_result = None
         slash_cmd_suppressed = True
 
+    # ------ Auto re-review after a fix that addressed review findings ------
+    # A /fix dispatched from review_failed/review_blocked set rereview_after_fix.
+    # Once that fix completes (status "fixed") and the user hasn't posted a new
+    # command since, re-run /review automatically so the gating verdict is
+    # rechecked before /pr can ship. emit() clears the flag when review runs.
+    if task.status == "fixed" and task.rereview_after_fix:
+        last_completion = _find_last_completion_id(comments)
+        if not _has_new_user_comment_after(comments, last_completion):
+            log(f"[DECIDE] {task.slug} auto re-review after fix from review")
+            return Action(
+                kind="review",
+                slug=task.slug,
+                plan_branch=task.plan_branch,
+                attempt_count=1,
+                triggering_comment_id=task.last_dispatched_command_id,
+                resume_session_id=task.session_id,
+            )
+
     # ------ No slash command ------
     if slash_cmd is None:
         status = task.status
@@ -382,46 +509,9 @@ def decide(world: World) -> Action:
 
         # waiting/planned: look for plain-text user reply
         if status in ("waiting", "planned"):
-            last_consumed = task.last_consumed_reply_id or 0
-            last_autoswe_id = _find_last_bot_comment_id(comments)
-
-            # Bot detection failed (Azure DevOps failure mode) — skip
-            if last_autoswe_id is None and status == "planned":
-                return Action(kind="noop", slug=task.slug)
-
-            reply = _has_user_reply_after(comments, last_autoswe_id, last_consumed)
-            if reply:
-                if not _is_author_allowed(
-                    reply.author_login or "", cfg, repo_cfg,
-                    getattr(reply, "raw_author_login", ""),
-                ):
-                    log(f"[DECIDE] {task.slug} reply from {reply.author_login} blocked: not in allowlist")
-                    return Action(kind="noop", slug=task.slug)
-                # Check if the reply itself contains a slash command
-                cmd_result = parse_slash_command(reply.body, bot_name=bot_name)
-                if cmd_result and cmd_result[0] not in ("/skip",):
-                    # Slash command resets attempt_count to 1
-                    new_count = 1
-                    log(f"[DECIDE] {task.slug} attempt_count {task.attempt_count}->{new_count} (reply cmd={cmd_result[0]})")
-                    return Action(
-                        kind=_kind_from_command(cmd_result[0]),
-                        slug=task.slug,
-                        plan_branch=task.plan_branch,
-                        guidance=cmd_result[1],
-                        attempt_count=new_count,
-                        triggering_comment_id=reply.id,
-                        resume_session_id=task.session_id,
-                    )
-                else:
-                    return Action(
-                        kind=_resume_kind(task),
-                        slug=task.slug,
-                        plan_branch=task.plan_branch,
-                        user_reply_text=reply.body or "",
-                        attempt_count=task.attempt_count,
-                        triggering_comment_id=reply.id,
-                        resume_session_id=task.session_id,
-                    )
+            action = _reply_transition(world, status, dispatch_slash=True)
+            if action is not None:
+                return action
 
         return Action(kind="noop", slug=task.slug)
 
@@ -452,8 +542,11 @@ def decide(world: World) -> Action:
     # ------ Has a slash command, task exists ------
     status = task.status
 
-    # Terminal state -> restart / guard logic
-    if status in TERMINAL_STATUSES:
+    # Terminal state (or a review-blocking resting state) -> restart / guard logic.
+    # Review-blocking states reuse the terminal restart machinery so /fix,
+    # /retry, /skip, /abort and new-comment restarts behave consistently; the
+    # /pr guard inside _check_restart_or_guard refuses shipping until re-review.
+    if status in TERMINAL_STATUSES or status in REVIEW_BLOCKING_STATUSES:
         action = _check_restart_or_guard(
             world, slash_cmd, guidance, branch, cmd_author, cmd_id
         )
@@ -486,7 +579,7 @@ def decide(world: World) -> Action:
             ):
                 # Slash command resets attempt_count to 1
                 new_count = 1
-                log(f"[DECIDE] {task.slug} attempt_count {task.attempt_count}->{new_count} (re-plan branch={branch})")
+                _reset_attempt(task, new_count, f"re-plan branch={branch}")
                 return Action(
                     kind="plan",
                     slug=task.slug,
@@ -497,27 +590,10 @@ def decide(world: World) -> Action:
                     resume_session_id=task.session_id,
                 )
             # No branch change — check if there's a plain-text reply
-            last_bot_id = _find_last_bot_comment_id(comments)
-            if last_bot_id is None:
-                return Action(kind="noop", slug=task.slug)
-            reply = _has_user_reply_after(comments, last_bot_id, task.last_consumed_reply_id or 0)
-            if reply is None or parse_slash_command(reply.body, bot_name=bot_name):
-                return Action(kind="noop", slug=task.slug)
-            if not _is_author_allowed(
-                reply.author_login or "", cfg, repo_cfg,
-                getattr(reply, "raw_author_login", ""),
-            ):
-                log(f"[DECIDE] {task.slug} reply from {reply.author_login} blocked: not in allowlist")
-                return Action(kind="noop", slug=task.slug)
-            return Action(
-                kind=_resume_kind(task),
-                slug=task.slug,
-                plan_branch=task.plan_branch,
-                user_reply_text=reply.body or "",
-                attempt_count=task.attempt_count,
-                triggering_comment_id=reply.id,
-                resume_session_id=task.session_id,
-            )
+            action = _reply_transition(world, "planned", dispatch_slash=False)
+            if action is not None:
+                return action
+            return Action(kind="noop", slug=task.slug)
 
         else:
             last_bot_id = _find_last_bot_comment_id(comments)
@@ -529,10 +605,9 @@ def decide(world: World) -> Action:
                 else:
                     # New command from planned — dispatch it
                     plan_branch = branch or task.plan_branch
-                    old_attempt = task.attempt_count
                     # Slash command resets attempt_count to 1
                     attempt_count = 1
-                    log(f"[DECIDE] {task.slug} attempt_count {old_attempt}->{attempt_count} (cmd={slash_cmd} from planned)")
+                    _reset_attempt(task, attempt_count, f"cmd={slash_cmd} from planned")
 
                     if attempt_count > cfg.get("MAX_ATTEMPTS", 3):
                         log(f"[LIMIT] {task.slug} guard fired: attempt_count={attempt_count} > MAX_ATTEMPTS={cfg.get('MAX_ATTEMPTS', 3)}")
@@ -556,76 +631,10 @@ def decide(world: World) -> Action:
 
     # waiting/planned -> check for user reply (also covers planned + /plan fallback)
     if status in ("waiting", "planned"):
-        last_consumed = task.last_consumed_reply_id or 0
-        last_autoswe_id = _find_last_bot_comment_id(comments)
-
-        if last_autoswe_id is None and status == "planned":
-            return Action(kind="noop", slug=task.slug)
-
-        reply = _has_user_reply_after(comments, last_autoswe_id, last_consumed)
-        if reply:
-            if not _is_author_allowed(
-                reply.author_login or "", cfg, repo_cfg,
-                getattr(reply, "raw_author_login", ""),
-            ):
-                log(f"[DECIDE] {task.slug} reply from {reply.author_login} blocked: not in allowlist")
-                return Action(kind="noop", slug=task.slug)
-            cmd_result = parse_slash_command(reply.body, bot_name=bot_name)
-            if cmd_result and cmd_result[0] not in ("/skip",):
-                reply_branch = cmd_result[2] if len(cmd_result) > 2 else None
-                # Use branch from the reply command; falls back to task plan_branch
-                plan_branch = reply_branch or task.plan_branch
-                # Slash command resets attempt_count to 1
-                new_count = 1
-                log(f"[DECIDE] {task.slug} attempt_count {task.attempt_count}->{new_count} (reply cmd={cmd_result[0]})")
-                return Action(
-                    kind=_kind_from_command(cmd_result[0]),
-                    slug=task.slug,
-                    plan_branch=plan_branch,
-                    guidance=cmd_result[1],
-                    attempt_count=new_count,
-                    triggering_comment_id=reply.id,
-                    resume_session_id=task.session_id,
-                )
-            else:
-                return Action(
-                    kind=_resume_kind(task),
-                    slug=task.slug,
-                    plan_branch=task.plan_branch,
-                    user_reply_text=reply.body or "",
-                    attempt_count=task.attempt_count,
-                    triggering_comment_id=reply.id,
-                    resume_session_id=task.session_id,
-                )
-
+        action = _reply_transition(world, status, dispatch_slash=True)
+        if action is not None:
+            return action
         return Action(kind="noop", slug=task.slug)
-
-    # Existing task with slash command but no status -> discover
-    if status is None:
-        if slash_cmd == "/skip":
-            return Action(
-                kind="skip",
-                slug=task.slug,
-                triggering_comment_id=cmd_id,
-            )
-        if slash_cmd == "/abort":
-            return Action(
-                kind="abort",
-                slug=task.slug,
-                triggering_comment_id=cmd_id,
-            )
-        # Slash command resets attempt_count to 1
-        attempt_count = 1
-        log(f"[DECIDE] {task.slug} action={_kind_from_command(slash_cmd)} attempt={attempt_count} (fresh discovery)")
-        return Action(
-            kind=_kind_from_command(slash_cmd),
-            slug=task.slug,
-            plan_branch=task.plan_branch or branch,
-            guidance=guidance,
-            attempt_count=attempt_count,
-            triggering_comment_id=cmd_id,
-            resume_session_id=task.session_id,
-        )
 
     # RUNNING state with new command
     if status in RUNNING_STATUSES:
@@ -647,7 +656,7 @@ def decide(world: World) -> Action:
     return Action(kind="noop", slug=task.slug)
 
 
-def _resume_kind(task: "object") -> str:  # type: ignore[type-arg]  # noqa: ANN001
+def _resume_kind(task: object) -> str:  # type: ignore[type-arg]
     """Determine the action kind for a user reply resume.
 
     Priority:

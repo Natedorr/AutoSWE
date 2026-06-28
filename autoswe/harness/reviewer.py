@@ -12,16 +12,16 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import resolve_harness
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.prompts import _find_plan_in_comments, build_review_prompt
-from autoswe.harness.runner import AGENT_TASK_TOOLS, HandlerResult
+from autoswe.harness.runner import HandlerResult
 from autoswe.providers.factory import get_tracker
 from autoswe.vcs.worktree import create_worktree, worktree_path
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 _REVIEW_MAX_DIFF_LINES = 2000
 
@@ -50,14 +50,20 @@ def run_review(
     task: dict,
     repo_cfg: dict,
     cfg: dict,
-    guidance: str = None,
+    guidance: str | None = None,
     *,
     progress_callback=None,
+    wt=None,
 ) -> HandlerResult:
     """Run a read-only code review on the feature branch.
 
+    When ``wt`` is provided (pre-synced worktree from the orchestrator), the
+    handler skips its own worktree creation and uses the synced path directly.
+    This mirrors the planner/coder pattern where _run_*_with_sync() ensures
+    base→feature merge before the agent runs.
+
     Steps:
-      1. Ensure worktree on autoswe/issue-{N}
+      1. Ensure worktree on autoswe/issue-{N} (or use pre-synced ``wt``)
       2. Compute git diff (base_branch..HEAD, stat + full)
       3. Extract plan text from issue comments
       4. Build review prompt (issue + plan + diff)
@@ -72,20 +78,24 @@ def run_review(
     token = task["_token"]
     provider = repo_cfg.get("provider", "github")
 
-    # 1. Worktree — reuse if present, create if missing
-    wt = worktree_path(owner, repo, issue_num, cfg, provider)
-    if wt.exists():
-        log(f"[REVIEW] Reusing worktree {wt}")
+    # 1. Worktree — reuse pre-synced from orchestrator, or create/reset locally
+    if wt is not None:
+        # Pre-synced worktree from orchestrator — reuse directly
+        wt_path: Path = Path(wt)
     else:
-        wt = create_worktree(
-            owner, repo, issue_num, base_branch, token, cfg, provider,
-            default_branch=base_branch, pull_strategy="reset", push_new=False,
-        )
+        wt_path = worktree_path(owner, repo, issue_num, cfg or {}, provider)
+        if wt_path.exists():
+            log(f"[REVIEW] Reusing worktree {wt_path}")
+        else:
+            wt_path = create_worktree(
+                owner, repo, issue_num, base_branch, token, cfg or {}, provider,
+                default_branch=base_branch, pull_strategy="reset", push_new=False,
+            )
 
     # 2. Compute diff
     try:
-        diff_stat = _run_git(wt, ["diff", "--stat", f"origin/{base_branch}...HEAD"])
-        diff_text = _run_git(wt, ["diff", f"origin/{base_branch}...HEAD"])
+        diff_stat = _run_git(wt_path, ["diff", "--stat", f"origin/{base_branch}...HEAD"])
+        diff_text = _run_git(wt_path, ["diff", f"origin/{base_branch}...HEAD"])
         diff_text = _truncate(diff_text, _REVIEW_MAX_DIFF_LINES)
     except subprocess.CalledProcessError as e:
         diff_stat = "(no diff)"
@@ -101,7 +111,7 @@ def run_review(
     try:
         comments = tracker.fetch_comments(rc, issue_num)
         plan_text = _find_plan_in_comments(comments)
-    except Exception as e:
+    except Exception as e:  # Provider resilience -- fetch_comments may fail (network, auth); proceed with empty plan.
         dbg.debug("REVIEW: fetch_comments failed: %s", e)
         comments = []
         plan_text = ""
@@ -109,7 +119,7 @@ def run_review(
     # 4. Build prompt
     prompt = build_review_prompt(
         task,
-        repo_root=str(wt),
+        repo_root=str(wt_path),
         repo_cfg=repo_cfg,
         plan_text=plan_text,
         diff_stat=diff_stat,
@@ -117,7 +127,8 @@ def run_review(
         guidance=guidance,
     )
 
-    review_model = repo_cfg.get("review_model") or cfg.get("REVIEW_MODEL") or None
+    harness = resolve_harness("review", repo_cfg, cfg or {})
+    review_model = harness.get("model")
     log(f"[REVIEW] {task['id']} session=NEW model={review_model or 'default'} diff_stat_lines={diff_stat.count(chr(10))}")
 
     # 5. Read-only session (fresh, no resume)
@@ -127,23 +138,22 @@ def run_review(
     try:
         result = runner.run(
             prompt,
-            cwd=str(wt),
-            cfg=cfg,
+            cwd=str(wt_path),
+            cfg=cfg or {},
             repo_cfg=repo_cfg,
             resume=None,  # CRITICAL: one-off session
             model=review_model,
-            permission_mode="plan",
-            allowed_tools=["Read", "Glob", "Grep", *AGENT_TASK_TOOLS],
+            mode="read_only",
             max_turns=80,
             can_use_tool=cut,
             state=state,
             progress_callback=progress_callback,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during review phase")
-    except Exception as e:
-        dbg.error("run_review: SDK error: %s", e, exc_info=True)
-        return HandlerResult(f"FAILED: {e}")
+    except Exception as e:  # State-machine boundary -- any handler failure becomes a FAILED result for emit().
+        return HandlerResult(f"FAILED: review error: {e}")
 
     log(f"[REVIEW] {task['id']} session={result.session_id} cost=${result.cost_usd or 0:.4f}")
 
@@ -167,7 +177,7 @@ def run_review(
 def _run_git(wt: Path, args: list[str]) -> str:
     """Run a git command in the worktree. Returns stdout."""
     result = subprocess.run(
-        ["git", "-C", str(wt)] + args,
+        ["git", "-C", str(wt), *args],
         capture_output=True, text=True, timeout=30, check=True,
     )
     return result.stdout.strip()

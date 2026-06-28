@@ -4,14 +4,14 @@ import sys
 from datetime import datetime, timezone
 
 from autoswe.commands import setup
-from autoswe.core.config import LOGS_DIR, QUEUE_FILE, load_config, load_repos_config
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import QUEUE_FILE, load_config, load_repos_config
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.core.queue_store import _atomic_write, _load_json
 from autoswe.core.slug import make_slug
 from autoswe.orch.loop import poll as orch_poll
 from autoswe.providers.factory import build_repo_cfg, get_tracker
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def main():
@@ -113,7 +113,8 @@ def _cmd_queue_list(args, cfg):
                 status = tracker.get_status(issue) or "none"
                 if status == args.status:
                     filtered.append(t)
-            except Exception:
+            except (RuntimeError, KeyError):  # API failures / missing fields are non-fatal for --status filter.
+
                 pass
         rows = filtered
     fmt = "{:<35} {:<14} {:<6} {}"
@@ -129,7 +130,8 @@ def _cmd_queue_list(args, cfg):
                 tracker = get_tracker(repo_cfg)
                 issue = tracker.fetch_issue(repo_cfg, t["issue_number"])
                 label_status = tracker.get_status(issue) or "-"
-        except Exception:
+        except (RuntimeError, KeyError):  # Best-effort status lookup per row; fall back to "-".
+
             pass
         pr = str(t.get("pr_number") or "")
         created = (t.get("created_at", "") or "")[:16]
@@ -160,7 +162,8 @@ def _cmd_queue_status(args, cfg):
             tracker = get_tracker(repo_cfg)
             issue = tracker.fetch_issue(repo_cfg, args.issue)
             label_status = tracker.get_status(issue) or "-"
-    except Exception:
+    except (RuntimeError, KeyError):  # Best-effort status lookup; fall back to "-".
+
         pass
     task["label_status"] = label_status
     print(json.dumps(task, indent=2))
@@ -168,11 +171,10 @@ def _cmd_queue_status(args, cfg):
 
 def _cmd_queue_prune(args, cfg):
     """Remove old done/skipped/closed tasks from the queue."""
-    from autoswe.core.config import QUEUE_FILE
-
     older_than_days = getattr(args, "older_than_days", 30) or 30
     dry_run = getattr(args, "dry_run", False)
 
+    # Deferred import: only needed for prune; keeps labels module unloaded on other CLI paths.
     from autoswe.tracking.labels import COMPLETED_STATUSES
 
     queue = _load_json(QUEUE_FILE, {})

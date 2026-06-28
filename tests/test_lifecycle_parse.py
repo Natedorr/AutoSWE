@@ -5,7 +5,11 @@ from autoswe.core.slug import make_slug, slug_to_filename
 from autoswe.tracking.comments import (
     _find_last_bot_comment_ts,
     _find_last_completion,
+    _get_body,
+    _get_id,
+    _get_is_bot,
     _is_autoswe_bot_comment,
+    _normalize_body,
 )
 from autoswe.tracking.labels import _get_autoswe_status
 from tests.conftest import load_fixture
@@ -653,3 +657,57 @@ def test_parse_plan_branch_on_subsequent_lines_ignored():
     cmd, guidance, branch = parse_slash_command(text)
     assert cmd == "/plan"
     assert branch is None  # --branch is on a different line
+
+
+# ---------------------------------------------------------------------------
+# _normalize_body (T7 DRY refactor)
+# ---------------------------------------------------------------------------
+
+def test_normalize_body_strips_formatting():
+    """_normalize_body removes backticks, asterisks, underscores, tildes."""
+    assert _normalize_body("`bold` *italic* _under~_ ~strike~") == "bold italic under strike"
+
+
+def test_normalize_body_lowercase():
+    """_normalize_body lowercases the input."""
+    assert _normalize_body("HELLO World") == "hello world"
+
+
+def test_normalize_body_collapses_whitespace():
+    """_normalize_body collapses runs of whitespace into a single space."""
+    assert _normalize_body("hello   world\n\nfoo") == "hello world foo"
+
+
+def test_normalize_body_empty():
+    """_normalize_body handles empty string."""
+    assert _normalize_body("") == ""
+
+
+def test_normalize_body_combined():
+    """_normalize_body handles the real-world completion pattern."""
+    body = "``Completed with command `/fix```"
+    result = _normalize_body(body)
+    assert "completed with command" in result
+
+
+# ---------------------------------------------------------------------------
+# Accessors with CommentLike type alias (T8 typing)
+# ---------------------------------------------------------------------------
+
+def test_get_body_dict():
+    """_get_body works with dict-shaped comment."""
+    assert _get_body({"body": "hello"}) == "hello"
+    assert _get_body({"body": None}) == ""
+    assert _get_body({}) == ""
+
+
+def test_get_id_dict():
+    """_get_id works with dict-shaped comment."""
+    assert _get_id({"id": 42}) == 42
+    assert _get_id({}) is None
+
+
+def test_get_is_bot_dict():
+    """_get_is_bot works with dict-shaped comment."""
+    assert _get_is_bot({"is_bot": True}) is True
+    assert _get_is_bot({}) is False

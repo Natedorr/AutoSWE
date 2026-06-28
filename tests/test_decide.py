@@ -243,3 +243,118 @@ def test_resume_kind_default_to_plan():
         pending_user_reply=None,
     )
     assert _resume_kind(task) == "plan"
+
+
+# ---------------------------------------------------------------------------
+# Review verdict gating — decide() (issue: review verdict ignored)
+# ---------------------------------------------------------------------------
+
+
+def _review_world(status: str, comments: list[dict], *, rereview_after_fix: bool = False,
+                  last_dispatched_command: str = "/review",
+                  last_dispatched_command_id: int = 10) -> World:
+    """Build a World for a review-gating scenario."""
+    issue = NormalizedIssue(
+        number=42, title="T", body="/plan", owner="owner", repo="repo", state="open",
+    )
+    api = ApiState(
+        issue=issue,
+        comments=tuple(
+            NormalizedComment(
+                body=c["body"], created_at=c.get("created_at", ""),
+                author_login=c.get("author_login", "owner"),
+                raw_author_login=c.get("raw_author_login", "owner"),
+                id=c.get("id"), is_bot=c.get("is_bot", False),
+            )
+            for c in comments
+        ),
+        open_pr_numbers=(),
+    )
+    task = TaskState(
+        slug="gh:owner_repo_42", owner="owner", repo="repo", issue_number=42,
+        title="T", body="/plan", status=status, plan_branch="autoswe/issue-42",
+        base_branch="main", attempt_count=1, first_dispatched_at=None,
+        last_dispatched_command=last_dispatched_command,
+        last_dispatched_command_id=last_dispatched_command_id,
+        last_consumed_reply_id=last_dispatched_command_id,
+        session_id="s-fix-42", pr_number=None, guard_blocked=False,
+        gh_closed=False, pending_command=None, pending_guidance=None,
+        pending_user_reply=None,
+        rereview_after_fix=rereview_after_fix,
+    )
+    return World(api=api, task=task, cfg=_default_cfg(), repo_cfg={})
+
+
+def test_pr_blocked_when_review_blocked():
+    """/pr on a review_blocked task must NOT ship — decide returns noop."""
+    world = _review_world(
+        "review_blocked",
+        [
+            {"body": "## Review\n\nBlocked.\n<!-- autoswe-bot -->", "created_at": "t1", "id": 10, "is_bot": True},
+            {"body": "/pr", "created_at": "t2", "id": 11},
+        ],
+    )
+    action = decide(world)
+    assert action.kind == "noop", "review_blocked must block /pr"
+
+
+def test_pr_blocked_when_review_failed():
+    """/pr on a review_failed task must NOT ship — decide returns noop."""
+    world = _review_world(
+        "review_failed",
+        [
+            {"body": "## Review\n\nNeeds changes.\n<!-- autoswe-bot -->", "created_at": "t1", "id": 10, "is_bot": True},
+            {"body": "/pr", "created_at": "t2", "id": 11},
+        ],
+    )
+    action = decide(world)
+    assert action.kind == "noop", "review_failed must block /pr"
+
+
+def test_fix_allowed_from_review_blocked():
+    """/fix on a review_blocked task dispatches a fix (so findings can be addressed)."""
+    world = _review_world(
+        "review_blocked",
+        [
+            {"body": "## Review\n\nBlocked.\n<!-- autoswe-bot -->", "created_at": "t1", "id": 10, "is_bot": True},
+            {"body": "/fix", "created_at": "t2", "id": 11},
+        ],
+    )
+    action = decide(world)
+    assert action.kind == "fix"
+    assert action.triggering_comment_id == 11
+
+
+def test_auto_rereview_after_fix_from_review():
+    """A completed fix flagged rereview_after_fix auto-dispatches /review."""
+    world = _review_world(
+        "fixed",
+        [
+            {"body": "## Review\n\nBlocked.\n<!-- autoswe-bot -->", "created_at": "t1", "id": 10, "is_bot": True},
+            {"body": "/fix", "created_at": "t2", "id": 11},
+            {"body": "Completed with command `/fix`.\n<!-- autoswe-bot -->", "created_at": "t3", "id": 12, "is_bot": True},
+        ],
+        rereview_after_fix=True,
+        last_dispatched_command="/fix",
+        last_dispatched_command_id=11,
+    )
+    action = decide(world)
+    assert action.kind == "review", "fix completing with rereview flag must re-review"
+
+
+def test_auto_rereview_suppressed_by_new_user_comment():
+    """If the user posts a new command after the fix, auto-rereview yields to it."""
+    world = _review_world(
+        "fixed",
+        [
+            {"body": "## Review\n\nBlocked.\n<!-- autoswe-bot -->", "created_at": "t1", "id": 10, "is_bot": True},
+            {"body": "/fix", "created_at": "t2", "id": 11},
+            {"body": "Completed with command `/fix`.\n<!-- autoswe-bot -->", "created_at": "t3", "id": 12, "is_bot": True},
+            {"body": "/skip", "created_at": "t4", "id": 13},
+        ],
+        rereview_after_fix=True,
+        last_dispatched_command="/fix",
+        last_dispatched_command_id=11,
+    )
+    action = decide(world)
+    assert action.kind != "review", "a newer user command must take priority over auto-rereview"

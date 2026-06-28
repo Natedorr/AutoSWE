@@ -183,7 +183,7 @@ def test_azure_html_div_stripped():
     from autoswe.providers.azure.tracker import _strip_html
 
     result = _strip_html("<div>/plan --branch dev</div>")
-    assert "/plan --branch dev" == result
+    assert result == "/plan --branch dev"
 
 
 def test_azure_html_entities_decoded():
@@ -191,7 +191,7 @@ def test_azure_html_entities_decoded():
     from autoswe.providers.azure.tracker import _strip_html
 
     result = _strip_html("&#47;fix &#45;&#45;focus")
-    assert "/fix --focus" == result
+    assert result == "/fix --focus"
 
 
 def test_azure_autoswe_tags_preserved():

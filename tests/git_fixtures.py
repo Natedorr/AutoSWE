@@ -79,7 +79,6 @@ class GitWorld:
 
         self.mp.setattr(qs_mod, "AUTOSWE_DIR", self._autoswe_dir)
         self.mp.setattr(qs_mod, "QUEUE_FILE", self._autoswe_dir / "data" / "queue.json")
-        self.mp.setattr(qs_mod, "LOGS_DIR", self._autoswe_dir / "logs")
 
         # Patch worktree module
         import autoswe.vcs.worktree as wt_mod
@@ -345,7 +344,7 @@ class GitWorld:
         # Dirty (unstaged changes)
         status_result = _git(wt, "status", "--porcelain", check=False)
         status_lines = status_result.stdout.strip().split("\n") if status_result.stdout.strip() else []
-        state["dirty"] = any(line.startswith(" M") or line.startswith("M ") for line in status_lines)
+        state["dirty"] = any(line.startswith((" M", "M ")) for line in status_lines)
 
         # Untracked files
         state["untracked"] = [line[3:] for line in status_lines if line.startswith("??")]

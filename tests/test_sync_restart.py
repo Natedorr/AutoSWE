@@ -669,6 +669,6 @@ def test_sync_conflict_resolution_persists_session_id():
             )
 
             assert result.done_content.startswith("DONE_SUMMARY\t")
-            assert task["session_id"] == "S2", (
-                f"session_id should be updated to S2 from runner result, got {task['session_id']}"
+            assert result.session_id == "S2", (
+                f"session_id should be S2 from runner result, got {result.session_id}"
             )

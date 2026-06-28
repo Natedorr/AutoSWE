@@ -363,3 +363,103 @@ def test_build_inline_comment_server_none_without_pr_none():
     rc = {"provider": "github"}
     result = build_mcp_inline_comment_server(task, rc, "abc123", None)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# MCP server body validation — post_plan / post_question
+# ---------------------------------------------------------------------------
+
+def test_mcp_post_plan_rejects_empty_body():
+    """post_plan returns an error when body is empty."""
+    import asyncio
+    import importlib
+    import os
+    from unittest.mock import patch
+
+    env = {
+        "AUTOSWE_PROVIDER": "github",
+        "AUTOSWE_OWNER": "o",
+        "AUTOSWE_REPO": "r",
+        "AUTOSWE_ISSUE_NUMBER": "1",
+        "AUTOSWE_TOKEN": "tok",
+        "AUTOSWE_COMMENT_ID": "",
+        "AUTOSWE_SUPPRESS_POSTING": "1",
+    }
+    with patch.dict(os.environ, env):
+        import mcp_servers.autoswe_comment_server as srv
+        importlib.reload(srv)
+        result = asyncio.run(srv.post_plan(body=""))
+
+    assert any("cannot be empty" in c.text for c in result)
+
+
+def test_mcp_post_plan_rejects_whitespace_body():
+    """post_plan returns an error when body is whitespace-only."""
+    import asyncio
+    import importlib
+    import os
+    from unittest.mock import patch
+
+    env = {
+        "AUTOSWE_PROVIDER": "github",
+        "AUTOSWE_OWNER": "o",
+        "AUTOSWE_REPO": "r",
+        "AUTOSWE_ISSUE_NUMBER": "1",
+        "AUTOSWE_TOKEN": "tok",
+        "AUTOSWE_COMMENT_ID": "",
+        "AUTOSWE_SUPPRESS_POSTING": "1",
+    }
+    with patch.dict(os.environ, env):
+        import mcp_servers.autoswe_comment_server as srv
+        importlib.reload(srv)
+        result = asyncio.run(srv.post_plan(body="   \n  "))
+
+    assert any("cannot be empty" in c.text for c in result)
+
+
+def test_mcp_post_question_rejects_empty_body():
+    """post_question returns an error when body is empty."""
+    import asyncio
+    import importlib
+    import os
+    from unittest.mock import patch
+
+    env = {
+        "AUTOSWE_PROVIDER": "github",
+        "AUTOSWE_OWNER": "o",
+        "AUTOSWE_REPO": "r",
+        "AUTOSWE_ISSUE_NUMBER": "1",
+        "AUTOSWE_TOKEN": "tok",
+        "AUTOSWE_COMMENT_ID": "",
+        "AUTOSWE_SUPPRESS_POSTING": "1",
+    }
+    with patch.dict(os.environ, env):
+        import mcp_servers.autoswe_comment_server as srv
+        importlib.reload(srv)
+        result = asyncio.run(srv.post_question(body=""))
+
+    assert any("cannot be empty" in c.text for c in result)
+
+
+def test_mcp_post_question_accepts_real_body():
+    """post_question passes through with SUPPRESS_POSTING when body is non-empty."""
+    import asyncio
+    import importlib
+    import os
+    from unittest.mock import patch
+
+    env = {
+        "AUTOSWE_PROVIDER": "github",
+        "AUTOSWE_OWNER": "o",
+        "AUTOSWE_REPO": "r",
+        "AUTOSWE_ISSUE_NUMBER": "1",
+        "AUTOSWE_TOKEN": "tok",
+        "AUTOSWE_COMMENT_ID": "",
+        "AUTOSWE_SUPPRESS_POSTING": "1",
+    }
+    with patch.dict(os.environ, env):
+        import mcp_servers.autoswe_comment_server as srv
+        importlib.reload(srv)
+        result = asyncio.run(srv.post_question(body="Is this approach correct?"))
+
+    assert any("suppressed" in c.text for c in result)

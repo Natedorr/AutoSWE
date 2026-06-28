@@ -1,7 +1,7 @@
 """Tests for autoswe.harness.ask_user_question formatting and callback."""
 from unittest.mock import MagicMock, patch
 
-from autoswe.harness.ask_user_question import format_ask_user_question
+from autoswe.harness.ask_user_question import _is_valid_question_input, format_ask_user_question
 
 
 def test_format_ask_user_question_single():
@@ -116,8 +116,8 @@ def test_make_can_use_tool_allows_non_ask():
     assert isinstance(result, PermissionResultAllow)
 
 
-def test_make_can_use_tool_allows_ask_with_answers():
-    """AskUserQuestion gets PermissionResultAllow with answers and sets state."""
+def test_make_can_use_tool_denies_ask_and_sets_state():
+    """AskUserQuestion gets PermissionResultDeny, sets state, and posts comment."""
     import asyncio
 
     from autoswe.harness.ask_user_question import make_can_use_tool
@@ -147,18 +147,60 @@ def test_make_can_use_tool_allows_ask_with_answers():
             callback("AskUserQuestion", input_data, None)
         )
 
-        from claude_agent_sdk import PermissionResultAllow
+        from claude_agent_sdk import PermissionResultDeny
 
-        assert isinstance(result, PermissionResultAllow)
+        assert isinstance(result, PermissionResultDeny)
+        assert "paused" in result.message.lower()
+        assert "resume" in result.message.lower()
         assert "asked_question_md" in state
         assert "Which approach?" in state["asked_question_md"]
-        # Check the updated_input has answers
-        updated = result.updated_input
-        assert "answers" in updated
-        assert "Which approach?" in updated["answers"]
         mock_tracker.post_comment.assert_called_once()
         body = mock_tracker.post_comment.call_args[0][2]
         assert "<!-- autoswe-bot -->" in body
+
+
+def test_make_can_use_tool_denies_ask_via_on_post():
+    """AskUserQuestion denies via on_post callback: question posted, agent paused."""
+    import asyncio
+
+    from autoswe.harness.ask_user_question import make_can_use_tool
+
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+    repo_cfg = {"provider": "github"}
+    state = {}
+
+    posted_bodies = []
+
+    def on_post(body):
+        posted_bodies.append(body)
+
+    input_data = {
+        "questions": [
+            {
+                "header": "H",
+                "question": "Question?",
+                "options": [{"label": "X", "description": ""}],
+                "multiSelect": False,
+            }
+        ]
+    }
+
+    callback = make_can_use_tool(task, repo_cfg, state, on_post=on_post)
+
+    with patch("autoswe.harness.ask_user_question.get_tracker") as mock_get:
+        result = asyncio.run(
+            callback("AskUserQuestion", input_data, None)
+        )
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        assert isinstance(result, PermissionResultDeny)
+        assert "paused" in result.message.lower()
+        assert len(posted_bodies) == 1
+        assert "Question?" in posted_bodies[0]
+        assert "<!-- autoswe-bot -->" in posted_bodies[0]
+        assert "asked_question_md" in state
+        mock_get.assert_not_called()
 
 
 def test_make_can_use_tool_uses_on_post():
@@ -198,3 +240,88 @@ def test_make_can_use_tool_uses_on_post():
         assert "Question?" in posted_bodies[0]
         assert "<!-- autoswe-bot -->" in posted_bodies[0]
         mock_get.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _is_valid_question_input
+# ---------------------------------------------------------------------------
+
+def test_is_valid_question_input_with_real_question():
+    """A question with text and options is valid."""
+    assert _is_valid_question_input({
+        "questions": [{"question": "Which approach?", "options": [{"label": "A"}]}]
+    })
+
+
+def test_is_valid_question_input_empty_list():
+    """Empty questions list is not valid."""
+    assert not _is_valid_question_input({"questions": []})
+
+
+def test_is_valid_question_input_missing_key():
+    """Missing questions key is not valid."""
+    assert not _is_valid_question_input({})
+
+
+def test_is_valid_question_input_empty_question_text():
+    """Question with blank text is not valid even if options exist."""
+    assert not _is_valid_question_input({
+        "questions": [{"question": "  ", "options": [{"label": "A"}]}]
+    })
+
+
+def test_is_valid_question_input_no_options():
+    """Question with text but no options is not valid."""
+    assert not _is_valid_question_input({
+        "questions": [{"question": "Which approach?", "options": []}]
+    })
+
+
+# ---------------------------------------------------------------------------
+# make_can_use_tool — empty/invalid question suppression
+# ---------------------------------------------------------------------------
+
+def test_make_can_use_tool_ignores_empty_question_list():
+    """AskUserQuestion with empty questions does NOT set state or post."""
+    import asyncio
+
+    from autoswe.harness.ask_user_question import make_can_use_tool
+
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+    repo_cfg = {"provider": "github"}
+    state = {}
+    posted = []
+
+    callback = make_can_use_tool(task, repo_cfg, state, on_post=posted.append)
+
+    from claude_agent_sdk import PermissionResultDeny
+
+    result = asyncio.run(callback("AskUserQuestion", {"questions": []}, None))
+
+    assert isinstance(result, PermissionResultDeny)
+    assert "asked_question_md" not in state
+    assert posted == []
+
+
+def test_make_can_use_tool_ignores_question_without_options():
+    """AskUserQuestion with no options does NOT set state or post."""
+    import asyncio
+
+    from autoswe.harness.ask_user_question import make_can_use_tool
+
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+    repo_cfg = {"provider": "github"}
+    state = {}
+    posted = []
+
+    callback = make_can_use_tool(task, repo_cfg, state, on_post=posted.append)
+
+    from claude_agent_sdk import PermissionResultDeny
+
+    result = asyncio.run(
+        callback("AskUserQuestion", {"questions": [{"question": "Q?", "options": []}]}, None)
+    )
+
+    assert isinstance(result, PermissionResultDeny)
+    assert "asked_question_md" not in state
+    assert posted == []

@@ -10,6 +10,7 @@ import html
 import re
 from html.parser import HTMLParser
 
+from autoswe.core.redact import redact_worktree_paths
 from autoswe.providers.azure.api import (
     _ado_api_version,
     _encode_path_segment,
@@ -18,6 +19,7 @@ from autoswe.providers.azure.api import (
     ado_patch_json,
     ado_post,
     ado_post_patch,
+    dbg,
 )
 from autoswe.providers.base import IssueTracker, NormalizedComment, NormalizedIssue
 from autoswe.tracking.comments import _BOT_CONTENT_PATTERNS, BOT_MARKER
@@ -34,10 +36,7 @@ def _is_bot_comment(body: str) -> bool:
     """
     if BOT_MARKER in body:
         return True
-    for pattern in _BOT_CONTENT_PATTERNS:
-        if pattern in body:
-            return True
-    return False
+    return any(pattern in body for pattern in _BOT_CONTENT_PATTERNS)
 
 
 _AUTOSWE_TAG_RE = re.compile(r"</?AUTOSWE_\w+>")
@@ -93,8 +92,10 @@ class AzureTracker(IssueTracker):
         self._repo_cfg = repo_cfg
         self._org = repo_cfg.get("org", "")
         self._project = repo_cfg.get("project", "")
+        self._repo = repo_cfg.get("repo", "")
         self._pat = repo_cfg.get("pat", "")
         self._authenticated_user: str | None = None
+        self._resolved_repo_id: str | None = None
 
         # Defensive fallback: when caller passes owner/repo instead of
         # org/project (e.g. from build_repo_cfg or other callers), parse
@@ -112,10 +113,42 @@ class AzureTracker(IssueTracker):
                 if proj_part:
                     self._org = owner
                     self._project = proj_part
+                    if _repo_part:
+                        self._repo = _repo_part
 
         # URL-encode for safe use in request URLs
         self._org_enc = _encode_path_segment(self._org)
         self._project_enc = _encode_path_segment(self._project)
+
+    # ---- Repo ID resolution ----
+
+    def resolve_repo_id(self) -> str | None:
+        """Resolve the Git repository UUID for this repo.
+
+        Azure DevOps web URLs require the repo UUID (not the display name)
+        in the `_git/{repo-id}/...` path segment. This method queries the
+        repos API, finds the repo matching self._repo by name, and returns
+        its UUID. Result is cached on first successful call.
+
+        Returns the UUID string, or None if lookup fails.
+        """
+        if self._resolved_repo_id is not None:
+            return self._resolved_repo_id
+        try:
+            repos_path = _ado_api_version(
+                f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories"
+            )
+            result = ado_get(repos_path, self._pat)
+            for repo_entry in result.get("value", []):
+                if repo_entry.get("name", "").lower() == self._repo.lower():
+                    self._resolved_repo_id = repo_entry.get("id", "")
+                    return self._resolved_repo_id
+        except (RuntimeError) as e:  # ADO API raises RuntimeError on HTTP error.
+            dbg.warning(
+                "resolve_repo_id: failed to resolve UUID for %s/%s: %s: %s",
+                self._org, self._project, type(e).__name__, e,
+            )
+        return None
 
     # ---- Protocol: IssueTracker ----
 
@@ -176,7 +209,7 @@ class AzureTracker(IssueTracker):
         # Resolve the authenticated PAT owner for comparison
         try:
             pat_owner = self.authenticated_user(repo_cfg)
-        except Exception:
+        except RuntimeError:  # ADO API lookup failure is non-fatal; skip OWNER normalization.
             pat_owner = None
 
         results = []
@@ -249,7 +282,7 @@ class AzureTracker(IssueTracker):
             )
             if self._authenticated_user:
                 return self._authenticated_user
-        except Exception:
+        except RuntimeError:  # Profile API call failed; fall through to workitem fallback.
             pass
 
         # Fallback: work item #1 CreatedBy
@@ -260,7 +293,7 @@ class AzureTracker(IssueTracker):
             raw = ado_get(path, self._pat)
             created_by = raw.get("fields", {}).get("System.CreatedBy", {})
             self._authenticated_user = created_by.get("uniqueName", "")
-        except Exception:
+        except RuntimeError:  # Work item lookup also failed; leave _authenticated_user as None.
             pass
 
         return self._authenticated_user or ""
@@ -277,7 +310,7 @@ class AzureTracker(IssueTracker):
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
             f"{issue_number}/comments?format=Markdown&api-version=7.1-preview.4"
         )
-        result = ado_post(path, self._pat, body={"text": body})
+        result = ado_post(path, self._pat, body={"text": redact_worktree_paths(body)})
         return result.get("id") if result else None
 
     def update_comment(self, repo_cfg: dict, issue_number: int, comment_id: int, body: str) -> None:
@@ -286,7 +319,7 @@ class AzureTracker(IssueTracker):
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
             f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1-preview.4"
         )
-        ado_patch_json(path, self._pat, body={"text": body})
+        ado_patch_json(path, self._pat, body={"text": redact_worktree_paths(body)})
 
     def create_issue(self, repo_cfg: dict, title: str, body: str) -> int:
         """Create a new work item (Issue type) in Azure DevOps.

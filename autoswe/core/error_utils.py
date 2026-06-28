@@ -175,10 +175,10 @@ def _run_safe(cwd: str, cmd: list[str], timeout: float = 5.0) -> str:
 def _get_memory_info() -> str:
     """Read system memory from /proc/meminfo (Linux) or fall back to empty."""
     try:
-        with open("/proc/meminfo", "r") as f:
+        with open("/proc/meminfo") as f:
             meminfo = f.readline().strip()  # MemTotal line
         return meminfo
-    except (OSError, IOError):
+    except OSError:
         return ""
 
 

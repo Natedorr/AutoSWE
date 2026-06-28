@@ -1,11 +1,42 @@
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import AUTOSWE_DIR, LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import AUTOSWE_DIR
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.factory import get_vcs
+from autoswe.providers.github.vcs import MissingScopeError
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
+
+
+def get_remote_branch_sha(
+    owner: str,
+    repo: str,
+    branch: str,
+    token: str,
+    provider: str = "github",
+) -> str | None:
+    """Get the SHA at the tip of a remote branch without cloning.
+
+    Uses the VCS provider's ``clone_url()`` to get the correct HTTPS URL
+    for the given provider (GitHub, Azure DevOps, etc.).
+    """
+    repo_cfg = {"owner": owner, "repo": repo, "token": token, "provider": provider}
+    try:
+        clone_url = get_vcs(repo_cfg).clone_url(repo_cfg)
+    except Exception as e:  # VCS provider clone_url() can fail for missing token, bad provider, etc.
+        dbg.debug("get_remote_branch_sha: clone_url failed: %s", e)
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-c", "credential.helper=", "ls-remote", clone_url, branch],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.split()[0]
+    except Exception as e:  # subprocess can raise TimeoutExpired, OSError, etc.
+        dbg.debug("get_remote_branch_sha: ls-remote failed: %s", e)
+    return None
 
 
 def _worktrees_root(cfg: dict) -> Path:
@@ -48,7 +79,9 @@ def worktree_path(owner: str, repo: str, issue_num: int, cfg: dict, provider: st
     return _repo_dir(owner, repo, cfg, provider) / f"issue-{issue_num}"
 
 
-def _run(args: list, cwd: Path = None, check: bool = True) -> subprocess.CompletedProcess:
+def _run(args: list, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    if args and args[0] == "git":
+        args = [args[0], "-c", "credential.helper=", *args[1:]]
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check)
 
 
@@ -90,7 +123,7 @@ def _get_default_branch(main: Path, base_branch: str) -> str:
 def ensure_clone(
     owner: str, repo: str, token: str, cfg: dict,
     base_branch: str = "main", provider: str = "github",
-    default_branch: str = None,
+    default_branch: str | None = None,
 ) -> None:
     """Ensure _main/ clone exists and is up to date."""
     main = main_clone_path(owner, repo, cfg, provider)
@@ -132,6 +165,18 @@ def ensure_clone(
 
         _run(["git", "-C", str(main), "checkout", branch_for_main])
         _run(["git", "-C", str(main), "reset", "--hard", f"origin/{branch_for_main}"])
+
+
+def is_dirty(wt: Path) -> bool:
+    """Return True if the worktree has uncommitted changes or untracked files."""
+    result = _run(["git", "-C", str(wt), "status", "--porcelain"], check=False)
+    return bool(result.stdout.strip())
+
+
+def reset_clean(wt: Path, branch: str) -> None:
+    """Hard-reset to origin/<branch> and remove untracked files/dirs."""
+    _run(["git", "-C", str(wt), "reset", "--hard", f"origin/{branch}"])
+    _run(["git", "-C", str(wt), "clean", "-fd"])
 
 
 def get_merge_conflict_files(wt: Path) -> list[str]:
@@ -179,7 +224,13 @@ def _apply_pull_strategy(wt: Path, branch: str, strategy: str) -> list[str]:
     if strategy == "none":
         return []
 
-    _run(["git", "-C", str(wt), "fetch", "origin", branch])
+    # A freshly-forked local branch (e.g. after read-only /plan, or before the
+    # first push) has no remote ref yet — fetching it errors 128. Treat a failed
+    # branch fetch as "nothing to pull" and reuse the local branch as-is.
+    fetched = _run(["git", "-C", str(wt), "fetch", "origin", branch], check=False)
+    if fetched.returncode != 0:
+        log(f"[WORKTREE] origin/{branch} not found — skipping pull (new branch)")
+        return []
 
     if strategy == "reset":
         _run(["git", "-C", str(wt), "reset", "--hard", f"origin/{branch}"])
@@ -206,7 +257,7 @@ def _apply_pull_strategy(wt: Path, branch: str, strategy: str) -> list[str]:
 def create_worktree(
     owner: str, repo: str, issue_num: int, base_branch: str,
     token: str, cfg: dict, provider: str = "github",
-    default_branch: str = None,
+    default_branch: str | None = None,
     pull_strategy: str = "reset",
     push_new: bool = False,
 ) -> Path:
@@ -246,19 +297,68 @@ def create_worktree(
         _apply_pull_strategy(wt, branch, pull_strategy)
     else:
         new_branch = True
-        # Verify base_branch exists on origin before creating worktree
+        # Verify base_branch exists on origin before creating worktree.
         verify = _run(
             ["git", "-C", str(main), "rev-parse", "--verify", f"origin/{base_branch}"],
             check=False,
         )
         if verify.returncode != 0:
-            raise RuntimeError(
-                f"base branch '{base_branch}' does not exist on origin"
+            # The requested base (e.g. a user-supplied `/plan --branch strategy/X`)
+            # doesn't exist yet. If a distinct default branch is available, create
+            # the requested branch from it on origin and continue — this is the
+            # branch the eventual PR will target, so it must exist. Only when there
+            # is no usable fallback do we surface a hard (recoverable via /retry)
+            # error.
+            fork_point = default_branch
+            if not fork_point or fork_point == base_branch:
+                raise RuntimeError(
+                    f"base branch '{base_branch}' does not exist on origin"
+                )
+            default_verify = _run(
+                ["git", "-C", str(main), "rev-parse", "--verify", f"origin/{fork_point}"],
+                check=False,
+            )
+            if default_verify.returncode != 0:
+                raise RuntimeError(
+                    f"base branch '{base_branch}' does not exist on origin "
+                    f"(fallback branch '{fork_point}' is also missing)"
+                )
+            # Create the requested branch on origin from the default branch.
+            _run([
+                "git", "-C", str(main), "push", "origin",
+                f"origin/{fork_point}:refs/heads/{base_branch}",
+            ])
+            _run(["git", "-C", str(main), "fetch", "origin", base_branch], check=False)
+            log(
+                f"[WORKTREE] {owner}/{repo}#{issue_num} base branch "
+                f"'{base_branch}' missing — created from '{fork_point}' on origin"
             )
         base_sha_result = _run(["git", "-C", str(main), "rev-parse", "--short", f"origin/{base_branch}"], check=False)
         base_sha = base_sha_result.stdout.strip() if base_sha_result.returncode == 0 else "unknown"
         log(f"[WORKTREE] {owner}/{repo}#{issue_num} branch={branch} forked_from={base_branch}@{base_sha}")
         _run(["git", "-C", str(main), "worktree", "add", str(wt), "-b", branch, f"origin/{base_branch}"])
+
+        # Best-effort: link branch to issue in platform UI (Development sidebar).
+        # Runs BEFORE the remote branch is pushed, so the GraphQL createLinkedBranch
+        # mutation can create the ref. Reused branches (branch_exists=True) skip this.
+        if cfg.get("LINK_BRANCH_TO_ISSUE", False):
+            try:
+                full_sha_result = _run(
+                    ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],
+                    check=False,
+                )
+                full_base_sha = full_sha_result.stdout.strip()
+                if full_base_sha:
+                    get_vcs(repo_cfg).link_branch_to_issue(
+                        issue_num, full_base_sha, branch,
+                    )
+            except MissingScopeError:
+                dbg.warning(
+                    "WORKTREE: link_branch_to_issue skipped — "
+                    "PAT missing permission to create linked branch"
+                )
+            except Exception as e:  # Best-effort; log and continue.
+                dbg.warning("WORKTREE: link_branch_to_issue failed: %s", e, exc_info=True)
 
     if new_branch and push_new:
         _run(["git", "-C", str(main), "push", "-u", "origin", branch])
@@ -279,7 +379,7 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
 
     Returns dict with:
       - committed: bool
-      - commit_sha: str  (short SHA, present when committed)
+      - commit_sha: str  (full SHA, present when committed)
       - branch: str      (branch name, e.g. "autoswe/issue-42")
     """
     repo_cfg = {"owner": owner, "repo": repo, "token": "", "provider": provider}
@@ -343,8 +443,8 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
             log(f"[WORKTREE] Reworded last commit on {branch} ({count} commit(s) preserved)")
             _run(["git", "-C", str(wt), "push", "-f", "origin", branch])
             log(f"[WORKTREE] git push -f origin {branch}")
-        commit_sha = _run(["git", "-C", str(wt), "rev-parse", "--short", "HEAD"]).stdout.strip()
-        log(f"[WORKTREE] git commit ({commit_sha}) on {branch}: {msg[:60]!r}")
+        commit_sha = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
+        log(f"[WORKTREE] git commit ({commit_sha[:8]}) on {branch}: {msg[:60]!r}")
         return {"committed": True, "commit_sha": commit_sha, "branch": branch}
 
     _run(["git", "-C", str(wt), "add", "-A"])
@@ -354,13 +454,13 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
         return {"committed": False}
     _run(["git", "-C", str(wt), "commit", "-m", msg])
     _run(["git", "-C", str(wt), "push", "-u", "origin", branch])
-    commit_sha = _run(["git", "-C", str(wt), "rev-parse", "--short", "HEAD"]).stdout.strip()
+    commit_sha = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
     dbg.debug("WORKTREE: committed and pushed %s sha=%s", branch, commit_sha)
-    log(f"[WORKTREE] Committed and pushed {branch} ({commit_sha})")
+    log(f"[WORKTREE] Committed and pushed {branch} ({commit_sha[:8]})")
     return {"committed": True, "commit_sha": commit_sha, "branch": branch}
 
 
-def sync_branch(wt: Path, owner: str, repo: str, issue_num: int, base_branch: str = "main", provider: str = "github", cfg: dict = None) -> dict:
+def sync_branch(wt: Path, owner: str, repo: str, issue_num: int, base_branch: str = "main", provider: str = "github", cfg: dict | None = None) -> dict:
     """Merge or rebase the latest base branch into the worktree branch.
 
     Strategy is controlled by ``cfg["SYNC_STRATEGY"]``:
@@ -404,7 +504,11 @@ def sync_branch(wt: Path, owner: str, repo: str, issue_num: int, base_branch: st
             log("[WORKTREE] Completed in-progress rebase before sync")
 
     # Fetch latest remote state
-    _run(["git", "-C", str(wt), "fetch", "origin"])
+    fetched = _run(["git", "-C", str(wt), "fetch", "origin"], check=False)
+    if fetched.returncode != 0:
+        err = (fetched.stdout + " " + fetched.stderr).strip()
+        log(f"[WORKTREE] fetch origin failed (continuing best-effort): {err}")
+        dbg.warning("WORKTREE: sync_branch fetch failed, using local refs: %s", err)
 
     # Capture HEAD before merge to detect if sync moved it
     head_before = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
@@ -482,13 +586,13 @@ def sync_branch(wt: Path, owner: str, repo: str, issue_num: int, base_branch: st
     ahead = _run(["git", "-C", str(wt), "log", f"origin/{base_branch}..HEAD", "--oneline"], check=False)
     ahead_count = len(ahead.stdout.strip().split("\n")) if ahead.stdout.strip() else 0
 
-    short_sha = _run(["git", "-C", str(wt), "rev-parse", "--short", "HEAD"]).stdout.strip()
+    commit_sha = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
     head_after = _run(["git", "-C", str(wt), "rev-parse", "HEAD"]).stdout.strip()
 
     return {
         "synced": True, "conflict": False, "branch": branch,
         "ahead": ahead_count,
-        "commit_sha": short_sha,
+        "commit_sha": commit_sha,
         "changed": head_before != head_after,
     }
 

@@ -48,9 +48,7 @@ TOKEN = os.environ.get("AUTOSWE_TOKEN", "")
 COMMENT_ID = os.environ.get("AUTOSWE_COMMENT_ID", "")
 SUPPRESS_POSTING = os.environ.get("AUTOSWE_SUPPRESS_POSTING", "0") == "1"
 
-if PROVIDER not in ("github",):
-    import logging
-    logging.warning("autoswe_comment_server: provider=%r is not supported (github only)", PROVIDER)
+
 
 
 # ---- HTTP helpers (no external deps) ----
@@ -77,17 +75,57 @@ def _http(method: str, url: str, body: dict | None) -> dict:
         raise RuntimeError(f"HTTP {e.code}: {content}") from e
 
 
+def _ado_http(method: str, url: str, body: dict | None) -> dict:
+    """HTTP request with Azure DevOps Basic auth (empty username, PAT as password)."""
+    auth = ("", TOKEN)
+    b64 = __import__("base64").b64encode(
+        ":".join(auth).encode()
+    ).decode()
+    headers = {
+        "Authorization": f"Basic {b64}",
+        "Content-Type": "application/json",
+    }
+    data = json.dumps(body).encode() if body else None
+    req = request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+    except url_error.HTTPError as e:
+        content = e.read().decode() if hasattr(e, "read") else ""
+        raise RuntimeError(f"HTTP {e.code}: {content}") from e
+
+
 def _post_comment(body: str) -> str:
     """Post a comment. Returns the comment ID as string."""
-    url = f"https://api.github.com/repos/{OWNER}/{REPO}/issues/{ISSUE_NUMBER}/comments"
-    result = _http("POST", url, {"body": _tag(body)})
-    return str(result.get("id", ""))
+    if PROVIDER == "github":
+        url = f"https://api.github.com/repos/{OWNER}/{REPO}/issues/{ISSUE_NUMBER}/comments"
+        result = _http("POST", url, {"body": _tag(body)})
+        return str(result.get("id", ""))
+    elif PROVIDER == "azure":
+        url = (
+            f"https://dev.azure.com/{OWNER}/{REPO}/_apis/wit/workItems/"
+            f"{ISSUE_NUMBER}/comments?format=Markdown&api-version=7.1-preview.4"
+        )
+        result = _ado_http("POST", url, {"text": body})
+        return str(result.get("id", ""))
+    else:
+        raise RuntimeError(f"Unsupported provider: {PROVIDER}")
 
 
 def _update_comment(comment_id: str, body: str) -> None:
     """Edit an existing comment."""
-    url = f"https://api.github.com/repos/{OWNER}/{REPO}/issues/comments/{comment_id}"
-    _http("PATCH", url, {"body": _tag(body)})
+    if PROVIDER == "github":
+        url = f"https://api.github.com/repos/{OWNER}/{REPO}/issues/comments/{comment_id}"
+        _http("PATCH", url, {"body": _tag(body)})
+    elif PROVIDER == "azure":
+        url = (
+            f"https://dev.azure.com/{OWNER}/{REPO}/_apis/wit/workItems/"
+            f"{ISSUE_NUMBER}/comments/{comment_id}?format=Markdown&api-version=7.1-preview.4"
+        )
+        _ado_http("PATCH", url, {"text": body})
+    else:
+        raise RuntimeError(f"Unsupported provider: {PROVIDER}")
 
 
 # ---- MCP Server ----
@@ -106,8 +144,6 @@ async def update_progress(*, body: str) -> list[TextContent]:
     """
     if SUPPRESS_POSTING:
         return [TextContent(type="text", text="suppressed (minimal posting)")]
-    if PROVIDER != "github":
-        return [TextContent(type="text", text=f"Unsupported provider: {PROVIDER}")]
     try:
         if COMMENT_ID:
             _update_comment(COMMENT_ID, body)
@@ -125,10 +161,10 @@ async def post_plan(*, body: str) -> list[TextContent]:
     Call this when you have a complete plan. The plan should include the
     approach, files to modify, and any questions for the user.
     """
+    if not body or not body.strip():
+        return [TextContent(type="text", text="Error: body cannot be empty — provide the plan content")]
     if SUPPRESS_POSTING:
         return [TextContent(type="text", text="suppressed (minimal posting)")]
-    if PROVIDER != "github":
-        return [TextContent(type="text", text=f"Unsupported provider: {PROVIDER}")]
     try:
         cid = _post_comment(body)
         return [TextContent(type="text", text=f"Plan posted (comment_id={cid})")]
@@ -143,10 +179,10 @@ async def post_question(*, body: str) -> list[TextContent]:
     Call this when you need clarification before proceeding. The comment
     will signal that autoSWE is waiting for a user reply.
     """
+    if not body or not body.strip():
+        return [TextContent(type="text", text="Error: body cannot be empty — provide the question text")]
     if SUPPRESS_POSTING:
         return [TextContent(type="text", text="suppressed (minimal posting)")]
-    if PROVIDER != "github":
-        return [TextContent(type="text", text=f"Unsupported provider: {PROVIDER}")]
     try:
         cid = _post_comment(body)
         return [TextContent(type="text", text=f"Question posted (comment_id={cid})")]

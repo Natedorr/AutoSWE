@@ -2,15 +2,14 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import resolve_harness
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server, build_mcp_inline_comment_server
 from autoswe.harness.prompts import build_conflict_resolution_prompt, build_fix_prompt
 from autoswe.harness.runner import AGENT_TASK_TOOLS, HandlerResult
 from autoswe.providers.factory import get_vcs
-from autoswe.providers.github.vcs import MissingScopeError
 from autoswe.vcs.worktree import (
     commit_and_push,
     create_worktree,
@@ -19,9 +18,7 @@ from autoswe.vcs.worktree import (
     worktree_path,
 )
 
-dbg = init_debug_logger(LOGS_DIR)
-
-_scope_error_warned = False
+dbg = get_debug_logger()
 
 
 _MCP_COMMENT_TOOL_PREFIX = "mcp__autoswe_comment__"
@@ -45,12 +42,92 @@ def _get_branch_head_sha(wt, branch: str) -> str | None:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception as e:
+    except Exception as e:  # Best-effort branch SHA lookup; returns None on failure.
         dbg.debug("_get_branch_head_sha failed: %s", e)
+
     return None
 
 
-def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict = None, *, progress_callback=None, wt=None) -> HandlerResult:
+def _run_fix_session(
+    task: dict,
+    prompt: str,
+    wt: Path,
+    cfg: dict,
+    rc: dict,
+    *,
+    resume_id: str | None,
+    allowed_tools: list[str],
+    mcp_servers: dict,
+    fix_model: str | None,
+    timeout_msg: str,
+    error_prefix: str,
+    guidance: str | None,
+    progress_callback=None,
+) -> HandlerResult:
+    """Shared execution tail for run_fix and resume_fix.
+
+    Resolves the harness, runs the agent, checks post-run state, and
+    finalises (commit/push) on success.
+    """
+    owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
+    base_branch = task.get("base_branch", "main")
+    token = task["_token"]
+    provider = rc.get("provider", "github")
+
+    state = {}
+    cut = make_can_use_tool(task, rc, state, on_post=progress_callback)
+
+    harness = resolve_harness("fix", rc, cfg or {})
+    fix_model = harness.get("model") or fix_model
+
+    try:
+        run_result = runner.run(
+            prompt,
+            cwd=str(wt),
+            cfg=cfg or {},
+            repo_cfg=rc,
+            resume=resume_id,
+            model=fix_model,
+            mode="read_write",
+            extra_tools=allowed_tools,
+            mcp_servers=mcp_servers,
+            progress_callback=progress_callback,
+            can_use_tool=cut,
+            state=state,
+            harness_cfg=harness,
+        )
+    except asyncio.TimeoutError:
+        return HandlerResult(f"FAILED: {timeout_msg}")
+    except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
+        dbg.error(f"{error_prefix}: SDK error: %s", e, exc_info=True)
+        return HandlerResult(f"FAILED: {e}")
+
+    log(f"[FIX] {task['id']} sdk subtype={run_result.subtype} session={run_result.session_id} duration={run_result.duration_seconds:.1f}s cost=${run_result.cost_usd or 0:.4f} text_chars={len(run_result.text or '')}")
+    dbg.debug("FIX: sdk returned subtype=%s session=%s", run_result.subtype, run_result.session_id)
+    dbg.debug("FIX OUTPUT (%d chars):\n%s", len(run_result.text or ""), (run_result.text or "")[:4000])
+
+    if state.get("asked_question_md"):
+        return HandlerResult(
+            "WAITING: questions",
+            cost_usd=run_result.cost_usd,
+            duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
+        )
+
+    if run_result.subtype != "success":
+        return HandlerResult(
+            f"FAILED: agent ended with subtype={run_result.subtype}",
+            session_id=run_result.session_id,
+        )
+
+    return _finalize_fix(
+        task, run_result, wt, owner, repo, issue_num,
+        guidance, base_branch, provider, token, rc, cfg or {},
+        session_id=run_result.session_id,
+    )
+
+
+def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = None, cfg: dict | None = None, *, progress_callback=None, wt=None) -> HandlerResult:
     """Run fix phase with bypassPermissions. Returns done-file content.
 
     Return format on success:
@@ -72,8 +149,10 @@ def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict =
         # Orchestrator already created/synced the worktree
         dbg.debug("FIX: reusing pre-synced worktree=%s", wt)
     else:
-        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
-                             default_branch=base_branch, pull_strategy="merge", push_new=True)
+        wt = create_worktree(
+            owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
+            default_branch=base_branch, pull_strategy="merge", push_new=True,
+        )
         dbg.debug("FIX: worktree=%s", wt)
 
     # Check for merge conflicts produced by pull_strategy="merge"
@@ -94,7 +173,7 @@ def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict =
             existing_pr = get_vcs(_link_rc).find_existing_pr(rc, branch)
             if existing_pr and existing_pr.number:
                 pr_number = existing_pr.number
-        except Exception as e:
+        except Exception as e:  # Best-effort PR lookup — missing inline comment server is non-fatal.
             dbg.debug("find_existing_pr failed: %s", e)
 
     if pr_number:
@@ -136,115 +215,16 @@ def run_fix(task: dict, guidance: str = None, repo_cfg: dict = None, cfg: dict =
     log(f"[FIX] {task['id']} model={fix_model or 'default'} guidance={str(guidance or '')[:200]!r} prompt_len={len(prompt)} conflict_files={len(conflict_files or [])}")
     dbg.debug("FIX: model=%s guidance=%s", fix_model or "default", guidance)
 
-    state = {}
-    cut = make_can_use_tool(task, repo_cfg or {}, state, on_post=progress_callback)
-
-    try:
-        run_result = runner.run(
-            prompt,
-            cwd=str(wt),
-            cfg=cfg or {},
-            repo_cfg=rc,
-            resume=None if use_fresh_session else session_id,
-            model=fix_model,
-            permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools,
-            mcp_servers=mcp_servers,
-            progress_callback=progress_callback,
-            can_use_tool=cut,
-            state=state,
-        )
-    except asyncio.TimeoutError:
-        return HandlerResult("FAILED: timeout during fix phase")
-    except Exception as e:
-        dbg.error("run_fix: SDK error: %s", e, exc_info=True)
-        return HandlerResult(f"FAILED: {e}")
-
-    log(f"[FIX] {task['id']} sdk subtype={run_result.subtype} session={run_result.session_id} duration={run_result.duration_seconds:.1f}s cost=${run_result.cost_usd or 0:.4f} text_chars={len(run_result.text or '')}")
-    dbg.debug("FIX: sdk returned subtype=%s session=%s", run_result.subtype, run_result.session_id)
-    dbg.debug("FIX OUTPUT (%d chars):\n%s", len(run_result.text or ""), (run_result.text or "")[:4000])
-    if run_result.session_id:
-        task["session_id"] = run_result.session_id
-    task["last_phase"] = "fix"
-
-    if state.get("asked_question_md"):
-        return HandlerResult("WAITING: questions", cost_usd=run_result.cost_usd, duration_seconds=run_result.duration_seconds)
-
-    if run_result.subtype != "success":
-        return HandlerResult(f"FAILED: agent ended with subtype={run_result.subtype}")
-
-    summary = _finalize_fix(
-        task, run_result, wt, owner, repo, issue_num,
-        guidance, base_branch, provider, token, repo_cfg, cfg or {},
-    )
-
-    return summary
-
-
-def _finalize_fix(
-    task: dict,
-    run_result,
-    wt: Path,
-    owner: str,
-    repo: str,
-    issue_num: int,
-    guidance: str,
-    base_branch: str,
-    provider: str,
-    token: str,
-    repo_cfg: dict,
-    cfg: dict,
-) -> HandlerResult:
-    """Commit, push, and return the final HandlerResult after a successful fix run.
-
-    Shared by run_fix and resume_fix to avoid duplicating the commit/push flow.
-    """
-    summary_lines = [line.strip() for line in run_result.text.split("\n") if line.strip()]
-    summary_text = "\n".join(summary_lines[-10:]) if summary_lines else "Changes applied."
-
-    subject = f"autoswe: {guidance[:60]}" if guidance else "autoswe: automated fix"
-    body_text = "\n".join(summary_lines[-15:]) if summary_lines else ""
-    if body_text:
-        commit_msg = f"{subject}\n\n{body_text}\n\nRefs #{issue_num}"
-    else:
-        commit_msg = f"{subject}\n\nRefs #{issue_num}"
-
-    log(f"[FIX] {task['id']} committing subject={subject!r}")
-    dbg.debug("FIX: committing with subject=%r", subject)
-    try:
-        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider)
-    except Exception as e:
-        dbg.error("_finalize_fix: commit/push failed: %s", e, exc_info=True)
-        return HandlerResult(f"FAILED: commit/push error: {e}")
-
-    if not commit_result["committed"]:
-        log(f"[FIX] {task['id']} NO CHANGES DETECTED — worktree unmodified by session")
-        return HandlerResult("DONE: no changes detected", cost_usd=run_result.cost_usd, duration_seconds=run_result.duration_seconds)
-
-    # Best-effort: link branch to issue in platform UI (e.g. GitHub Development section)
-    if cfg.get("LINK_BRANCH_TO_ISSUE", True):
-        try:
-            _link_repo_cfg = dict(repo_cfg or {}, token=token)
-            get_vcs(_link_repo_cfg).link_branch_to_issue(
-                issue_num, commit_result["commit_sha"], commit_result["branch"],
-            )
-        except MissingScopeError:
-            global _scope_error_warned
-            if not _scope_error_warned:
-                _scope_error_warned = True
-                log("[FIX] link_branch_to_issue skipped: PAT missing check_runs:write scope (set LINK_BRANCH_TO_ISSUE=false to silence)")
-        except Exception as e:
-            dbg.warning("link_branch_to_issue failed: %s", e, exc_info=True)
-    else:
-        if not _scope_error_warned:
-            _scope_error_warned = True
-            log("[FIX] link_branch_to_issue disabled by LINK_BRANCH_TO_ISSUE=false")
-
-    log(f"[FIX] {task['id']} committed sha={commit_result['commit_sha']} branch={commit_result['branch']}")
-    return HandlerResult(
-        f"DONE_SUMMARY\t{summary_text}\t{commit_result['commit_sha']}",
-        cost_usd=run_result.cost_usd,
-        duration_seconds=run_result.duration_seconds,
+    return _run_fix_session(
+        task, prompt, wt, cfg, rc,
+        resume_id=None if use_fresh_session else session_id,
+        allowed_tools=allowed_tools,
+        mcp_servers=mcp_servers,
+        fix_model=fix_model,
+        timeout_msg="timeout during fix phase",
+        error_prefix="run_fix",
+        guidance=guidance,
+        progress_callback=progress_callback,
     )
 
 
@@ -262,8 +242,10 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
     session_id = task.get("session_id")
     provider = (repo_cfg or {}).get("provider", "github")
 
-    wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
-                         default_branch=base_branch, pull_strategy="merge", push_new=True)
+    wt = create_worktree(
+        owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
+        default_branch=base_branch, pull_strategy="merge", push_new=True,
+    )
     dbg.debug("FIX_RESUME: worktree=%s session=%s", wt, session_id)
 
     # Fast-forward worktree to origin/branch so the session operates on current state
@@ -284,48 +266,73 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
     fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
     log(f"[FIX] {task['id']} session=RESUME from={session_id} user_reply_chars={len(user_text)}")
 
-    state = {}
-    cut = make_can_use_tool(task, repo_cfg or {}, state, on_post=progress_callback)
-
-    try:
-        run_result = runner.run(
-            resume_prompt,
-            cwd=str(wt),
-            cfg=cfg or {},
-            repo_cfg=rc,
-            resume=session_id,
-            model=fix_model,
-            permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools,
-            mcp_servers=mcp_servers,
-            progress_callback=progress_callback,
-            can_use_tool=cut,
-            state=state,
-        )
-    except asyncio.TimeoutError:
-        return HandlerResult("FAILED: timeout during fix resume")
-    except Exception as e:
-        dbg.error("resume_fix: SDK error: %s", e, exc_info=True)
-        return HandlerResult(f"FAILED: {e}")
-
-    dbg.debug("FIX_RESUME: sdk returned subtype=%s session=%s", run_result.subtype, run_result.session_id)
-    dbg.debug("FIX_RESUME OUTPUT (%d chars):\n%s", len(run_result.text or ""), (run_result.text or "")[:4000])
-    if run_result.session_id:
-        task["session_id"] = run_result.session_id
-    task["last_phase"] = "fix"
-
-    if state.get("asked_question_md"):
-        return HandlerResult("WAITING: questions", cost_usd=run_result.cost_usd, duration_seconds=run_result.duration_seconds)
-
-    if run_result.subtype != "success":
-        return HandlerResult(f"FAILED: agent ended with subtype={run_result.subtype}")
-
-    summary = _finalize_fix(
-        task, run_result, wt, owner, repo, issue_num,
-        None, base_branch, provider, token, repo_cfg, cfg or {},
+    return _run_fix_session(
+        task, resume_prompt, wt, cfg, rc,
+        resume_id=session_id,
+        allowed_tools=allowed_tools,
+        mcp_servers=mcp_servers,
+        fix_model=fix_model,
+        timeout_msg="timeout during fix resume",
+        error_prefix="resume_fix",
+        guidance=None,
+        progress_callback=progress_callback,
     )
 
-    return summary
+
+def _finalize_fix(
+    task: dict,
+    run_result,
+    wt: Path,
+    owner: str,
+    repo: str,
+    issue_num: int,
+    guidance: str,
+    base_branch: str,
+    provider: str,
+    token: str,
+    repo_cfg: dict,
+    cfg: dict,
+    *,
+    session_id: str | None = None,
+) -> HandlerResult:
+    """Commit, push, and return the final HandlerResult after a successful fix run.
+
+    Shared by run_fix and resume_fix to avoid duplicating the commit/push flow.
+    """
+    summary_lines = [line.strip() for line in run_result.text.split("\n") if line.strip()]
+    summary_text = "\n".join(summary_lines[-10:]) if summary_lines else "Changes applied."
+
+    subject = f"autoswe: {guidance[:60]}" if guidance else "autoswe: automated fix"
+    body_text = "\n".join(summary_lines[-15:]) if summary_lines else ""
+    if body_text:
+        commit_msg = f"{subject}\n\n{body_text}\n\nFixes #{issue_num}"
+    else:
+        commit_msg = f"{subject}\n\nFixes #{issue_num}"
+
+    log(f"[FIX] {task['id']} committing subject={subject!r}")
+    dbg.debug("FIX: committing with subject=%r", subject)
+    try:
+        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider)
+    except Exception as e:  # Commit/push boundary — any provider or git error surfaces to the task result.
+        dbg.error("_finalize_fix: commit/push failed: %s", e, exc_info=True)
+        return HandlerResult(f"FAILED: commit/push error: {e}")
+
+    if not commit_result["committed"]:
+        log(f"[FIX] {task['id']} NO CHANGES DETECTED — worktree unmodified by session")
+        return HandlerResult(
+            "DONE: no changes detected",
+            cost_usd=run_result.cost_usd,
+            duration_seconds=run_result.duration_seconds,
+            session_id=session_id,
+        )
+
+    log(f"[FIX] {task['id']} committed sha={commit_result['commit_sha']} branch={commit_result['branch']}")
+    return HandlerResult(
+        f"DONE_SUMMARY\t{summary_text}\t{commit_result['commit_sha']}",
+        cost_usd=run_result.cost_usd,
+        duration_seconds=run_result.duration_seconds,
+        session_id=session_id,
+    )
 
 
 def resolve_sync_conflicts(
@@ -383,8 +390,14 @@ def resolve_sync_conflicts(
         f"session_id={session_id or 'none'} conflicts={len(conflict_files)}"
     )
 
+    fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
+    dbg.debug("RESOLVE: model=%s", fix_model or "default")
+
     state = {}
-    cut = make_can_use_tool(task, repo_cfg or {}, state, on_post=progress_callback)
+    cut = make_can_use_tool(task, rc, state, on_post=progress_callback)
+
+    harness = resolve_harness("fix", rc, cfg or {})
+    fix_model = harness.get("model") or fix_model
 
     try:
         run_result = runner.run(
@@ -393,16 +406,19 @@ def resolve_sync_conflicts(
             cfg=cfg or {},
             repo_cfg=rc,
             resume=session_id,  # None if first conflict with no prior session
-            permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools,
+            model=fix_model,
+            mode="read_write",
+            extra_tools=allowed_tools,
+            disallowed_tools_override=["AskUserQuestion"],
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during conflict resolution")
-    except Exception as e:
+    except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
         dbg.error("resolve_sync_conflicts: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 
@@ -411,15 +427,12 @@ def resolve_sync_conflicts(
         f"session={run_result.session_id} duration={run_result.duration_seconds:.1f}s"
     )
 
-    if run_result.session_id:
-        task["session_id"] = run_result.session_id
-    task["last_phase"] = "sync"
-
     if run_result.subtype != "success":
         return HandlerResult(
             f"FAILED: conflict resolution ended subtype={run_result.subtype}",
             cost_usd=run_result.cost_usd,
             duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
         )
 
     # Verify conflicts are actually cleared
@@ -430,6 +443,7 @@ def resolve_sync_conflicts(
             f"FAILED: unresolved conflicts: {files_list}",
             cost_usd=run_result.cost_usd,
             duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
         )
 
     # Push the resolved merge commit
@@ -440,11 +454,12 @@ def resolve_sync_conflicts(
             ["git", "-C", str(wt), "push", "origin", branch],
             capture_output=True, text=True, timeout=60, check=True,
         )
-    except Exception as e:
+    except Exception as e:  # subprocess can raise TimeoutExpired, CalledProcessError, OSError
         return HandlerResult(
             f"FAILED: push after resolution failed: {e}",
             cost_usd=run_result.cost_usd,
             duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
         )
 
     # Compute summary stats
@@ -454,7 +469,7 @@ def resolve_sync_conflicts(
             capture_output=True, text=True, timeout=10, check=True,
         )
         short_sha = short_sha_result.stdout.strip()
-    except Exception:
+    except Exception:  # Subprocess call (git rev-parse) is best-effort; fallback to "unknown".
         short_sha = "unknown"
 
     try:
@@ -463,7 +478,7 @@ def resolve_sync_conflicts(
             capture_output=True, text=True, timeout=10, check=False,
         )
         ahead_count = len(ahead_result.stdout.strip().split("\n")) if ahead_result.stdout.strip() else 0
-    except Exception:
+    except Exception:  # Subprocess call (git log) is best-effort; fallback to 0.
         ahead_count = 0
 
     summary = (
@@ -476,4 +491,5 @@ def resolve_sync_conflicts(
         f"DONE_SUMMARY\t{summary}\t{short_sha}",
         cost_usd=run_result.cost_usd,
         duration_seconds=run_result.duration_seconds,
+        session_id=run_result.session_id,
     )

@@ -26,7 +26,9 @@ All labels use the `autoswe:` prefix. Defined in `tracking/labels.py:AUTOSWE_LAB
 | `autoswe:fixed` | `fixed` | `ededed` | Fix completed |
 | `autoswe:synced` | `synced` | `ededed` | Sync completed |
 | `autoswe:shipped` | `shipped` | `ededed` | PR created |
-| `autoswe:reviewed` | `reviewed` | `ededed` | Review completed |
+| `autoswe:reviewed` | `reviewed` | `ededed` | Review approved (LGTM) — `/pr` allowed |
+| `autoswe:review_failed` | `review_failed` | `fbca04` | Review verdict "Needs changes" — `/pr` blocked until `/fix` |
+| `autoswe:review_blocked` | `review_blocked` | `d73a4a` | Review verdict "Blocked" (CRITICAL findings) — `/pr` blocked until `/fix` |
 | `autoswe:waiting` | `waiting` | `fbca04` | Claude asked a question; awaiting a reply |
 | `autoswe:failed` | `failed` | `d73a4a` | Handler errored, or a limit guard tripped |
 | `autoswe:skipped` | `skipped` | `ffffff` | `/skip` |
@@ -53,9 +55,10 @@ The transitions below happen by writing `autoswe_status` in `queue.json`; the la
   - a user comment with a slash command whose ID is *newer than `last_dispatched_command_id`*, on a task in a COMPLETED status (`fixed`/`synced`/`shipped`/`reviewed`)/`failed`/`skipped`/`planned`, or
   - any user reply on a task in `waiting`/`planned` (plain text → `pending_command = None`, `pending_user_reply = text`).
 - **→ RUNNING statuses** (`planning`/`fixing`/`syncing`/`reviewing`/`shipping`; set by `_dispatch_task()`): only from a non-noop Action. PID file is created first, then the status flips. The specific running status depends on the action kind (`plan` → `planning`, `fix` → `fixing`, `sync_branch` → `syncing`, `review` → `reviewing`, `ship_pr` → `shipping`).
-- **→ planned**: planner returned `"PLAN_READY"` (`<AUTOSWE_PLAN>` block found).
-- **→ waiting**: planner returned `"WAITING: …"` (`<AUTOSWE_QUESTIONS>` block, or no XML block).
-- **→ COMPLETED statuses** (`fixed`/`synced`/`shipped`/`reviewed`): coder returned `"DONE*"` for `/fix` → `fixed`, or `/sync` succeeded → `synced`, or `/pr` succeeded → `shipped`, or `/review` succeeded → `reviewed`, or the issue was found closed at refresh time → `fixed`.
+- **→ planned**: planner returned `"PLAN_READY"` (MCP `post_plan` fired, or — deprecated fallback — an `<AUTOSWE_PLAN>` block / native plan file).
+- **→ waiting**: planner returned `"WAITING: …"` (MCP `post_question`, an AskUserQuestion, or — deprecated fallback — an `<AUTOSWE_QUESTIONS>` block / no parseable plan).
+- **→ COMPLETED statuses** (`fixed`/`synced`/`shipped`/`reviewed`): coder returned `"DONE*"` for `/fix` → `fixed`, or `/sync` succeeded → `synced`, or `/pr` succeeded → `shipped`, or `/review` returned an **LGTM** verdict → `reviewed`, or the issue was found closed at refresh time → `fixed`.
+- **→ review_failed / review_blocked** (non-terminal resting states): `/review` returned a gating verdict. `_map_done_to_status` parses the `## Verdict` section of the review report — `Needs changes` → `review_failed`, `Blocked` → `review_blocked`. In both states `decide()` refuses `/pr`; a `/fix` is accepted (it addresses the findings and, via the `rereview_after_fix` flag, triggers an automatic re-review before shipping). See `handlers.md`.
 - **→ failed**: handler returned `"FAILED: …"`, or `sync`'s attempt/time guard tripped.
 - **→ skipped**: `/skip`.
 - **→ aborted**: `/abort`.

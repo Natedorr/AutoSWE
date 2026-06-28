@@ -1166,6 +1166,7 @@ TRANSITIONS: list[dict[str, Any]] = [
             "label_after": "autoswe:synced",
             "autoswe_status": "synced",
             "comment_contains": ["Completed with command", "Resolved merge conflicts"],
+            "claude_permission": "bypassPermissions",
         },
     },
     {
@@ -1209,6 +1210,7 @@ TRANSITIONS: list[dict[str, Any]] = [
             "label_after": "autoswe:failed",
             "autoswe_status": "failed",
             "comment_contains": ["Failed:", "/retry"],
+            "claude_permission": "bypassPermissions",
         },
     },
     # ---- Review transitions ----
@@ -1248,7 +1250,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "claude_responses": [
             {"text": "## Summary\n\nGood.\n\n## Verdict\n\nLGTM", "session_id": "s-review-42", "subtype": "success"},
         ],
-        "git_calls": ["worktree_path"],
+        "git_calls": ["worktree_path", "create_worktree", "sync_branch"],
         "expect": {
             "label_after": "autoswe:reviewed",
             "autoswe_status": "reviewed",
@@ -1292,7 +1294,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "claude_responses": [
             {"text": "## Summary\n\nGood.\n\n## Verdict\n\nLGTM", "session_id": "s-review-42", "subtype": "success"},
         ],
-        "git_calls": ["worktree_path"],
+        "git_calls": ["worktree_path", "create_worktree", "sync_branch"],
         "expect": {
             "label_after": "autoswe:reviewed",
             "autoswe_status": "reviewed",
@@ -1336,11 +1338,55 @@ TRANSITIONS: list[dict[str, Any]] = [
         "claude_responses": [
             {"text": "## Summary\n\nPlan looks solid.\n\n## Verdict\n\nLGTM", "session_id": "s-review-42", "subtype": "success"},
         ],
-        "git_calls": ["worktree_path"],
+        "git_calls": ["worktree_path", "create_worktree", "sync_branch"],
         "expect": {
             "label_after": "autoswe:reviewed",
             "autoswe_status": "reviewed",
             "comment_contains": ["## Review", "LGTM"],
+            "claude_permission": "plan",
+        },
+    },
+    {
+        "name": "planned_then_review_blocked",
+        "description": "Task at planned; /review finds a CRITICAL bug → Blocked verdict → review_blocked (gates /pr)",
+        "meta": {"script_review": True},
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:planned"],
+            "comments": [
+                {
+                    "body": "## Plan\n\n1. Implement count_vowels\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/review",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "planned",
+                "session_id": "s-plan-42",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "## Findings\n\n[CRITICAL] count_vowels misses uppercase.\n\n## Verdict\n\nBlocked", "session_id": "s-review-42", "subtype": "success"},
+        ],
+        "git_calls": ["worktree_path", "create_worktree", "sync_branch"],
+        "expect": {
+            "label_after": "autoswe:review_blocked",
+            "autoswe_status": "review_blocked",
+            "comment_contains": ["## Review", "Blocked", "/pr` is disabled"],
             "claude_permission": "plan",
         },
     },
@@ -1482,7 +1528,68 @@ TRANSITIONS: list[dict[str, Any]] = [
             "claude_permission": "bypassPermissions",
         },
     },
+    {
+        "name": "codex_plan_prose_only",
+        "description": "Codex plan emits prose (no tags) → waiting via raw-text fallback",
+        "start": {
+            "issue": {"body": "/plan"},
+            "queue_task": None,
+        },
+        "claude_responses": [
+            {"text": "I need more context about the issue requirements.", "session_id": "s-plan-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree"],
+        "expect": {
+            "label_after": "autoswe:waiting",
+            "autoswe_status": "waiting",
+            "session_id": "s-plan-42",
+            "comment_contains": ["Claude's response"],
+            "claude_permission": "plan",
+        },
+    },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Codex backend transition rows
+
+# Curated set of high-value transition names to run against the Codex backend.
+# These cover backend-divergent paths: sandbox/mode translation, JSONL→RunResult,
+# text-parse fallback (has_mcp == False), and per-backend assertions.
+# MCP-only rows (waiting_resume_mcp_post_plan) are excluded — Claude only.
+
+CODEX_TRANSITIONS: list[str] = [
+    "fresh_plan_command",            # Plan with read-only sandbox
+    "fresh_plan_with_questions",     # Questions → waiting
+    "codex_plan_prose_only",         # Prose-only output → waiting (fs scan skipped)
+    "fresh_fix_command",             # Fix with workspace-write sandbox
+    "fresh_fix_fails",               # Error subtype → failed
+    "plan_ready_then_fix",           # Resume fix from planned
+    "waiting_user_plain_reply",      # Resume plan from waiting
+    "sync_conflict_resolved",        # Conflict resolution → synced
+    "sync_conflict_unresolved",      # Conflict resolution fails → failed
+    "planned_then_review",           # Review phase
+    "planned_then_review_blocked",   # Review verdict gating (Blocked → review_blocked)
+]
+
+
+# ---------------------------------------------------------------------------
+# Helper: translate claude_permission → codex sandbox
+
+
+def _permission_to_sandbox(permission: str) -> str:
+    """Map a claude_permission expectation to the Codex sandbox value.
+
+    ``"plan"`` → ``"read-only"``
+    ``"bypassPermissions"`` → ``"workspace-write"``
+    ``"read_only"`` → ``"read-only"``
+    """
+    mapping = {
+        "plan": "read-only",
+        "bypassPermissions": "workspace-write",
+        "read_only": "read-only",
+    }
+    return mapping.get(permission, "read-only")
 
 
 # ---------------------------------------------------------------------------
@@ -1509,6 +1616,10 @@ def build_queue_task(row: dict, provider: str) -> dict | None:
     if task is None:
         return None
     task = copy.deepcopy(task)
+    # A task that already exists in the queue has already been discovered,
+    # so a welcome comment would have been posted on first discovery.
+    # Suppress it here so _post_pending_welcomes doesn't hit time.sleep(10).
+    task.setdefault("suppress_welcome", True)
     if provider == "azure":
         task["id"] = "ado:testorg_testproj/testrepo_42"
         task["owner"] = "testorg"

@@ -3,14 +3,14 @@ import time
 from urllib import error as url_error
 from urllib import request
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log, mask_sensitive
+from autoswe.core.logging_utils import get_debug_logger, log, mask_sensitive
+from autoswe.core.redact import redact_worktree_paths
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def _gh_request(
-    method: str, path: str, token: str, body: dict = None,
+    method: str, path: str, token: str, body: dict | None = None,
     max_retries: int = 3, timeout: float = 30,
 ):
     """Generic GitHub API request with exponential backoff on rate-limit/errors.
@@ -40,6 +40,10 @@ def _gh_request(
         except url_error.HTTPError as e:
             content = e.read().decode() if hasattr(e, 'read') else ""
             if e.code == 403:
+                # Distinguish archived-repo 403 from genuine rate-limit 403.
+                # Archived repos return 403 with "archived" in the body — no point sleeping.
+                if "archived" in content:
+                    raise RuntimeError(f"GitHub API {path} -> HTTP {e.code}: {mask_sensitive(content)}") from e
                 reset_ts = int(e.headers.get("X-RateLimit-Reset", 0))
                 if reset_ts and attempt < max_retries - 1:
                     wait_seconds = max(60, reset_ts - time.time())
@@ -102,7 +106,7 @@ def fetch_owned_repos(token: str) -> list:
 def gh_post_comment(owner: str, repo: str, issue_number: int, body: str, token: str) -> None:
     """Post a comment on a GitHub issue."""
     url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments"
-    payload = json.dumps({"body": body}).encode()
+    payload = json.dumps({"body": redact_worktree_paths(body)}).encode()
     req = request.Request(url, data=payload, method="POST", headers={
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",

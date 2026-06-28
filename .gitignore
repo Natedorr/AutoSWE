@@ -9,6 +9,7 @@
 
 /config/autoswe.env
 /config/repos.json
+/config/harnesses.json
 
 # Coverage output
 .coverage

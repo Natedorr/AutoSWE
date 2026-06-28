@@ -69,6 +69,55 @@ def test_map_review_ready():
     assert _map_done_to_label("REVIEW_READY") == "autoswe:reviewed"
 
 
+# ---------------------------------------------------------------------------
+# Review verdict gating — REVIEW_READY\t<text> maps by verdict
+# ---------------------------------------------------------------------------
+
+def test_map_review_lgtm_is_reviewed():
+    body = "## Summary\n\nClean.\n\n## Verdict\n\n**LGTM**"
+    assert _map_done_to_label(f"REVIEW_READY\t{body}") == "autoswe:reviewed"
+
+
+def test_map_review_needs_changes_is_review_failed():
+    body = "## Summary\n\nSome gaps.\n\n## Verdict\n\n**Needs changes** — see findings."
+    assert _map_done_to_label(f"REVIEW_READY\t{body}") == "autoswe:review_failed"
+
+
+def test_map_review_blocked_is_review_blocked():
+    body = "## Summary\n\nBug.\n\n## Verdict\n\n**Blocked** — 1 CRITICAL finding."
+    assert _map_done_to_label(f"REVIEW_READY\t{body}") == "autoswe:review_blocked"
+
+
+def test_map_review_no_verdict_section_defaults_reviewed():
+    """No ## Verdict section and no blocking tokens → reviewed (backward compat)."""
+    body = "## Findings\n\nThe code has critical issues described below."
+    assert _map_done_to_label(f"REVIEW_READY\t{body}") == "autoswe:reviewed"
+
+
+def test_map_review_no_issues_found_is_reviewed():
+    assert _map_done_to_label("REVIEW_READY\tLGTM, no issues found.") == "autoswe:reviewed"
+
+
+def test_parse_review_verdict_ignores_body_tokens_outside_verdict():
+    """'Blocked'/'Needs changes' in finding bodies must not gate when the
+    Verdict section itself is LGTM."""
+    from autoswe.tracking.labels import parse_review_verdict
+
+    body = (
+        "## Findings\n\n[MEDIUM] this would have blocked older clients.\n"
+        "Needs changes were considered but rejected.\n\n"
+        "## Verdict\n\n**LGTM**\n"
+    )
+    assert parse_review_verdict(body) == "reviewed"
+
+
+def test_parse_review_verdict_blocked_beats_needs_changes():
+    from autoswe.tracking.labels import parse_review_verdict
+
+    body = "## Verdict\n\nBlocked. (Needs changes alone would not be enough.)"
+    assert parse_review_verdict(body) == "review_blocked"
+
+
 def test_map_random_string():
     assert _map_done_to_label("something random") == "autoswe:fixed"
 
@@ -433,3 +482,64 @@ def test_bot_content_patterns_ignore_user_text():
     ]
     for body in bodies:
         assert _is_autoswe_bot_comment({"body": body}) is False, f"Must NOT detect: {body!r}"
+
+
+# ---------------------------------------------------------------------------
+# Azure repo_id (UUID) in URLs — issue #52
+# ---------------------------------------------------------------------------
+
+def test_build_commit_url_azure_with_repo_id():
+    """Azure commit URL uses repo UUID when repo_id is set (issue #52)."""
+    url = _build_commit_url("azure", {
+        "org": "natedorr", "project": "testProject",
+        "repo": "testProject",
+        "repo_id": "d512de06-9118-4a61-97f1-34938c662c41",
+    }, "8a9a1bdb8d4ada31ba4c4b26d636a4dd3170d5a7")
+    # UUID replaces repo display name in the _git/ path segment
+    assert "_git/d512de06-9118-4a61-97f1-34938c662c41/commit/" in url
+    assert url == "https://dev.azure.com/natedorr/testProject/_git/d512de06-9118-4a61-97f1-34938c662c41/commit/8a9a1bdb8d4ada31ba4c4b26d636a4dd3170d5a7"
+
+
+def test_build_branch_url_azure_with_repo_id():
+    """Azure branch URL uses repo UUID when repo_id is set (issue #52)."""
+    url = _build_branch_url("azure", {
+        "org": "natedorr", "project": "testProject",
+        "repo": "testProject",
+        "repo_id": "d512de06-9118-4a61-97f1-34938c662c41",
+    }, "autoswe/issue-151")
+    # UUID replaces repo display name in the _git/ path segment
+    assert "_git/d512de06-9118-4a61-97f1-34938c662c41?version=" in url
+    assert url == "https://dev.azure.com/natedorr/testProject/_git/d512de06-9118-4a61-97f1-34938c662c41?version=GBautoswe%2Fissue-151"
+
+
+def test_build_commit_url_azure_fallback_without_repo_id():
+    """Azure commit URL falls back to display name when repo_id is absent."""
+    url = _build_commit_url("azure", {
+        "org": "my-org", "project": "my-project", "repo": "my-repo",
+    }, "abc1234")
+    assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo/commit/abc1234"
+
+
+def test_build_branch_url_azure_fallback_without_repo_id():
+    """Azure branch URL falls back to display name when repo_id is absent."""
+    url = _build_branch_url("azure", {
+        "org": "my-org", "project": "my-project", "repo": "my-repo",
+    }, "feature/branch")
+    assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBfeature%2Fbranch"
+
+
+def test_build_completion_comment_azure_with_repo_id():
+    """Completion comment uses repo UUID in commit/branch URLs (issue #52)."""
+    msg = _build_completion_comment(
+        pending_command="/fix",
+        done_content="DONE_SUMMARY\tFixed the bug\tabc1234",
+        task_owner="natedorr", task_repo="testProject", issue_num=5,
+        plan_branch=None, provider="azure",
+        cost_usd=None, duration_seconds=None, session_id=None,
+        repo_cfg={
+            "org": "natedorr", "project": "testProject", "repo": "testProject",
+            "repo_id": "d512de06-9118-4a61-97f1-34938c662c41",
+        },
+    )
+    assert "d512de06-9118-4a61-97f1-34938c662c41" in msg
+    assert "github.com" not in msg.split("**Summary:**")[0]

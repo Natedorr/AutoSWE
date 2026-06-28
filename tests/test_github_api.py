@@ -13,7 +13,7 @@ from autoswe.tracking.api import _gh_request, gh_get_all
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_response(body: dict, status: int = 200, headers: dict = None):
+def make_response(body: dict, status: int = 200, headers: dict | None = None):
     """Return a context-manager mock simulating urllib.request.urlopen response."""
     raw = json.dumps(body).encode()
     resp = MagicMock()
@@ -26,7 +26,7 @@ def make_response(body: dict, status: int = 200, headers: dict = None):
     return resp
 
 
-def make_http_error(code: int, headers: dict = None):
+def make_http_error(code: int, headers: dict | None = None):
     hdr = MagicMock()
     hdr.get = lambda k, d=None: (headers or {}).get(k, d)
     err = urllib.error.HTTPError(

@@ -187,7 +187,6 @@ class TestAtomicWriteCrashRecovery:
         monkeypatch.setattr(cfg_mod, "QUEUE_FILE", queue_file)
         monkeypatch.setattr(qs_mod, "AUTOSWE_DIR", tmp_path / "data")
         monkeypatch.setattr(qs_mod, "QUEUE_FILE", queue_file)
-        monkeypatch.setattr(qs_mod, "LOGS_DIR", tmp_path / "logs")
         (tmp_path / "logs").mkdir(exist_ok=True)
         (tmp_path / "data" / ".queue.lock").parent.mkdir(parents=True, exist_ok=True)
 
@@ -208,7 +207,6 @@ class TestAtomicWriteCrashRecovery:
         monkeypatch.setattr(cfg_mod, "QUEUE_FILE", queue_file)
         monkeypatch.setattr(qs_mod, "AUTOSWE_DIR", tmp_path / "data")
         monkeypatch.setattr(qs_mod, "QUEUE_FILE", queue_file)
-        monkeypatch.setattr(qs_mod, "LOGS_DIR", tmp_path / "logs")
         (tmp_path / "logs").mkdir(exist_ok=True)
         (tmp_path / "data" / ".queue.lock").parent.mkdir(parents=True, exist_ok=True)
 
@@ -228,7 +226,6 @@ class TestAtomicWriteCrashRecovery:
         monkeypatch.setattr(cfg_mod, "QUEUE_FILE", queue_file)
         monkeypatch.setattr(qs_mod, "AUTOSWE_DIR", tmp_path / "data")
         monkeypatch.setattr(qs_mod, "QUEUE_FILE", queue_file)
-        monkeypatch.setattr(qs_mod, "LOGS_DIR", tmp_path / "logs")
         (tmp_path / "logs").mkdir(exist_ok=True)
 
         with LockedQueue() as lq:

@@ -91,7 +91,7 @@ def test_run_review_uses_fresh_session(tmp_path, mock_gh_post_comment):
 
 
 def test_run_review_is_read_only(tmp_path, mock_gh_post_comment):
-    """run_review uses permission_mode='plan' and read_only=True."""
+    """run_review uses mode='read_only' (backend translates to plan permission + read-only tools) and read_only=True."""
     run_calls = []
     cut_calls = []
 
@@ -113,16 +113,24 @@ def test_run_review_is_read_only(tmp_path, mock_gh_post_comment):
                         from autoswe.harness.reviewer import run_review
                         run_review(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    assert run_calls[0]["permission_mode"] == "plan"
-    assert "Read" in run_calls[0]["allowed_tools"]
-    assert "Write" not in run_calls[0]["allowed_tools"]
-    assert "Edit" not in run_calls[0]["allowed_tools"]
-    # Agent task tools (TodoWrite, TaskCreate, etc.) should be included
-    from autoswe.harness.runner import AGENT_TASK_TOOLS
-    for tool in AGENT_TASK_TOOLS:
-        assert tool in run_calls[0]["allowed_tools"], f"{tool} should be in review allowed_tools"
+    assert run_calls[0]["mode"] == "read_only"
+    # Verify the backend maps mode="read_only" correctly
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    perm, tools, _disallowed = _MODE_CONFIG["read_only"]
+    assert perm == "plan"
+    assert "Read" in tools
+    assert "Write" not in tools
+    assert "Edit" not in tools
+    assert "Bash" not in tools
+    # Progress/task tools included
+    from autoswe.harness.runner import PROGRESS_TOOLS
+    for tool in PROGRESS_TOOLS:
+        assert tool in tools, f"{tool} should be in read_only mode tools"
+    assert "Agent" not in tools, (
+        "Agent (sub-agent spawning) must not be available in a read-only review"
+    )
     assert cut_calls[0] is True
-    assert "AskUserQuestion" not in run_calls[0]["allowed_tools"], (
+    assert "AskUserQuestion" not in tools, (
         "Reviewer must not be able to ask questions — review session is "
         "one-shot and non-resumable; findings only."
     )

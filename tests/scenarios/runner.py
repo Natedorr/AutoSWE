@@ -112,15 +112,17 @@ def run_one_turn(owner: str, repo: str, cfg: dict,
     cfg_mod.CONFIG_FILE = autoswe_dir / "config" / "autoswe.env"
     cfg_mod.REPOS_CONFIG_FILE = autoswe_dir / "config" / "repos.json"
     cfg_mod.WELCOME_FILE = autoswe_dir / "config" / "welcome_comment.txt"
+    cfg_mod.HARNESSES_CONFIG_FILE = autoswe_dir / "config" / "harnesses.json"
 
     qs_mod.AUTOSWE_DIR = autoswe_dir
     qs_mod.QUEUE_FILE = autoswe_dir / "data" / "queue.json"
-    qs_mod.LOGS_DIR = autoswe_dir / "logs"
 
-    # Force repos.json reload by clearing cache
+    # Force repos.json and harnesses.json reload by clearing caches
     repos_cfg_path = autoswe_dir / "config" / "repos.json"
     if repos_cfg_path.exists():
         cfg_mod.REPOS_CONFIG_FILE = repos_cfg_path
+
+    cfg_mod._harnesses_cache.clear()
 
     from autoswe.orch.loop import poll as orch_poll
     return orch_poll(cfg, mode="full")
@@ -168,7 +170,7 @@ def assert_comments_posted(gh_fake, expected_comments: list[dict]) -> None:
         path = call.get("path", "")
         if call.get("method") in ("PATCH", "PUT") and (
             "/issues/comments/" in path or
-            "/workitems/" in path and "/comments/" in path
+            ("/workitems/" in path and "/comments/" in path)
         ):
             body = (call.get("body") or {}).get("body", "") or (call.get("body") or {}).get("text", "")
             if body:
@@ -234,10 +236,28 @@ def assert_claude_calls(cl_fake, expected_calls: list[dict]) -> None:
             )
 
         call = cl_fake.calls[i]
+        # Phase 3: check mode first, fall back to permission_mode for compat
+        if "mode" in exp:
+            assert call["mode"] == exp["mode"], (
+                f"Call {i}: expected mode={exp['mode']!r}, "
+                f"got {call.get('mode')!r}"
+            )
         if "permission_mode" in exp:
-            assert call["permission_mode"] == exp["permission_mode"], (
-                f"Call {i}: expected permission_mode={exp['permission_mode']!r}, "
-                f"got {call['permission_mode']!r}"
+            # If scenario checks permission_mode, translate from mode
+            expected_pm = exp["permission_mode"]
+            actual_mode = call.get("mode")
+            if actual_mode is not None:
+                # Translate mode → permission_mode for comparison
+                from autoswe.harness.backends.claude_code import _MODE_CONFIG
+                if actual_mode in _MODE_CONFIG:
+                    actual_pm = _MODE_CONFIG[actual_mode][0]
+                else:
+                    actual_pm = call.get("permission_mode")
+            else:
+                actual_pm = call.get("permission_mode")
+            assert actual_pm == expected_pm, (
+                f"Call {i}: expected permission_mode={expected_pm!r}, "
+                f"got mode={actual_mode!r} (→ {actual_pm if actual_mode else call.get('permission_mode')!r})"
             )
         if "resume" in exp:
             assert call["resume"] == exp["resume"], (
@@ -248,6 +268,42 @@ def assert_claude_calls(cl_fake, expected_calls: list[dict]) -> None:
             assert call["model"] == exp["model"], (
                 f"Call {i}: expected model={exp['model']!r}, "
                 f"got {call['model']!r}"
+            )
+
+
+def assert_codex_calls(cx_fake, expected_calls: list[dict]) -> None:
+    """Assert Codex subprocess calls match expectations.
+
+    Each entry in *expected_calls* is a dict with optional keys:
+        sandbox - expected sandbox value (``"read-only"`` or ``"workspace-write"``)
+        is_resume - True for resume mode, False for fresh exec
+        model - expected model
+    """
+    if not expected_calls:
+        return
+
+    for i, exp in enumerate(expected_calls):
+        if i >= len(cx_fake.calls):
+            raise AssertionError(
+                f"Expected {len(expected_calls)} Codex call(s), "
+                f"only {len(cx_fake.calls)} made."
+            )
+
+        call = cx_fake.calls[i]
+        if "sandbox" in exp:
+            assert call.get("sandbox") == exp["sandbox"], (
+                f"Call {i}: expected sandbox={exp['sandbox']!r}, "
+                f"got {call.get('sandbox')!r}"
+            )
+        if "is_resume" in exp:
+            assert call.get("is_resume") == exp["is_resume"], (
+                f"Call {i}: expected is_resume={exp['is_resume']!r}, "
+                f"got {call.get('is_resume')!r}"
+            )
+        if "model" in exp:
+            assert call.get("model") == exp["model"], (
+                f"Call {i}: expected model={exp['model']!r}, "
+                f"got {call.get('model')!r}"
             )
 
 
@@ -293,7 +349,7 @@ def add_repo_to_repos_json(autoswe_dir: Path, owner: str, repo: str,
                            extra: dict | None = None) -> None:
     """Add an entry to repos.json for scenario tests."""
     key = f"{owner}/{repo}"
-    entry = {"provider": provider, "pat": "test-pat", **((extra or {}))}
+    entry = {"provider": provider, "pat": "test-pat", **(extra or {})}
     repos_path = autoswe_dir / "config" / "repos.json"
     data = json.loads(repos_path.read_text(encoding="utf-8")) if repos_path.exists() else {}
     data[key] = entry

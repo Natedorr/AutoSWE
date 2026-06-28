@@ -30,8 +30,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from autoswe.core.config import load_config, load_repos_config  # noqa: E402
-from autoswe.providers.factory import build_repo_cfg, get_tracker  # noqa: E402
+from autoswe.core.config import load_config, load_repos_config
+from autoswe.providers.factory import build_repo_cfg, get_tracker
 
 DEFAULT_REPO = "natedorr/testProject/testProject"
 
@@ -67,10 +67,7 @@ def main():
     args = parser.parse_args()
 
     # Filter COMMANDS if --wis specified
-    if args.wis:
-        commands = [(wi, cmd, desc) for wi, cmd, desc in COMMANDS if wi in args.wis]
-    else:
-        commands = COMMANDS
+    commands = [(wi, cmd, desc) for wi, cmd, desc in COMMANDS if wi in args.wis] if args.wis else COMMANDS
 
     cfg = load_config()
     repos_cfg = load_repos_config()

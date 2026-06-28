@@ -2,17 +2,17 @@ import json
 
 import portalocker
 
-from autoswe.core.config import AUTOSWE_DIR, LOGS_DIR, QUEUE_FILE
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import AUTOSWE_DIR, QUEUE_FILE
+from autoswe.core.logging_utils import get_debug_logger, log
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
 def _atomic_write(path, data) -> None:
     """Write JSON atomically via a temp file."""
     tmp = path.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(data, indent=2))
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         tmp.replace(path)
     except OSError as e:
         dbg.error("_atomic_write: failed to write %s: %s", path, e, exc_info=True)

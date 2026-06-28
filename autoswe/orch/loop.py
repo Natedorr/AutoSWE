@@ -10,8 +10,10 @@ CLI modes (controlled by ``mode`` param):
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -23,7 +25,7 @@ from autoswe.core.config import (
     load_repos_config,
 )
 from autoswe.core.error_utils import capture_dispatch_error, format_error_comment
-from autoswe.core.logging_utils import init_debug_logger, init_issue_logger, log, remove_issue_logger
+from autoswe.core.logging_utils import get_debug_logger, init_issue_logger, log, remove_issue_logger
 from autoswe.core.queue_store import LockedQueue
 from autoswe.core.slug import make_slug, slug_to_filename
 from autoswe.orch.decide import decide
@@ -32,10 +34,12 @@ from autoswe.orch.run import DispatchResult, run
 from autoswe.orch.types import ApiState, TaskState, World
 from autoswe.providers.azure.adapter import apply_effect as azure_apply_effect
 from autoswe.providers.azure.adapter import read_api as azure_read_api
+from autoswe.providers.azure.tracker import AzureTracker
 from autoswe.providers.factory import build_repo_cfg, get_tracker
 from autoswe.providers.github.adapter import apply_effect as gh_apply_effect
 from autoswe.providers.github.adapter import read_api as gh_read_api
 from autoswe.tracking.labels import (
+    REVIEW_BLOCKING_STATUSES,
     RUNNING_STATUSES,
     TERMINAL_STATUSES,
     completed_status_for,
@@ -45,9 +49,9 @@ from autoswe.tracking.labels import (
 from autoswe.tracking.progress import ProgressComment
 
 # Statuses whose label mirror is synced in Phase 3
-_MIRROR_STATUSES = TERMINAL_STATUSES | {"planned", "waiting"}
+_MIRROR_STATUSES = TERMINAL_STATUSES | {"planned", "waiting"} | REVIEW_BLOCKING_STATUSES
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 AUTOSWE_BOT_FOOTER = "\n<!-- autoswe-bot -->"
 
@@ -106,6 +110,7 @@ def _ensure_queue_entry(
         "last_updated": None,
         "last_comment_sync": None,
         "creator_login": api.issue.creator_login or "",
+        "fix_summary": None,
     }
     log(f"[NEW] {slug} (no command, no label)")
 
@@ -124,40 +129,9 @@ def _build_poll_task(
     # Update queue entry in-place if normalized
     if status != raw_status:
         t["autoswe_status"] = status
-    ts = TaskState(
-        slug=slug,
-        owner=t["owner"],
-        repo=t["repo"],
-        issue_number=t["issue_number"],
-        title=t["title"],
-        body=t["body"],
-        status=status,
-        plan_branch=t.get("plan_branch"),
-        base_branch=t.get("base_branch", "main"),
-        attempt_count=t.get("attempt_count", 0),
-        first_dispatched_at=t.get("first_dispatched_at"),
-        last_dispatched_command=t.get("last_dispatched_command"),
-        last_dispatched_command_id=t.get("last_dispatched_command_id"),
-        last_consumed_reply_id=t.get("last_consumed_reply_id"),
-        session_id=t.get("session_id"),
-        pr_number=t.get("pr_number"),
-        guard_blocked=t.get("_guard_blocked", False),
-        gh_closed=t.get("gh_closed", False),
-        pending_command=t.get("pending_command"),
-        pending_guidance=t.get("pending_guidance"),
-        pending_user_reply=t.get("pending_user_reply"),
-        suppress_welcome=t.get("suppress_welcome", False),
-        welcome_comment_id=t.get("welcome_comment_id"),
-        bot_comment_ids=tuple(t.get("bot_comment_ids", [])),
-        last_phase=t.get("last_phase", "plan"),
-        resume_phase=t.get("resume_phase"),
-        created_at=t.get("created_at", ""),
-        last_synced=t.get("last_synced", ""),
-        provider=t.get("provider", "github"),
-        plan_file_path=t.get("plan_file_path"),
-        review_file_path=t.get("review_file_path"),
-        creator_login=t.get("creator_login", ""),
-    )
+    # Override the registry-read status with the normalised value
+    t["autoswe_status"] = status
+    ts = TaskState.from_queue(slug, t)
     world = World(api=api, task=ts, cfg=cfg, repo_cfg=repo_cfg)
     return PollTask(slug=slug, task_state=ts, world=world)
 
@@ -209,7 +183,7 @@ def _is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
-        import ctypes
+        import ctypes  # deferred import: Windows-only; kept local so this module imports cleanly on POSIX
         handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
         if handle:
             ctypes.windll.kernel32.CloseHandle(handle)
@@ -424,10 +398,8 @@ def _finalize_handler(
 
     # --- Write done file ---
     done_path = RUNNING_DIR / f"{slug_to_filename(slug)}.done"
-    try:
-        done_path.write_text(done_content)
-    except OSError:
-        pass
+    with contextlib.suppress(OSError):
+        done_path.write_text(done_content, encoding="utf-8")
 
     # --- Write structured result file ---
     result_path = RUNNING_DIR / f"{slug_to_filename(slug)}.result.json"
@@ -448,7 +420,7 @@ def _finalize_handler(
             "pr_number": task_entry.get("pr_number"),
             "session_id": task_entry.get("session_id"),
         }
-        result_path.write_text(json.dumps(result_data, indent=2))
+        result_path.write_text(json.dumps(result_data, indent=2), encoding="utf-8")
     except OSError:
         pass
 
@@ -490,15 +462,17 @@ def _handle_dispatch_error(
     # function; failure is caught below.
     worktree = None
     if "WORKTREE_DIR" in cfg:
+        # Deferred import: only needed for error diagnostics; avoids circular dependency.
         from autoswe.vcs.worktree import worktree_path as _worktree_path
+
         try:
             worktree = _worktree_path(
                 owner, repo, queue_entry["issue_number"],
                 cfg,
                 provider=provider,
             )
-        except Exception:
-            pass  # Best effort
+        except Exception:  # Best-effort worktree path lookup for diagnostics; failure is harmless
+            pass
 
     # 1. Capture diagnostics
     ctx = capture_dispatch_error(exc, slug, worktree)
@@ -508,7 +482,7 @@ def _handle_dispatch_error(
         comment_body = format_error_comment(ctx)
         tracker.post_comment(repo_cfg, issue_num, comment_body)
         log(f"[ERROR] {slug}: posted error comment")
-    except Exception as post_err:
+    except Exception as post_err:  # Post is best-effort; log and continue if the provider API fails
         dbg.error("dispatch error: failed to post comment for %s: %s", slug, post_err, exc_info=True)
         log(f"[ERROR] {slug}: failed to post error comment: {post_err}")
 
@@ -532,10 +506,19 @@ def _post_pending_welcomes(
     cfg: dict,
     bot_name: str,
     silent_reporting: bool,
+    active_slugs: set | None = None,
 ) -> None:
-    """Post welcome comments to newly discovered issues that don't have one yet."""
+    """Post welcome comments to newly discovered issues that don't have one yet.
+
+    *active_slugs* — set of slugs currently open in the API.  When provided,
+    stale queue entries (issues closed on the platform between runs) are
+    skipped so we don't post welcome comments to closed issues.
+    """
     for slug, task in list(queue.items()):
         if task.get("suppress_welcome", False):
+            continue
+        # Skip stale entries not currently open in the API
+        if active_slugs is not None and slug not in active_slugs:
             continue
 
         owner = task["owner"]
@@ -564,7 +547,9 @@ def _post_pending_welcomes(
                 task["welcome_comment_id"] = welcome_id
                 task.setdefault("bot_comment_ids", []).append(welcome_id)
             log(f"[WELCOME] posted to {slug}")
-        except Exception as e:
+            # Throttle welcome posts to avoid API rate limits (10s between each).
+            time.sleep(10)
+        except Exception as e:  # Per-repo resilience; one failed welcome must not block the rest.
             dbg.error("post_welcome_comments: failed for %s: %s", slug, e, exc_info=True)
             log(f"[WARN] welcome comment failed for {slug}: {e}")
 
@@ -572,6 +557,129 @@ def _post_pending_welcomes(
 # ---------------------------------------------------------------------------
 # Main poll function
 # ---------------------------------------------------------------------------
+
+def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None:
+    """Recover worktrees left dirty by SIGKILL'd dispatch processes.
+
+    Runs at poll-cycle startup (inside the LockedQueue context, before dispatch).
+    For each queue entry with a dead PID file:
+    - Clears the stale PID.
+    - Resets any RUNNING status to "pending" so decide() re-dispatches.
+    - Depending on WORKTREE_ORPHAN_POLICY (default "commit"):
+        "commit"   — stage, commit, and push orphaned changes so the next
+                     dispatch's reset-to-origin keeps the work.
+        "discard"  — hard-reset the worktree (no commit).
+        "log_only" — log but take no git action.
+    """
+    if not RUNNING_DIR.exists():
+        return
+
+    policy = str(cfg.get("WORKTREE_ORPHAN_POLICY", "commit")).lower()
+
+    for slug, task in list(queue.items()):
+        pid_path = RUNNING_DIR / f"{slug_to_filename(slug)}.pid"
+        if not pid_path.exists():
+            continue
+
+        try:
+            pid = int(pid_path.read_text().strip())
+        except (ValueError, OSError):
+            pid_path.unlink(missing_ok=True)
+            continue
+
+        if _is_pid_alive(pid):
+            continue  # live dispatch owns this entry
+
+        # Dead PID — orphaned interrupted dispatch
+        pid_path.unlink(missing_ok=True)
+        log(f"[RECOVER] {slug}: cleared stale PID {pid}")
+
+        owner = task.get("owner")
+        repo = task.get("repo")
+        issue_num = task.get("issue_number")
+        provider = task.get("provider", "github")
+
+        if not (owner and repo and issue_num):
+            continue
+
+        # Reset any running status so decide() will re-dispatch
+        current_status = task.get("autoswe_status")
+        if current_status in RUNNING_STATUSES:
+            task["autoswe_status"] = "pending"
+            log(f"[RECOVER] {slug}: reset status {current_status!r} → 'pending'")
+
+        if policy == "log_only":
+            log(f"[RECOVER] {slug}: policy=log_only, skipping worktree recovery")
+            continue
+
+        # Deferred worktree imports (avoids circular dependency at module load)
+        try:
+            from autoswe.vcs.worktree import (
+                commit_and_push,
+                ensure_clone,
+                is_dirty,
+                reset_clean,
+                worktree_path,
+            )
+        except ImportError:
+            dbg.error("recover: worktree module unavailable for %s", slug, exc_info=True)
+            continue
+
+        wt = worktree_path(owner, repo, issue_num, cfg, provider)
+        if not wt.exists():
+            log(f"[RECOVER] {slug}: worktree {wt} does not exist, skipping")
+            continue
+
+        if not is_dirty(wt):
+            log(f"[RECOVER] {slug}: worktree clean, nothing to recover")
+            continue
+
+        try:
+            repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg)
+        except Exception as e:
+            dbg.error("recover: build_repo_cfg failed for %s: %s", slug, e, exc_info=True)
+            log(f"[RECOVER] {slug}: could not build repo_cfg: {e}")
+            continue
+
+        repo_override = repos_cfg.get(f"{owner}/{repo}", {})
+        base_branch = repo_override.get("base_branch", "main")
+
+        if policy == "discard":
+            try:
+                from autoswe.providers.factory import get_vcs as _get_vcs
+                branch = _get_vcs(repo_cfg).branch_name(issue_num)
+                reset_clean(wt, branch)
+                log(f"[RECOVER] {slug}: discarded orphaned changes")
+            except Exception as e:
+                dbg.error("recover: discard failed for %s: %s", slug, e, exc_info=True)
+                log(f"[RECOVER] {slug}: discard failed: {e}")
+            continue
+
+        # Default policy: commit + push
+        try:
+            token = os.environ.get("PAT", "") or repo_cfg.get("pat", "")
+            ensure_clone(owner, repo, token, cfg, base_branch=base_branch, provider=provider)
+            msg = f"autoswe: recovered orphaned changes from interrupted run (issue #{issue_num})"
+            commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider)
+            log(f"[RECOVER] {slug}: committed and pushed orphaned changes")
+        except Exception as e:
+            dbg.error("recover: commit_and_push failed for %s: %s", slug, e, exc_info=True)
+            log(f"[RECOVER] {slug}: commit_and_push failed: {e}")
+            continue
+
+        # Best-effort recovery comment
+        try:
+            tracker = get_tracker(repo_cfg)
+            tracker.post_comment(
+                repo_cfg, issue_num,
+                f"**autoSWE recovery**: found orphaned changes from an interrupted run "
+                f"— committed and pushed them to `autoswe/issue-{issue_num}`."
+                f"{AUTOSWE_BOT_FOOTER}",
+            )
+        except Exception as e:
+            dbg.error("recover: comment post failed for %s: %s", slug, e, exc_info=True)
+            log(f"[RECOVER] {slug}: recovery comment failed: {e}")
+
 
 def poll(cfg: dict, mode: str = "full", repo_filter: str | None = None) -> int:
     """Run one poll cycle: sync + decide + dispatch for all repos.
@@ -596,7 +704,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
     Returns the number of tasks processed (actions that weren't noop).
     """
     repos_cfg = load_repos_config()
-    repo_keys = [k for k in repos_cfg.keys() if not k.startswith("_")]
+    repo_keys = [k for k in repos_cfg if not k.startswith("_")]
 
     if repo_filter:
         repo_keys = [k for k in repo_keys if k == repo_filter]
@@ -618,6 +726,9 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
     with LockedQueue() as lq:
         queue = lq.queue
 
+        if run_actions and cfg.get("WORKTREE_DIR"):
+            _recover_orphaned_worktrees(cfg, queue, repos_cfg)
+
         for repo_path in repo_keys:
             owner, _, repo = repo_path.partition("/")
             if not repo:
@@ -628,12 +739,22 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
 
             try:
                 repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg)
-            except Exception as e:
+            except Exception as e:  # Config parse failure is per-repo; skip repo, continue to next.
                 log(f"[ERROR] {owner}/{repo}: failed to build repo_cfg: {e}")
                 continue
 
             tracker = get_tracker(repo_cfg)
             provider = repo_cfg.get("provider", "github")
+
+            # Resolve repo UUID for Azure — web URLs require UUID, not display name
+            if provider == "azure" and isinstance(tracker, AzureTracker):
+                try:
+                    repo_id = tracker.resolve_repo_id()
+                    if repo_id:
+                        repo_cfg["repo_id"] = repo_id
+                except Exception as e:  # Azure repo_id resolution is optional — fallback to repo name
+                    log(f"[WARN] {owner}/{repo}: failed to resolve repo_id ({type(e).__name__}: {e}), falling back to name")
+
             repo_override = repos_cfg.get(repo_path, {})
             base_branch = repo_override.get("base_branch", "main")
 
@@ -692,12 +813,14 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             # --- Phase 0a: Ensure queue entries exist ---
             # Create queue entries for all open issues before Phase 0b (welcomes).
             # This ensures _post_pending_welcomes can find newly discovered tasks.
+            active_slugs: set[str] = set()
             for issue_number, api in api_states.items():
                 if api.issue.is_pull_request:
                     continue
                 if api.issue.state == "closed":
                     continue
                 slug = make_slug(provider, (owner, repo), issue_number)
+                active_slugs.add(slug)
                 _ensure_queue_entry(
                     queue, slug, api, owner, repo, issue_number,
                     now_iso, base_branch, provider, silent_reporting,
@@ -709,7 +832,8 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             # The queue is mutated in-place; _build_poll_task reads the
             # updated suppress_welcome flag for each issue.
             if run_actions:
-                _post_pending_welcomes(queue, repos_cfg, cfg, bot_name, silent_reporting)
+                _post_pending_welcomes(queue, repos_cfg, cfg, bot_name, silent_reporting,
+                                       active_slugs=active_slugs)
 
             # --- Phase 1: Process open issues ---
             for issue_number, api in api_states.items():
@@ -769,7 +893,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
 
                 try:
                     _dispatch_task(pt, action, tracker, repo_cfg, provider, cfg, queue, now_iso)
-                except Exception as e:
+                except Exception as e:  # Dispatch state-machine boundary; ANY failure must become a handled error.
                     dbg.error("poll: dispatch failed for %s: %s", slug, e, exc_info=True)
                     log(f"[ERROR] {slug}: dispatch failed: {e}")
                     _handle_dispatch_error(
@@ -827,10 +951,8 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                             task_entry.get("last_dispatched_command", "/fix").lstrip("/")
                         )
                         task_entry["autoswe_status"] = closed_status
-                        try:
+                        with contextlib.suppress(RuntimeError):
                             tracker.set_status(repo_cfg, task_entry["issue_number"], f"autoswe:{closed_status}")
-                        except RuntimeError:
-                            pass
                         log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
                     continue
                 if task_entry.get("gh_closed", False):
@@ -852,12 +974,10 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                 if qs in _MIRROR_STATUSES:
                     api_state = api_states.get(task_entry["issue_number"])
                     if api_state is not None and api_state.issue.status != qs:
-                        try:
+                        with contextlib.suppress(RuntimeError):
                             tracker.set_status(
                                 repo_cfg, task_entry["issue_number"], f"autoswe:{qs}"
                             )
-                        except RuntimeError:
-                            pass
 
     return tasks_processed
 

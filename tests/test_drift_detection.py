@@ -26,15 +26,15 @@ def _base_issue(state: str = "open") -> NormalizedIssue:
 
 
 def _base_task(status, **overrides) -> TaskState:
-    defaults = dict(
-        slug="gh:o_r_42", owner="o", repo="r", issue_number=42,
-        title="Drift test", body="Body", plan_branch=None,
-        base_branch="main", attempt_count=1,
-        first_dispatched_at=None, last_dispatched_command=None,
-        last_dispatched_command_id=None, last_consumed_reply_id=None,
-        session_id=None, pr_number=None, guard_blocked=False, gh_closed=False,
-        pending_command=None, pending_guidance=None, pending_user_reply=None,
-    )
+    defaults = {
+        "slug": "gh:o_r_42", "owner": "o", "repo": "r", "issue_number": 42,
+        "title": "Drift test", "body": "Body", "plan_branch": None,
+        "base_branch": "main", "attempt_count": 1,
+        "first_dispatched_at": None, "last_dispatched_command": None,
+        "last_dispatched_command_id": None, "last_consumed_reply_id": None,
+        "session_id": None, "pr_number": None, "guard_blocked": False, "gh_closed": False,
+        "pending_command": None, "pending_guidance": None, "pending_user_reply": None,
+    }
     defaults["status"] = status
     defaults.update(overrides)
     return TaskState(**defaults)

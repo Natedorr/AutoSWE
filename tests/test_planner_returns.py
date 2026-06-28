@@ -26,10 +26,16 @@ def make_task(token="ghp_fake", session_id=None):
 
 
 @contextmanager
-def _patch_worktree(tmp_path):
-    """Context manager that patches create_worktree and suppresses plan file detection."""
+def _patch_worktree(tmp_path, fs_file=None):
+    """Context manager that patches create_worktree and optionally _find_latest_plan_file.
+
+    Args:
+        tmp_path: The temporary directory to use as the worktree.
+        fs_file: Optional Path to return from _find_latest_plan_file.
+                 If None (default), _find_latest_plan_file returns None.
+    """
     with patch("autoswe.harness.planner.create_worktree", return_value=tmp_path):
-        with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        with patch("autoswe.harness.planner._find_latest_plan_file", return_value=fs_file):
             yield tmp_path
 
 
@@ -51,7 +57,7 @@ def test_run_plan_returns_plan_ready_on_plan_block(tmp_path, mock_gh_post_commen
                 result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert task["session_id"] == "sess-1"
+    assert result.session_id == "sess-1"
     assert len(mock_gh_post_comment.posted) == 1
     assert "Step 1" in mock_gh_post_comment.posted[0]["body"]
     assert "<!-- autoswe-bot -->" in mock_gh_post_comment.posted[0]["body"]
@@ -126,7 +132,7 @@ def test_resume_plan_returns_plan_ready(tmp_path, mock_gh_post_comment):
             result = resume_plan(task, "Use approach A.", {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert task["session_id"] == "sess-new"
+    assert result.session_id == "sess-new"
 
 
 def test_resume_plan_passes_session_id_to_runner(tmp_path, mock_gh_post_comment):
@@ -151,7 +157,7 @@ def test_resume_plan_passes_session_id_to_runner(tmp_path, mock_gh_post_comment)
 # ---------------------------------------------------------------------------
 
 def test_run_plan_records_plan_file_path_on_plan_ready(tmp_path, mock_gh_post_comment):
-    """When run_plan produces PLAN_READY from a valid plan file, task['plan_file_path'] is set."""
+    """When run_plan produces PLAN_READY from a valid plan file, HandlerResult.plan_file_path is set."""
     plan_file = tmp_path / "my-plan.md"
     plan_file.write_text("# My Plan\n\nStep 1: do stuff")
     task = make_task()
@@ -164,11 +170,11 @@ def test_run_plan_records_plan_file_path_on_plan_ready(tmp_path, mock_gh_post_co
                     result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert task.get("plan_file_path") == str(plan_file)
+    assert result.plan_file_path == str(plan_file)
 
 
 def test_run_plan_does_not_record_plan_file_when_pending(tmp_path, mock_gh_post_comment):
-    """When the plan file is a pending placeholder, task['plan_file_path'] is NOT set."""
+    """When the plan file is a pending placeholder, HandlerResult.plan_file_path is None."""
     plan_file = tmp_path / "pending-plan.md"
     plan_file.write_text("# Plan\n\nWaiting for user to provide more information.")
     task = make_task()
@@ -182,11 +188,11 @@ def test_run_plan_does_not_record_plan_file_when_pending(tmp_path, mock_gh_post_
                     result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert "plan_file_path" not in task
+    assert result.plan_file_path is None
 
 
 def test_run_plan_does_not_record_plan_file_on_waiting(tmp_path, mock_gh_post_comment):
-    """When planner returns WAITING (questions, no plan file), task['plan_file_path'] is NOT set."""
+    """When planner returns WAITING (questions, no plan file), HandlerResult.plan_file_path is None."""
     task = make_task()
     claude_text = "<AUTOSWE_QUESTIONS>\n1. Which approach?\n</AUTOSWE_QUESTIONS>"
 
@@ -197,7 +203,7 @@ def test_run_plan_does_not_record_plan_file_on_waiting(tmp_path, mock_gh_post_co
                 result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content.startswith("WAITING:")
-    assert "plan_file_path" not in task
+    assert result.plan_file_path is None
 
 
 def test_run_plan_both_plan_and_questions(tmp_path, mock_gh_post_comment):
@@ -257,8 +263,8 @@ def test_run_plan_empty_text_from_sdk(tmp_path, mock_gh_post_comment):
     assert "(no response)" in mock_gh_post_comment.posted[0]["body"]
 
 
-def test_run_plan_uses_allowed_tools(tmp_path, mock_gh_post_comment):
-    """Plan phase should use read-only tools plus MCP comment tools."""
+def test_run_plan_uses_mode_plan(tmp_path, mock_gh_post_comment):
+    """Plan phase should use mode='plan' (backend translates to read-only tools + MCP comment tools)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -273,26 +279,28 @@ def test_run_plan_uses_allowed_tools(tmp_path, mock_gh_post_comment):
                 from autoswe.harness.planner import run_plan
                 run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    tools = run_calls[0]["allowed_tools"]
+    # Phase 3: handler passes mode="plan", backend translates to permission+tools
+    assert run_calls[0]["mode"] == "plan"
+    # Verify the backend maps mode="plan" correctly
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    perm, tools, disallowed = _MODE_CONFIG["plan"]
+    assert perm == "plan"
     assert "Read" in tools
     assert "Glob" in tools
     assert "Grep" in tools
-    # MCP comment tools should be included
-    assert "mcp__autoswe_comment__update_progress" in tools
-    # PROGRESS_TOOLS (TodoWrite, TaskCreate, etc.) should be included
-    # but NOT 'Agent' — Agent spawns sub-agents that bypass read-only containment
-    from autoswe.harness.runner import PROGRESS_TOOLS
-    for tool in PROGRESS_TOOLS:
-        assert tool in tools, f"{tool} should be in plan allowed_tools"
     assert "Agent" not in tools
+    assert "ExitPlanMode" in disallowed
+    # MCP comment tools included
     assert "mcp__autoswe_comment__post_plan" in tools
     assert "mcp__autoswe_comment__post_question" in tools
-    assert run_calls[0]["permission_mode"] == "plan"
+    # PROGRESS_TOOLS included
+    from autoswe.harness.runner import PROGRESS_TOOLS
+    for tool in PROGRESS_TOOLS:
+        assert tool in tools, f"{tool} should be in plan mode tools"
 
 
-def test_resume_plan_uses_agent_task_tools(tmp_path, mock_gh_post_comment):
-    """Resume plan phase should include PROGRESS_TOOLS in allowed_tools
-    (Agent excluded — it bypasses read-only containment)."""
+def test_resume_plan_uses_mode_plan(tmp_path, mock_gh_post_comment):
+    """Resume plan phase should use mode='plan' (same tool set as run_plan)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -306,10 +314,13 @@ def test_resume_plan_uses_agent_task_tools(tmp_path, mock_gh_post_comment):
             from autoswe.harness.planner import resume_plan
             resume_plan(task, "Use approach A.", {}, {"GITHUB_TOKEN": "tok"})
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "plan"
+    # Verify PROGRESS_TOOLS included, Agent excluded
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["plan"]
     from autoswe.harness.runner import PROGRESS_TOOLS
     for tool in PROGRESS_TOOLS:
-        assert tool in tools, f"{tool} should be in resume_plan allowed_tools"
+        assert tool in tools, f"{tool} should be in plan mode tools"
     assert "Agent" not in tools
 
 
@@ -381,11 +392,11 @@ def test_run_plan_sanitizes_absolute_paths_in_prompt(tmp_path, mock_gh_post_comm
 
 
 # ---------------------------------------------------------------------------
-# permission_mode="plan" — explicit regression tests
+# mode="plan" — regression tests (Phase 3)
 # ---------------------------------------------------------------------------
 
-def test_run_plan_uses_plan_permission_mode(tmp_path, mock_gh_post_comment):
-    """Plan phase should use permission_mode='plan' (native plan mode)."""
+def test_run_plan_uses_mode_plan_regression(tmp_path, mock_gh_post_comment):
+    """Plan phase should use mode='plan' (backend translates to permission_mode='plan')."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -400,11 +411,11 @@ def test_run_plan_uses_plan_permission_mode(tmp_path, mock_gh_post_comment):
                 from autoswe.harness.planner import run_plan
                 run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    assert run_calls[0]["permission_mode"] == "plan"
+    assert run_calls[0]["mode"] == "plan"
 
 
-def test_resume_plan_uses_plan_permission_mode(tmp_path, mock_gh_post_comment):
-    """Resume plan should also use permission_mode='plan'."""
+def test_resume_plan_uses_mode_plan_regression(tmp_path, mock_gh_post_comment):
+    """Resume plan should also use mode='plan'."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -418,7 +429,7 @@ def test_resume_plan_uses_plan_permission_mode(tmp_path, mock_gh_post_comment):
             from autoswe.harness.planner import resume_plan
             resume_plan(task, "Use approach A.", {}, {"GITHUB_TOKEN": "tok"})
 
-    assert run_calls[0]["permission_mode"] == "plan"
+    assert run_calls[0]["mode"] == "plan"
 
 
 # ---------------------------------------------------------------------------
@@ -450,23 +461,29 @@ def test_find_latest_plan_file_none_when_dir_empty():
     assert result is None
 
 
-def test_run_plan_plan_file_takes_precedence(tmp_path, mock_gh_post_comment):
-    """When both plan file and <AUTOSWE_PLAN> tags exist, plan file content wins."""
-    plan_file = tmp_path / "native-plan.md"
-    plan_file.write_text("# Native Plan\n\nStep 1: from plan file")
+def test_run_plan_captured_path_takes_precedence_over_tags(tmp_path, mock_gh_post_comment):
+    """When both captured plan_file_path and <AUTOSWE_PLAN> tags exist, captured path wins."""
+    plan_file = tmp_path / "captured-plan.md"
+    plan_file.write_text("# Captured Plan\n\nStep 1: from captured plan file")
 
     task = make_task()
     claude_text = "<AUTOSWE_PLAN>\nStep from XML tags\n</AUTOSWE_PLAN>"
 
+    captured_runner_result = RunResult(
+        text=claude_text,
+        session_id="sess-1",
+        subtype="success",
+        plan_file_path=str(plan_file),
+    )
+
     with _patch_worktree(tmp_path):
         with FETCH_COMMENTS_PATCH:
-            with patch("autoswe.harness.planner._find_latest_plan_file", return_value=plan_file):
-                with patch("autoswe.harness.runner.run", return_value=_r(claude_text)):
-                    from autoswe.harness.planner import run_plan
-                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+            with patch("autoswe.harness.runner.run", return_value=captured_runner_result):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content == "PLAN_READY"
-    assert "from plan file" in mock_gh_post_comment.posted[0]["body"]
+    assert "from captured plan file" in mock_gh_post_comment.posted[0]["body"]
     assert "from XML tags" not in mock_gh_post_comment.posted[0]["body"]
 
 
@@ -544,27 +561,31 @@ def test_extract_plan_output_unit():
 
     # Fallback: empty text -> WAITING with "(no response)"
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
-        comment, done = _extract_plan_output("")
+        comment, done, used_file = _extract_plan_output("")
         assert done == "WAITING: see comment"
         assert "(no response)" in comment
+        assert used_file is None
 
     # Fallback: raw text -> WAITING
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
-        comment, done = _extract_plan_output("Some analysis.")
+        comment, done, used_file = _extract_plan_output("Some analysis.")
         assert done == "WAITING: see comment"
         assert "Some analysis." in comment
+        assert used_file is None
 
     # XML plan tags work without plan file
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
-        comment, done = _extract_plan_output("<AUTOSWE_PLAN>\nDo X\n</AUTOSWE_PLAN>")
+        comment, done, used_file = _extract_plan_output("<AUTOSWE_PLAN>\nDo X\n</AUTOSWE_PLAN>")
         assert done == "PLAN_READY"
         assert "Do X" in comment
+        assert used_file is None
 
     # XML questions work without plan file
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
-        comment, done = _extract_plan_output("<AUTOSWE_QUESTIONS>\n1. Q?\n</AUTOSWE_QUESTIONS>")
+        comment, done, used_file = _extract_plan_output("<AUTOSWE_QUESTIONS>\n1. Q?\n</AUTOSWE_QUESTIONS>")
         assert done == "WAITING: questions"
         assert "Q?" in comment
+        assert used_file is None
 
 
 # ---------------------------------------------------------------------------
@@ -636,8 +657,8 @@ def test_run_plan_ask_user_question_returns_waiting(tmp_path, mock_gh_post_comme
     assert result.done_content.startswith("WAITING:")
 
 
-def test_run_plan_records_last_phase_plan(tmp_path, mock_gh_post_comment):
-    """run_plan should set last_phase=plan on the task."""
+def test_run_plan_returns_plan_ready_phase(tmp_path, mock_gh_post_comment):
+    """run_plan returns PLAN_READY — last_phase is managed by emit() from action.kind."""
     task = make_task()
 
     with _patch_worktree(tmp_path):
@@ -645,26 +666,26 @@ def test_run_plan_records_last_phase_plan(tmp_path, mock_gh_post_comment):
             with patch("autoswe.harness.runner.run",
                        return_value=_r("<AUTOSWE_PLAN>" + chr(10) + "Plan" + chr(10) + "</AUTOSWE_PLAN>")):
                 from autoswe.harness.planner import run_plan
-                run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    assert task.get("last_phase") == "plan"
+    assert result.done_content == "PLAN_READY"
 
 
-def test_resume_plan_records_last_phase_plan(tmp_path, mock_gh_post_comment):
-    """resume_plan should set last_phase=plan on the task."""
+def test_resume_plan_returns_plan_ready_phase(tmp_path, mock_gh_post_comment):
+    """resume_plan returns PLAN_READY — last_phase is managed by emit() from action.kind."""
     task = make_task(session_id="sess-existing")
 
     with _patch_worktree(tmp_path):
         with patch("autoswe.harness.runner.run",
                    return_value=_r("<AUTOSWE_PLAN>" + chr(10) + "Plan" + chr(10) + "</AUTOSWE_PLAN>")):
             from autoswe.harness.planner import resume_plan
-            resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tok"})
+            result = resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tok"})
 
-    assert task.get("last_phase") == "plan"
+    assert result.done_content == "PLAN_READY"
 
 
-def test_run_plan_ask_user_question_in_allowed_tools(tmp_path, mock_gh_post_comment):
-    """AskUserQuestion should be included in allowed_tools for plan phase."""
+def test_run_plan_ask_user_question_in_mode(tmp_path, mock_gh_post_comment):
+    """AskUserQuestion should be included in mode='plan' tool set (planner can ask questions)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -679,12 +700,14 @@ def test_run_plan_ask_user_question_in_allowed_tools(tmp_path, mock_gh_post_comm
                 from autoswe.harness.planner import run_plan
                 run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    tools = run_calls[0]["allowed_tools"]
+    assert run_calls[0]["mode"] == "plan"
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, tools, _disallowed = _MODE_CONFIG["plan"]
     assert "AskUserQuestion" in tools
 
 
-def test_run_plan_disallowed_tools_includes_exit_plan_mode(tmp_path, mock_gh_post_comment):
-    """run_plan should include ExitPlanMode in disallowed_tools."""
+def test_run_plan_mode_excludes_exit_plan_mode(tmp_path, mock_gh_post_comment):
+    """mode='plan' should translate to ExitPlanMode in disallowed_tools (via backend)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -699,7 +722,10 @@ def test_run_plan_disallowed_tools_includes_exit_plan_mode(tmp_path, mock_gh_pos
                 from autoswe.harness.planner import run_plan
                 run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
 
-    disallowed = run_calls[0].get("disallowed_tools", [])
+    assert run_calls[0]["mode"] == "plan"
+    # Verify the backend maps mode="plan" to disallow ExitPlanMode
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, _tools, disallowed = _MODE_CONFIG["plan"]
     assert "ExitPlanMode" in disallowed
 
 
@@ -817,7 +843,7 @@ def test_run_plan_uses_plan_file_path_from_runner_result(tmp_path, mock_gh_post_
     assert result.done_content == "PLAN_READY"
     assert "from captured path" in mock_gh_post_comment.posted[0]["body"]
     assert "Decoy" not in mock_gh_post_comment.posted[0]["body"]
-    assert task.get("plan_file_path") == str(plan_file)
+    assert result.plan_file_path == str(plan_file)
 
 
 def test_run_plan_falls_back_to_filesystem_when_no_plan_file_path(tmp_path, mock_gh_post_comment):
@@ -899,9 +925,10 @@ def test_extract_plan_output_with_plan_file_parameter(tmp_path):
     plan_file.write_text("# Test Plan\n\nSteps here.")
 
     with patch("autoswe.harness.planner._find_latest_plan_file") as mock_find:
-        comment, done = _extract_plan_output("some text", plan_file=plan_file)
+        comment, done, used_file = _extract_plan_output("some text", plan_file=plan_file)
         assert done == "PLAN_READY"
         assert "Steps here" in comment
+        assert used_file == plan_file
         # _find_latest_plan_file should NOT have been called
         mock_find.assert_not_called()
 
@@ -914,9 +941,10 @@ def test_extract_plan_output_falls_back_when_plan_file_none(tmp_path):
     fallback_file.write_text("# Fallback\n\nFallback content.")
 
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=fallback_file):
-        comment, done = _extract_plan_output("text", plan_file=None)
+        comment, done, used_file = _extract_plan_output("text", plan_file=None)
         assert done == "PLAN_READY"
         assert "Fallback content" in comment
+        assert used_file == fallback_file
 
 
 def test_extract_plan_output_falls_back_when_plan_file_not_found(tmp_path):
@@ -928,9 +956,148 @@ def test_extract_plan_output_falls_back_when_plan_file_not_found(tmp_path):
     fallback_file.write_text("# Fallback\n\nFallback.")
 
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=fallback_file):
-        comment, done = _extract_plan_output("text", plan_file=missing_file)
+        comment, done, used_file = _extract_plan_output("text", plan_file=missing_file)
         assert done == "PLAN_READY"
         assert "Fallback" in comment
+        assert used_file == fallback_file
+
+
+def test_extract_plan_output_logs_when_plan_file_disappears(tmp_path):
+    """A debug log is emitted when the captured plan file is deleted mid-flow."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    plan_file = tmp_path / "vanishing.md"
+    plan_file.write_text("# Plan content\n\nStep 1.")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        # Delete the file between the existence check and the read
+        plan_file.unlink()
+        comment, done, used_file = _extract_plan_output("text", plan_file=plan_file)
+        # Should fall through to tag detection, then to fallback
+        assert done == "WAITING: see comment"
+        assert used_file is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #36 regression tests — plan file collision
+
+def test_extract_plan_output_tags_before_filesystem():
+    """Direct unit test: when plan_file=None, stale filesystem file exists,
+    and <AUTOSWE_PLAN> tags are in text, tags take precedence and used_file is None.
+    Regression test for issue #36 — plan file collision."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    stale_text = "# Wrong Issue Plan\n\nSteps for the wrong issue."
+    correct_tags = "<AUTOSWE_PLAN>\nCorrect plan from current session\n</AUTOSWE_PLAN>"
+
+    with patch("autoswe.harness.planner._find_latest_plan_file") as mock_find:
+        # Simulate a stale plan file from another session
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False, mode="w") as f:
+            f.write(stale_text)
+            stale_file = f.name
+        from pathlib import Path
+        mock_find.return_value = Path(stale_file)
+
+        try:
+            comment, done, used_file = _extract_plan_output(correct_tags, plan_file=None)
+            assert done == "PLAN_READY"
+            assert "Correct plan from current session" in comment
+            assert "Wrong Issue Plan" not in comment
+            # Tags were used, not the stale filesystem file
+            assert used_file is None
+            # Filesystem scan should NOT have been called (tags short-circuited it)
+            mock_find.assert_not_called()
+        finally:
+            Path(stale_file).unlink(missing_ok=True)
+
+
+def test_extract_plan_output_filesystem_fallback_no_tags():
+    """Filesystem scan still works as last resort when no tags and no captured path."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    fs_content = "# Filesystem Fallback Plan\n\nFound by scan."
+    text = "Some plain text with no tags."
+
+    with patch("autoswe.harness.planner._find_latest_plan_file") as mock_find:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".md", delete=False, mode="w") as f:
+            f.write(fs_content)
+            fs_file = f.name
+        from pathlib import Path
+        mock_find.return_value = Path(fs_file)
+
+        try:
+            comment, done, used_file = _extract_plan_output(text, plan_file=None)
+            assert done == "PLAN_READY"
+            assert "Filesystem Fallback Plan" in comment
+            assert used_file == Path(fs_file)
+        finally:
+            Path(fs_file).unlink(missing_ok=True)
+
+
+def test_run_plan_tags_take_precedence_over_stale_filesystem(tmp_path, mock_gh_post_comment):
+    """Regression test for issue #36: when concurrent sessions write plan files,
+    <AUTOSWE_PLAN> tags in the current session's output take precedence over
+    a stale plan file from another session found by filesystem scan."""
+    # Create a stale plan file that simulates another session's output
+    stale_file = tmp_path / "stale-plan.md"
+    stale_file.write_text("# Wrong Issue (#34)\n\nFix for extra comments showing up.")
+
+    task = make_task()
+    # Current session outputs correct plan in tags
+    claude_text = "<AUTOSWE_PLAN>\n# Correct Issue (#35)\n\nFix for Windows support.\n</AUTOSWE_PLAN>"
+
+    with _patch_worktree(tmp_path, fs_file=stale_file):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run", return_value=_r(claude_text)):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    # The correct plan from tags should be posted, not the stale file
+    assert "Windows support" in mock_gh_post_comment.posted[0]["body"]
+    assert "Wrong Issue" not in mock_gh_post_comment.posted[0]["body"]
+    assert "extra comments" not in mock_gh_post_comment.posted[0]["body"]
+
+
+def test_run_plan_concurrent_session_collision(tmp_path, mock_gh_post_comment):
+    """Full reproduction of the bug scenario: issue #34's plan file exists on disk,
+    issue #35's session outputs correct plan in <AUTOSWE_PLAN> tags.
+    Verifies #35's plan is posted, not #34's.
+    Regression test for issue #36."""
+    # Simulate issue #34's plan file (written to disk)
+    issue_34_plan = tmp_path / "issue-34-plan.md"
+    issue_34_plan.write_text("## Fix: Extra Comments Showing Up (#34)\n\nMCP retry logic changes.")
+
+    task = make_task()
+    task["issue_number"] = 35
+    # Issue #35's session output includes correct plan in tags
+    claude_text = (
+        "I have analyzed the Windows support issue.\n\n"
+        "<AUTOSWE_PLAN>\n"
+        "# Fix: Windows Support (#35)\n\n"
+        "## Changes needed:\n"
+        "1. Update progress.py for PS 5.1 compatibility\n"
+        "2. Add file logging support\n"
+        "</AUTOSWE_PLAN>"
+    )
+
+    with _patch_worktree(tmp_path, fs_file=issue_34_plan):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run", return_value=_r(claude_text)):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    # Verify the correct plan (#35) is posted, not #34's plan
+    posted_body = mock_gh_post_comment.posted[0]["body"]
+    assert "Windows Support" in posted_body
+    assert "PS 5.1" in posted_body
+    assert "Extra Comments" not in posted_body
+    assert "MCP retry logic" not in posted_body
+    # No plan file stored (tags don't produce a file path)
+    assert "plan_file_path" not in task
 
 
 # ---------------------------------------------------------------------------
@@ -988,10 +1155,10 @@ def test_resume_plan_does_not_push_new_branch(tmp_path, mock_gh_post_comment):
 
 
 # ---------------------------------------------------------------------------
-# Fix 1: resume_plan disallows ExitPlanMode
+# Fix 1: resume_plan disallows ExitPlanMode (via mode="plan")
 
 def test_resume_plan_disallows_exit_plan_mode(tmp_path, mock_gh_post_comment):
-    """resume_plan should include ExitPlanMode in disallowed_tools (matches run_plan)."""
+    """resume_plan should use mode='plan' which includes ExitPlanMode in disallowed_tools (via backend)."""
     run_calls = []
 
     def fake_run(prompt, **kwargs):
@@ -1003,9 +1170,11 @@ def test_resume_plan_disallows_exit_plan_mode(tmp_path, mock_gh_post_comment):
     with _patch_worktree(tmp_path):
         with patch("autoswe.harness.runner.run", side_effect=fake_run):
             from autoswe.harness.planner import resume_plan
-            resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tok"})
+            resume_plan(task, "Answer.", {}, {"GITHUB_TOKEN": "tool"})
 
-    disallowed = run_calls[0].get("disallowed_tools", [])
+    assert run_calls[0]["mode"] == "plan"
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    _perm, _tools, disallowed = _MODE_CONFIG["plan"]
     assert "ExitPlanMode" in disallowed
 
 
@@ -1084,3 +1253,121 @@ def test_run_plan_question_posted_beats_plan_posted(tmp_path, mock_gh_post_comme
     assert result.done_content.startswith("WAITING:")
     assert "questions" in result.done_content
 
+
+# ---------------------------------------------------------------------------
+# ExitPlanMode plan capture — model exits plan mode via the native tool
+
+def test_run_plan_uses_exit_plan_mode_text(tmp_path, mock_gh_post_comment):
+    """When the model exits plan mode via ExitPlanMode (no MCP post_plan, no plan
+    file), the captured plan_text is posted and PLAN_READY is returned — instead
+    of leaking the bare 'Tool: ExitPlanMode' progress line."""
+    task = make_task()
+    plan_md = "# Plan\n\n1. Build the state machine\n2. Add tests"
+    runner_result = RunResult(
+        text="Tool: ExitPlanMode",  # final assistant text is unhelpful
+        session_id="sess-1",
+        subtype="success",
+        plan_text=plan_md,
+    )
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            # No filesystem plan file — exercise the ExitPlanMode capture path
+            with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+                with patch("autoswe.harness.runner.run", return_value=runner_result):
+                    from autoswe.harness.planner import run_plan
+                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    assert len(mock_gh_post_comment.posted) == 1
+    body = mock_gh_post_comment.posted[0]["body"]
+    assert "Build the state machine" in body
+    assert "Tool: ExitPlanMode" not in body
+
+
+def test_extract_plan_output_exit_plan_text_unit(tmp_path):
+    """_extract_plan_output uses exit_plan_text after a captured file but before
+    tags/filesystem scan."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(
+            "irrelevant text", plan_file=None,
+            exit_plan_text="# My Plan\n\nDo the thing.",
+        )
+    assert done == "PLAN_READY"
+    assert "Do the thing" in comment
+    assert used_file is None
+
+
+def test_extract_plan_output_pending_exit_plan_falls_through(tmp_path):
+    """A pending ExitPlanMode plan falls through to tag/raw detection."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(
+            "<AUTOSWE_PLAN>\nReal plan\n</AUTOSWE_PLAN>", plan_file=None,
+            exit_plan_text="Waiting for the user to clarify before implementing.",
+        )
+    assert done == "PLAN_READY"
+    assert "Real plan" in comment
+
+
+def test_extract_plan_output_captured_file_beats_exit_plan_text(tmp_path):
+    """An explicit Write to the plans dir outranks ExitPlanMode text."""
+    from autoswe.harness.planner import _extract_plan_output
+
+    plan_file = tmp_path / "captured.md"
+    plan_file.write_text("# Captured\n\nFrom the write tool.")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(
+            "text", plan_file=plan_file,
+            exit_plan_text="# Exit\n\nFrom exit plan mode.",
+        )
+    assert done == "PLAN_READY"
+    assert "From the write tool" in comment
+    assert "From exit plan mode" not in comment
+
+
+# ---------------------------------------------------------------------------
+# Codex backend — text-tag fallback (no MCP)
+
+
+def test_run_plan_codex_text_tag_plan_ready(tmp_path, mock_gh_post_comment):
+    """When harness_cfg uses Codex backend (no MCP), the planner falls back to
+    parsing <AUTOSWE_PLAN> tags from RunResult.text → PLAN_READY."""
+    claude_text = "Here is the plan:\n<AUTOSWE_PLAN>\nStep 1: Fix the bug\nStep 2: Add tests\n</AUTOSWE_PLAN>"
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            # Codex backend returns plan_posted=False (no MCP) — text-tag fallback
+            with patch("autoswe.harness.runner.run", return_value=_r(claude_text, "sess-codex")):
+                # Verify Codex harness has no mcp capability
+                with patch("autoswe.harness.runner.backend_has_capability", return_value=False):
+                    from autoswe.harness.planner import run_plan
+                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    assert result.session_id == "sess-codex"
+    assert len(mock_gh_post_comment.posted) == 1
+    assert "Step 1: Fix the bug" in mock_gh_post_comment.posted[0]["body"]
+
+
+def test_run_plan_codex_text_tag_questions(tmp_path, mock_gh_post_comment):
+    """When harness_cfg uses Codex backend (no MCP), <AUTOSWE_QUESTIONS> in text
+    → WAITING: questions (text-tag fallback)."""
+    claude_text = "I need clarification:\n<AUTOSWE_QUESTIONS>\n1. Which database?\n</AUTOSWE_QUESTIONS>"
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run", return_value=_r(claude_text, "sess-codex")):
+                with patch("autoswe.harness.runner.backend_has_capability", return_value=False):
+                    from autoswe.harness.planner import run_plan
+                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content.startswith("WAITING:")
+    assert len(mock_gh_post_comment.posted) == 1
+    assert "Which database" in mock_gh_post_comment.posted[0]["body"]

@@ -326,7 +326,7 @@ def test_progress_flush_fallback_both_fail():
     progress._comment_id = 999
 
     # Make update_comment fail, then fallback post_comment also fails
-    tracker.update_comment = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("API down"))  # noqa: B028
+    tracker.update_comment = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("API down"))
     progress.update("Step 1")
 
     # Should not crash; comment_id preserved at 999

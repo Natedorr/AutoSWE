@@ -221,10 +221,17 @@ def isolated_autoswe_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config" / "autoswe.env")
     monkeypatch.setattr(cfg, "REPOS_CONFIG_FILE", tmp_path / "config" / "repos.json")
+    monkeypatch.setattr(cfg, "HARNESSES_CONFIG_FILE", tmp_path / "config" / "harnesses.json")
+
+    # Clear the harnesses cache so load_harnesses_config re-reads from the new path
+    cfg._harnesses_cache.clear()
 
     monkeypatch.setattr(qs, "AUTOSWE_DIR", tmp_path)
     monkeypatch.setattr(qs, "QUEUE_FILE", tmp_path / "data" / "queue.json")
-    monkeypatch.setattr(qs, "LOGS_DIR", tmp_path / "logs")
+
+    # Patch cli module paths so CLI commands (prune, list, status) use the isolated dir
+    import autoswe.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "QUEUE_FILE", tmp_path / "data" / "queue.json")
 
     return tmp_path
 
@@ -268,7 +275,22 @@ def git_world(tmp_path, monkeypatch):
     Returns a GitWorld instance with a bare remote, AUTOSWE_DIR tree,
     and monkeypatched clone URLs. Tests call world.init_remote() to seed
     content, then use production worktree functions against real git.
+
+    Also monkeypatches subprocess.run to capture output by default, so git
+    progress noise (enumerating objects, writing objects, etc.) doesn't
+    leak into the pytest output.
     """
+    import subprocess as _sub
+
+    _orig_run = _sub.run
+
+    def _quiet_run(*args, **kwargs):
+        kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("text", True)
+        return _orig_run(*args, **kwargs)
+
+    monkeypatch.setattr(_sub, "run", _quiet_run)
+
     from tests.git_fixtures import GitWorld
     return GitWorld(tmp_path, monkeypatch)
 
@@ -295,6 +317,9 @@ def scenario_cfg(isolated_autoswe_dir, tmp_path):
         "PLAN_MODEL": "",
         "FIX_MODEL": "",
         "REVIEW_MODEL": "",
+        "PLAN_HARNESS": "",
+        "FIX_HARNESS": "",
+        "REVIEW_HARNESS": "",
         "ANTHROPIC_AUTH_TOKEN": "",
         "ANTHROPIC_API_KEY": "",
         "ANTHROPIC_BASE_URL": "",

@@ -11,7 +11,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$AUTOSWE_DIR = if ($env:AUTOSWE_DIR) { $env:AUTOSWE_DIR } else { Join-Path $HOME ".autoswe" }
+$AUTOSWE_DIR = if ($env:AUTOSWE_DIR) { $env:AUTOSWE_DIR } else { $PSScriptRoot }
 $AUTOSWE_PY  = Join-Path $AUTOSWE_DIR "autoswe.py"
 $VENV_PY     = Join-Path $AUTOSWE_DIR ".venv\Scripts\python.exe"
 $LOGFILE     = Join-Path $AUTOSWE_DIR "logs\poller.log"
@@ -23,7 +23,7 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Forc
 
 function Write-Log {
     param([string]$Message)
-    $line = "[$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ' -AsUTC)] $Message"
+    $line = "[$([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))] $Message"
     Write-Output $line
     Add-Content -Path $LOGFILE -Value $line
 }

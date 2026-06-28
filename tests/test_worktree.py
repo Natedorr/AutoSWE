@@ -134,6 +134,87 @@ def test_create_worktree_reuses_existing(tmp_path, monkeypatch):
     assert not any("worktree" in " ".join(str(c)) for c in mock_run.call_args_list)
 
 
+def test_apply_pull_strategy_skips_when_branch_not_on_origin(tmp_path):
+    """fetch returning non-zero → _apply_pull_strategy returns [] and never resets."""
+    from autoswe.vcs.worktree import _apply_pull_strategy
+
+    reset_calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "fetch" in cmd and "origin" in cmd:
+            # Simulate missing remote ref
+            result.returncode = 128
+            result.stdout = ""
+            result.stderr = "fatal: couldn't find remote ref autoswe/issue-1"
+        elif "reset" in cmd:
+            reset_calls.append(args)
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        out = _apply_pull_strategy(tmp_path, "autoswe/issue-1", "reset")
+
+    assert out == []
+    assert reset_calls == [], "reset --hard must not run when fetch fails"
+
+
+def test_create_worktree_reuse_local_only_branch(tmp_path, monkeypatch):
+    """Reusing an existing worktree dir whose branch was never pushed must not raise."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt_mod
+    monkeypatch.setattr(wt_mod, "AUTOSWE_DIR", tmp_path)
+
+    main = tmp_path / "worktrees" / "o_r" / "_main"
+    main.mkdir(parents=True, exist_ok=True)
+    wt_path = tmp_path / "worktrees" / "o_r" / "issue-1"
+    wt_path.mkdir(parents=True, exist_ok=True)
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "fetch" in cmd and "origin" in cmd and "autoswe" in cmd:
+            result.returncode = 128
+            result.stderr = "fatal: couldn't find remote ref autoswe/issue-1"
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import create_worktree
+        result = create_worktree("o", "r", 1, "main", "token", _cfg())
+
+    assert result == wt_path
+
+
+def test_apply_pull_strategy_reset_runs_when_fetch_succeeds(tmp_path):
+    """When fetch succeeds the reset still executes (guard must not over-suppress)."""
+    from autoswe.vcs.worktree import _apply_pull_strategy
+
+    reset_called = []
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "reset" in cmd:
+            reset_called.append(args)
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        out = _apply_pull_strategy(tmp_path, "autoswe/issue-1", "reset")
+
+    assert out == []
+    assert any("reset" in " ".join(str(a) for a in c) for c in reset_called), \
+        "reset --hard must run when fetch succeeds"
+
+
 # ---------------------------------------------------------------------------
 # commit_and_push
 # ---------------------------------------------------------------------------
@@ -251,7 +332,7 @@ def test_commit_and_push_preserves_auto_commits(tmp_path, monkeypatch):
         # After fetch + reset-to-origin, there are 2 auto-commits from this session
         if "origin/autoswe/issue-1..HEAD" in cmd_str:
             result.stdout = "aaa1111 fix typo\nbbb2222 fix logic\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "def9876"
         else:
             result.stdout = ""
@@ -297,7 +378,7 @@ def test_commit_and_push_amend_uses_correct_message(tmp_path, monkeypatch):
         cmd_str = " ".join(args)
         if "origin/autoswe/issue-42..HEAD" in cmd_str:
             result.stdout = "ccc3333 initial fix\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "abc1234"
         else:
             result.stdout = ""
@@ -343,7 +424,7 @@ def test_commit_and_push_multi_fix_preserves_history(tmp_path, monkeypatch):
         # origin/autoswe/issue-1..HEAD only shows the new session commits.
         if "origin/autoswe/issue-1..HEAD" in cmd_str:
             result.stdout = "ddd4444 second fix round\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "abc1234"
         else:
             result.stdout = ""
@@ -371,6 +452,88 @@ def test_commit_and_push_multi_fix_preserves_history(tmp_path, monkeypatch):
     base_ahead_checks = [c for c in call_order
                          if "log" in c and "origin/main..HEAD" in " ".join(c)]
     assert len(base_ahead_checks) == 0, "Must not check origin/main..HEAD — would re-squash history"
+
+
+# ---------------------------------------------------------------------------
+# is_dirty / reset_clean
+# ---------------------------------------------------------------------------
+
+
+def test_is_dirty_returns_true_when_changes(tmp_path):
+    """is_dirty returns True when git status --porcelain has output."""
+    from autoswe.vcs.worktree import is_dirty
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = " M modified_file.py\n"
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        assert is_dirty(tmp_path) is True
+
+
+def test_is_dirty_returns_false_when_clean(tmp_path):
+    """is_dirty returns False when git status --porcelain is empty."""
+    from autoswe.vcs.worktree import is_dirty
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        assert is_dirty(tmp_path) is False
+
+
+def test_is_dirty_calls_porcelain(tmp_path):
+    """is_dirty issues git status --porcelain against the worktree path."""
+    from autoswe.vcs.worktree import is_dirty
+
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(args)
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        is_dirty(tmp_path)
+
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert "status" in cmd
+    assert "--porcelain" in cmd
+    assert str(tmp_path) in cmd
+
+
+def test_reset_clean_issues_correct_commands(tmp_path):
+    """reset_clean calls git reset --hard and git clean -fd."""
+    from autoswe.vcs.worktree import reset_clean
+
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        reset_clean(tmp_path, "autoswe/issue-7")
+
+    assert len(calls) == 2
+    reset_cmd = calls[0]
+    clean_cmd = calls[1]
+    assert "reset" in reset_cmd
+    assert "--hard" in reset_cmd
+    assert "origin/autoswe/issue-7" in reset_cmd
+    assert "clean" in clean_cmd
+    assert "-fd" in clean_cmd
 
 
 # ---------------------------------------------------------------------------
@@ -1043,9 +1206,7 @@ def test_commit_and_push_logs_agent_commits(tmp_path, monkeypatch):
             result.stdout = "abc1234\n"
         elif "rev-parse" in args:
             result.stdout = "abc1234def5678\n"
-        elif "commit" in args:
-            result.stdout = ""
-        elif "push" in args:
+        elif "commit" in args or "push" in args:
             result.stdout = ""
         return result
 
@@ -1083,7 +1244,7 @@ def test_commit_and_push_skips_amend_for_merge_commit(tmp_path, monkeypatch):
         elif "rev-list" in cmd_str and "--parents" in cmd_str:
             # Simulate merge commit: hash + 2 parents = 3 items
             result.stdout = "aaa1111 bbb2222 ccc3333\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "def9876"
         else:
             result.stdout = ""
@@ -1121,7 +1282,7 @@ def test_commit_and_push_amends_normal_commit(tmp_path, monkeypatch):
         elif "rev-list" in cmd_str and "--parents" in cmd_str:
             # Simulate normal commit: hash + 1 parent = 2 items
             result.stdout = "aaa1111 bbb2222\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "def9876"
         else:
             result.stdout = ""
@@ -1157,7 +1318,7 @@ def test_sync_branch_returns_commit_sha_and_changed(tmp_path, monkeypatch):
         cmd_str = " ".join(args)
         if "origin/main..HEAD" in cmd_str:
             result.stdout = "abc1234 fix\n"
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "abc1234"
         elif "rev-parse" in cmd_str and "HEAD" in cmd_str:
             # First call returns one SHA, second returns different (changed=True)
@@ -1193,7 +1354,7 @@ def test_sync_branch_unchanged(tmp_path, monkeypatch):
         cmd_str = " ".join(args)
         if "origin/main..HEAD" in cmd_str:
             result.stdout = ""
-        elif "rev-parse --short" in cmd_str:
+        elif "rev-parse" in cmd_str:
             result.stdout = "aaa1111"
         elif "rev-parse" in cmd_str:
             result.stdout = "aaa1111"  # Same SHA before and after
@@ -1746,7 +1907,7 @@ def test_commit_and_push_azure_provider(tmp_path, monkeypatch):
         elif "--cached" in cmd and "--quiet" in cmd:
             result.returncode = 1  # Changes exist
             result.stdout = ""
-        elif "rev-parse --short" in cmd:
+        elif "rev-parse" in cmd:
             result.stdout = "abc1234"
             result.returncode = 0
         else:
@@ -1885,3 +2046,49 @@ def test_fast_forward_worktree_warns_on_conflict(tmp_path, monkeypatch):
 
     assert result is False
     assert any("Could not fast-forward" in m for m in log_calls)
+
+
+# ---------------------------------------------------------------------------
+# sync_branch fetch resilience
+# ---------------------------------------------------------------------------
+
+def test_sync_branch_fetch_failure_does_not_raise(tmp_path, monkeypatch):
+    """sync_branch must not raise when 'git fetch origin' fails.
+
+    Regression for the unprotected check=True fetch: a transient network/auth
+    failure should log a warning and continue best-effort with local refs.
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt_mod
+    monkeypatch.setattr(wt_mod, "AUTOSWE_DIR", tmp_path)
+
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "fetch" in cmd and "origin" in cmd and "--git-path" not in cmd:
+            # Simulate network/auth failure on the bare 'git fetch origin'
+            result.returncode = 1
+            result.stderr = "fatal: unable to connect to origin"
+        elif "show-ref" in cmd:
+            result.returncode = 1  # remote ref does not exist
+        elif "rev-parse" in cmd and "HEAD" in cmd and "--git-path" not in cmd and "MERGE_HEAD" not in cmd:
+            result.stdout = "abc1234\n"
+        elif "log" in cmd:
+            result.stdout = ""
+        elif "merge" in cmd:
+            result.returncode = 0
+            result.stdout = "Already up to date."
+        return result
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        with patch("autoswe.vcs.worktree._git_operation_in_progress", return_value=None):
+            from autoswe.vcs.worktree import sync_branch
+            result = sync_branch(wt_dir, "o", "r", 1, "main")
+
+    assert isinstance(result, dict), "sync_branch must return a dict even when fetch fails"

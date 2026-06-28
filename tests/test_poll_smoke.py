@@ -116,6 +116,7 @@ def _assert_azure_tag(fake, wi_number: int, expected_label: str) -> None:
 
 def test_welcome_posted_before_handler_output(
     isolated_autoswe_dir: Path,
+    monkeypatch,
 ):
     """Welcome comment is posted before the handler's output comment.
 
@@ -166,6 +167,10 @@ def test_welcome_posted_before_handler_output(
 
     # Set up repos.json
     setup_repos(isolated_autoswe_dir, "github", state)
+
+    # Mock time.sleep to avoid the 10s throttle in _post_pending_welcomes
+    import time as _time_mod
+    monkeypatch.setattr(_time_mod, "sleep", lambda _s: None)
 
     with patched_world(
         "github",

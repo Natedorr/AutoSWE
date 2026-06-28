@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import time
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.tracking.comments import BOT_MARKER
 
-_dbg = init_debug_logger(LOGS_DIR)
+_dbg = get_debug_logger()
 
 
 def _tag(body: str) -> str:
@@ -60,7 +59,7 @@ class ProgressComment:
             )
             log(f"[PROGRESS] POST comment={self._comment_id}")
             return self._comment_id
-        except Exception:
+        except Exception:  # Progress comment creation is best-effort; handler should continue
             _dbg.warning("progress: create comment failed", exc_info=True)
             return None
 
@@ -95,8 +94,7 @@ class ProgressComment:
             self._tracker.update_comment(self._repo_cfg, self._issue_num, self._comment_id, tagged)
             self._last_update = time.monotonic()
             self._pending_body = None
-        except Exception:
-            # Provider doesn't support comment editing; post a new comment instead
+        except Exception:  # Provider doesn't support comment editing; post a new comment instead
             _dbg.warning("progress: update_comment failed, falling back to post_comment", exc_info=True)
             try:
                 new_id = self._tracker.post_comment(self._repo_cfg, self._issue_num, tagged)
@@ -105,7 +103,7 @@ class ProgressComment:
                     log(f"[PROGRESS] Switched to fallback comment={new_id}")
                 self._last_update = time.monotonic()
                 self._pending_body = None
-            except Exception:
+            except Exception:  # Both update and fallback post failed — silently give up
                 _dbg.warning("progress: fallback post_comment also failed", exc_info=True)
 
     def drain(self) -> None:

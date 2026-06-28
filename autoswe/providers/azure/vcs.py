@@ -5,6 +5,7 @@ Azure DevOps REST API.
 """
 from __future__ import annotations
 
+from autoswe.core.redact import redact_worktree_paths
 from autoswe.providers.azure.api import _ado_api_version, _encode_path_segment, ado_get, ado_post
 from autoswe.providers.base import PRResult, VCSProvider
 
@@ -103,8 +104,8 @@ class AzureVCS(VCSProvider):
         pr_data = {
             "sourceRefName": f"refs/heads/{branch}",
             "targetRefName": f"refs/heads/{base}",
-            "title": title,
-            "description": body,
+            "title": redact_worktree_paths(title),
+            "description": redact_worktree_paths(body),
         }
         result = ado_post(path, self._pat, body=pr_data)
         # ADO returns the API URL in "url"; construct the clickable web URL instead
@@ -121,4 +122,3 @@ class AzureVCS(VCSProvider):
         branch: str,
     ) -> None:
         """Azure DevOps does not have an equivalent feature — no-op."""
-        pass

@@ -1,28 +1,71 @@
 import asyncio
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Optional
 
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+from autoswe.core.config import resolve_harness
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server
 from autoswe.harness.prompts import BOT_MARKER, build_plan_prompt
-from autoswe.harness.runner import PROGRESS_TOOLS, HandlerResult
+from autoswe.harness.runner import HandlerResult
 from autoswe.providers.factory import get_tracker
 from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
 from autoswe.vcs.worktree import create_worktree
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 
-_MCP_COMMENT_TOOL_PREFIX = "mcp__autoswe_comment__"
-_MCP_COMMENT_TOOLS = [
-    f"{_MCP_COMMENT_TOOL_PREFIX}update_progress",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_plan",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_question",
-]
+def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | None]:
+    """Interpret a plan-phase RunResult, returning (done_content, plan_file_path).
+
+    Checks MCP-specific fields (plan_posted, question_posted) only when the
+    backend advertises the ``"mcp"`` capability.  Falls back to text parsing
+    (``_extract_plan_output``) when MCP is unavailable or flags are not set.
+
+    Returns a tuple of (done_content, plan_file_path).  Callers should use
+    these to construct the HandlerResult.
+    """
+    # 1. AskUserQuestion via can_use_tool callback (always available)
+    if state.get("asked_question_md"):
+        return "WAITING: questions", None
+
+    has_mcp = runner.backend_has_capability(harness, "mcp")
+
+    if has_mcp:
+        # 2. MCP post_question → WAITING
+        if result.question_posted:
+            return "WAITING: questions", None
+
+        # 3. MCP post_plan → PLAN_READY
+        if result.plan_posted:
+            plan_file_path: str | None = None
+            if result.plan_file_path:
+                pf = Path(result.plan_file_path)
+                if pf.exists():
+                    plan_text = pf.read_text(encoding="utf-8").strip()
+                    if not _plan_file_is_pending(plan_text):
+                        plan_file_path = str(pf)
+            return "PLAN_READY", plan_file_path
+
+    # 4. Text-parse fallback (always available)
+    plan_file: Path | None = (
+        Path(result.plan_file_path) if result.plan_file_path else None
+    )
+    allow_fs_scan = runner.backend_has_capability(harness, "plan_file")
+    exit_plan_text = getattr(result, "plan_text", None)
+    comment, done_content, used_file = _extract_plan_output(
+        result.text, plan_file=plan_file, allow_fs_scan=allow_fs_scan,
+        exit_plan_text=exit_plan_text,
+    )
+
+    plan_file_path: str | None = None
+    if done_content == "PLAN_READY" and used_file is not None:
+        plan_file_path = str(used_file)
+
+    # Return comment as part of done_content for _post_and_return
+    return f"_POST:{done_content}\t{comment}", plan_file_path
 
 
 def _get_plans_dir() -> Path:
@@ -30,7 +73,7 @@ def _get_plans_dir() -> Path:
     return Path.home() / ".claude" / "plans"
 
 
-def _find_latest_plan_file() -> Optional[Path]:
+def _find_latest_plan_file() -> Path | None:
     """Find the most recently created plan file in ~/.claude/plans/.
 
     Returns None if the directory does not exist or contains no .md files.
@@ -66,37 +109,57 @@ def _plan_file_is_pending(plan_text: str) -> bool:
     return any(indicator in lower for indicator in pending_indicators)
 
 
-def _extract_plan_output(text: str, plan_file: Path = None) -> tuple[str, str]:
-    """Return (comment_body, done_content) using the output priority chain.
+def _extract_plan_output(text: str, plan_file: Path | None = None, *, allow_fs_scan: bool = True, exit_plan_text: str | None = None) -> tuple[str, str, Path | None]:
+    """Return (comment_body, done_content, used_file_path) using the output priority chain.
+
+    The third element is the Path of the plan file used (when content came from
+    a file), or None when content came from tags / ExitPlanMode / raw text.
 
     Priority:
-    1. Plan file (from captured Write tool call or filesystem scan) -> "## Plan" + "PLAN_READY" (unless pending)
-    2. <AUTOSWE_PLAN> tags in text -> "## Plan" + "PLAN_READY"
-    3. <AUTOSWE_QUESTIONS> tags in text -> "## Questions" + "WAITING: questions"
-    4. Fallback -> "## Claude's response" + "WAITING: see comment"
+    1. Captured plan file (from Write tool call) -> "## Plan" + "PLAN_READY" + path (unless pending)
+    2. ExitPlanMode plan text (from the native plan-mode exit) -> "## Plan" + "PLAN_READY" + None (unless pending)
+    3. <AUTOSWE_PLAN> tags in text -> "## Plan" + "PLAN_READY" + None
+    4. <AUTOSWE_QUESTIONS> tags in text -> "## Questions" + "WAITING: questions" + None
+    5. Filesystem scan (_find_latest_plan_file) -> "## Plan" + "PLAN_READY" + path (last resort)
+       Only runs when allow_fs_scan=True (gated on the "plan_file" backend capability).
+       Backends that never write to ~/.claude/plans/ (e.g. Codex) pass False to
+       prevent stale cross-issue plan files from being posted.
+    6. Fallback -> "## Claude's response" + "WAITING: see comment" + None
+
+    Tags (steps 3-4) are checked BEFORE the filesystem scan (step 5) to avoid
+    picking up another session's plan file during concurrent execution.
+    (Regression fix for issue #36 — plan file collision.)
+
+    ExitPlanMode text (step 2) is session-correct (it comes from this run's
+    message stream), so it ranks above the deprecated tags and the filesystem
+    scan but below an explicit Write to the plans directory.
     """
-    # 1. Check for plan file — use captured path from tool calls (primary),
-    # fall back to filesystem scan
+    # 1. Check for captured plan file path (from Write tool call — per-session)
     captured_file = plan_file
-    plan_file = None
     try:
         if captured_file is not None and captured_file.exists():
-            plan_file = captured_file
-        else:
-            plan_file = _find_latest_plan_file()
+            plan_text = captured_file.read_text(encoding="utf-8").strip()
+            # If the plan file is a placeholder waiting for user input,
+            # fall through to check for tags instead of returning PLAN_READY
+            if _plan_file_is_pending(plan_text):
+                dbg.debug("PLAN: plan file detected as pending (waiting for user input) — falling through to tag detection")
+            else:
+                comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
+                return comment, "PLAN_READY", captured_file
     except FileNotFoundError:
-        plan_file = _find_latest_plan_file()
-    if plan_file is not None:
-        plan_text = plan_file.read_text(encoding="utf-8").strip()
-        # If the plan file is a placeholder waiting for user input,
-        # fall through to check for questions instead of returning PLAN_READY
-        if _plan_file_is_pending(plan_text):
-            dbg.debug("PLAN: plan file detected as pending (waiting for user input) — falling through to question detection")
-        else:
-            comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
-            return comment, "PLAN_READY"
+        dbg.debug("PLAN: captured plan file disappeared: %s — falling through to tag detection", plan_file)
+        captured_file = None
 
-    # 2. Check for <AUTOSWE_PLAN> tags (backward compat, deprecated)
+    # 2. Check for ExitPlanMode plan text (session-correct, from the stream)
+    if exit_plan_text and exit_plan_text.strip():
+        ep = exit_plan_text.strip()
+        if _plan_file_is_pending(ep):
+            dbg.debug("PLAN: ExitPlanMode plan detected as pending — falling through to tag detection")
+        else:
+            comment = f"## Plan\n\n{ep}\n\n_Reply with `/fix` to start coding._"
+            return comment, "PLAN_READY", None
+
+    # 3. Check for <AUTOSWE_PLAN> tags (session-correct, before filesystem scan)
     plan_m = _PLAN_RE.search(text or "")
     questions_m = _QUESTIONS_RE.search(text or "")
 
@@ -104,15 +167,31 @@ def _extract_plan_output(text: str, plan_file: Path = None) -> tuple[str, str]:
         dbg.warning("PLAN: deprecated <AUTOSWE_PLAN> tag used — migrate to mcp__autoswe_comment__post_plan tool")
         plan_text = plan_m.group(1).strip()
         comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
-        return comment, "PLAN_READY"
+        return comment, "PLAN_READY", None
     elif questions_m:
         dbg.warning("PLAN: deprecated <AUTOSWE_QUESTIONS> tag used — migrate to mcp__autoswe_comment__post_question tool")
         q_text = questions_m.group(1).strip()
         comment = f"## Questions\n\n{q_text}\n\n_Reply in this thread to answer._"
-        return comment, "WAITING: questions"
-    else:
-        comment = f"## Claude's response\n\n{text or '(no response)'}"
-        return comment, "WAITING: see comment"
+        return comment, "WAITING: questions", None
+
+    # 3. Filesystem scan — true last resort (may return another session's file).
+    # Skipped when allow_fs_scan=False (backends that never write plan files
+    # to ~/.claude/plans/, such as Codex).
+    if allow_fs_scan:
+        fs_file: Path | None = None
+        try:
+            fs_file = _find_latest_plan_file()
+        except Exception:  # Filesystem scan is best-effort last resort; any failure is ignored
+            fs_file = None
+        if fs_file is not None:
+            plan_text = fs_file.read_text(encoding="utf-8").strip()
+            if not _plan_file_is_pending(plan_text):
+                comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
+                return comment, "PLAN_READY", fs_file
+
+    # 4. Raw text fallback
+    comment = f"## Claude's response\n\n{text or '(no response)'}"
+    return comment, "WAITING: see comment", None
 
 
 def _post_and_return(task: dict, comment_body: str, done_content: str, repo_cfg: dict, *, progress_callback=None) -> str:
@@ -136,12 +215,13 @@ def _post_and_return(task: dict, comment_body: str, done_content: str, repo_cfg:
     tracker = get_tracker(rc)
     try:
         tracker.post_comment(rc, task["issue_number"], comment_body + BOT_MARKER)
-    except Exception as e:
+    except Exception as e:  # Provider call failure is non-fatal; proceed without posting comment.
         dbg.error("planner: comment failed: %s", e)
+
     return done_content
 
 
-def _get_git_head(wt: Path) -> Optional[str]:
+def _get_git_head(wt: Path) -> str | None:
     """Return git HEAD SHA of the worktree, or None on error."""
     result = subprocess.run(
         ["git", "-C", str(wt), "rev-parse", "HEAD"],
@@ -152,7 +232,7 @@ def _get_git_head(wt: Path) -> Optional[str]:
     return None
 
 
-def _ensure_worktree_unchanged(wt: Path, head_before: Optional[str]) -> None:
+def _ensure_worktree_unchanged(wt: Path, head_before: str | None) -> None:
     """Reset the worktree if the agent modified it during plan phase."""
     head_after = _get_git_head(wt)
     if head_before and head_after and head_before != head_after:
@@ -161,11 +241,24 @@ def _ensure_worktree_unchanged(wt: Path, head_before: Optional[str]) -> None:
         subprocess.run(["git", "-C", str(wt), "clean", "-fd"], timeout=10, check=False)
 
 
-def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, progress_callback=None, wt=None) -> str:
-    """Run plan phase. Returns done-file content string.
+def _plan_session(
+    task: dict,
+    repo_cfg: dict,
+    cfg: dict,
+    *,
+    prompt_factory: None | Callable[[Path], str] = None,
+    prompt: str | None = None,
+    resume_session_id: str | None,
+    label: str,
+    timeout_msg: str,
+    error_prefix: str,
+    progress_callback=None,
+    wt=None,
+) -> HandlerResult:
+    """Shared execution tail for run_plan and resume_plan.
 
-    When *wt* is provided (e.g. from the sync-wrapped orchestrator), the
-    pre-synced worktree is used directly without creating a new one.
+    Sets up the worktree, resolves the harness, runs the agent, ensures
+    the worktree is unchanged, and interprets the result into a HandlerResult.
     """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     base_branch = task.get("base_branch", "main")
@@ -174,14 +267,20 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
     provider = repo_cfg.get("provider", "github")
 
     if wt is None:
-        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg, provider,
-                             default_branch=base_branch, pull_strategy="reset", push_new=False)
+        wt = create_worktree(
+            owner, repo, issue_num, plan_branch, token, cfg or {}, provider,
+            default_branch=base_branch, pull_strategy="reset", push_new=False,
+        )
     dbg.debug("PLAN: worktree=%s", wt)
-    prompt = build_plan_prompt(task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance)
 
-    plan_model = repo_cfg.get("plan_model") or cfg.get("PLAN_MODEL") or None
-    log(f"[PLAN] {task['id']} session=NEW model={plan_model or 'default'} guidance_len={len(guidance or '')}")
-    dbg.debug("PLAN: model=%s guidance=%s", plan_model or "default", guidance)
+    # Resolve prompt: use factory (deferred to after worktree setup) or pre-built
+    if prompt_factory is not None:
+        prompt_text = prompt_factory(wt)
+    else:
+        prompt_text = prompt or ""
+
+    harness = resolve_harness("plan", repo_cfg, cfg or {})
+    log(f"[PLAN] {task['id']} {label}")
 
     state = {}
     cut = make_can_use_tool(task, repo_cfg, state, on_post=progress_callback, read_only=True)
@@ -190,23 +289,23 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
 
     try:
         result = runner.run(
-            prompt,
+            prompt_text,
             cwd=str(wt),
-            cfg=cfg,
+            cfg=cfg or {},
             repo_cfg=repo_cfg,
-            model=plan_model,
-            permission_mode="plan",
-            allowed_tools=["Read", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *PROGRESS_TOOLS],
-            disallowed_tools=["ExitPlanMode"],
+            resume=resume_session_id,
+            model=harness.get("model"),
+            mode="plan",
             mcp_servers=build_mcp_comment_server(task, repo_cfg),
             progress_callback=progress_callback,
             can_use_tool=cut,
             state=state,
+            harness_cfg=harness,
         )
     except asyncio.TimeoutError:
-        return HandlerResult("FAILED: timeout during plan phase")
-    except Exception as e:
-        dbg.error("run_plan: SDK error: %s", e, exc_info=True)
+        return HandlerResult(f"FAILED: {timeout_msg}")
+    except Exception as e:  # State-machine boundary — any SDK failure becomes a FAILED result.
+        dbg.error(f"{error_prefix}: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 
     _ensure_worktree_unchanged(wt, head_before)
@@ -214,69 +313,62 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str = None, *, pro
     log(f"[PLAN] {task['id']} session={result.session_id} subtype={result.subtype} duration={result.duration_seconds:.1f}s cost=${result.cost_usd or 0:.4f}")
     dbg.debug("PLAN: sdk returned subtype=%s session=%s len=%d", result.subtype, result.session_id, len(result.text or ""))
     dbg.debug("PLAN OUTPUT (%d chars):\n%s", len(result.text or ""), (result.text or "")[:4000])
-    if result.session_id:
-        task["session_id"] = result.session_id
-    task["last_phase"] = "plan"
 
-    if state.get("asked_question_md"):
-        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+    done_content, plan_file_path = _interpret_plan_result(result, state, harness)
 
-    if result.question_posted:
-        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
+    if done_content.startswith("_POST:"):
+        inner_done, comment = done_content[len("_POST:"):].split("\t", 1)
+        _post_and_return(task, comment, inner_done, repo_cfg, progress_callback=progress_callback)
+        log(f"[PLAN] {task['id']} complete done={inner_done} plan_file={plan_file_path or 'none'}")
+        return HandlerResult(
+            inner_done,
+            cost_usd=result.cost_usd,
+            duration_seconds=result.duration_seconds,
+            session_id=result.session_id,
+            plan_file_path=plan_file_path,
+        )
 
-    if result.plan_posted:
-        plan_file_path: Optional[str] = None
-        if result.plan_file_path:
-            pf = Path(result.plan_file_path)
-            if pf.exists():
-                plan_text = pf.read_text(encoding="utf-8").strip()
-                if not _plan_file_is_pending(plan_text):
-                    plan_file_path = str(pf)
-                    task["plan_file_path"] = plan_file_path
-        log(f"[PLAN] {task['id']} complete done=PLAN_READY plan_file={plan_file_path or 'none'}")
-        return HandlerResult("PLAN_READY", cost_usd=result.cost_usd,
-                             duration_seconds=result.duration_seconds, plan_file_path=plan_file_path)
-
-    plan_file: Optional[Path] = (
-        Path(result.plan_file_path) if result.plan_file_path else None
-    )
-    comment, done_content = _extract_plan_output(result.text, plan_file=plan_file)
-    plan_file_path: Optional[str] = None
-    if done_content == "PLAN_READY":
-        actual_file = plan_file or _find_latest_plan_file()
-        if actual_file is not None:
-            plan_text = actual_file.read_text(encoding="utf-8").strip()
-            if not _plan_file_is_pending(plan_text):
-                plan_file_path = str(actual_file)
-                task["plan_file_path"] = plan_file_path
-    _post_and_return(task, comment, done_content, repo_cfg, progress_callback=progress_callback)
-    result_str = HandlerResult(
+    if done_content == "PLAN_READY" and plan_file_path:
+        log(f"[PLAN] {task['id']} complete done=PLAN_READY plan_file={plan_file_path}")
+    return HandlerResult(
         done_content,
         cost_usd=result.cost_usd,
         duration_seconds=result.duration_seconds,
+        session_id=result.session_id,
         plan_file_path=plan_file_path,
     )
-    log(f"[PLAN] {task['id']} complete done={done_content} plan_file={plan_file_path or 'none'}")
-    return result_str
 
 
-def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progress_callback=None, wt=None) -> str:
-    """Resume plan session after user reply. Returns done-file content string.
+def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None, *, progress_callback=None, wt=None) -> HandlerResult:
+    """Run plan phase. Returns HandlerResult.
 
     When *wt* is provided (e.g. from the sync-wrapped orchestrator), the
     pre-synced worktree is used directly without creating a new one.
     """
-    owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
-    base_branch = task.get("base_branch", "main")
-    plan_branch = task.get("plan_branch") or base_branch
-    token = task["_token"]
-    session_id = task.get("session_id")
-    provider = repo_cfg.get("provider", "github")
+    harness = resolve_harness("plan", repo_cfg, cfg or {})
+    plan_model = harness.get("model")
+    dbg.debug("PLAN: model=%s guidance=%s", plan_model or "default", guidance)
+    label = f"session=NEW model={plan_model or 'default'} guidance_len={len(guidance or '')}"
 
-    if wt is None:
-        wt = create_worktree(owner, repo, issue_num, plan_branch, token, cfg, provider,
-                             default_branch=base_branch, pull_strategy="reset", push_new=False)
-    dbg.debug("PLAN_RESUME: worktree=%s session=%s", wt, session_id)
+    return _plan_session(
+        task, repo_cfg, cfg or {},
+        prompt_factory=lambda wt: build_plan_prompt(task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance),
+        resume_session_id=None,
+        label=label,
+        timeout_msg="timeout during plan phase",
+        error_prefix="run_plan",
+        progress_callback=progress_callback,
+        wt=wt,
+    )
+
+
+def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progress_callback=None, wt=None) -> HandlerResult:
+    """Resume plan session after user reply. Returns HandlerResult.
+
+    When *wt* is provided (e.g. from the sync-wrapped orchestrator), the
+    pre-synced worktree is used directly without creating a new one.
+    """
+    session_id = task.get("session_id")
 
     resume_prompt = (
         f"The user replied to your last question(s):\n\n{user_text}\n\n"
@@ -288,81 +380,16 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
         "<AUTOSWE_QUESTIONS> block."
     )
 
-    plan_model = repo_cfg.get("plan_model") or cfg.get("PLAN_MODEL") or None
-    log(f"[PLAN] {task['id']} session=RESUME from={session_id} reply_chars={len(user_text)}")
+    dbg.debug("PLAN_RESUME: session=%s", session_id)
+    label = f"session=RESUME from={session_id} reply_chars={len(user_text)}"
 
-    state = {}
-    cut = make_can_use_tool(task, repo_cfg, state, on_post=progress_callback, read_only=True)
-
-    head_before = _get_git_head(wt)
-
-    try:
-        result = runner.run(
-            resume_prompt,
-            cwd=str(wt),
-            cfg=cfg,
-            repo_cfg=repo_cfg,
-            resume=session_id,
-            model=plan_model,
-            permission_mode="plan",
-            allowed_tools=["Read", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *PROGRESS_TOOLS],
-            disallowed_tools=["ExitPlanMode"],
-            mcp_servers=build_mcp_comment_server(task, repo_cfg),
-            progress_callback=progress_callback,
-            can_use_tool=cut,
-            state=state,
-        )
-    except asyncio.TimeoutError:
-        return HandlerResult("FAILED: timeout during plan resume")
-    except Exception as e:
-        dbg.error("resume_plan: SDK error: %s", e, exc_info=True)
-        return HandlerResult(f"FAILED: {e}")
-
-    _ensure_worktree_unchanged(wt, head_before)
-
-    dbg.debug("PLAN_RESUME: sdk returned subtype=%s session=%s len=%d", result.subtype, result.session_id, len(result.text or ""))
-    dbg.debug("PLAN_RESUME OUTPUT (%d chars):\n%s", len(result.text or ""), (result.text or "")[:4000])
-    if result.session_id:
-        task["session_id"] = result.session_id
-    task["last_phase"] = "plan"
-
-    if state.get("asked_question_md"):
-        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
-
-    if result.question_posted:
-        return HandlerResult("WAITING: questions", cost_usd=result.cost_usd, duration_seconds=result.duration_seconds)
-
-    if result.plan_posted:
-        plan_file_path: Optional[str] = None
-        if result.plan_file_path:
-            pf = Path(result.plan_file_path)
-            if pf.exists():
-                plan_text = pf.read_text(encoding="utf-8").strip()
-                if not _plan_file_is_pending(plan_text):
-                    plan_file_path = str(pf)
-                    task["plan_file_path"] = plan_file_path
-        log(f"[PLAN] {task['id']} resume complete done=PLAN_READY plan_file={plan_file_path or 'none'}")
-        return HandlerResult("PLAN_READY", cost_usd=result.cost_usd,
-                             duration_seconds=result.duration_seconds, plan_file_path=plan_file_path)
-
-    plan_file: Optional[Path] = (
-        Path(result.plan_file_path) if result.plan_file_path else None
+    return _plan_session(
+        task, repo_cfg, cfg or {},
+        prompt=resume_prompt,
+        resume_session_id=session_id,
+        label=label,
+        timeout_msg="timeout during plan resume",
+        error_prefix="resume_plan",
+        progress_callback=progress_callback,
+        wt=wt,
     )
-    comment, done_content = _extract_plan_output(result.text, plan_file=plan_file)
-    plan_file_path: Optional[str] = None
-    if done_content == "PLAN_READY":
-        actual_file = plan_file or _find_latest_plan_file()
-        if actual_file is not None:
-            plan_text = actual_file.read_text(encoding="utf-8").strip()
-            if not _plan_file_is_pending(plan_text):
-                plan_file_path = str(actual_file)
-                task["plan_file_path"] = plan_file_path
-    _post_and_return(task, comment, done_content, repo_cfg, progress_callback=progress_callback)
-    result_str = HandlerResult(
-        done_content,
-        cost_usd=result.cost_usd,
-        duration_seconds=result.duration_seconds,
-        plan_file_path=plan_file_path,
-    )
-    log(f"[PLAN] {task['id']} resume complete done={done_content} plan_file={plan_file_path or 'none'}")
-    return result_str

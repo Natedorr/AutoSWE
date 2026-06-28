@@ -677,18 +677,59 @@ class TestBranchRemote:
         )
         assert branch_result.stdout.strip() == "main"
 
-    def test_E6_base_branch_nonexistent(self, git_world: GitWorld):
-        """E6: base_branch doesn't exist → RuntimeError with clear message."""
+    def test_E6_base_branch_nonexistent_no_fallback(self, git_world: GitWorld, monkeypatch):
+        """E6: requested base missing and no usable fallback → RuntimeError.
+
+        With no ``default_branch`` to fork from, the requested branch cannot be
+        created, so the hard (recoverable via ``/retry``) error is preserved.
+        ``ensure_clone`` is stubbed so the assertion targets create_worktree's
+        own base-branch guard rather than the empty-repo check it shares.
+        """
+        import autoswe.vcs.worktree as wt_mod
+
         world = git_world
         world.init_remote(initial_files={"README.md": "# test"})
         world.make_main_clone()
+        monkeypatch.setattr(wt_mod, "ensure_clone", lambda *a, **k: None)
 
         with pytest.raises(RuntimeError, match="does not exist on origin"):
             create_worktree(
                 world.owner, world.repo, 1, "nonexistent",
                 "fake-token", world.cfg(), "github",
-                default_branch="main",
+                default_branch=None,
             )
+
+    def test_E6b_base_branch_created_from_default(self, git_world: GitWorld):
+        """E6b: requested base missing but default exists → branch auto-created.
+
+        Mirrors ``/plan --branch strategy/X`` where ``strategy/X`` does not yet
+        exist: it is created from the default branch on origin and planning
+        proceeds (no error). The eventual PR targets this branch, so it must
+        exist remotely.
+        """
+        world = git_world
+        world.init_remote(initial_files={"README.md": "# test"})
+        main = world.make_main_clone()
+
+        wt = create_worktree(
+            world.owner, world.repo, 1, "strategy/NewName",
+            "fake-token", world.cfg(), "github",
+            default_branch="main",
+        )
+
+        assert wt.exists()
+        # The requested base branch now exists on origin.
+        ls = subprocess.run(
+            ["git", "-C", str(main), "ls-remote", "--heads", "origin", "strategy/NewName"],
+            capture_output=True, text=True, check=True,
+        )
+        assert ls.stdout.strip(), "strategy/NewName should have been pushed to origin"
+        # The issue branch is forked from it.
+        branch = subprocess.run(
+            ["git", "-C", str(wt), "branch", "--show-current"],
+            capture_output=True, text=True, check=True,
+        )
+        assert branch.stdout.strip() == world.branch_name(1)
 
     def test_E8_stale_worktree_dir(self, git_world: GitWorld):
         """E8: Worktree dir exists but .git is missing → next git call fails."""

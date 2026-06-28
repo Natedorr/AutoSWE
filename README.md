@@ -93,7 +93,7 @@ That's the full workflow. No terminal. No cloud agent service. No data leaving y
 
 Three pure layers separated by frozen dataclasses:
 1. **Decide** — pure state machine (what should happen next?)
-2. **Run** — Claude Code agent invocation (the actual coding work)
+2. **Run** — coding-backend invocation (the actual work; Claude Code or Codex behind one `CodingBackend` protocol)
 3. **Emit** — pure effect emission (status changes, comments, PRs)
 
 ## Quick Start
@@ -168,20 +168,31 @@ Commands work on both issue bodies and comments. You reply to Claude's questions
 - **Read-only planning** — `/plan` can only read code, never write
 - **Human authorization** — only the issue owner can issue commands
 
+## Pluggable Backends
+
+The agent that does the coding isn't hard-wired. A **harness profile** binds each phase (`plan` / `fix` / `review`) to a backend and a model, so you can mix and match:
+
+| Backend | What it runs | Notes |
+|---|---|---|
+| `claude_code` | Claude Agent SDK (default) | Full feature set — MCP, inline clarifying questions, plan capture, session resume |
+| `codex` | OpenAI Codex CLI (`codex exec`) | No Anthropic dependency; MCP/question features degrade gracefully |
+
+Run plan on Claude and fix on Codex, go all-Codex to drop the Anthropic dependency, or point a profile at a local Ollama model — it's per-phase, per-repo. See [Harnesses & Backends](docs/autoswe/harnesses.md).
+
 ## Requirements
 
 - Python 3.10+
 - Git
-- Claude Code CLI (ships with autoSWE)
-- Anthropic API key (for Claude Code)
+- A coding backend: **Claude Code CLI** (ships with autoSWE, needs an Anthropic API key) and/or the **Codex CLI** (`npm i -g @openai/codex`, needs an OpenAI/Codex key — or a local provider)
 - GitHub PAT with `repo` scope (or Azure DevOps PAT)
 
 ## Configuration
 
-Two files, everything else is automatic:
+Three files, everything else is automatic:
 
-- **`config/autoswe.env`** — API keys, concurrency, timeouts, model selection
+- **`config/autoswe.env`** — API keys, concurrency, timeouts, per-phase model/harness selection
 - **`config/repos.json`** — which repos to watch, per-repo PATs and overrides
+- **`config/harnesses.json`** — named backend profiles (optional; without it, defaults to Claude Code)
 
 Run `./setup.sh` for a guided first-time configuration. Run `./setup.sh --force` to reconfigure.
 
@@ -189,10 +200,12 @@ Run `./setup.sh` for a guided first-time configuration. Run `./setup.sh --force`
 
 - [Pipeline Architecture](docs/autoswe/pipeline.md)
 - [Configuration](docs/autoswe/config.md)
+- [Harnesses & Backends](docs/autoswe/harnesses.md)
 - [Safeguards](docs/autoswe/safeguards.md)
 - [Providers (GitHub, Azure)](docs/autoswe/providers.md)
 - [Git Worktrees](docs/autoswe/git-worktrees.md)
 - [Debugging](docs/autoswe/debugging.md)
+- [Testing](docs/autoswe/testing.md)
 
 ---
 

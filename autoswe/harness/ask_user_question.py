@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import re
 import shlex
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from autoswe.harness.prompts import BOT_MARKER
 from autoswe.providers.factory import get_tracker
@@ -87,7 +88,7 @@ def _git_subcommand(cmd: str) -> str | None:
         if not t.startswith("-"):
             return t.lower()
         # `-c key=val` / `--exec-path=foo` flags
-        if "=" in t or t.startswith("--") and "=" in t:
+        if "=" in t or (t.startswith("--") and "=" in t):
             i += 1
             continue
         if t in _GIT_FLAGS_WITH_VALUE:
@@ -107,6 +108,14 @@ def _is_git_commit_push(cmd: str) -> bool:
     """Backwards-compat helper. Returns True for git commit/push specifically."""
     sub = _git_subcommand(cmd)
     return sub in {"commit", "push", "force-push"}
+
+
+def _is_valid_question_input(input_data: dict) -> bool:
+    """Return True if input_data has at least one question with text and options."""
+    return any(
+        q.get("question", "").strip() and q.get("options")
+        for q in input_data.get("questions", [])
+    )
 
 
 def format_ask_user_question(input_data: dict) -> str:
@@ -160,15 +169,16 @@ def make_can_use_tool(
     repo_cfg: dict,
     state: dict,
     *,
-    on_post: Callable[[str], None] = None,
+    on_post: Callable[[str], None] | None = None,
     read_only: bool = False,
 ) -> CanUseToolCallback:
     """Build the async ``can_use_tool`` callback for the Claude Agent SDK.
 
     When Claude calls ``AskUserQuestion``, this callback formats the questions
-    as markdown, posts them as an issue comment, and returns PermissionResultAllow
-    with pre-filled answers so the agent completes its turn naturally.
-    The handler then checks ``state["asked_question_md"]`` to detect and return WAITING.
+    as markdown, posts them as an issue comment, and returns PermissionResultDeny
+    to immediately pause the agent. The denial message informs Claude that its
+    session is paused and will resume when the user replies. The handler then
+    checks ``state["asked_question_md"]`` to detect and return WAITING.
     All other tools are allowed through.
 
     Args:
@@ -182,10 +192,14 @@ def make_can_use_tool(
             shell redirects, tee, python -c with open/write, curl -o, wget, etc.).
             TodoWrite and the sub-agent task family (TaskCreate, etc.) are
             allowed — they are progress/orchestration tools that do not mutate
+            allowed — they are progress/orchestration tools that do not mutate
             the repo. Used by plan phase as a safeguard against the CLI exiting
             plan mode via the native ExitPlanMode command or bash-based bypasses.
     """
+    # Deferred import: SDK may not be installed; only needed when ask_user_question
+    # safeguards are active (plan-phase can_use_tool callback).
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
 
     async def can_use_tool(tool_name: str, input_data: Any, context: Any) -> Any:
         if read_only:
@@ -207,6 +221,11 @@ def make_can_use_tool(
         if tool_name != "AskUserQuestion":
             return PermissionResultAllow(updated_input=input_data)
 
+        if not _is_valid_question_input(input_data):
+            return PermissionResultDeny(
+                message="AskUserQuestion input had no real questions — provide at least one question with options.",
+            )
+
         md = format_ask_user_question(input_data)
         state["asked_question_md"] = md
 
@@ -222,19 +241,14 @@ def make_can_use_tool(
                 rc.setdefault("pat", task.get("_token", ""))
                 tracker = get_tracker(rc)
                 tracker.post_comment(rc, task["issue_number"], full_body)
-        except Exception:
+        except Exception:  # Post failure is non-fatal; session still pauses via PermissionResultDeny.
             pass
 
-        questions = input_data.get("questions", [])
-        answers = {
-            q["question"]: "Question posted to issue. User will reply by commenting."
-            for q in questions
-        }
-        return PermissionResultAllow(
-            updated_input={
-                "questions": questions,
-                "answers": answers,
-            }
+        return PermissionResultDeny(
+            message=(
+                "Questions posted to the issue as a comment. "
+                "Your session is paused — it will resume when the user replies."
+            ),
         )
 
     return can_use_tool

@@ -1,8 +1,9 @@
-from autoswe.core.config import LOGS_DIR
-from autoswe.core.logging_utils import init_debug_logger, log
+import re
+
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.tracking.api import gh_get, gh_get_all, gh_post, gh_put
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 # Label constants — autoswe: prefix (lowercase to match GitHub conventions)
 # Color families: blue (pending), orange (RUNNING), grey (COMPLETED),
@@ -19,7 +20,9 @@ AUTOSWE_LABELS = {
     "autoswe:fixed":      {"color": "ededed", "description": "Fix completed"},
     "autoswe:synced":     {"color": "ededed", "description": "Sync completed"},
     "autoswe:shipped":    {"color": "ededed", "description": "PR created"},
-    "autoswe:reviewed":   {"color": "ededed", "description": "Review completed"},
+    "autoswe:reviewed":   {"color": "ededed", "description": "Review approved (LGTM)"},
+    "autoswe:review_failed":  {"color": "fbca04", "description": "Review found issues — needs /fix"},
+    "autoswe:review_blocked": {"color": "d73a4a", "description": "Review blocked — critical findings, needs /fix"},
     "autoswe:waiting":    {"color": "fbca04", "description": "Agent asked a question"},
     "autoswe:failed":     {"color": "d73a4a", "description": "Agent errored"},
     "autoswe:skipped":    {"color": "ffffff", "description": "Skipped by user"},
@@ -34,6 +37,7 @@ _PREFIX = "autoswe:"
 VALID_STATUSES = frozenset(
     {"pending", "planning", "fixing", "syncing", "reviewing", "shipping",
      "planned", "fixed", "synced", "shipped", "reviewed",
+     "review_failed", "review_blocked",
      "waiting", "failed", "skipped", "aborted", "error"}
 )
 
@@ -41,6 +45,9 @@ VALID_STATUSES = frozenset(
 RUNNING_STATUSES = frozenset({"planning", "fixing", "syncing", "reviewing", "shipping"})
 COMPLETED_STATUSES = frozenset({"fixed", "synced", "shipped", "reviewed"})
 TERMINAL_STATUSES = COMPLETED_STATUSES | frozenset({"failed", "skipped", "aborted", "error"})
+# Non-terminal resting states a /review lands in when it found problems. The
+# task is NOT done: /pr is blocked until the user posts /fix (which re-reviews).
+REVIEW_BLOCKING_STATUSES = frozenset({"review_failed", "review_blocked"})
 
 # Action kind → status mappings (module-level to avoid per-call allocation)
 _KIND_TO_RUNNING = {
@@ -135,7 +142,7 @@ def _set_autoswe_status(owner: str, repo: str, issue_number: int, status_label: 
     _validate_status(status_label)
     current = gh_get(f"/repos/{owner}/{repo}/issues/{issue_number}/labels", token)
     non_status = [lb["name"] for lb in current if not lb["name"].startswith(_PREFIX)]
-    new_labels = non_status + [status_label]
+    new_labels = [*non_status, status_label]
     gh_put(f"/repos/{owner}/{repo}/issues/{issue_number}/labels", token, {"labels": new_labels})
     log(f"[LABEL] {owner}/{repo}#{issue_number} -> {status_label}")
 
@@ -149,6 +156,36 @@ def _get_autoswe_status(labels: list):
     return None
 
 
+_VERDICT_RE = re.compile(r"#{1,6}\s*Verdict\b(.*?)(?:\n#{1,6}\s|\Z)", re.IGNORECASE | re.DOTALL)
+
+
+def parse_review_verdict(review_text: str) -> str:
+    """Map a review report's verdict to an autoswe status.
+
+    Returns one of:
+      * ``"reviewed"``       — LGTM / approved (or no blocking verdict found).
+      * ``"review_failed"``  — "Needs changes" verdict (MEDIUM findings).
+      * ``"review_blocked"`` — "Blocked" verdict (CRITICAL findings).
+
+    The reviewer report ends with a ``## Verdict`` section reading one of
+    ``LGTM`` / ``Needs changes`` / ``Blocked``. When that section is present we
+    parse only its contents (so the words "Blocked"/"Needs changes" appearing
+    inside finding descriptions don't trigger a false gate). When it is absent
+    we scan the whole text but only react to the explicit verdict tokens,
+    defaulting to ``"reviewed"`` so a review without a recognisable verdict
+    keeps the historical (non-gating) behaviour.
+    """
+    text = review_text or ""
+    m = _VERDICT_RE.search(text)
+    scope = m.group(1) if m else text
+    low = scope.lower()
+    if re.search(r"\bblocked\b", low):
+        return "review_blocked"
+    if re.search(r"needs[\s-]*changes?\b", low):
+        return "review_failed"
+    return "reviewed"
+
+
 def _map_done_to_status(done_content: str, kind: str = "fix") -> str:
     """Map handler return string to autoswe status (no prefix).
 
@@ -157,7 +194,13 @@ def _map_done_to_status(done_content: str, kind: str = "fix") -> str:
     """
     if done_content == "PLAN_READY":
         return "planned"
-    elif done_content == "REVIEW_READY" or done_content.startswith("REVIEW_READY\t"):
+    elif done_content.startswith("REVIEW_READY\t"):
+        # Gate on the verdict embedded in the review text. A blocking verdict
+        # transitions to a non-terminal review_failed/review_blocked state so
+        # decide() can refuse /pr until a /fix addresses the findings.
+        return parse_review_verdict(done_content[len("REVIEW_READY\t"):])
+    elif done_content == "REVIEW_READY":
+        # Bare REVIEW_READY (no embedded text) — treat as approved.
         return "reviewed"
     elif done_content.startswith("WAITING:"):
         return "waiting"

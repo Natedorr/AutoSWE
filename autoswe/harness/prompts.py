@@ -2,11 +2,11 @@ import os
 import re
 from pathlib import Path
 
-from autoswe.core.config import AUTOSWE_DIR, FIX_PROMPT_FILE, LOGS_DIR, PLAN_PROMPT_FILE, REVIEW_PROMPT_FILE
-from autoswe.core.logging_utils import init_debug_logger
+from autoswe.core.config import AUTOSWE_DIR, FIX_PROMPT_FILE, PLAN_PROMPT_FILE, REVIEW_PROMPT_FILE
+from autoswe.core.logging_utils import get_debug_logger
 from autoswe.providers.base import NormalizedComment
 
-dbg = init_debug_logger(LOGS_DIR)
+dbg = get_debug_logger()
 
 CONFLICT_RESOLUTION_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "conflict_resolution.txt"
 
@@ -117,10 +117,11 @@ def load_fix_prompt(repo_cfg: dict | None = None) -> str:
 
 
 def build_plan_prompt(
-    task: dict, repo_root: str = None, comments: list[NormalizedComment] = None,
-    repo_cfg: dict = None, guidance: str = None,
+    task: dict, repo_root: str | None = None, comments: list[NormalizedComment] | None = None,
+    repo_cfg: dict | None = None, guidance: str | None = None,
 ) -> str:
     """Build the plan prompt from template + task data."""
+    # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
     from autoswe.providers.factory import get_tracker
 
     owner, repo = task["owner"], task["repo"]
@@ -165,6 +166,7 @@ def _find_plan_in_comments(comments: list[NormalizedComment] | None) -> str:
     1. MCP-posted plan: comment body starting with "## Plan"
     2. Legacy tag format: <AUTOSWE_PLAN>...</AUTOSWE_PLAN>
     """
+    # Deferred import: avoids circular dependency (prompts <- tracking.comments).
     from autoswe.tracking.comments import _PLAN_RE
 
     for comment in reversed(comments or []):
@@ -190,11 +192,12 @@ def _find_plan_in_comments(comments: list[NormalizedComment] | None) -> str:
 
 
 def build_fix_prompt(
-    task: dict, guidance: str = None, repo_root: str = None,
-    comments: list[NormalizedComment] = None, repo_cfg: dict = None,
-    plan_text: str = None,
+    task: dict, guidance: str | None = None, repo_root: str | None = None,
+    comments: list[NormalizedComment] | None = None, repo_cfg: dict | None = None,
+    plan_text: str | None = None,
 ) -> str:
     """Build the fix prompt from template + task data."""
+    # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
     from autoswe.providers.factory import get_tracker
 
     owner, repo = task["owner"], task["repo"]
@@ -260,9 +263,9 @@ def build_conflict_resolution_prompt(
     task: dict,
     conflict_files: list[str],
     *,
-    plan_text: str = None,
+    plan_text: str | None = None,
     base_branch: str = "main",
-    repo_cfg: dict = None,
+    repo_cfg: dict | None = None,
 ) -> str:
     """Build the conflict-resolution prompt from template + task data."""
     owner, repo = task["owner"], task["repo"]
@@ -328,13 +331,13 @@ def _pop_review_file(task: dict) -> str:
 
 def build_review_prompt(
     task: dict,
-    repo_root: str = None,
-    comments: list[NormalizedComment] = None,
-    repo_cfg: dict = None,
-    plan_text: str = None,
-    diff_stat: str = None,
-    diff_text: str = None,
-    guidance: str = None,
+    repo_root: str | None = None,
+    comments: list[NormalizedComment] | None = None,
+    repo_cfg: dict | None = None,
+    plan_text: str | None = None,
+    diff_stat: str | None = None,
+    diff_text: str | None = None,
+    guidance: str | None = None,
 ) -> str:
     """Build the review prompt from template + task data."""
     owner, repo = task["owner"], task["repo"]

@@ -184,7 +184,7 @@ def test_readonly_blocks_file_mutations(dummy_task, dummy_repo_cfg):
 # ==== TEST 4: AskUserQuestion interception ====
 
 def test_ask_user_question_interception(dummy_task, dummy_repo_cfg):
-    """make_can_use_tool intercepts AskUserQuestion, sets state, fills answers."""
+    """make_can_use_tool intercepts AskUserQuestion, sets state, denies to pause."""
     state = {}
     post_log = []
     cut = make_can_use_tool(
@@ -219,10 +219,9 @@ def test_ask_user_question_interception(dummy_task, dummy_repo_cfg):
     # on_post callback should have been called
     assert len(post_log) == 1
 
-    # Result should be PermissionResultAllow with pre-filled answers
-    assert result.behavior == "allow"
-    assert "answers" in result.updated_input
-    assert len(result.updated_input["answers"]) == 1
+    # Result should be PermissionResultDeny to pause the agent
+    assert result.behavior == "deny"
+    assert "paused" in result.message.lower()
 
 
 # ==== TEST 5: _extract_plan_output priority chain ===
@@ -244,10 +243,11 @@ def test_extract_plan_output_plan_file(tmp_path):
     plan_file = tmp_path / "my-plan.md"
     plan_file.write_text("## Steps\n1. Fix bug A\n2. Fix bug B")
 
-    comment, done = _extract_plan_output("Some random text", plan_file=plan_file)
+    comment, done, used_file = _extract_plan_output("Some random text", plan_file=plan_file)
     assert done == "PLAN_READY"
     assert "## Steps" in comment
     assert "Fix bug A" in comment
+    assert used_file == plan_file
 
 
 def test_extract_plan_output_pending_fallback(tmp_path):
@@ -255,32 +255,78 @@ def test_extract_plan_output_pending_fallback(tmp_path):
     plan_file = tmp_path / "pending-plan.md"
     plan_file.write_text("I'm waiting for clarification on the approach.")
 
-    comment, done = _extract_plan_output("Some text", plan_file=plan_file)
+    comment, done, used_file = _extract_plan_output("Some text", plan_file=plan_file)
     # "waiting for" is a pending indicator → should NOT return PLAN_READY
     assert done != "PLAN_READY", "Pending plan should not return PLAN_READY"
 
 
 def test_extract_plan_output_autoswe_plan_tag():
     """<AUTOSWE_PLAN> tags detected when no plan file."""
+    from unittest.mock import patch
     text = "Some preamble <AUTOSWE_PLAN>Step 1\nStep 2</AUTOSWE_PLAN> done."
-    comment, done = _extract_plan_output(text)
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(text)
     assert done == "PLAN_READY"
     assert "Step 1" in comment
+    assert used_file is None
 
 
 def test_extract_plan_output_autoswe_questions_tag():
     """<AUTOSWE_QUESTIONS> tags detected."""
+    from unittest.mock import patch
     text = "Hey <AUTOSWE_QUESTIONS>What should I do?</AUTOSWE_QUESTIONS>"
-    comment, done = _extract_plan_output(text)
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(text)
     assert done == "WAITING: questions"
     assert "## Questions" in comment
+    assert used_file is None
 
 
 def test_extract_plan_output_fallback():
     """Plain text falls back to WAITING: see comment."""
-    comment, done = _extract_plan_output("Just some random response text.")
+    from unittest.mock import patch
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output("Just some random response text.")
     assert done == "WAITING: see comment"
     assert "## Claude's response" in comment
+    assert used_file is None
+
+
+def test_extract_plan_output_allow_fs_scan_false_skips_stale_file(tmp_path):
+    """allow_fs_scan=False prevents a stale plan file from being used.
+
+    Even when ~/.claude/plans/ contains a file newer than this session, passing
+    allow_fs_scan=False must return the raw-text fallback (WAITING: see comment)
+    instead of PLAN_READY from the stale file.
+    """
+    from unittest.mock import patch
+    stale_file = tmp_path / "stale-plan.md"
+    stale_file.write_text("## Stale Plan\n\n1. Step from another issue")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=stale_file):
+        comment, done, used_file = _extract_plan_output(
+            "Prose only, no tags", plan_file=None, allow_fs_scan=False
+        )
+
+    assert done == "WAITING: see comment"
+    assert used_file is None
+    assert "Stale Plan" not in comment
+
+
+def test_extract_plan_output_allow_fs_scan_true_still_finds_file(tmp_path):
+    """allow_fs_scan=True (default) still returns PLAN_READY from a scanned file."""
+    from unittest.mock import patch
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("## My Plan\n\n1. Step A")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=plan_file):
+        comment, done, used_file = _extract_plan_output(
+            "Prose only, no tags", plan_file=None, allow_fs_scan=True
+        )
+
+    assert done == "PLAN_READY"
+    assert used_file == plan_file
+    assert "## My Plan" in comment
 
 
 # ==== TEST 6: _plan_file_is_pending detection ====
@@ -453,7 +499,7 @@ def test_ollama_plan_extract_output(tmp_path, ollama_env, ollama_model):
 
     # Now run _extract_plan_output on the result
     plan_file = Path(result.plan_file_path) if result.plan_file_path else None
-    comment, done = _extract_plan_output(result.text, plan_file=plan_file)
+    comment, done, used_file = _extract_plan_output(result.text, plan_file=plan_file)
 
     # The model should have produced either a plan file or text output
     assert done in ("PLAN_READY", "WAITING: questions", "WAITING: see comment")

@@ -18,8 +18,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from autoswe.core.config import load_config, load_repos_config  # noqa: E402
-from autoswe.providers.factory import build_repo_cfg, get_tracker  # noqa: E402
+from autoswe.core.config import load_config, load_repos_config
+from autoswe.providers.factory import build_repo_cfg, get_tracker
 
 DEFAULT_REPO = "natedorr/testProject/testProject"
 DEFAULT_WIS = [92, 94, 95, 97, 98, 99, 100, 104, 109, 111]
