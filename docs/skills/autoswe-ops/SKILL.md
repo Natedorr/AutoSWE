@@ -354,3 +354,17 @@ Before pasting any output into a GitHub issue:
 ### Use the Template
 
 Open a new issue on the autoSWE repo and select the **Bug Report** template (`.github/ISSUE_TEMPLATE/bug_report.md`). It has a diagnostics section with every command above pre-filled. Fill in each section with your redacted output.
+
+### `gh` CLI note (colons in labels)
+
+If you use the GitHub CLI here, remember every autoSWE label carries a colon (`autoswe:failed`, `autoswe:fixing`, …), which collides with `gh`'s `key:value` search-qualifier parsing. To list autoSWE issues, filter with `--label` (literal, no parsing) rather than `--search`:
+
+```bash
+# Right: --label takes the literal label
+gh issue list --repo OWNER/REPO --label 'autoswe:failed'
+
+# If you must use search, quote the value so the second colon stays inside it
+gh issue list --repo OWNER/REPO --search 'label:"autoswe:failed"'
+```
+
+Single-quote the whole argument so the shell doesn't split on the colon or the `/` in `OWNER/REPO`.
