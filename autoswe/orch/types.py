@@ -64,6 +64,7 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     # --- Optional fields (dataclass default) ---
     TaskField("suppress_welcome", "suppress_welcome", False),
     TaskField("welcome_comment_id", "welcome_comment_id", None),
+    TaskField("progress_comment_id", "progress_comment_id", None),
     TaskField("bot_comment_ids", "bot_comment_ids", (),
               transform=lambda v: tuple(v) if isinstance(v, list) else v),
     TaskField("last_phase", "last_phase", "plan"),
@@ -128,6 +129,11 @@ class TaskState:
     pending_user_reply: str | None
     suppress_welcome: bool = False
     welcome_comment_id: int | None = None
+    # ID of the sticky progress comment for the current dispatch. Survives in
+    # the queue only when a dispatch crashes (finalize clears it on any clean
+    # return), so its presence together with an "error" status is the signal
+    # that a /retry should re-use — not re-post — the sticky comment.
+    progress_comment_id: int | None = None
     bot_comment_ids: tuple[int, ...] = ()
     last_phase: str = "plan"
     # Explicitly tracks which phase should resume after a user reply.

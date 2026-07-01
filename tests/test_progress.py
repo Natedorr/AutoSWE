@@ -335,6 +335,57 @@ def test_progress_flush_fallback_both_fail():
 
 
 # ---------------------------------------------------------------------------
+# adopt() — re-use an existing sticky comment on retry
+# ---------------------------------------------------------------------------
+
+def test_progress_adopt_reuses_existing_comment():
+    """adopt() edits the given comment in place — no new POST."""
+    posted = []
+    updated = []
+
+    class AdoptTracker:
+        def post_comment(self, repo_cfg, issue_num, body):
+            posted.append(body)
+            return 111
+
+        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+            updated.append({"id": comment_id, "body": body})
+
+    from autoswe.tracking.comments import BOT_MARKER
+    from autoswe.tracking.progress import ProgressComment
+
+    progress = ProgressComment(AdoptTracker(), {}, 1)
+    cid = progress.adopt(777, "Retrying `/fix`…")
+
+    assert cid == 777
+    assert progress.comment_id == 777
+    assert posted == [], "adopt must not POST a new comment"
+    assert updated == [{"id": 777, "body": "Retrying `/fix`…\n" + BOT_MARKER}]
+
+
+def test_progress_adopt_falls_back_to_create_when_edit_fails():
+    """If the adopted comment can't be edited (e.g. deleted), post a fresh one."""
+    posted = []
+
+    class GoneTracker:
+        def post_comment(self, repo_cfg, issue_num, body):
+            posted.append(body)
+            return 222
+
+        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+            raise RuntimeError("404 comment deleted")
+
+    from autoswe.tracking.progress import ProgressComment
+
+    progress = ProgressComment(GoneTracker(), {}, 1)
+    cid = progress.adopt(777, "Retrying `/fix`…")
+
+    assert cid == 222
+    assert progress.comment_id == 222
+    assert len(posted) == 1, "fell back to a fresh POST"
+
+
+# ---------------------------------------------------------------------------
 # Provider update_comment tests
 # ---------------------------------------------------------------------------
 
