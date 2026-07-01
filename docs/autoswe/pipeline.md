@@ -101,7 +101,7 @@ For each non-noop `Action`:
 8. Delete PID file
 ```
 
-The **progress comment** (via `tracking.progress.ProgressComment`) is a sticky comment: created with the dispatch status text, updated during the Claude run, then finalized with the completion/failure message. The comment ID is tracked in `bot_comment_ids`. When the run emits a todo list (via `TodoWrite` or `TaskCreate`/`TaskUpdate`), the comment body is rendered as a structured **Todo List** + **Last Command** markdown block instead of a bare tool-name string.
+The **progress comment** (via `tracking.progress.ProgressComment`) is a sticky comment: created with the dispatch status text, updated during the Claude run, then finalized with the completion/failure message. The comment ID is tracked in `bot_comment_ids` and in the per-dispatch `progress_comment_id`. A clean return clears `progress_comment_id`; if the dispatch **crashes**, it survives so a later `/retry` (from the `error` state) re-uses that same comment via `ProgressComment.adopt()` instead of starting a fresh one. When the run emits a todo list (via `TodoWrite` or `TaskCreate`/`TaskUpdate`), the comment body is rendered as a structured **Todo List** + **Last Command** markdown block instead of a bare tool-name string.
 
 **Input:** queue.json (tasks with non-noop Actions). **Output:** handler result → effects applied → `autoswe_status` transition → mirrored label → bot comment.
 

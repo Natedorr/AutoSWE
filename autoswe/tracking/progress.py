@@ -63,6 +63,27 @@ class ProgressComment:
             _dbg.warning("progress: create comment failed", exc_info=True)
             return None
 
+    def adopt(self, comment_id: int, resume_body: str) -> int | None:
+        """Re-use an already-posted sticky comment instead of posting a new one.
+
+        Used on a /retry after a crashed dispatch: the prior attempt's sticky
+        comment is refreshed in place so the retry writes to the same comment
+        the user is already watching. Falls back to create() if the edit fails
+        (e.g. the comment was deleted).
+        """
+        self._comment_id = comment_id
+        log(f"[PROGRESS] ADOPT comment={comment_id}")
+        try:
+            self._tracker.update_comment(
+                self._repo_cfg, self._issue_num, comment_id, _tag(resume_body),
+            )
+            self._last_update = time.monotonic()
+            return comment_id
+        except Exception:  # Comment gone/uneditable — post a fresh one so nothing is lost
+            _dbg.warning("progress: adopt failed, posting new comment", exc_info=True)
+            self._comment_id = None
+            return self.create(resume_body)
+
     def update(self, body: str) -> None:
         """Queue a throttled edit. At most one edit per 10s.
 

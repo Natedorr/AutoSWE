@@ -1366,3 +1366,227 @@ def test_dispatch_error_clears_first_dispatched_at(
     )
 
 
+# ---------------------------------------------------------------------------
+# Sticky progress comment reuse on /retry after a crash
+#
+# progress_comment_id survives in the queue only when a dispatch crashed
+# (finalize clears it on a clean return). A /retry from the "error" state must
+# re-use — not re-post — that comment so the user keeps watching one thread.
+# ---------------------------------------------------------------------------
+
+
+class _CapturingTracker:
+    """Fake tracker recording posts/updates; assigns incrementing comment IDs."""
+
+    def __init__(self):
+        self.posts = []
+        self.updates = []
+        self._next_id = 900
+
+    def set_status(self, repo_cfg, issue_num, label):
+        pass
+
+    def post_comment(self, repo_cfg, issue_num, body):
+        cid = self._next_id
+        self._next_id += 1
+        self.posts.append({"id": cid, "body": body})
+        return cid
+
+    def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        self.updates.append({"id": comment_id, "body": body})
+
+
+def _make_poll_task(slug, status, extra=None):
+    """Build a (PollTask, queue_entry) pair for a single-issue dispatch."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    task = TaskState(
+        slug=slug, owner="owner", repo="repo", issue_number=1, title="t", body="b",
+        status=status, plan_branch=None, base_branch="main", attempt_count=0,
+        first_dispatched_at=None, last_dispatched_command=None,
+        last_dispatched_command_id=None, last_consumed_reply_id=None,
+        session_id=None, pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+        provider="github",
+    )
+    api = ApiState(
+        issue=NormalizedIssue(number=1, title="t", body="b", owner="owner", repo="repo"),
+        comments=(),
+    )
+    world = World(api=api, task=task, cfg={}, repo_cfg={"provider": "github"})
+    from autoswe.orch.loop import PollTask
+    pt = PollTask(slug=slug, task_state=task, world=world)
+
+    entry = {
+        "id": slug, "owner": "owner", "repo": "repo", "issue_number": 1,
+        "title": "t", "body": "b", "autoswe_status": status,
+        "bot_comment_ids": [], "provider": "github",
+    }
+    if extra:
+        entry.update(extra)
+    return pt, entry
+
+
+def _patch_dispatch_internals(monkeypatch):
+    """Stub out logging + handler run so _dispatch_task exercises only the
+    progress-comment wiring."""
+    import autoswe.orch.loop as loop_mod
+    monkeypatch.setattr(loop_mod, "init_issue_logger", lambda *a, **k: None)
+    monkeypatch.setattr(loop_mod, "remove_issue_logger", lambda *a, **k: None)
+    monkeypatch.setattr(loop_mod, "run", lambda *a, **k: None)   # skip finalize
+    monkeypatch.setattr(loop_mod, "emit", lambda *a, **k: [])    # no effects
+
+
+def test_dispatch_retry_after_error_reuses_progress_comment(running_dir, monkeypatch):
+    """A /retry from 'error' with a stored progress_comment_id edits that
+    comment instead of posting a new one."""
+    import autoswe.orch.loop as loop_mod
+    from autoswe.orch.types import Action
+
+    _patch_dispatch_internals(monkeypatch)
+
+    slug = "gh:owner_repo_1"
+    pt, entry = _make_poll_task(
+        slug, "error", extra={"progress_comment_id": 555, "bot_comment_ids": [555]},
+    )
+    queue = {slug: entry}
+    tracker = _CapturingTracker()
+    action = Action(kind="fix", slug=slug)
+
+    loop_mod._dispatch_task(
+        pt, action, tracker, {"provider": "github"}, "github", {}, queue, "2026-01-01T00:00:00Z",
+    )
+
+    assert tracker.posts == [], "retry must not POST a new sticky comment"
+    assert any(u["id"] == 555 for u in tracker.updates), "adopted comment 555 should be edited"
+    assert queue[slug]["progress_comment_id"] == 555
+    # No duplicate id appended to bot_comment_ids
+    assert queue[slug]["bot_comment_ids"].count(555) == 1
+
+
+def test_dispatch_fresh_command_posts_new_progress_comment(running_dir, monkeypatch):
+    """A fresh (non-error) dispatch posts a new sticky comment and records its id."""
+    import autoswe.orch.loop as loop_mod
+    from autoswe.orch.types import Action
+
+    _patch_dispatch_internals(monkeypatch)
+
+    slug = "gh:owner_repo_1"
+    pt, entry = _make_poll_task(slug, "pending")
+    queue = {slug: entry}
+    tracker = _CapturingTracker()
+    action = Action(kind="fix", slug=slug)
+
+    loop_mod._dispatch_task(
+        pt, action, tracker, {"provider": "github"}, "github", {}, queue, "2026-01-01T00:00:00Z",
+    )
+
+    assert len(tracker.posts) == 1, "fresh dispatch should POST one sticky comment"
+    new_id = tracker.posts[0]["id"]
+    assert queue[slug]["progress_comment_id"] == new_id
+    assert new_id in queue[slug]["bot_comment_ids"]
+
+
+def test_dispatch_error_with_stale_id_but_not_error_status_posts_new(running_dir, monkeypatch):
+    """A lingering progress_comment_id on a non-error status must NOT be adopted —
+    only the 'error' status triggers reuse."""
+    import autoswe.orch.loop as loop_mod
+    from autoswe.orch.types import Action
+
+    _patch_dispatch_internals(monkeypatch)
+
+    slug = "gh:owner_repo_1"
+    pt, entry = _make_poll_task(
+        slug, "waiting", extra={"progress_comment_id": 555, "bot_comment_ids": [555]},
+    )
+    queue = {slug: entry}
+    tracker = _CapturingTracker()
+    action = Action(kind="fix", slug=slug, user_reply_text="please continue")
+
+    loop_mod._dispatch_task(
+        pt, action, tracker, {"provider": "github"}, "github", {}, queue, "2026-01-01T00:00:00Z",
+    )
+
+    assert len(tracker.posts) == 1, "non-error resume should POST a fresh comment"
+    assert queue[slug]["progress_comment_id"] == tracker.posts[0]["id"]
+
+
+def test_dispatch_error_preserves_progress_comment_id(
+    isolated_autoswe_dir, monkeypatch, tmp_path,
+):
+    """A dispatch crash must leave progress_comment_id in the queue so a later
+    /retry can re-use the sticky comment (unlike session_id, which is cleared)."""
+    from autoswe.core.queue_store import LockedQueue
+
+    task_id = "gh:owner_repo_1"
+    task = {
+        "id": task_id, "owner": "owner", "repo": "repo", "issue_number": 1,
+        "title": "Test issue", "body": "Fix this\n\n/fix", "autoswe_status": "pending",
+        "base_branch": "main", "provider": "github", "suppress_welcome": True,
+        "pr_number": None, "session_id": None, "last_dispatched_command_id": None,
+        "last_consumed_reply_id": None, "bot_comment_ids": [],
+        "last_synced": "2026-01-01T00:00:00Z", "created_at": "2026-01-01T00:00:00Z",
+    }
+    with LockedQueue() as lq:
+        lq.queue[task_id] = dict(task)
+
+    import json
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+
+    import autoswe.orch.loop as loop_mod
+
+    def failing_dispatch(*args, **kwargs):
+        pt = args[0]
+        slug = pt.slug
+        queue_entry = args[6]
+        queue_entry[slug]["autoswe_status"] = "dispatched"
+        # Simulate the sticky comment being posted before the crash.
+        queue_entry[slug]["progress_comment_id"] = 555
+        raise RuntimeError("simulated dispatch failure")
+
+    monkeypatch.setattr(loop_mod, "_dispatch_task", failing_dispatch)
+
+    class FakeTracker:
+        def set_status(self, repo_cfg, issue_num, label):
+            pass
+        def post_comment(self, repo_cfg, issue_num, body):
+            pass
+        def fetch_comments(self, *a, **kw):
+            return []
+
+    import autoswe.providers.factory as factory_mod
+    monkeypatch.setattr(loop_mod, "get_tracker", lambda repo_cfg: FakeTracker())
+    monkeypatch.setattr(factory_mod, "get_tracker", lambda repo_cfg: FakeTracker())
+
+    from autoswe.orch.types import ApiState
+    from autoswe.providers.base import NormalizedIssue
+
+    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+        return {
+            1: ApiState(
+                issue=NormalizedIssue(
+                    number=1, title="Test issue", body="Fix this\n\n/fix",
+                    owner="owner", repo="repo", state="open",
+                    is_pull_request=False, labels=[],
+                ),
+                comments=(),
+            ),
+        }
+
+    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+
+    cfg = {"MAX_CONCURRENT": 1, "SILENT_REPORTING": True, "WORKTREE_DIR": str(tmp_path / "worktrees")}
+    loop_mod.poll(cfg, mode="full", repo_filter="owner/repo")
+
+    with LockedQueue() as lq:
+        entry = lq.queue[task_id]
+    assert entry["autoswe_status"] == "error"
+    assert entry.get("progress_comment_id") == 555, (
+        "progress_comment_id must survive a crash so /retry re-uses the sticky comment"
+    )
+
+

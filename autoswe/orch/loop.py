@@ -314,15 +314,26 @@ def _dispatch_task(
         minimal = bool(cfg.get("MINIMAL_POSTING"))
         progress = ProgressComment(tracker, repo_cfg, issue_num, minimal=minimal)
 
-        if action.user_reply_text is not None:
+        # On a /retry after a crashed run, re-use the sticky comment from the
+        # failed attempt rather than posting a fresh one. progress_comment_id
+        # survives in the queue only when the prior dispatch raised (a clean
+        # finalize clears it), so its presence together with an "error" status
+        # is the retry signal. See docs/autoswe/handlers.md.
+        prior_comment_id = task_entry.get("progress_comment_id")
+        if world.task.status == "error" and prior_comment_id:
+            progress.adopt(prior_comment_id, f"Retrying `{action.kind}`&hellip;")
+        elif action.user_reply_text is not None:
             progress.create(f"Resuming `{action.kind}` session&hellip;")
         else:
             progress.create(f"Dispatching `{action.kind}`&hellip;")
 
         if progress.comment_id:
             task_entry["_comment_id"] = progress.comment_id
+            task_entry["progress_comment_id"] = progress.comment_id
             task_entry["_minimal_posting"] = minimal
-            task_entry.setdefault("bot_comment_ids", []).append(progress.comment_id)
+            bot_ids = task_entry.setdefault("bot_comment_ids", [])
+            if progress.comment_id not in bot_ids:
+                bot_ids.append(progress.comment_id)
 
         # --- Run the action (Layer B) ---
         result = run(action, world, progress_callback=progress.update)
@@ -428,6 +439,12 @@ def _finalize_handler(
     for field in ("pending_command", "pending_guidance", "pending_user_reply",
              "_token", "_comment_id", "_minimal_posting"):
         task_entry.pop(field, None)
+
+    # Reaching finalize means the dispatch returned cleanly (no crash), so the
+    # sticky comment is done being written to — drop the retry-reuse marker.
+    # It is deliberately kept set on the error path (_handle_dispatch_error) so
+    # a later /retry re-uses the same comment.
+    task_entry["progress_comment_id"] = None
 
     log(f"[DISPATCH] Task complete: {slug} -> {new_status} "
         f"attempt_count={task_entry.get('attempt_count', 0)} "
