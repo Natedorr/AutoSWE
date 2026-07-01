@@ -113,7 +113,7 @@ def run(
         return _to_dispatch(hr, task)
 
     if kind == "ship_pr":
-        done = ship.open_pr(task, cfg, rc)
+        done = ship.open_pr(task, cfg, rc, progress_callback=progress_callback)
         return DispatchResult(done_content=done)
 
     if kind == "sync_branch":

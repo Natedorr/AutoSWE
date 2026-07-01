@@ -1,0 +1,16 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/commits/{sha}/check-runs",
+    "method": "GET",
+    "doc_ref": "docs/github-api/list-check-runs.md"
+  },
+  "total_count": 1,
+  "check_runs": [
+    {
+      "id": 1,
+      "name": "CI",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

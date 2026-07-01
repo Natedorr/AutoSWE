@@ -7,8 +7,8 @@ factory — never to backend-specific functions directly.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Literal, Protocol, runtime_checkable
 
 # ---------------------------------------------------------------------------
 # Normalized dataclasses — backends produce these; orchestrator consumes them
@@ -58,6 +58,22 @@ class PRResult:
     url: str
     number: int | None = None
     head_sha: str | None = None  # PR head commit SHA for branch linking
+
+
+@dataclass
+class CIStatus:
+    """Combined CI status for a branch head, provider-agnostic.
+
+    ``state`` priority when reducing multiple checks: any failure wins,
+    else any pending/in-progress wins, else success if at least one check
+    passed, else "none" (no CI configured — never blocks a PR).
+    """
+
+    state: Literal["success", "pending", "failure", "none"]
+    total: int = 0
+    failing: list[str] = field(default_factory=list)
+    pending_count: int = 0
+    summary: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -134,4 +150,13 @@ class VCSProvider(Protocol):
         """Link the branch to the issue in the platform's UI (optional, no-op default).
 
         Causes the branch to appear in the issue's Development section on GitHub.
+        """
+
+    def get_ci_status(self, repo_cfg: dict, branch: str, ref_sha: str | None = None) -> CIStatus:
+        """Return the combined CI status for a branch head.
+
+        *ref_sha* pins the check to a specific commit; when omitted, the
+        provider resolves the current tip of *branch*. A repo with no CI
+        configured returns ``CIStatus(state="none")`` — treated as a pass by
+        callers so autoSWE doesn't block forever on repos without checks.
         """

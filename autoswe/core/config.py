@@ -133,6 +133,8 @@ def load_config() -> dict:
         "ALLOWED_AUTHORS": os.environ.get("ALLOWED_AUTHORS", ""),
         "LINK_BRANCH_TO_ISSUE": _as_bool(os.environ.get("LINK_BRANCH_TO_ISSUE"), "false"),
         "SYNC_STRATEGY": os.environ.get("SYNC_STRATEGY", "merge"),  # "merge" | "rebase"
+        "PR_REQUIRE_SYNC": _as_bool(os.environ.get("PR_REQUIRE_SYNC"), "true"),
+        "PR_REQUIRE_CI": _as_bool(os.environ.get("PR_REQUIRE_CI"), "true"),
         "AGENT_RETRY_ON_SUBTYPE": os.environ.get("AGENT_RETRY_ON_SUBTYPE", ""),
         "WORKTREE_ORPHAN_POLICY": os.environ.get("WORKTREE_ORPHAN_POLICY", "commit"),
     }
@@ -150,6 +152,8 @@ def load_config() -> dict:
         cfg["AUTO_ASSIGN"] = _as_bool(cfg.get("AUTO_ASSIGN"), "true")
         cfg["AUTO_CREATE_PR"] = _as_bool(cfg.get("AUTO_CREATE_PR"))
         cfg["LINK_BRANCH_TO_ISSUE"] = _as_bool(cfg.get("LINK_BRANCH_TO_ISSUE"), "false")
+        cfg["PR_REQUIRE_SYNC"] = _as_bool(cfg.get("PR_REQUIRE_SYNC"), "true")
+        cfg["PR_REQUIRE_CI"] = _as_bool(cfg.get("PR_REQUIRE_CI"), "true")
     # Parse ALLOWED_AUTHORS as a set for O(1) lookup
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()
     cfg["ALLOWED_AUTHORS"] = {a.strip() for a in _raw.split(",") if a.strip()} if _raw else set()

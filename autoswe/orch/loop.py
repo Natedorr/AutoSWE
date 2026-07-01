@@ -351,7 +351,7 @@ def _dispatch_task(
                 log("[DISPATCH] Finalized sticky progress comment")
             else:
                 try:
-                    apply_fn(tracker, effect, repo_cfg, issue_num, queue, slug)
+                    apply_fn(tracker, effect, repo_cfg, issue_num, queue, slug, cfg)
                 except RuntimeError as e:
                     log(f"[WARN] failed to apply effect {effect.kind!r}: {e}")
 

@@ -1,0 +1,10 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/commits/{sha}/status",
+    "method": "GET",
+    "doc_ref": "docs/github-api/get-combined-status.md"
+  },
+  "state": "success",
+  "total_count": 0,
+  "statuses": []
+}

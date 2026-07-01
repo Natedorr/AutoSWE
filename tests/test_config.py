@@ -169,6 +169,59 @@ def test_load_repos_config_missing_returns_empty(isolated_autoswe_dir):
     assert result == {}
 
 
+# ---------------------------------------------------------------------------
+# PR_REQUIRE_SYNC / PR_REQUIRE_CI (PR preflight gate flags)
+# ---------------------------------------------------------------------------
+
+def test_load_config_pr_gate_flags_default_true(isolated_autoswe_dir):
+    """PR_REQUIRE_SYNC and PR_REQUIRE_CI default to True (gate on by default)."""
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_REQUIRE_SYNC"] is True
+    assert cfg["PR_REQUIRE_CI"] is True
+
+
+def test_load_config_pr_gate_flags_env_override(isolated_autoswe_dir, monkeypatch):
+    monkeypatch.setenv("PR_REQUIRE_SYNC", "false")
+    monkeypatch.setenv("PR_REQUIRE_CI", "false")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_REQUIRE_SYNC"] is False
+    assert cfg["PR_REQUIRE_CI"] is False
+
+
+def test_load_config_pr_gate_flags_from_env_file(isolated_autoswe_dir):
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text(
+        "PR_REQUIRE_SYNC=false\nPR_REQUIRE_CI=false\n",
+        encoding="utf-8",
+    )
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_REQUIRE_SYNC"] is False
+    assert cfg["PR_REQUIRE_CI"] is False
+
+
+def test_pr_gate_flags_per_repo_override():
+    """pr_gate._flag lets a repo_cfg override (lowercase key) beat the global cfg."""
+    from autoswe.vcs.pr_gate import _flag
+
+    cfg = {"PR_REQUIRE_SYNC": True, "PR_REQUIRE_CI": True}
+
+    assert _flag("PR_REQUIRE_SYNC", cfg, {}) is True
+    assert _flag("PR_REQUIRE_SYNC", cfg, {"pr_require_sync": False}) is False
+    assert _flag("PR_REQUIRE_CI", cfg, {"pr_require_ci": False}) is False
+    assert _flag("PR_REQUIRE_CI", cfg, {"pr_require_ci": True}) is True
+
+
 def test_load_repos_config_parses_json(isolated_autoswe_dir):
     repos_json = isolated_autoswe_dir / "config" / "repos.json"
     repos_json.write_text(

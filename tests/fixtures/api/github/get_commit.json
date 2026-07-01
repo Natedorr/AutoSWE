@@ -1,0 +1,11 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/commits/{ref}",
+    "method": "GET",
+    "doc_ref": "docs/github-api/get-commit.md"
+  },
+  "sha": "abc1234def5678abc1234def5678abc1234def5",
+  "commit": {
+    "message": "Fix issue"
+  }
+}

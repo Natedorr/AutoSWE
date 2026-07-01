@@ -518,3 +518,91 @@ class TestGitHubVCS:
         assert "createLinkedBranch" in call["body"]["query"]
         assert call["body"]["variables"]["oid"] == "abc1234"
         assert call["body"]["variables"]["name"] == "autoswe/issue-42"
+
+    # -- get_ci_status --
+
+    def test_get_ci_status_success(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {
+            "check_runs": [{"name": "build", "status": "completed", "conclusion": "success"}],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
+
+        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+
+        assert ci.state == "success"
+        assert ci.total == 1
+        assert ci.failing == []
+
+    def test_get_ci_status_pending(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {
+            "check_runs": [{"name": "build", "status": "in_progress", "conclusion": None}],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
+
+        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+
+        assert ci.state == "pending"
+        assert ci.pending_count == 1
+
+    def test_get_ci_status_failure_takes_priority_over_pending(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {
+            "check_runs": [
+                {"name": "build", "status": "completed", "conclusion": "failure"},
+                {"name": "lint", "status": "in_progress", "conclusion": None},
+            ],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
+
+        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+
+        assert ci.state == "failure"
+        assert ci.failing == ["build"]
+
+    def test_get_ci_status_legacy_status_failure(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        """A failing legacy commit status (no check-runs) also blocks."""
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {"check_runs": []}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {
+            "statuses": [{"context": "ci/circleci", "state": "failure"}],
+        }
+
+        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+
+        assert ci.state == "failure"
+        assert ci.failing == ["ci/circleci"]
+
+    def test_get_ci_status_no_checks_is_none(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {"check_runs": []}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
+
+        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+
+        assert ci.state == "none"
+
+    def test_get_ci_status_unresolvable_sha_is_none(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        """Branch head can't be resolved (unstubbed request raises) → treated as none, not a crash."""
+        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+
+        assert ci.state == "none"
+
+    def test_get_ci_status_uses_explicit_ref_sha(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        """When ref_sha is given, skip resolving the branch head entirely."""
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/cafebabe/check-runs")] = {
+            "check_runs": [{"name": "build", "status": "completed", "conclusion": "success"}],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/cafebabe/status")] = {"statuses": []}
+
+        ci = vcs.get_ci_status({}, "autoswe/issue-42", ref_sha="cafebabe")
+
+        assert ci.state == "success"
+        # No call should have been made to resolve the branch head sha
+        assert not any(
+            c["path"] == "/repos/natedorr/autoswe/commits/autoswe/issue-42"
+            for c in mock_gh_request.calls
+        )

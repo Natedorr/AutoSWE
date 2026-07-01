@@ -34,10 +34,14 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | `ALLOWED_AUTHORS` | `""` | Comma-separated list of allowed author logins (empty = no restriction). Controls who can trigger slash commands AND who can create issues that autoSWE processes. For GitHub, use usernames (e.g. "natedorr"). For Azure, use UPN/email (e.g. "jane@example.com") |
 | `LINK_BRANCH_TO_ISSUE` | `false` | Link feature branches to issues in the provider UI (e.g. GitHub Development sidebar). When `true`, the branch is linked at worktree creation time via GraphQL `createLinkedBranch` (GitHub only; no-op for Azure). Requires a PAT with `contents` + `issues` write scope. Defaults to `false` — only enable if you use the Development sidebar. |
 | `SYNC_STRATEGY` | `merge` | Strategy for `/sync`: `"merge"` (append-only merge commit) or `"rebase"` (linear history, force-pushes) |
+| `PR_REQUIRE_SYNC` | `true` | Gate `/pr` (and auto-PR) on the feature branch being in sync with its base. When behind, `pr_gate.preflight_pr()` runs the same sync used by `/sync`, resolving merge conflicts via `coder.resolve_sync_conflicts()`; if sync can't complete cleanly, the PR is blocked with `FAILED: <reason>`. Set `false` to skip this check entirely. |
+| `PR_REQUIRE_CI` | `true` | Gate `/pr` (and auto-PR) on CI status via `VCSProvider.get_ci_status()`. `pending` or `failure` blocks the PR; `success` or `none` (no CI configured on the repo) passes. Set `false` to skip this check entirely. |
 
 **Integer keys re-parsed:** After loading the file, `AGENT_TIMEOUT`, `AGENT_RETRY_ON_FAILURE`, `MAX_ATTEMPTS`, `MAX_TOTAL_HOURS`, `MAX_CONCURRENT`, and `MAX_DRAIN_CYCLES` are cast to `int` (`config.py:51-55`).
 
-**Boolean keys re-parsed:** `SILENT_REPORTING`, `MINIMAL_POSTING`, `AUTO_ASSIGN`, `AUTO_CREATE_PR`, and `LINK_BRANCH_TO_ISSUE` are compared to `"true"` (case-insensitive) after file load.
+**Boolean keys re-parsed:** `SILENT_REPORTING`, `MINIMAL_POSTING`, `AUTO_ASSIGN`, `AUTO_CREATE_PR`, `LINK_BRANCH_TO_ISSUE`, `PR_REQUIRE_SYNC`, and `PR_REQUIRE_CI` are compared to `"true"` (case-insensitive) after file load.
+
+**Per-repo overrides:** `pr_gate._flag()` checks `repo_cfg` first — a lowercase `pr_require_sync` / `pr_require_ci` key in a `repos.json` entry overrides the global `autoswe.env` value for that repo only (same pattern as `plan_model`/`fix_model` overrides).
 
 ## `config/repos.json` (gitignored, copy from `repos.json.example`)
 

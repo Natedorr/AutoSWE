@@ -416,7 +416,8 @@ class TestPRContent:
         # Patch _gh_request so both gh_post (PR create) and comment post route through fake
         # Patch find_existing_pr to return None (no existing PR)
         with patch("autoswe.tracking.api._gh_request", fake_gh_request), \
-             patch("autoswe.providers.github.vcs.GitHubVCS.find_existing_pr", return_value=None):
+             patch("autoswe.providers.github.vcs.GitHubVCS.find_existing_pr", return_value=None), \
+             patch("autoswe.vcs.ship.preflight_pr", return_value=(True, "")):
             from autoswe.vcs.ship import open_pr
             result = open_pr(task, {})
 
@@ -457,7 +458,8 @@ class TestPRContent:
             return github_fake.handle_request(method, path, token, body=body)
 
         with patch("autoswe.tracking.api._gh_request", fake_gh_request), \
-             patch("autoswe.providers.github.vcs.GitHubVCS.find_existing_pr", return_value=existing_pr):
+             patch("autoswe.providers.github.vcs.GitHubVCS.find_existing_pr", return_value=existing_pr), \
+             patch("autoswe.vcs.ship.preflight_pr", return_value=(True, "")):
             from autoswe.vcs.ship import open_pr
             result = open_pr(task, {})
 
@@ -510,7 +512,8 @@ class TestPRContent:
             ct = kw.get("content_type", "application/json")
             return azure_fake.handle_request(method, path, pat, body=body, content_type=ct)
 
-        with patch("autoswe.providers.azure.api._ado_request", fake_ado_request):
+        with patch("autoswe.providers.azure.api._ado_request", fake_ado_request), \
+             patch("autoswe.vcs.ship.preflight_pr", return_value=(True, "")):
             from autoswe.vcs.ship import open_pr
             open_pr(task, {}, {
                 "provider": "azure",

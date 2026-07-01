@@ -2,8 +2,19 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from autoswe.providers.base import PRResult
 from autoswe.vcs.ship import _pr_ref
+
+
+@pytest.fixture(autouse=True)
+def _default_preflight_pass(monkeypatch):
+    """Bypass the sync/CI preflight gate for tests that only assert PR content.
+
+    Gate behavior itself is covered by TestOpenPrPreflightGate below.
+    """
+    monkeypatch.setattr("autoswe.vcs.ship.preflight_pr", lambda *a, **kw: (True, ""))
 
 
 def make_task(pr_number=None):
@@ -422,3 +433,77 @@ def test_open_pr_body_minimal_when_no_issue_body(mock_gh_post_comment):
     assert "**Issue:**" not in pr_body
     assert "**Fix Summary:**" not in pr_body
     assert "Opened by autoSWE." in pr_body
+
+
+# ---------------------------------------------------------------------------
+# open_pr — preflight gate (branch sync + CI status)
+# ---------------------------------------------------------------------------
+
+class TestOpenPrPreflightGate:
+    """open_pr() must consult preflight_pr() before creating/finding a PR."""
+
+    def test_blocked_by_preflight_returns_failed(self, monkeypatch, mock_gh_post_comment):
+        """preflight_pr() returning not-ok short-circuits with FAILED, no PR lookup."""
+        monkeypatch.setattr(
+            "autoswe.vcs.ship.preflight_pr",
+            lambda *a, **kw: (False, "CI failing: 1 check(s) failing: build"),
+        )
+        task = make_task()
+
+        with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+             patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+            mock_vcs = _mock_vcs()
+            mock_get_vcs.return_value = mock_vcs
+            mock_get_tracker.return_value = _mock_tracker()
+
+            from autoswe.vcs.ship import open_pr
+            result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+        assert result == "FAILED: CI failing: 1 check(s) failing: build"
+        mock_vcs.find_existing_pr.assert_not_called()
+        mock_vcs.open_pull_request.assert_not_called()
+        mock_get_tracker.return_value.post_comment.assert_not_called()
+
+    def test_passing_preflight_proceeds_to_create_pr(self, monkeypatch, mock_gh_post_comment):
+        """preflight_pr() returning ok lets open_pr proceed as normal."""
+        monkeypatch.setattr("autoswe.vcs.ship.preflight_pr", lambda *a, **kw: (True, ""))
+        task = make_task()
+
+        with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+             patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+            mock_vcs = _mock_vcs(pr_url="https://github.com/o/r/pull/42", existing_pr=None)
+            mock_get_vcs.return_value = mock_vcs
+            mock_get_tracker.return_value = _mock_tracker()
+
+            from autoswe.vcs.ship import open_pr
+            result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+        assert result == "DONE: PR https://github.com/o/r/pull/42"
+        mock_vcs.open_pull_request.assert_called_once()
+
+    def test_preflight_called_with_task_cfg_repo_cfg_and_progress_callback(self, mock_gh_post_comment):
+        """open_pr threads its cfg/repo_cfg/progress_callback into preflight_pr."""
+        task = make_task()
+        progress = MagicMock()
+        captured = {}
+
+        def fake_preflight(t, c, rc, *, progress_callback=None, **kw):
+            captured["task"] = t
+            captured["cfg"] = c
+            captured["repo_cfg"] = rc
+            captured["progress_callback"] = progress_callback
+            return True, ""
+
+        with patch("autoswe.vcs.ship.preflight_pr", fake_preflight), \
+             patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+             patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+            mock_get_vcs.return_value = _mock_vcs()
+            mock_get_tracker.return_value = _mock_tracker()
+
+            from autoswe.vcs.ship import open_pr
+            open_pr(task, {"GITHUB_TOKEN": "tok"}, progress_callback=progress)
+
+        assert captured["task"] is task
+        assert captured["cfg"] == {"GITHUB_TOKEN": "tok"}
+        assert captured["repo_cfg"]["owner"] == "o"
+        assert captured["progress_callback"] is progress

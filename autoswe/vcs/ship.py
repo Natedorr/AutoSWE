@@ -1,9 +1,14 @@
 import contextlib
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.base import PRResult
 from autoswe.providers.factory import get_tracker, get_vcs
+from autoswe.vcs.pr_gate import preflight_pr
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 dbg = get_debug_logger()
 
@@ -33,7 +38,12 @@ def _pr_ref(pr_url: str) -> str:
     return f"PR#{last}"
 
 
-def open_pr(task: dict, cfg: dict, repo_cfg: dict | None = None) -> str:
+def open_pr(
+    task: dict,
+    cfg: dict,
+    repo_cfg: dict | None = None,
+    progress_callback: "Callable[[str], None] | None" = None,
+) -> str:
     """Open a PR from the worktree branch. Returns done-file content."""
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     token = task["_token"]
@@ -52,6 +62,11 @@ def open_pr(task: dict, cfg: dict, repo_cfg: dict | None = None) -> str:
     tracker = get_tracker(rcfg)
 
     dbg.debug("SHIP: branch=%s base=%s", branch, base_branch)
+
+    ok, reason = preflight_pr(task, cfg, rcfg, progress_callback=progress_callback)
+    if not ok:
+        dbg.debug("SHIP: preflight blocked PR: %s", reason)
+        return f"FAILED: {reason}"
 
     # Build informative PR body from task data
     fix_summary = task.get("fix_summary", "") or ""

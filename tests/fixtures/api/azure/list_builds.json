@@ -1,0 +1,19 @@
+{
+  "__meta": {
+    "endpoint": "GET /_apis/build/builds",
+    "method": "GET",
+    "doc_ref": "docs/azure-devops-api/list-builds.md"
+  },
+  "count": 1,
+  "value": [
+    {
+      "id": 1,
+      "status": "completed",
+      "result": "succeeded",
+      "definition": {
+        "id": 1,
+        "name": "CI"
+      }
+    }
+  ]
+}
