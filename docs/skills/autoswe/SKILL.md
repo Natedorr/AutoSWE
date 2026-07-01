@@ -31,18 +31,55 @@ Post these as comments on the issue (at the start of a line):
 | Command | What it does |
 |---------|-------------|
 | `/plan` | Start a planning session — Claude reads the codebase, asks clarifying questions, then posts a plan |
-| `/plan --branch develop` | Plan on a specific branch instead of `main` |
+| `/plan --branch <name>` | Same as `/plan`, but cut the work branch from `<name>` instead of the repo's default branch (see **Branch selection** below) |
 | `/fix` | Implement the fix — Claude gets code-writing permissions and edits the repo |
 | `/fix with <guidance>` | Same as `/fix` but appends guidance to the prompt (e.g., `/fix with focus on edge cases`) |
-| `/fix --branch develop` | Fix on a specific branch |
+| `/fix --branch <name>` | Same as `/fix`, but cut the work branch from `<name>` (see **Branch selection** below) |
 | `/review` | Run a code review on the current branch diff |
-| `/pr` | Open a pull request from the current branch |
+| `/pr` | Open a pull request from the task's work branch. Takes **no arguments** — see **Branch selection** below |
 | `/sync` | Pull the branch from upstream to keep it up to date |
 | `/retry` | Retry a failed task (resets attempt counter) |
 | `/skip` | Skip this issue |
 | `/abort` | Cancel the current task |
 
 **Alias:** `@autoswe <guidance>` is equivalent to `/fix with <guidance>` (uses the configured bot name).
+
+### Branch selection
+
+autoSWE creates exactly **one work branch per issue** — `autoswe/issue-<N>` — and `/pr` always opens the pull request **from `autoswe/issue-<N>` back to the branch that work was based on**.
+
+- `--branch <name>` (on `/plan` or `/fix`) picks the **base** to branch from. So `/fix --branch develop` means: cut `autoswe/issue-<N>` from `develop`, and the eventual PR targets `develop`.
+- The base is **locked the first time it's set** — a later `--branch` on another comment is ignored. Set it on your very first `/plan` or `/fix`.
+- Omit `--branch` to use the repo's configured default branch (often `main`).
+- **`/pr` accepts no branch argument.** There is no way to open the PR onto a branch other than the one the work was based on — the head is always `autoswe/issue-<N>` and the base is always that starting branch.
+
+---
+
+## Posting & Reading via the GitHub CLI (`gh`)
+
+If you drive autoSWE with the `gh` CLI instead of the web UI, keep two things in mind.
+
+**Posting a command** is just a comment — no special escaping needed beyond quoting the body:
+
+```bash
+gh issue comment <N> --repo OWNER/REPO --body '/fix with focus on edge cases'
+```
+
+**Colons in `gh` search queries will bite you.** Every autoSWE label contains a colon (`autoswe:planning`, `autoswe:fixed`, …). `gh search` and `gh issue list --search` read `key:value` as a search *qualifier*, so a bare `label:autoswe:planning` is mis-parsed — the second colon splits the value and you get no results (or an error). To filter issues by an autoSWE label:
+
+- **Prefer `--label`, which takes the literal label** and does no query parsing:
+
+  ```bash
+  gh issue list --repo OWNER/REPO --label 'autoswe:planning'
+  ```
+
+- If you must use `--search`, **wrap the value in double quotes** so the second colon stays inside it:
+
+  ```bash
+  gh issue list --repo OWNER/REPO --search 'label:"autoswe:planning"'
+  ```
+
+- Always **single-quote the whole argument** so the shell doesn't split on the colon (or the `/` in `OWNER/REPO`).
 
 ---
 
