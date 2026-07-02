@@ -2,7 +2,13 @@ import os
 import re
 from pathlib import Path
 
-from autoswe.core.config import AUTOSWE_DIR, FIX_PROMPT_FILE, PLAN_PROMPT_FILE, REVIEW_PROMPT_FILE
+from autoswe.core.config import (
+    AUTOSWE_DIR,
+    FIX_PROMPT_FILE,
+    INIT_PROMPT_FILE,
+    PLAN_PROMPT_FILE,
+    REVIEW_PROMPT_FILE,
+)
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.providers.base import NormalizedComment
 
@@ -19,6 +25,7 @@ _PROMPT_KEY_MAP = {
     "fix_prompt": FIX_PROMPT_FILE,
     "review_prompt": REVIEW_PROMPT_FILE,
     "conflict_resolution_prompt": CONFLICT_RESOLUTION_PROMPT_FILE,
+    "init_prompt": INIT_PROMPT_FILE,
 }
 
 
@@ -314,6 +321,29 @@ def load_review_prompt(repo_cfg: dict | None = None) -> str:
         "- Summary (1-3 sentences)\n- Correctness (bugs, edge cases)\n"
         "- Security (auth, injection, secrets)\n- Tests (coverage)\n"
         "- Style & consistency\n- Suggestions\n- Verdict: LGTM / Needs changes / Blocked\n"
+    )
+
+
+def load_init_prompt(repo_cfg: dict | None = None) -> str:
+    prompt_file = _resolve_prompt_path(repo_cfg, "init_prompt")
+    if prompt_file.exists():
+        return prompt_file.read_text()
+    bundled = _PROMPT_KEY_MAP["init_prompt"]
+    if prompt_file != bundled and bundled.exists():
+        return bundled.read_text()
+    return (
+        "Analyze the repository in the current working directory and write a concise "
+        "CLAUDE.md file at the repo root.\n\n"
+        "Examine the project structure, build system, test setup, configuration files, "
+        "key directories, and any existing documentation to understand the codebase.\n\n"
+        "The CLAUDE.md file should cover:\n"
+        "- **Project Overview** — What the project does in 1-2 sentences\n"
+        "- **Where to Look** — Key directories and what they contain\n"
+        "- **Common Commands** — How to build, run tests, and start the app\n"
+        "- **Working Rules** — Any conventions or patterns developers must follow\n\n"
+        "Keep it focused and practical. The file will be used by AI coding agents "
+        "to understand the codebase. Write it in markdown format.\n"
+        "Commit the file as 'CLAUDE.md' at the repository root."
     )
 
 

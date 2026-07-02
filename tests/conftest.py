@@ -16,10 +16,15 @@ Exposes:
 - scenario_cfg: pre-configured cfg dict + repos.json for scenario tests
 """
 import json
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Disable the CLAUDE.md init session in all tests — it would consume a
+# scripted ClaudeFake response and break the transition matrix.
+os.environ["AUTOSWE_SKIP_INIT_SESSION"] = "1"
 
 
 @pytest.fixture(autouse=True)

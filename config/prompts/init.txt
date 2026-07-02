@@ -1,0 +1,11 @@
+Analyze the repository in the current working directory and write a concise CLAUDE.md file at the repo root.
+
+Examine the project structure, build system, test setup, configuration files, key directories, and any existing documentation to understand the codebase.
+
+The CLAUDE.md file should cover:
+- **Project Overview** — What the project does in 1-2 sentences
+- **Where to Look** — Key directories and what they contain
+- **Common Commands** — How to build, run tests, and start the app
+- **Working Rules** — Any conventions or patterns developers must follow
+
+Keep it focused and practical. The file will be used by AI coding agents to understand the codebase. Write it in markdown format.

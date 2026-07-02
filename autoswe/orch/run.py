@@ -276,6 +276,18 @@ def _sync_before_dispatch(
     elif not sync_result.get("synced"):
         return wt, HandlerResult(f"FAILED: pre-{phase} sync error: {sync_result.get('error')}")
 
+    # Auto-generate CLAUDE.md if missing (non-fatal, clean synced path only).
+    # Skipped on the conflict-leave-for-fix path (resolve_conflicts=False) above
+    # so we never commit over conflict markers.
+    if sync_result.get("synced"):
+        from autoswe.harness import initializer as _initializer
+
+        _initializer.ensure_claude_md(
+            task, wt, repo_cfg, cfg,
+            phase=phase,
+            progress_callback=progress_callback,
+        )
+
     return wt, None
 
 

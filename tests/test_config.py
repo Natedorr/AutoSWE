@@ -839,3 +839,35 @@ def test_worktree_orphan_policy_file_override(isolated_autoswe_dir):
 
     cfg = load_config()
     assert cfg["WORKTREE_ORPHAN_POLICY"] == "log_only"
+
+
+# ---------------------------------------------------------------------------
+# INIT_PROMPT_FILE
+# ---------------------------------------------------------------------------
+
+
+def test_init_prompt_file_resolves(isolated_autoswe_dir):
+    """INIT_PROMPT_FILE constant points to a valid path."""
+    from autoswe.core.config import INIT_PROMPT_FILE
+
+    assert INIT_PROMPT_FILE.name == "init.txt"
+    assert INIT_PROMPT_FILE.parent.name == "prompts"
+
+
+def test_load_init_prompt_exists_on_real_project():
+    """load_init_prompt returns the bundled prompt for the real project."""
+    from autoswe.harness.prompts import load_init_prompt
+
+    prompt = load_init_prompt()
+    assert "CLAUDE.md" in prompt
+    assert "project" in prompt.lower() or "analyze" in prompt.lower()
+
+
+def test_load_init_prompt_fallback():
+    """load_init_prompt returns a non-empty fallback when no file exists."""
+    from autoswe.harness.prompts import load_init_prompt
+
+    # Pass a repo_cfg that points to a non-existent override path
+    prompt = load_init_prompt({"init_prompt": "/nonexistent/init.txt"})
+    assert len(prompt) > 50
+    assert "CLAUDE.md" in prompt

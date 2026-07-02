@@ -31,7 +31,7 @@ Returns `(command, guidance, branch)` or `None`.
 
 ### Regex Patterns
 
-- Command: `r"/(?:fix|plan|pr|retry|skip|sync|abort)"` (case-insensitive, at line start)
+- Command: `r"/(?:fix|plan|pr|retry|skip|sync|abort|review)"` (case-insensitive, at line start)
 - Branch: `r"--branch\s+([\w][\w\-./]+)"`
 
 ## Multi-Command-Last-Wins Rule

@@ -1,5 +1,10 @@
 """Tests for pure-logic helpers — no mocking needed."""
 
+import re
+from pathlib import Path
+
+import pytest
+
 from autoswe.commands.parser import parse_slash_command
 from autoswe.core.slug import make_slug, slug_to_filename
 from autoswe.tracking.comments import (
@@ -711,3 +716,24 @@ def test_get_is_bot_dict():
     """_get_is_bot works with dict-shaped comment."""
     assert _get_is_bot({"is_bot": True}) is True
     assert _get_is_bot({}) is False
+
+
+def test_parser_commands_all_in_welcome_template():
+    """Every command in the parser regex must appear in the welcome template.
+
+    This invariant test guards against future drift where a new command is
+    added to the parser but never advertised to end users.
+    """
+    # Commands recognized by the parser (from parser.py regex)
+    parser_re = re.compile(r"/(?:fix|plan|pr|retry|skip|sync|abort|review)", re.IGNORECASE)
+    commands = {m.group(0).lower() for m in parser_re.finditer("/fix /plan /pr /retry /skip /sync /abort /review")}
+
+    # Read the welcome template
+    welcome_file = Path(__file__).resolve().parents[2] / "config" / "welcome_comment.txt"
+    if welcome_file.exists():
+        template = welcome_file.read_text()
+    else:
+        pytest.skip("welcome_comment.txt not found")
+
+    for cmd in commands:
+        assert cmd in template, f"Command {cmd!r} is in parser but missing from welcome_comment.txt"

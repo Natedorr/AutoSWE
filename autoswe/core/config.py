@@ -102,6 +102,7 @@ LOGS_DIR = AUTOSWE_DIR / "logs"
 PLAN_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "plan.txt"
 FIX_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "fix.txt"
 REVIEW_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "review.txt"
+INIT_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "init.txt"
 
 
 def load_config() -> dict:

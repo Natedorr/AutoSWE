@@ -154,6 +154,7 @@ def _build_welcome_comment(slash_cmd: str, guidance: str, slug: str, bot_name: s
             "- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n"
             "- `/fix --branch <name>` - Fix on a specific branch (default: main)\n"
             "- `/fix with <guidance>` - Same as /fix but appends guidance to the prompt\n"
+            "- `/review` - Review the changes on the branch (read-only, posts findings)\n"
             "- `@{bot_name} <guidance>` - Short form for /fix with guidance\n"
             "- `/pr` - Open a pull request from the current branch\n"
             "- `/sync` - Pull the branch from upstream to keep it up to date\n"
