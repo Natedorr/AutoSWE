@@ -6,10 +6,14 @@ import subprocess
 
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_worktree_paths
-from autoswe.providers.base import PRResult, VCSProvider
+from autoswe.providers.base import CIStatus, PRResult, VCSProvider
 from autoswe.tracking.api import gh_get, gh_post
 
 dbg = get_debug_logger()
+
+# check-run/status conclusions that block a PR vs. that count as a pass
+_FAILURE_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required"}
+_SUCCESS_CONCLUSIONS = {"success", "neutral", "skipped"}
 
 
 class MissingScopeError(RuntimeError):
@@ -224,3 +228,76 @@ class GitHubVCS(VCSProvider):
             f"createLinkedBranch GraphQL error: "
             f"{[e.get('message', str(e)) for e in errors]}"
         )
+
+    def get_ci_status(self, repo_cfg: dict, branch: str, ref_sha: str | None = None) -> CIStatus:
+        """Combine check-runs and legacy commit status into one CIStatus.
+
+        Priority: any failure -> failure; else any queued/in_progress/pending
+        -> pending; else >=1 completed-success -> success; else none.
+        """
+        sha = ref_sha
+        if not sha:
+            try:
+                commit = gh_get(
+                    f"/repos/{self._owner}/{self._repo}/commits/{branch}",
+                    self._token, max_retries=1,
+                )
+                sha = commit.get("sha")
+            except Exception:
+                return CIStatus(state="none", summary="could not resolve branch head")
+        if not sha:
+            return CIStatus(state="none", summary="could not resolve branch head")
+
+        failing: list[str] = []
+        pending_count = 0
+        success_count = 0
+        total = 0
+
+        try:
+            check_runs = gh_get(
+                f"/repos/{self._owner}/{self._repo}/commits/{sha}/check-runs",
+                self._token, max_retries=1,
+            )
+            for run in check_runs.get("check_runs", []):
+                total += 1
+                name = run.get("name", "check")
+                if run.get("status") != "completed":
+                    pending_count += 1
+                elif run.get("conclusion") in _FAILURE_CONCLUSIONS:
+                    failing.append(name)
+                elif run.get("conclusion") in _SUCCESS_CONCLUSIONS:
+                    success_count += 1
+        except Exception:
+            pass  # best-effort — treat as no check-runs available
+
+        try:
+            status = gh_get(
+                f"/repos/{self._owner}/{self._repo}/commits/{sha}/status",
+                self._token, max_retries=1,
+            )
+            for s in status.get("statuses", []):
+                total += 1
+                context = s.get("context", "status")
+                state = s.get("state")
+                if state in ("failure", "error"):
+                    failing.append(context)
+                elif state == "pending":
+                    pending_count += 1
+                elif state == "success":
+                    success_count += 1
+        except Exception:
+            pass  # best-effort — treat as no legacy status available
+
+        if failing:
+            return CIStatus(
+                state="failure", total=total, failing=failing, pending_count=pending_count,
+                summary=f"{len(failing)} check(s) failing: {', '.join(failing)}",
+            )
+        if pending_count:
+            return CIStatus(
+                state="pending", total=total, pending_count=pending_count,
+                summary=f"{pending_count} check(s) pending",
+            )
+        if success_count:
+            return CIStatus(state="success", total=total, summary=f"{success_count} check(s) passed")
+        return CIStatus(state="none", total=total, summary="no checks found")

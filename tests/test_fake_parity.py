@@ -454,6 +454,32 @@ class TestProviderParity:
             "pat", body={"title": "PR", "sourceRefName": "b", "targetRefName": "main"})
         assert "pullRequestId" in az_resp
 
+    def test_both_get_ci_status_routes(self):
+        """Both fakes serve a settable CI status via get_ci_status()."""
+        from autoswe.providers.azure.vcs import AzureVCS
+        from autoswe.providers.github.vcs import GitHubVCS
+
+        gh = GitHubFake()
+        gh.set_ci_status("failure", name="build")
+        gh_mod, gh_original = gh.patch()
+        try:
+            vcs = GitHubVCS({"owner": "o", "repo": "r", "token": "tok"})
+            ci = vcs.get_ci_status({}, "autoswe/issue-1")
+        finally:
+            gh.unpatch(gh_mod, gh_original)
+        assert ci.state == "failure"
+        assert ci.failing == ["build"]
+
+        az = AzureFake()
+        az.set_ci_status("pending", name="build")
+        az_mod, az_original = az.patch()
+        try:
+            vcs = AzureVCS({"org": "o", "project": "p", "repo": "r", "pat": "tok"})
+            ci = vcs.get_ci_status({}, "autoswe/issue-1")
+        finally:
+            az.unpatch(az_mod, az_original)
+        assert ci.state == "pending"
+
     def test_both_update_comment(self):
         """Both providers must support updating existing comments."""
         gh = GitHubFake()

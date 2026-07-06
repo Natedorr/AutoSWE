@@ -21,7 +21,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from autoswe.orch.types import Effect
-from autoswe.providers.base import NormalizedComment, NormalizedIssue, PRResult
+from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue, PRResult
 from autoswe.tracking.comments import BOT_MARKER
 
 # ---------------------------------------------------------------------------
@@ -484,3 +484,133 @@ class TestApplyEffectCreatePr:
         vcs.find_existing_pr.assert_called_once()
         # open_pull_request must NOT be called when PR exists
         vcs.open_pull_request.assert_not_called()
+
+
+class TestApplyEffectCreatePrCiGate:
+    """Auto-PR-after-/fix: create_pr is CI-gated (no sync gate — already synced)."""
+
+    def _effect(self):
+        return Effect(
+            kind="create_pr",
+            pr_title="Fixes #1: Test",
+            pr_body="Fixes #1",
+            pr_head="autoswe/issue-1",
+            pr_base="main",
+        )
+
+    def test_github_create_pr_deferred_when_ci_pending(self):
+        """CI pending → PR creation deferred, deferral comment posted instead."""
+        tracker = MagicMock()
+        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
+        vcs = MagicMock()
+        vcs.find_existing_pr.return_value = None
+        vcs.get_ci_status.return_value = CIStatus(state="pending", pending_count=1)
+        repo_cfg = {"provider": "github"}
+        cfg = {"PR_REQUIRE_CI": True}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
+            from autoswe.providers.github.adapter import apply_effect
+            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
+
+        vcs.open_pull_request.assert_not_called()
+        tracker.post_comment.assert_called_once()
+        assert "deferred" in tracker.post_comment.call_args[0][2].lower()
+
+    def test_github_create_pr_deferred_when_ci_failing(self):
+        """CI failing → PR creation deferred."""
+        tracker = MagicMock()
+        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
+        vcs = MagicMock()
+        vcs.find_existing_pr.return_value = None
+        vcs.get_ci_status.return_value = CIStatus(state="failure", failing=["build"])
+        repo_cfg = {"provider": "github"}
+        cfg = {"PR_REQUIRE_CI": True}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
+            from autoswe.providers.github.adapter import apply_effect
+            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
+
+        vcs.open_pull_request.assert_not_called()
+        tracker.post_comment.assert_called_once()
+
+    def test_github_create_pr_proceeds_when_ci_success(self):
+        """CI success → PR created as normal."""
+        tracker = MagicMock()
+        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
+        vcs = MagicMock()
+        vcs.find_existing_pr.return_value = None
+        vcs.get_ci_status.return_value = CIStatus(state="success")
+        repo_cfg = {"provider": "github"}
+        cfg = {"PR_REQUIRE_CI": True}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
+            from autoswe.providers.github.adapter import apply_effect
+            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
+
+        vcs.open_pull_request.assert_called_once()
+        tracker.post_comment.assert_not_called()
+
+    def test_github_create_pr_proceeds_when_no_ci_configured(self):
+        """CI state 'none' (no checks configured) → treated as pass, PR created."""
+        tracker = MagicMock()
+        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
+        vcs = MagicMock()
+        vcs.find_existing_pr.return_value = None
+        vcs.get_ci_status.return_value = CIStatus(state="none")
+        repo_cfg = {"provider": "github"}
+        cfg = {"PR_REQUIRE_CI": True}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
+            from autoswe.providers.github.adapter import apply_effect
+            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
+
+        vcs.open_pull_request.assert_called_once()
+
+    def test_github_create_pr_ci_gate_disabled_ignores_failure(self):
+        """PR_REQUIRE_CI=False → CI failure does not block PR creation."""
+        tracker = MagicMock()
+        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
+        vcs = MagicMock()
+        vcs.find_existing_pr.return_value = None
+        vcs.get_ci_status.return_value = CIStatus(state="failure", failing=["build"])
+        repo_cfg = {"provider": "github"}
+        cfg = {"PR_REQUIRE_CI": False}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
+            from autoswe.providers.github.adapter import apply_effect
+            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
+
+        vcs.open_pull_request.assert_called_once()
+
+    def test_github_create_pr_no_gate_without_cfg(self):
+        """cfg=None (legacy call signature) skips gating entirely — backward compatible."""
+        tracker = MagicMock()
+        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
+        vcs = MagicMock()
+        vcs.find_existing_pr.return_value = None
+        vcs.get_ci_status.return_value = CIStatus(state="failure", failing=["build"])
+        repo_cfg = {"provider": "github"}
+
+        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
+            from autoswe.providers.github.adapter import apply_effect
+            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1")
+
+        vcs.get_ci_status.assert_not_called()
+        vcs.open_pull_request.assert_called_once()
+
+    def test_azure_create_pr_deferred_when_ci_failing(self):
+        """Azure adapter applies the same CI gate."""
+        tracker = MagicMock()
+        queue = {"ado__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
+        vcs = MagicMock()
+        vcs.find_existing_pr.return_value = None
+        vcs.get_ci_status.return_value = CIStatus(state="failure", failing=["build"])
+        repo_cfg = {"provider": "azure"}
+        cfg = {"PR_REQUIRE_CI": True}
+
+        with patch("autoswe.providers.azure.adapter.get_vcs", return_value=vcs):
+            from autoswe.providers.azure.adapter import apply_effect
+            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "ado__owner_repo_1", cfg)
+
+        vcs.open_pull_request.assert_not_called()
+        tracker.post_comment.assert_called_once()

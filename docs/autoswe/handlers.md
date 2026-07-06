@@ -51,12 +51,17 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
 
 ## `/pr` — `ship.open_pr(task, cfg, repo_cfg)`
 
-- **No Claude invocation** — pure `VCSProvider.open_pull_request()` call.
+- **Preflight gate first** — before touching the VCS, `open_pr` calls `pr_gate.preflight_pr(task, cfg, repo_cfg, progress_callback=..., do_sync=True)` (see [config.md](config.md) for `PR_REQUIRE_SYNC` / `PR_REQUIRE_CI`):
+  - **Sync gate** (`PR_REQUIRE_SYNC`, default on): ensures the worktree, runs the existing `worktree.sync_branch()`. Already up to date → continue. Merge conflict → invoke `coder.resolve_sync_conflicts()`; if that can't resolve cleanly → gate fails. Rebase conflict → gate fails immediately (no auto-resolution for rebase).
+  - **CI gate** (`PR_REQUIRE_CI`, default on): calls `VCSProvider.get_ci_status()` for the branch head. `success` or `none` (repo has no CI configured) → pass. `pending` (checks still queued/running) or `failure` → gate fails.
+  - If either enabled gate fails, `open_pr` returns `"FAILED: <reason>"` without calling `find_existing_pr`/`open_pull_request` — same failed-emit path as any other `FAILED:`, so the user is told to `/retry` once the branch/CI is green.
+- **Then, if the gate passes:** pure `VCSProvider.open_pull_request()` call.
 - **Flow:** open the PR for `autoswe/issue-{N}` → `base_branch`; post a "Pull request opened" comment.
 - **Returns:**
   - `"DONE: PR <url>"` — PR created
+  - `"FAILED: <gate reason>"` — blocked by the sync or CI preflight gate
   - `"FAILED: could not create PR: …"` — VCS error
-- **Direction:** because this needs no agent, `/pr` requests are meant to be resolved in the poller's quick-posts pass (`pipeline.md` Stage 4) rather than competing for a slot in the session loop. (Auto-PR after a successful `/fix` still happens inside the dispatch loop — see `pipeline.md` Stage 7.)
+- **Direction:** because this needs no agent (aside from the occasional sync-conflict resolution), `/pr` requests are meant to be resolved in the poller's quick-posts pass (`pipeline.md` Stage 4) rather than competing for a slot in the session loop. (Auto-PR after a successful `/fix` still happens inside the dispatch loop — see `pipeline.md` Stage 7 — and applies the CI gate only, since the branch was already synced by `_run_fix_with_sync`.)
 
 ## `/sync` — inline in dispatch loop
 

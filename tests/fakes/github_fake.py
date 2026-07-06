@@ -86,6 +86,8 @@ class GitHubFake:
         self._next_pr_number = 1
         self._authenticated_user = T.github_user()
         self._owned_repos: list[dict] = []
+        self._ci_state = "none"  # "success" | "pending" | "failure" | "none"
+        self._ci_name = "CI"
 
     # ------------------------------------------------------------------
     # Loading initial state from scenario fixtures
@@ -126,6 +128,17 @@ class GitHubFake:
             self._authenticated_user = copy.deepcopy(state["authenticated_user"])
         if state.get("owned_repos"):
             self._owned_repos = [copy.deepcopy(r) for r in state["owned_repos"]]
+        if state.get("ci_status"):
+            self.set_ci_status(state["ci_status"])
+
+    def set_ci_status(self, state: str, name: str = "CI") -> None:
+        """Configure the CI status served by check-runs/status/commit routes.
+
+        *state* is one of ``"success"``, ``"pending"``, ``"failure"``, ``"none"``
+        (no checks configured — the default).
+        """
+        self._ci_state = state
+        self._ci_name = name
 
     def add_issue(self, number: int, payload: dict, labels: list[str],
                   comments: list[dict] | None = None) -> None:
@@ -355,6 +368,39 @@ class GitHubFake:
                         "id": len(self.recorded_calls) + 2000,
                     }
             return {}
+
+        # ---- GET /repos/{o}/{r}/commits/{sha}/check-runs ----
+        if method == "GET" and "/commits/" in path and path.endswith("/check-runs"):
+            template = copy.deepcopy(T.github_list_check_runs())
+            if self._ci_state == "none":
+                template["check_runs"] = []
+                template["total_count"] = 0
+            elif self._ci_state == "pending":
+                template["check_runs"] = [
+                    {"id": 1, "name": self._ci_name, "status": "in_progress", "conclusion": None}
+                ]
+            elif self._ci_state == "failure":
+                template["check_runs"] = [
+                    {"id": 1, "name": self._ci_name, "status": "completed", "conclusion": "failure"}
+                ]
+            else:  # success
+                template["check_runs"] = [
+                    {"id": 1, "name": self._ci_name, "status": "completed", "conclusion": "success"}
+                ]
+            template["total_count"] = len(template["check_runs"])
+            return template
+
+        # ---- GET /repos/{o}/{r}/commits/{sha}/status (legacy combined status) ----
+        if method == "GET" and "/commits/" in path and path.endswith("/status"):
+            # Combined status left empty — check-runs alone carry the fake's CI signal.
+            template = copy.deepcopy(T.github_combined_status())
+            template["statuses"] = []
+            template["total_count"] = 0
+            return template
+
+        # ---- GET /repos/{o}/{r}/commits/{ref} (resolve branch head sha) ----
+        if method == "GET" and "/commits/" in path:
+            return copy.deepcopy(T.github_get_commit())
 
         # POST /repos/{o}/{r}/check-runs
         if method == "POST" and "/check-runs" in path:

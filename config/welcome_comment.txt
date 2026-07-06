@@ -6,6 +6,7 @@ autoSWE picked up this issue (`{{SLUG}}`).
 - `/fix` - Implement the fix (runs Claude with code-editing permissions)
 - `/fix --branch <name>` - Fix on a specific branch (default: main)
 - `/fix with <guidance>` - Same as /fix but appends guidance to the prompt
+- `/review` - Review the changes on the branch (read-only, posts findings)
 - `/pr` - Open a pull request from the current branch
 - `/sync` - Pull the branch from upstream to keep it up to date
 - `/retry` - Retry a failed task (resets attempt counter)

@@ -146,7 +146,9 @@ The `emit()` layer maps `DispatchResult.done_content` to status transitions:
 
 ## Stage 6 — Auto-PR
 
-After a successful `/fix` (`autoswe_status → fixed`), if `AUTO_CREATE_PR=true` and no PR exists for the branch, `emit()` includes a `create_pr` Effect. The adapter translates it to the provider's PR creation API.
+After a successful `/fix` (`autoswe_status → fixed`), if `AUTO_CREATE_PR=true` and no PR exists for the branch, `emit()` includes a `create_pr` Effect (this stays pure — no gating here).
+
+The adapter (`apply_effect` in `providers/github/adapter.py` / `providers/azure/adapter.py`) applies a **CI-only** preflight gate before translating the effect to the provider's PR creation API: `pr_gate.preflight_pr(task, cfg, repo_cfg, do_sync=False, vcs=vcs)`. No sync gate here — the branch was already synced pre-dispatch by `_run_fix_with_sync`. If `PR_REQUIRE_CI` is enabled and CI is `pending` or `failure`, the adapter skips PR creation and posts a "PR deferred" comment instead, telling the user to post `/pr` once checks are green. `AUTO_CREATE_PR` is therefore best-effort under this gate, not guaranteed on every `/fix` success. See [config.md](config.md) for `PR_REQUIRE_CI` / `PR_REQUIRE_SYNC`.
 
 ## Stage 7 — Post-Poll Bookkeeping
 

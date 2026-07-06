@@ -64,6 +64,8 @@ class AzureFake:
         self._org = ""
         self._project = ""
         self._repo = ""
+        self._ci_state = "none"  # "success" | "pending" | "failure" | "none"
+        self._ci_name = "CI"
 
     # ------------------------------------------------------------------
     # Loading initial state from scenario fixtures
@@ -99,6 +101,17 @@ class AzureFake:
             self._authenticated_user = copy.deepcopy(state["authenticated_user"])
         if state.get("repos"):
             self._repos = [copy.deepcopy(r) for r in state["repos"]]
+        if state.get("ci_status"):
+            self.set_ci_status(state["ci_status"])
+
+    def set_ci_status(self, state: str, name: str = "CI") -> None:
+        """Configure the CI status served by the build/builds route.
+
+        *state* is one of ``"success"``, ``"pending"``, ``"failure"``, ``"none"``
+        (no builds found — the default).
+        """
+        self._ci_state = state
+        self._ci_name = name
 
     # ------------------------------------------------------------------
     # Patchable _ado_request replacement
@@ -270,6 +283,24 @@ class AzureFake:
         if "/pullrequests" in path and method == "GET":
             return {"count": len(self.pulls),
                     "value": [copy.deepcopy(pr) for pr in self.pulls.values()]}
+
+        # ---- GET build/builds (CI status query) ----
+        if "build/builds" in path and method == "GET":
+            if self._ci_state == "none":
+                return {"count": 0, "value": []}
+            template = copy.deepcopy(T.azure_list_builds())
+            build = template["value"][0]
+            build["definition"]["name"] = self._ci_name
+            if self._ci_state == "pending":
+                build["status"] = "inProgress"
+                build["result"] = None
+            elif self._ci_state == "failure":
+                build["status"] = "completed"
+                build["result"] = "failed"
+            else:  # success
+                build["status"] = "completed"
+                build["result"] = "succeeded"
+            return {"count": 1, "value": [build]}
 
         return {}
 

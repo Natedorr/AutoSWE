@@ -5,10 +5,14 @@ so the orchestrator can stay provider-agnostic.
 """
 from __future__ import annotations
 
+import contextlib
+
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.orch.types import ApiState, Effect
 from autoswe.providers.base import IssueTracker, NormalizedComment
 from autoswe.providers.factory import get_vcs
+from autoswe.tracking.comments import BOT_MARKER
+from autoswe.vcs.pr_gate import preflight_pr
 
 dbg = get_debug_logger()
 
@@ -100,6 +104,7 @@ def apply_effect(
     issue_num: int,
     queue: dict,
     slug: str,
+    cfg: dict | None = None,
 ) -> None:
     """Translate a single Effect into GitHub API calls."""
     if effect.kind == "post_comment":
@@ -125,11 +130,22 @@ def apply_effect(
     elif effect.kind == "create_pr":
         vcs = get_vcs(repo_cfg)
         branch = effect.pr_head or ""
+        task_entry = queue.get(slug)
+        if cfg is not None and task_entry is not None:
+            ok, reason = preflight_pr(task_entry, cfg, repo_cfg, do_sync=False, vcs=vcs)
+            if not ok:
+                with contextlib.suppress(Exception):
+                    comment_id = tracker.post_comment(
+                        repo_cfg, issue_num,
+                        f"PR deferred — {reason}. Post `/pr` when ready.{BOT_MARKER}",
+                    )
+                    if comment_id:
+                        task_entry.setdefault("bot_comment_ids", []).append(comment_id)
+                return
         existing = vcs.find_existing_pr(repo_cfg, branch)
         if existing is None:
             # Enrich PR body if it only contains the bare "Fixes #N" text
             body = effect.pr_body or ""
-            task_entry = queue.get(slug)
             if task_entry and not body:
                 body = f"Fixes #{issue_num}"
             elif task_entry and body == f"Fixes #{issue_num}":

@@ -59,6 +59,9 @@ Translates a single `Effect` into the provider's API. The dispatch loop calls th
 | `find_existing_pr(repo_cfg, branch)` | `PRResult \| None` | Existing PR for branch |
 | `open_pull_request(repo_cfg, branch, base, title, body)` | `PRResult` | Open PR; raises on failure |
 | `link_branch_to_issue(issue_number, commit_sha, branch)` | `None` | Link branch to issue in platform UI (no-op default for Azure) |
+| `get_ci_status(repo_cfg, branch, ref_sha=None)` | `CIStatus` | Combined CI status for the branch head — used by `vcs/pr_gate.py` to gate `/pr` |
+
+`CIStatus` (`providers/base.py`) is a provider-agnostic dataclass: `state` (`"success" \| "pending" \| "failure" \| "none"`), `total`, `failing: list[str]`, `pending_count`, `summary`. `"none"` means no CI is configured on the repo — treated as a pass so autoSWE never blocks forever on repos without checks.
 
 
 ## Factory (`providers/factory.py`)
@@ -78,13 +81,13 @@ Both trackers populate `NormalizedIssue.state` (`"open"` / `"closed"`) so the di
 ## GitHub Implementation (`providers/github/`)
 
 - **`tracker.py:GitHubTracker`** — wraps `tracking/api.py` helpers. Lazily ensures labels. Normalizes `author_login` to `BOT`/`OWNER`/`AUTHOR` in `fetch_comments()`. `state` comes straight from the issue's `state` field. All outbound comment bodies (POST/PATCH) are passed through `redact_worktree_paths()` to prevent leaking host filesystem paths into comments.
-- **`vcs.py:GitHubVCS`** — HTTPS clone URL with `x-access-token:`, `gh pr create` with GitHub API fallback, `gh pr list` for existing PR check. PR title and body are redacted before creation. `link_branch_to_issue()` uses the GitHub GraphQL API (`createLinkedBranch` mutation) — fetches the issue `node_id` via REST, then POSTs to `/graphql`. Handles "already exists" errors as idempotent no-ops. Raises `MissingScopeError` on permission failures.
+- **`vcs.py:GitHubVCS`** — HTTPS clone URL with `x-access-token:`, `gh pr create` with GitHub API fallback, `gh pr list` for existing PR check. PR title and body are redacted before creation. `link_branch_to_issue()` uses the GitHub GraphQL API (`createLinkedBranch` mutation) — fetches the issue `node_id` via REST, then POSTs to `/graphql`. Handles "already exists" errors as idempotent no-ops. Raises `MissingScopeError` on permission failures. `get_ci_status()` combines check-runs (`GET /commits/{sha}/check-runs`) and the legacy combined status (`GET /commits/{sha}/status`): any failure/cancelled/timed_out/action_required conclusion wins, else any non-completed run is `pending`, else `success` if at least one check passed, else `none`.
 - **`adapter.py`** — `read_api()` and `apply_effect()` bridge the tracker/VCS to the orchestrator.
 
 ## Azure Implementation (`providers/azure/`)
 
 - **`tracker.py:AzureTracker`** — WIQL for discovery, batch API for expand, tag-based label mirror (semicolons in `System.Tags`). Normalizes `author_login` same way as GitHub. `state` maps `System.State`: `Closed`/`Done`/`Removed` → `"closed"`, otherwise `"open"`. HTML stripping via `_StripHTML` parser preserves `<AUTOSWE_*>` tags. All outbound comment bodies are redacted via `redact_worktree_paths()`.
-- **`vcs.py:AzureVCS`** — Azure Repos REST API for clone URL, PR creation, PR discovery. PAT embedded in HTTPS URL. PR title and body are redacted before creation. `link_branch_to_issue()` is a documented no-op (Azure DevOps has no equivalent feature).
+- **`vcs.py:AzureVCS`** — Azure Repos REST API for clone URL, PR creation, PR discovery. PAT embedded in HTTPS URL. PR title and body are redacted before creation. `link_branch_to_issue()` is a documented no-op (Azure DevOps has no equivalent feature). `get_ci_status()` queries the most recent Azure Pipelines build for the branch (`GET .../_apis/build/builds?branchName=...`); `notStarted`/`inProgress` → `pending`, `failed`/`canceled` → `failure`, `succeeded`/`partiallySucceeded` → `success`, no builds → `none`.
 - **`adapter.py`** — `read_api()` and `apply_effect()` bridge the tracker/VCS to the orchestrator. Sets `is_bot` from `bot_ids` membership and body marker fallback.
 
 Both providers share `autoswe/issue-{N}` branch naming.

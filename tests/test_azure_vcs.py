@@ -272,3 +272,69 @@ def test_open_pull_request_develop_base(vcs, mock_ado_request, ado_route_table):
 
     call = mock_ado_request.calls[0]
     assert call["body"]["targetRefName"] == "refs/heads/develop"
+
+
+# -- get_ci_status --
+
+_BUILDS_PREFIX = "https://dev.azure.com/my-org/my-project/_apis/build/builds"
+
+
+def test_get_ci_status_success(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded", "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+
+    assert ci.state == "success"
+
+
+def test_get_ci_status_pending(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "inProgress", "result": None, "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+
+    assert ci.state == "pending"
+    assert ci.pending_count == 1
+
+
+def test_get_ci_status_failure(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "failed", "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+
+    assert ci.state == "failure"
+    assert ci.failing == ["CI"]
+
+
+def test_get_ci_status_canceled_is_failure(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "canceled", "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+
+    assert ci.state == "failure"
+
+
+def test_get_ci_status_no_builds_is_none(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {"count": 0, "value": []}
+
+    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+
+    assert ci.state == "none"
+
+
+def test_get_ci_status_request_error_is_none(vcs, mock_ado_request, ado_route_table):
+    """No route stubbed → request raises → treated as none, not a crash."""
+    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+
+    assert ci.state == "none"

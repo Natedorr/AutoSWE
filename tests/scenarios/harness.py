@@ -421,6 +421,10 @@ def build_test_cfg(isolated_dir: Path, provider: str = "github", backend: str = 
     ``FIX_HARNESS``, and ``REVIEW_HARNESS`` to ``"codex"`` so that all three
     phases resolve to the Codex backend.
     """
+    # Disable the CLAUDE.md init session in tests — it would consume a
+    # scripted ClaudeFake response and break the transition matrix.
+    os.environ["AUTOSWE_SKIP_INIT_SESSION"] = "1"
+
     cfg: dict[str, Any] = {
         "AGENT_TIMEOUT": 7200,
         "MAX_ATTEMPTS": 3,

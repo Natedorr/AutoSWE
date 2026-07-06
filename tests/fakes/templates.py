@@ -97,6 +97,21 @@ def github_list_pulls() -> list:
     return load_template("github", "list_pulls")
 
 
+def github_get_commit() -> dict:
+    """Template for GET /repos/{o}/{r}/commits/{ref}."""
+    return load_template("github", "get_commit")
+
+
+def github_list_check_runs() -> dict:
+    """Template for GET /repos/{o}/{r}/commits/{sha}/check-runs."""
+    return load_template("github", "list_check_runs")
+
+
+def github_combined_status() -> dict:
+    """Template for GET /repos/{o}/{r}/commits/{sha}/status."""
+    return load_template("github", "get_combined_status")
+
+
 def azure_current_user() -> dict:
     """Template for GET current user."""
     return load_template("azure", "get_current_user")
@@ -150,3 +165,8 @@ def azure_list_pullrequests() -> dict:
 def azure_create_pullrequest() -> dict:
     """Template for POST pullrequest."""
     return load_template("azure", "create_pullrequest")
+
+
+def azure_list_builds() -> dict:
+    """Template for GET build/builds."""
+    return load_template("azure", "list_builds")

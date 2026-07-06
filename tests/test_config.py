@@ -169,6 +169,59 @@ def test_load_repos_config_missing_returns_empty(isolated_autoswe_dir):
     assert result == {}
 
 
+# ---------------------------------------------------------------------------
+# PR_REQUIRE_SYNC / PR_REQUIRE_CI (PR preflight gate flags)
+# ---------------------------------------------------------------------------
+
+def test_load_config_pr_gate_flags_default_true(isolated_autoswe_dir):
+    """PR_REQUIRE_SYNC and PR_REQUIRE_CI default to True (gate on by default)."""
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_REQUIRE_SYNC"] is True
+    assert cfg["PR_REQUIRE_CI"] is True
+
+
+def test_load_config_pr_gate_flags_env_override(isolated_autoswe_dir, monkeypatch):
+    monkeypatch.setenv("PR_REQUIRE_SYNC", "false")
+    monkeypatch.setenv("PR_REQUIRE_CI", "false")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_REQUIRE_SYNC"] is False
+    assert cfg["PR_REQUIRE_CI"] is False
+
+
+def test_load_config_pr_gate_flags_from_env_file(isolated_autoswe_dir):
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text(
+        "PR_REQUIRE_SYNC=false\nPR_REQUIRE_CI=false\n",
+        encoding="utf-8",
+    )
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_REQUIRE_SYNC"] is False
+    assert cfg["PR_REQUIRE_CI"] is False
+
+
+def test_pr_gate_flags_per_repo_override():
+    """pr_gate._flag lets a repo_cfg override (lowercase key) beat the global cfg."""
+    from autoswe.vcs.pr_gate import _flag
+
+    cfg = {"PR_REQUIRE_SYNC": True, "PR_REQUIRE_CI": True}
+
+    assert _flag("PR_REQUIRE_SYNC", cfg, {}) is True
+    assert _flag("PR_REQUIRE_SYNC", cfg, {"pr_require_sync": False}) is False
+    assert _flag("PR_REQUIRE_CI", cfg, {"pr_require_ci": False}) is False
+    assert _flag("PR_REQUIRE_CI", cfg, {"pr_require_ci": True}) is True
+
+
 def test_load_repos_config_parses_json(isolated_autoswe_dir):
     repos_json = isolated_autoswe_dir / "config" / "repos.json"
     repos_json.write_text(
@@ -786,3 +839,35 @@ def test_worktree_orphan_policy_file_override(isolated_autoswe_dir):
 
     cfg = load_config()
     assert cfg["WORKTREE_ORPHAN_POLICY"] == "log_only"
+
+
+# ---------------------------------------------------------------------------
+# INIT_PROMPT_FILE
+# ---------------------------------------------------------------------------
+
+
+def test_init_prompt_file_resolves(isolated_autoswe_dir):
+    """INIT_PROMPT_FILE constant points to a valid path."""
+    from autoswe.core.config import INIT_PROMPT_FILE
+
+    assert INIT_PROMPT_FILE.name == "init.txt"
+    assert INIT_PROMPT_FILE.parent.name == "prompts"
+
+
+def test_load_init_prompt_exists_on_real_project():
+    """load_init_prompt returns the bundled prompt for the real project."""
+    from autoswe.harness.prompts import load_init_prompt
+
+    prompt = load_init_prompt()
+    assert "CLAUDE.md" in prompt
+    assert "project" in prompt.lower() or "analyze" in prompt.lower()
+
+
+def test_load_init_prompt_fallback():
+    """load_init_prompt returns a non-empty fallback when no file exists."""
+    from autoswe.harness.prompts import load_init_prompt
+
+    # Pass a repo_cfg that points to a non-existent override path
+    prompt = load_init_prompt({"init_prompt": "/nonexistent/init.txt"})
+    assert len(prompt) > 50
+    assert "CLAUDE.md" in prompt

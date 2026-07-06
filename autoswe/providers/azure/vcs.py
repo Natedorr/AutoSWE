@@ -7,7 +7,12 @@ from __future__ import annotations
 
 from autoswe.core.redact import redact_worktree_paths
 from autoswe.providers.azure.api import _ado_api_version, _encode_path_segment, ado_get, ado_post
-from autoswe.providers.base import PRResult, VCSProvider
+from autoswe.providers.base import CIStatus, PRResult, VCSProvider
+
+# Azure Pipelines build statuses/results
+_PENDING_STATUSES = {"notStarted", "inProgress", "postponed", "cancelling"}
+_FAILURE_RESULTS = {"failed", "canceled"}
+_SUCCESS_RESULTS = {"succeeded", "partiallySucceeded"}
 
 
 class AzureVCS(VCSProvider):
@@ -122,3 +127,36 @@ class AzureVCS(VCSProvider):
         branch: str,
     ) -> None:
         """Azure DevOps does not have an equivalent feature — no-op."""
+
+    def get_ci_status(self, repo_cfg: dict, branch: str, ref_sha: str | None = None) -> CIStatus:
+        """Return CI status from the most recent Azure Pipelines build for *branch*.
+
+        ``ref_sha`` is unused — Azure Pipelines builds are queried by branch,
+        not commit SHA (kept for VCSProvider protocol parity with GitHub).
+        """
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/build/builds"
+            f"?branchName=refs/heads/{branch}&statusFilter=all&$top=1"
+            f"&queryOrder=queueTimeDescending"
+        )
+        try:
+            result = ado_get(path, self._pat)
+        except Exception:
+            return CIStatus(state="none", summary="could not query builds")
+
+        builds = result.get("value", [])
+        if not builds:
+            return CIStatus(state="none", summary="no builds found")
+
+        latest = builds[0]
+        name = (latest.get("definition") or {}).get("name", "build")
+        status = latest.get("status")
+        build_result = latest.get("result")
+
+        if status in _PENDING_STATUSES:
+            return CIStatus(state="pending", total=1, pending_count=1, summary=f"build '{name}' in progress")
+        if build_result in _FAILURE_RESULTS:
+            return CIStatus(state="failure", total=1, failing=[name], summary=f"build '{name}' failed")
+        if build_result in _SUCCESS_RESULTS:
+            return CIStatus(state="success", total=1, summary=f"build '{name}' succeeded")
+        return CIStatus(state="none", total=1, summary="no build result")

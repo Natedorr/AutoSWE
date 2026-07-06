@@ -150,6 +150,9 @@ def _to_azure_state(gh_state: dict) -> dict:
             "id": "1",
         }
 
+    if gh_state.get("ci_status"):
+        az["ci_status"] = gh_state["ci_status"]
+
     return az
 
 
@@ -665,6 +668,90 @@ TRANSITIONS: list[dict[str, Any]] = [
         "start": {
             "issue": {"body": "Fix.\n\n/fix"},
             "labels": ["autoswe:fixed"],
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:shipped",
+            "autoswe_status": "shipped",
+            "comment_contains": ["Completed with command", "/pr"],
+        },
+    },
+    # ---- PR preflight gate: CI pending blocks ----
+    {
+        "name": "pr_blocked_by_ci_pending",
+        "description": "Fixed task; /pr from user while CI is still running → stays failed with gate message",
+        "skip_providers": ["azure"],
+        "start": {
+            "issue": {"body": "Fix.\n\n/fix"},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "pending",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:failed",
+            "autoswe_status": "failed",
+            "comment_contains": ["Failed:", "CI still running"],
+        },
+    },
+    # ---- PR preflight gate: clean sync + CI success ships ----
+    {
+        "name": "pr_ships_when_ci_success",
+        "description": "Fixed task; /pr from user with a clean sync and green CI → shipped",
+        "skip_providers": ["azure"],
+        "start": {
+            "issue": {"body": "Fix.\n\n/fix"},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "success",
             "comments": [
                 {
                     "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",

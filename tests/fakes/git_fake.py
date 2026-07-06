@@ -157,7 +157,8 @@ class GitFake:
 
         # Patch into modules that import worktree
         import sys as _sys
-        for mod_name in ("autoswe.harness.planner", "autoswe.harness.coder", "autoswe.orch.run"):
+        for mod_name in ("autoswe.harness.planner", "autoswe.harness.coder", "autoswe.orch.run",
+                         "autoswe.vcs.pr_gate"):
             if mod_name in _sys.modules:
                 mod = _sys.modules[mod_name]
                 if hasattr(mod, "worktree_mod") or hasattr(mod, "worktree"):
