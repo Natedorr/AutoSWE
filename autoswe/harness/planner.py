@@ -246,7 +246,7 @@ def _plan_session(
     repo_cfg: dict,
     cfg: dict,
     *,
-    prompt_factory: None | Callable[[Path], str] = None,
+    prompt_factory: Callable[[Path], str] | None = None,
     prompt: str | None = None,
     resume_session_id: str | None,
     label: str,
