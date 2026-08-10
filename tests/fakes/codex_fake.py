@@ -77,7 +77,7 @@ class FakeStreamReader:
         self._index += 1
         return line
 
-    async def read(self) -> bytes:
+    async def read(self, size: int = -1) -> bytes:
         """Return remaining bytes (used for stderr — always b"")."""
         return b""
 
