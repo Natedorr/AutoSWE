@@ -345,9 +345,11 @@ class CodexBackend:
                     if total_bytes > _MAX_STREAM_BYTES:
                         log(f"[CODEX] stdout exceeded {_MAX_STREAM_BYTES} bytes — truncating stream")
                         acc.turn_failed = True
-                        # Drain remaining data without parsing to prevent deadlock
+                        # Drain remaining data without parsing to prevent deadlock.
+                        # Use read() not readline() — if the child writes
+                        # non-newline data, readline() would block forever.
                         while True:
-                            leftover = await process.stdout.readline()
+                            leftover = await process.stdout.read(64 * 1024)
                             if not leftover:
                                 break
                         break
