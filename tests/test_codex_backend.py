@@ -1186,11 +1186,11 @@ def test_codex_stream_limit_stdout_truncates():
 
 
 def test_codex_stream_limit_within_bounds():
-    """Normal-sized stream (~100KB) completes without hitting the limit."""
+    """Normal-sized stream (~1KB) completes without hitting the limit."""
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
 
-    # Build a ~10KB JSONL stream — well within 16MB
+    # Build a ~1KB JSONL stream — well within 16MB
     jsonl = _jsonl(
         {"type": "thread.started", "thread_id": "t-1"},
     )
@@ -1223,9 +1223,12 @@ def test_codex_stream_limit_stderr_truncates():
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
     jsonl = _make_success_jsonl()
 
-    # Create a mock that returns a lot of stderr data
+    # Create a mock that returns a lot of stderr data (64KB is enough for
+    # 2+ read(64KB) calls to exceed a 1KB limit, then the drain loop fires)
     class _LargeStderrProcess(_MockProcess):
-        _large_stderr: bytes = b"X" * (16 * 1024 * 1024)
+        def __init__(self, stdout: str):
+            super().__init__(stdout=stdout)
+            self._large_stderr = b"X" * (64 * 1024)
 
         async def read(self, size: int = -1) -> bytes:
             if size == -1:
@@ -1251,6 +1254,61 @@ def test_codex_stream_limit_stderr_truncates():
     result = asyncio.run(_run())
     # Should still succeed — stderr is non-critical
     assert result.subtype == "success"
+
+
+def test_codex_stream_limit_drains_pipe_after_truncation():
+    """After stdout limit, the pipe is fully drained (not deadlocked).
+
+    Verifies the drain loop consumes all remaining data after hitting the
+    limit, preventing child process pipe-buffer deadlock.
+    """
+    from autoswe.harness.backends import codex as codex_mod
+
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+
+    # Build stdout that exceeds the limit by many lines
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+    )
+    # Each line is ~80 bytes, so 100 lines = ~8KB
+    for i in range(100):
+        jsonl += json.dumps({
+            "type": "item.completed",
+            "item": {"id": f"i{i}", "type": "agent_message", "text": f"Msg {i} " + "x" * 30},
+        }) + "\n"
+
+    # Mock that tracks how many readline calls were made
+    class _DrainingProcess(_MockProcess):
+        def __init__(self, stdout: str):
+            super().__init__(stdout=stdout)
+            self.readline_count = 0
+
+        async def readline(self) -> bytes:
+            self.readline_count += 1
+            return await super().readline()
+
+    small_limit = 500  # ~6 lines worth
+
+    async def _run():
+        proc = _DrainingProcess(stdout=jsonl)
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            orig = codex_mod._MAX_STREAM_BYTES
+            try:
+                codex_mod._MAX_STREAM_BYTES = small_limit
+                return await _run_backend(backend, spec), proc
+            finally:
+                codex_mod._MAX_STREAM_BYTES = orig
+
+    result, proc = asyncio.run(_run())
+    # The process should have read all lines + 1 EOF read (drain loop consumes rest)
+    total_lines = len(proc._stdout_lines)
+    assert proc.readline_count == total_lines + 1, (
+        f"Expected {total_lines + 1} readline calls ({total_lines} lines + 1 EOF), "
+        f"got {proc.readline_count}"
+    )
+    assert result.subtype == "error"
 
 
 # ---------------------------------------------------------------------------

@@ -302,7 +302,11 @@ class CodexBackend:
         acc = _CodexAccumulator()
 
         async def read_stderr() -> bytes:
-            """Collect stderr output in chunks, bounded by _MAX_STREAM_BYTES."""
+            """Collect stderr output in chunks, bounded by _MAX_STREAM_BYTES.
+
+            After the limit is hit, the pipe is drained (discarding data) so the
+            child process does not block on a full pipe buffer.
+            """
             if not process.stderr:
                 return b""
             chunks: list[bytes] = []
@@ -314,6 +318,11 @@ class CodexBackend:
                 total_bytes += len(chunk)
                 if total_bytes > _MAX_STREAM_BYTES:
                     log(f"[CODEX] stderr exceeded {_MAX_STREAM_BYTES} bytes — truncating")
+                    # Drain remaining data without accumulating to prevent deadlock
+                    while True:
+                        leftover = await process.stderr.read(64 * 1024)
+                        if not leftover:
+                            break
                     break
                 chunks.append(chunk)
             return b"".join(chunks)
@@ -322,7 +331,9 @@ class CodexBackend:
             """Read stdout line-by-line, parse JSONL events, fire callbacks.
 
             Bounded by _MAX_STREAM_BYTES to prevent pipe-buffer deadlock
-            and unbounded memory growth.
+            and unbounded memory growth.  After the limit is hit, the pipe
+            is drained (discarding data) so the child process does not block
+            on a full pipe buffer.
             """
             if process.stdout:
                 total_bytes = 0
@@ -334,6 +345,11 @@ class CodexBackend:
                     if total_bytes > _MAX_STREAM_BYTES:
                         log(f"[CODEX] stdout exceeded {_MAX_STREAM_BYTES} bytes — truncating stream")
                         acc.turn_failed = True
+                        # Drain remaining data without parsing to prevent deadlock
+                        while True:
+                            leftover = await process.stdout.readline()
+                            if not leftover:
+                                break
                         break
                     text = raw.decode("utf-8", errors="replace")
                     _parse_jsonl_line(
