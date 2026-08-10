@@ -188,29 +188,29 @@ def test_run_fix_passes_mcp_servers(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_extract_plan_output_logs_deprecation_for_plan_tag(tmp_path, mock_gh_post_comment):
-    """Using <AUTOSWE_PLAN> tags should log a deprecation warning."""
+    """Using <AUTOSWE_PLAN> tags should log a deprecation info message."""
     from autoswe.harness.planner import _extract_plan_output
 
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
-        with patch("autoswe.harness.planner.dbg.warning") as mock_warn:
+        with patch("autoswe.harness.planner.dbg.info") as mock_info:
             _extract_plan_output("<AUTOSWE_PLAN>\nX\n</AUTOSWE_PLAN>")
 
-    assert mock_warn.called
-    assert "deprecated" in mock_warn.call_args[0][0].lower()
-    assert "post_plan" in mock_warn.call_args[0][0]
+    assert mock_info.called
+    assert "deprecated" in mock_info.call_args[0][0].lower()
+    assert "post_plan" in mock_info.call_args[0][0]
 
 
 def test_extract_plan_output_logs_deprecation_for_questions_tag(tmp_path, mock_gh_post_comment):
-    """Using <AUTOSWE_QUESTIONS> tags should log a deprecation warning."""
+    """Using <AUTOSWE_QUESTIONS> tags should log a deprecation info message."""
     from autoswe.harness.planner import _extract_plan_output
 
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
-        with patch("autoswe.harness.planner.dbg.warning") as mock_warn:
+        with patch("autoswe.harness.planner.dbg.info") as mock_info:
             _extract_plan_output("<AUTOSWE_QUESTIONS>\n1. Q?\n</AUTOSWE_QUESTIONS>")
 
-    assert mock_warn.called
-    assert "deprecated" in mock_warn.call_args[0][0].lower()
-    assert "post_question" in mock_warn.call_args[0][0]
+    assert mock_info.called
+    assert "deprecated" in mock_info.call_args[0][0].lower()
+    assert "post_question" in mock_info.call_args[0][0]
 
 
 def test_extract_plan_output_no_deprecation_for_plan_file():
