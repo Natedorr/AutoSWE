@@ -92,8 +92,12 @@ class _MockProcess:
             return line.encode()
         return b""
 
-    async def read(self) -> bytes:
-        return self._stderr_bytes
+    async def read(self, size: int = -1) -> bytes:
+        if size == -1:
+            return self._stderr_bytes
+        result = self._stderr_bytes[:size]
+        self._stderr_bytes = self._stderr_bytes[size:]
+        return result
 
 
 async def _run_backend(backend, spec):
@@ -1138,6 +1142,115 @@ def test_backend_has_capability_codex():
 # Note: Backend parity tests (RunSpec→RunResult contract, capability matrix,
 # protocol conformance) have moved to tests/test_backend_parity.py.
 # That file mirrors the provider parity pattern (test_fake_parity.py).
+
+
+# ---------------------------------------------------------------------------
+# Stream limit tests — 16 MB cap on stdout/stderr
+
+
+def test_codex_stream_limit_stdout_truncates():
+    """stdout exceeding _MAX_STREAM_BYTES sets turn_failed → subtype='error'."""
+    from autoswe.harness.backends import codex as codex_mod
+
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+
+    # Each JSONL line is ~100 bytes. 1000 lines ≈ 100 KB.
+    # Patch _MAX_STREAM_BYTES to 500 bytes so we hit the threshold quickly.
+    small_limit = 500
+    large_jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+    )
+    # Add enough lines to exceed the small limit
+    for i in range(1000):
+        large_jsonl += json.dumps({
+            "type": "item.completed",
+            "item": {"id": f"i{i}", "type": "agent_message", "text": f"Message {i} " + "x" * 50},
+        }) + "\n"
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=large_jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            # Patch the module constant for this test only
+            orig = codex_mod._MAX_STREAM_BYTES
+            try:
+                codex_mod._MAX_STREAM_BYTES = small_limit
+                return await _run_backend(backend, spec)
+            finally:
+                codex_mod._MAX_STREAM_BYTES = orig
+
+    result = asyncio.run(_run())
+    assert result.subtype == "error", "Stream over limit should produce subtype=error"
+    # Partial text should still be collected (text before truncation)
+    assert result.text, "Some text should be collected before the limit is hit"
+
+
+def test_codex_stream_limit_within_bounds():
+    """Normal-sized stream (~100KB) completes without hitting the limit."""
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+
+    # Build a ~10KB JSONL stream — well within 16MB
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+    )
+    for i in range(10):
+        jsonl += json.dumps({
+            "type": "item.completed",
+            "item": {"id": f"i{i}", "type": "agent_message", "text": f"Message {i}"},
+        }) + "\n"
+    jsonl += json.dumps({
+        "type": "turn.completed",
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+    }) + "\n"
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.subtype == "success"
+    assert result.session_id == "t-1"
+    assert result.text  # should have collected all messages
+
+
+def test_codex_stream_limit_stderr_truncates():
+    """stderr exceeding _MAX_STREAM_BYTES is truncated (no crash)."""
+    from autoswe.harness.backends import codex as codex_mod
+
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    jsonl = _make_success_jsonl()
+
+    # Create a mock that returns a lot of stderr data
+    class _LargeStderrProcess(_MockProcess):
+        _large_stderr: bytes = b"X" * (16 * 1024 * 1024)
+
+        async def read(self, size: int = -1) -> bytes:
+            if size == -1:
+                result = self._large_stderr
+                self._large_stderr = b""
+                return result
+            result = self._large_stderr[:size]
+            self._large_stderr = self._large_stderr[size:]
+            return result
+
+    small_limit = 1024  # 1 KB
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_LargeStderrProcess(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            orig = codex_mod._MAX_STREAM_BYTES
+            try:
+                codex_mod._MAX_STREAM_BYTES = small_limit
+                return await _run_backend(backend, spec)
+            finally:
+                codex_mod._MAX_STREAM_BYTES = orig
+
+    result = asyncio.run(_run())
+    # Should still succeed — stderr is non-critical
+    assert result.subtype == "success"
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,13 @@ from autoswe.core.logging_utils import log
 from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.backends.codex_pricing import estimate_cost
 
+# Max bytes allowed on stdout/stderr pipes before we truncate and
+# flag the turn as failed.  Prevents pipe-buffer deadlock (~64KB on
+# Linux) and unbounded memory growth when the child process produces
+# pathological output.
+_MAX_STREAM_BYTES = 16 * 1024 * 1024  # 16 MB
+
+
 # ---------- Streaming accumulator ----------
 
 
@@ -295,17 +302,38 @@ class CodexBackend:
         acc = _CodexAccumulator()
 
         async def read_stderr() -> bytes:
-            """Collect all stderr output (non-JSON progress/debug)."""
-            if process.stderr:
-                return await process.stderr.read()
-            return b""
+            """Collect stderr output in chunks, bounded by _MAX_STREAM_BYTES."""
+            if not process.stderr:
+                return b""
+            chunks: list[bytes] = []
+            total_bytes = 0
+            while True:
+                chunk = await process.stderr.read(64 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > _MAX_STREAM_BYTES:
+                    log(f"[CODEX] stderr exceeded {_MAX_STREAM_BYTES} bytes — truncating")
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
 
         async def read_stdout_jsonl() -> None:
-            """Read stdout line-by-line, parse JSONL events, fire callbacks."""
+            """Read stdout line-by-line, parse JSONL events, fire callbacks.
+
+            Bounded by _MAX_STREAM_BYTES to prevent pipe-buffer deadlock
+            and unbounded memory growth.
+            """
             if process.stdout:
+                total_bytes = 0
                 while True:
                     raw = await process.stdout.readline()
                     if not raw:
+                        break
+                    total_bytes += len(raw)
+                    if total_bytes > _MAX_STREAM_BYTES:
+                        log(f"[CODEX] stdout exceeded {_MAX_STREAM_BYTES} bytes — truncating stream")
+                        acc.turn_failed = True
                         break
                     text = raw.decode("utf-8", errors="replace")
                     _parse_jsonl_line(
