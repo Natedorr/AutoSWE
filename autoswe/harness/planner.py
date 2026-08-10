@@ -164,12 +164,12 @@ def _extract_plan_output(text: str, plan_file: Path | None = None, *, allow_fs_s
     questions_m = _QUESTIONS_RE.search(text or "")
 
     if plan_m:
-        dbg.warning("PLAN: deprecated <AUTOSWE_PLAN> tag used — migrate to mcp__autoswe_comment__post_plan tool")
+        dbg.info("PLAN: deprecated <AUTOSWE_PLAN> tag used — migrate to mcp__autoswe_comment__post_plan tool")
         plan_text = plan_m.group(1).strip()
         comment = f"## Plan\n\n{plan_text}\n\n_Reply with `/fix` to start coding._"
         return comment, "PLAN_READY", None
     elif questions_m:
-        dbg.warning("PLAN: deprecated <AUTOSWE_QUESTIONS> tag used — migrate to mcp__autoswe_comment__post_question tool")
+        dbg.info("PLAN: deprecated <AUTOSWE_QUESTIONS> tag used — migrate to mcp__autoswe_comment__post_question tool")
         q_text = questions_m.group(1).strip()
         comment = f"## Questions\n\n{q_text}\n\n_Reply in this thread to answer._"
         return comment, "WAITING: questions", None
