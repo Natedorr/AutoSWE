@@ -75,7 +75,7 @@ def main():
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
         title = lines[0].lstrip("# ").strip()
-        source = next((l.split("Source:", 1)[1].strip() for l in lines if l.startswith("Source:")), None)
+        source = next((line.split("Source:", 1)[1].strip() for line in lines if line.startswith("Source:")), None)
         if not source:
             print(f"[skip] {name}: no Source line")
             continue
@@ -83,7 +83,7 @@ def main():
         if page_md is None:
             fail.append((name, source, "fetch failed"))
             continue
-        page_h1 = next((l.lstrip("# ").strip() for l in page_md.splitlines() if l.startswith("# ")), "")
+        page_h1 = next((line.lstrip("# ").strip() for line in page_md.splitlines() if line.startswith("# ")), "")
         sections = split_h2(page_md)
         section_by_norm = {norm(st): (st, txt) for st, txt in sections}
 
@@ -92,7 +92,7 @@ def main():
             match = "whole page"
         else:
             # Primary key: the local file's own first H2 (its original section heading)
-            local_h2 = next((l[3:].strip() for l in lines if l.startswith("## ")), None)
+            local_h2 = next((line[3:].strip() for line in lines if line.startswith("## ")), None)
             hit = section_by_norm.get(norm(local_h2)) if local_h2 else None
             if hit is None:
                 hit = section_by_norm.get(norm(title))

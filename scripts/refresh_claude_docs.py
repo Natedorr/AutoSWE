@@ -61,7 +61,7 @@ def main():
     for rel in local_files():
         path = os.path.join(BASE_DIR, rel)
         with open(path, encoding="utf-8") as f:
-            local_title = next((l.lstrip("# ").strip() for l in f if l.startswith("# ")), "")
+            local_title = next((line.lstrip("# ").strip() for line in f if line.startswith("# ")), "")
         url = UPSTREAM + "/" + rel
         md = fetch(url)
         if md is not None and len(md) > 50:
