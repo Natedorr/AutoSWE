@@ -1,8 +1,8 @@
 # Azure DevOps REST API Reference
 
 > Grounding reference for Claude Code sessions — prevents hallucinated endpoints.
-> Fetched: 2026-05-03
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/
+> Fetched: 2026-07-19
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/?view=azure-devops-rest-7.1
 
 ---
 
@@ -17,10 +17,10 @@ https://dev.azure.com/{organization}/
 
 ### Azure DevOps Server / TFS (On-Premises)
 ```
-https://{instance}.visualstudio.com/
+https://{server:port}/tfs/{collection}
 ```
 
-For Azure DevOps Services, `{organization}` is your organization name. For on-premises, `{instance}` is your server name.
+For Azure DevOps Services, `{organization}` is your organization name. For on-premises, use your server host (default port `8080`) and collection (`DefaultCollection` is typical; the TFS resource path is `{server:port}/tfs/{collection}` per the current reference).
 
 ---
 
@@ -34,9 +34,9 @@ All API requests **must** include the `api-version` query parameter:
 ?api-version=7.1
 ```
 
-- `7.1` is the latest stable API version as of 2025
+- `7.1` is the latest stable API version as of 2026-07-19 (`7.2` exists only as preview, e.g. `7.2-preview.3`)
 - Omitting `api-version` returns an error — **this is required on ALL requests**
-- Check the [API version catalog](https://learn.microsoft.com/en-us/rest/api/azure/devops/#api-version-catalog) for the latest version
+- Check the [API and TFS version mapping](https://learn.microsoft.com/en-us/rest/api/azure/devops/?view=azure-devops-rest-7.1#api-and-tfs-version-mapping) for which REST API versions apply to your server version
 
 ### Version Compatibility
 

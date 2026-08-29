@@ -1,17 +1,17 @@
 # List Work Item Revisions
 
 > Grounding reference for Azure DevOps Work Items API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/revisions
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/revisions/list?view=azure-devops-rest-7.1
 
 ---
 
 ## List Work Item Revisions
 
 ```
-GET /{organization}/{project}/_apis/wit/workitems/{id}/revs?api-version=7.1
+GET /{organization}/{project}/_apis/wit/workItems/{id}/revisions?api-version=7.1
 ```
 
-Retrieve the revision history of a work item. Every field change creates a new revision, providing a complete audit trail.
+Retrieve the revision history of a work item, paged. Every field change creates a new revision, providing a complete audit trail.
 
 ### Parameters
 
@@ -30,6 +30,15 @@ Retrieve the revision history of a work item. Every field change creates a new r
 
 - **`api-version`** (string) (required)
   API version. Use `7.1` for latest stable.
+
+- **`$top`** (integer) (optional)
+  Maximum number of revisions to return.
+
+- **`$skip`** (integer) (optional)
+  Number of revisions to skip.
+
+- **`$expand`** (string) (optional)
+  Expand work item attributes (`None`, `Relations`, `Fields`, `Links`, `All`).
 
 #### Headers
 
@@ -138,7 +147,7 @@ Retrieve the revision history of a work item. Every field change creates a new r
 
 ```bash
 curl -u ":$ADO_PAT" \
-  "https://dev.azure.com/myorg/myproject/_apis/wit/workitems/123/revs?api-version=7.1"
+  "https://dev.azure.com/myorg/myproject/_apis/wit/workitems/123/revisions?api-version=7.1"
 ```
 
 #### Get a Specific Revision
@@ -155,7 +164,7 @@ import requests
 from datetime import datetime
 
 def get_revisions(org, project, work_item_id, pat):
-    url = f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems/{work_item_id}/revs"
+    url = f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems/{work_item_id}/revisions"
     response = requests.get(
         url,
         auth=("", pat),
@@ -196,7 +205,7 @@ print_revision_history(revisions)
 const axios = require('axios');
 
 async function getRevisions(org, project, workItemId, pat) {
-  const url = `https://dev.azure.com/${org}/${project}/_apis/wit/workitems/${workItemId}/revs`;
+  const url = `https://dev.azure.com/${org}/${project}/_apis/wit/workitems/${workItemId}/revisions`;
   const response = await axios.get(url, {
     params: { 'api-version': '7.1' },
     auth: { username: '', password: pat },

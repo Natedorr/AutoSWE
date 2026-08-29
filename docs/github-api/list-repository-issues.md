@@ -20,17 +20,12 @@ application/vnd.github.text+json: Returns a text only representation of the mark
 application/vnd.github.html+json: Returns HTML rendered from the body's markdown. Response will include body_html.
 application/vnd.github.full+json: Returns raw, text, and HTML representations. Response will include body, body_text, and body_html.
 
-
 ### Parameters
-
 
 #### Headers
 
-
 - **`accept`** (string)
   Setting to `application/vnd.github+json` is recommended.
-
-
 
 #### Path and query parameters
 
@@ -60,6 +55,16 @@ application/vnd.github.full+json: Returns raw, text, and HTML representations. R
 - **`mentioned`** (string)
   A user that's mentioned in the issue.
 
+- **`issue_field_values`** (string)
+  A comma-separated list of issue field filters in field_slug:value format.
+Only issues matching all specified field values are returned.
+Requires issue fields to be enabled for the repository. Issue fields are
+not available for user-owned repositories, and field availability for
+organization-owned public repositories depends on the organization's
+visibility settings. For example, priority:Urgent,severity:High filters
+issues where the priority field is Urgent AND the severity field is
+High.
+
 - **`labels`** (string)
   A list of comma separated label names. Example: bug,ui,@high
 
@@ -84,31 +89,17 @@ application/vnd.github.full+json: Returns raw, text, and HTML representations. R
   The page number of the results to fetch. For more information, see "Using pagination in the REST API."
   Default: `1`
 
-
-
-
-
-
 ### HTTP response status codes
-
 
 - **200** - OK
 
-
 - **301** - Moved permanently
-
 
 - **404** - Resource not found
 
-
 - **422** - Validation failed, or the endpoint has been spammed.
 
-
-
-
 ### Code examples
-
-
 
 #### Example
 
@@ -123,7 +114,3 @@ curl -L \
 **Response schema (Status: 200):**
 
 Same response schema as [List issues assigned to the authenticated user](#list-issues-assigned-to-the-authenticated-user).
-
-
-
-

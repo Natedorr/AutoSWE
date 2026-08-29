@@ -1,7 +1,7 @@
 # List Tags
 
 > Grounding reference for Azure DevOps Work Item Tracking API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/tags/list
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/tags/list?view=azure-devops-rest-7.1
 
 ---
 

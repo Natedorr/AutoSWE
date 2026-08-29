@@ -1,7 +1,7 @@
 # Get Current User
 
 > Grounding reference for Azure DevOps Profile API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/profile/profiles/get
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/profile/profiles/get?view=azure-devops-rest-7.1
 
 ---
 

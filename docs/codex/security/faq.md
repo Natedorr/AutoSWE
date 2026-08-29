@@ -1,6 +1,14 @@
-# Source: https://developers.openai.com/codex/security/faq/
+# Source: https://learn.chatgpt.com/docs/security/faq.md
 
-Copy Page
+# Codex Security cloud FAQ
+
+> For the complete documentation index, see [llms.txt](https://learn.chatgpt.com/llms.txt). Markdown versions of documentation pages are available by appending `.md` to the page URL.
+
+This FAQ covers Codex Security cloud. For local scans and workflows that run in
+a Codex task, see the [Codex Security plugin quickstart](https://learn.chatgpt.com/docs/security/plugin).
+
+{/* vale Microsoft.Auto = NO */}
+{/* vale Vale.Spelling = NO */}
 
 ## Getting started
 
@@ -32,16 +40,16 @@ No. Codex Security complements SAST. It adds semantic, LLM-based reasoning and a
 
 Codex Security follows a staged pipeline:
 
-- **Analysis**builds a threat model for the repository.
-- **Commit scanning**reviews merged commits and repository history for likely issues.
-- **Validation**tries to reproduce likely vulnerabilities in a sandbox to reduce false positives.
-- **Patching**integrates with Codex to propose patches that reviewers can inspect before opening a PR.
+1. **Analysis** builds a threat model for the repository.
+2. **Commit scanning** reviews merged commits and repository history for likely issues.
+3. **Validation** tries to reproduce likely vulnerabilities in a sandbox to reduce false positives.
+4. **Patching** integrates with Codex to propose patches that reviewers can inspect before opening a PR.
 
 It works alongside engineers in GitHub, Codex, and standard review workflows.
 
 ### What languages are supported?
 
-Codex Security is language-agnostic. In practice, performance depends on the model’s reasoning ability for the language and framework used by the repository.
+Codex Security is language-agnostic. In practice, performance depends on the model's reasoning ability for the language and framework used by the repository.
 
 ### What outputs do I get after the scan completes?
 
@@ -57,7 +65,7 @@ No. The proposed patch is a recommended remediation. Users can review it and pus
 
 ### Does the project need to be built for scanning?
 
-No. Codex Security can produce findings from repository and commit context without a compile step. During auto-validation, it may try to build the project inside the container if that helps reproduce the issue. For environment setup details, seeCodex cloud environments[Codex cloud environments](/codex/cloud/environments).
+No. Codex Security can produce findings from repository and commit context without a compile step. During auto-validation, it may try to build the project inside the container if that helps reproduce the issue. For environment setup details, see [Codex cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environment).
 
 ### How does Codex Security reduce false positives and avoid broken patches?
 
@@ -69,7 +77,7 @@ Initial scan time depends on repository size, build time, and how many findings 
 
 ### What is a threat model?
 
-A threat model is the scan-time security context for a repository. It combines a concise project overview with attack-surface details such as entry points, trust boundaries, auth assumptions, and risky components. For more detail, seeImproving the threat model[Improving the threat model](/codex/security/threat-model).
+A threat model is the scan-time security context for a repository. It combines a concise project overview with attack-surface details such as entry points, trust boundaries, auth assumptions, and risky components. For more detail, see [Improving the threat model](https://learn.chatgpt.com/docs/security/threat-model).
 
 ### How is a threat model generated?
 
@@ -81,11 +89,11 @@ No. Codex Security accelerates review and helps rank findings, but it does not r
 
 ### Can I edit the threat model?
 
-Yes. Codex Security creates the initial threat model, and you can update it as the architecture, risks, and business context change. For the editing workflow, seeImproving the threat model[Improving the threat model](/codex/security/threat-model).
+Yes. Codex Security creates the initial threat model, and you can update it as the architecture, risks, and business context change. For the editing workflow, see [Improving the threat model](https://learn.chatgpt.com/docs/security/threat-model).
 
 ### Do I need to configure a scan before using threat modeling?
 
-Yes. Threat-model guidance is tied to how and what you scan, so you need to configure the repository first. SeeCodex Security setup[Codex Security setup](/codex/security/setup).
+Yes. Threat-model guidance is tied to how and what you scan, so you need to configure the repository first. See [Codex Security setup](https://learn.chatgpt.com/docs/security/setup).
 
 ### What does the proposed patch contain?
 
@@ -104,3 +112,6 @@ Auto-validation is the phase that tries to reproduce a suspected issue in an iso
 ### What happens if validation fails?
 
 The finding remains unvalidated. Logs and reports still capture what was attempted so engineers can retry, investigate further, or adjust the reproduction steps.
+
+{/* vale Microsoft.Auto = YES */}
+{/* vale Vale.Spelling = YES */}

@@ -1,7 +1,7 @@
 # List Repositories
 
 > Grounding reference for Azure DevOps Git API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/repositories/get
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/repositories/list?view=azure-devops-rest-7.1
 
 ---
 

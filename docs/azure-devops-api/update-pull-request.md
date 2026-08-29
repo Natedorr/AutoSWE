@@ -1,6 +1,6 @@
 # Update a pull request
 
-Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull%20requests/update%20pull%20request
+Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/update?view=azure-devops-rest-7.1
 
 ## Update a pull request
 

@@ -1,11 +1,13 @@
 # Complete (merge) a pull request
 
-Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull%20requests/complete%20a%20pullrequest
+Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests?view=azure-devops-rest-7.1 (Pull Requests area overview)
+
+> **Note (verified 2026-07-19):** Microsoft removed the dedicated "Complete a pull request" reference page from the current 7.1/7.2 Azure DevOps REST API docs (it no longer appears in the Pull Requests operations list). The `PATCH .../pullRequests/{pullRequestId}/complete` endpoint itself still exists on the service; the merge/completion options are now covered by the [Update pull request](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/update?view=azure-devops-rest-7.1) reference (status, mergeOptions, completionOptions). The extract below is preserved from the 6.x-era docs, with the HTTP method corrected to `PATCH` (the 6.x reference documented `PATCH`).
 
 ## Complete a pull request
 
 ```
-POST /{org}/{project}/_apis/git/repositories/{repositoryId}/pullRequests/{pullRequestId}/complete?api-version=7.1
+PATCH /{org}/{project}/_apis/git/repositories/{repositoryId}/pullRequests/{pullRequestId}/complete?api-version=7.1
 ```
 
 Completes (merges) a pull request into the target branch. This is the recommended approach over setting `status: completed` via PATCH, as it provides control over merge strategy, source branch cleanup, and the merge commit message.
@@ -103,7 +105,7 @@ Returns the updated pull request object:
 
 ```bash
 curl -L \
-  -X POST \
+  -X PATCH \
   "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repositoryId}/pullRequests/42/complete?api-version=7.1" \
   -H "Authorization: Basic $(echo -n ':YOUR_PAT' | base64)" \
   -H "Content-Type: application/json" \
@@ -120,7 +122,7 @@ curl -L \
 
 ```bash
 curl -L \
-  -X POST \
+  -X PATCH \
   "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repositoryId}/pullRequests/42/complete?api-version=7.1" \
   -H "Authorization: Basic $(echo -n ':YOUR_PAT' | base64)" \
   -H "Content-Type: application/json" \
@@ -137,7 +139,7 @@ curl -L \
 
 ```bash
 curl -L \
-  -X POST \
+  -X PATCH \
   "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repositoryId}/pullRequests/42/complete?api-version=7.1" \
   -H "Authorization: Basic $(echo -n ':YOUR_PAT' | base64)" \
   -H "Content-Type: application/json" \

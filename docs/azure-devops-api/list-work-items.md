@@ -1,7 +1,7 @@
 # List Work Items
 
 > Grounding reference for Azure DevOps Work Items API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work%20items/query
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/wiql/query-by-wiql?view=azure-devops-rest-7.1
 
 ---
 
@@ -131,8 +131,10 @@ Returns a response envelope with work items:
 ### Endpoint
 
 ```
-POST /{organization}/{project}/_apis/wit/wiql?query?api-version=7.1
+POST /{organization}/{project}/_apis/wit/wiql?api-version=7.1
 ```
+
+(An optional `{team}` path segment — `POST /{organization}/{project}/{team}/_apis/wit/wiql` — scopes the query to a team. Omit it for the whole project.)
 
 ### Description
 

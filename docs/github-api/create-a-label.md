@@ -10,17 +10,12 @@ POST /repos/{owner}/{repo}/labels
 
 Creates a label for the specified repository with the given name and color. The name and color parameters are required. The color must be a valid hexadecimal color code.
 
-
 ### Parameters
-
 
 #### Headers
 
-
 - **`accept`** (string)
   Setting to `application/vnd.github+json` is recommended.
-
-
 
 #### Path and query parameters
 
@@ -29,9 +24,6 @@ Creates a label for the specified repository with the given name and color. The 
 
 - **`repo`** (string) (required)
   The name of the repository without the .git extension. The name is not case sensitive.
-
-
-
 
 #### Body parameters
 
@@ -44,27 +36,15 @@ Creates a label for the specified repository with the given name and color. The 
 - **`description`** (string)
   A short description of the label. Must be 100 characters or fewer.
 
-
-
-
-
 ### HTTP response status codes
-
 
 - **201** - Created
 
-
 - **404** - Resource not found
-
 
 - **422** - Validation failed, or the endpoint has been spammed.
 
-
-
-
 ### Code examples
-
-
 
 #### Example
 
@@ -90,7 +70,3 @@ curl -L \
 * `description`: required, string or null
 * `color`: required, string
 * `default`: required, boolean
-
-
-
-

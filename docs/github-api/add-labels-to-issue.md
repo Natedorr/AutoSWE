@@ -10,17 +10,12 @@ POST /repos/{owner}/{repo}/issues/{issue_number}/labels
 
 Adds labels to an issue.
 
-
 ### Parameters
-
 
 #### Headers
 
-
 - **`accept`** (string)
   Setting to `application/vnd.github+json` is recommended.
-
-
 
 #### Path and query parameters
 
@@ -33,41 +28,24 @@ Adds labels to an issue.
 - **`issue_number`** (integer) (required)
   The number that identifies the issue.
 
-
-
-
 #### Body parameters
 
-- **`labels`** (array of strings)
-  The names of the labels to add to the issue's existing labels. You can also pass an array of labels directly, but GitHub recommends passing an object with the labels key. To replace all of the labels for an issue, use "Set labels for an issue."
-
-
-
-
+- **`labels`** (array)
+  The labels to add to the issue's existing labels. You can also pass an array of labels directly, but GitHub recommends passing an object with the labels key. To replace all of the labels for an issue, use "Set labels for an issue."
 
 ### HTTP response status codes
 
-
 - **200** - OK
-
 
 - **301** - Moved permanently
 
-
 - **404** - Resource not found
-
 
 - **410** - Gone
 
-
 - **422** - Validation failed, or the endpoint has been spammed.
 
-
-
-
 ### Code examples
-
-
 
 #### Example
 
@@ -88,7 +66,3 @@ curl -L \
 **Response schema (Status: 200):**
 
 Same response schema as [List labels for an issue](#list-labels-for-an-issue).
-
-
-
-

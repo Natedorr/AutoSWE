@@ -10,17 +10,12 @@ GET /repos/{owner}/{repo}/issues/{issue_number}/labels
 
 Lists all labels for an issue.
 
-
 ### Parameters
-
 
 #### Headers
 
-
 - **`accept`** (string)
   Setting to `application/vnd.github+json` is recommended.
-
-
 
 #### Path and query parameters
 
@@ -41,31 +36,17 @@ Lists all labels for an issue.
   The page number of the results to fetch. For more information, see "Using pagination in the REST API."
   Default: `1`
 
-
-
-
-
-
 ### HTTP response status codes
-
 
 - **200** - OK
 
-
 - **301** - Moved permanently
-
 
 - **404** - Resource not found
 
-
 - **410** - Gone
 
-
-
-
 ### Code examples
-
-
 
 #### Example
 
@@ -87,7 +68,3 @@ Array of `Label`:
   * `description`: required, string or null
   * `color`: required, string
   * `default`: required, boolean
-
-
-
-

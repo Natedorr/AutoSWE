@@ -1,7 +1,7 @@
 # Remove Tag from Work Item
 
 > Grounding reference for Azure DevOps Work Items API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work%20items/update
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/update?view=azure-devops-rest-7.1
 
 ---
 

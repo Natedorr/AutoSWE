@@ -11,17 +11,12 @@ GET /user/repos
 Lists repositories that the authenticated user has explicit permission (:read, :write, or :admin) to access.
 The authenticated user has explicit permission to access repositories they own, repositories where they are a collaborator, and repositories that they can access through an organization membership.
 
-
 ### Parameters
-
 
 #### Headers
 
-
 - **`accept`** (string)
   Setting to `application/vnd.github+json` is recommended.
-
-
 
 #### Path and query parameters
 
@@ -66,34 +61,19 @@ organization_member: Repositories that the user has access to through being a me
 - **`before`** (string)
   Only show repositories updated before the given time. This is a timestamp in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ.
 
-
-
-
-
-
 ### HTTP response status codes
-
 
 - **200** - OK
 
-
 - **304** - Not modified
-
 
 - **401** - Requires authentication
 
-
 - **403** - Forbidden
-
 
 - **422** - Validation failed, or the endpoint has been spammed.
 
-
-
-
 ### Code examples
-
-
 
 #### Example
 
@@ -240,8 +220,3 @@ Array of `Repository`:
   * `code_search_index_status`: object:
     * `lexical_search_ok`: boolean
     * `lexical_commit_sha`: string
-
-
-
-
-

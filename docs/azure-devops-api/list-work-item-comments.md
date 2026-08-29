@@ -1,7 +1,7 @@
 # List Work Item Comments
 
 > Grounding reference for Azure DevOps Work Items API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/comments/get%20comments
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/comments/get-comments?view=azure-devops-rest-7.1
 
 ---
 

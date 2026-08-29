@@ -1,6 +1,6 @@
 # List pull request reviewers
 
-Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/reviewers/get%20reviewers
+Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-reviewers/list?view=azure-devops-rest-7.1
 
 ## List pull request reviewers
 

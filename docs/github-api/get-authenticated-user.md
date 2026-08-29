@@ -10,28 +10,17 @@ GET /user
 
 OAuth app tokens and personal access tokens (classic) need the user scope in order for the response to include private profile information.
 
-
-
 ### HTTP response status codes
-
 
 - **200** - OK
 
-
 - **304** - Not modified
-
 
 - **401** - Requires authentication
 
-
 - **403** - Forbidden
 
-
-
-
 ### Code examples
-
-
 
 #### Example 1: Status Code 200
 
@@ -140,8 +129,6 @@ curl -L \
     * `disk_usage`: integer
     * `collaborators`: integer
 
-
-
 #### Example 2: Status Code 200
 
 **Request:**
@@ -248,7 +235,3 @@ curl -L \
     * `owned_private_repos`: integer
     * `disk_usage`: integer
     * `collaborators`: integer
-
-
-
-

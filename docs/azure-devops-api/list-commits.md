@@ -1,7 +1,7 @@
 # List Commits
 
 > Grounding reference for Azure DevOps Git API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/commits/list
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/commits/get-commits?view=azure-devops-rest-7.1
 
 ---
 

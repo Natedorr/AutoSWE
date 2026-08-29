@@ -1,190 +1,178 @@
+# Source: https://learn.chatgpt.com/docs/configuration.md
+
 # Configuration
 
-Codex uses TOML configuration files at two levels:
+> For the complete documentation index, see [llms.txt](https://learn.chatgpt.com/llms.txt). Markdown versions of documentation pages are available by appending `.md` to the page URL.
 
-| Scope | Location | Purpose |
-|---|---|---|
-| **User** | `~/.codex/config.toml` | Global settings, auth, profiles |
-| **Project** | `.codex/config.toml` | Repo-scoped overrides (trusted projects only) |
-
-Project config **cannot** override provider, auth, notification, profile, or telemetry keys.
-
-## Quick Start
-
-```toml
-# ~/.codex/config.toml
-
-# Active model
-model = "gpt-5.5"
-
-# Approval policy: "on-request" | "never" | "untrusted"
-approval_policy = "on-request"
-
-# Sandbox mode: "workspace-write" | "read-only" | "danger-full-access"
-sandbox_mode = "workspace-write"
-
-# Web search: "cached" (default) | "live" | "disabled"
-web_search = "cached"
-```
-
-## Sandbox & Network
-
-```toml
-# Enable network access in workspace-write mode
-[sandbox_workspace_write]
-network_access = true
-
-# Network proxy (domain allowlist)
-[features.network_proxy]
-enabled = true
-domains = { "api.openai.com" = "allow", "example.com" = "deny" }
-```
-
-## Profiles
-
-Save reusable configurations:
-
-```toml
-[profiles.full_auto]
-approval_policy = "on-request"
-sandbox_mode = "workspace-write"
-
-[profiles.readonly_quiet]
-approval_policy = "never"
-sandbox_mode = "read-only"
-```
-
-Select with `codex --profile full_auto`.
-
-## Subagent Settings
-
-```toml
-[agents]
-max_threads = 6        # Concurrent agent threads (default: 6)
-max_depth = 1          # Nesting depth (default: 1)
-job_max_runtime_seconds = 1800  # Per-worker timeout
-```
-
-## Model Context Protocol (MCP)
-
-```toml
-# STDIO server
-[mcp_servers.context7]
-command = "npx"
-args = ["-y", "@upstash/context7-mcp"]
-env_vars = ["LOCAL_TOKEN"]
-
-# HTTP server
-[mcp_servers.figma]
-url = "https://mcp.figma.com/mcp"
-bearer_token_env_var = "FIGMA_OAUTH_TOKEN"
-
-# Per-tool approval
-[mcp_servers.chrome_devtools]
-url = "http://localhost:3000/mcp"
-enabled_tools = ["open", "screenshot"]
-default_tools_approval_mode = "prompt"
-
-[mcp_servers.chrome_devtools.tools.open]
-approval_mode = "approve"
-```
-
-### CLI MCP Management
-
-```bash
-# Add a server
-codex mcp add context7 -- npx -y @upstash/context7-mcp
-
-# List servers
-/mcp  # (in TUI)
-
-# Help
-codex mcp --help
-```
-
-## Skills Configuration
-
-Disable a skill without deleting it:
-
-```toml
-[[skills.config]]
-path = "/path/to/skill/SKILL.md"
-enabled = false
-```
-
-## Custom Agents
-
-Define custom agents under `~/.codex/agents/` (global) or `.codex/agents/` (project):
-
-```toml
-# ~/.codex/agents/reviewer.toml
-
-name = "reviewer"
-description = "PR reviewer focused on correctness, security, and missing tests."
-developer_instructions = """
-Review code like an owner.
-Prioritize correctness, security, behavior regressions, and missing test coverage.
-"""
-model = "gpt-5.4"
-model_reasoning_effort = "high"
-sandbox_mode = "read-only"
-nickname_candidates = ["Atlas", "Delta", "Echo"]
-```
-
-## Project Instructions Discovery
-
-```toml
-# Fallback filenames
-project_doc_fallback_filenames = ["TEAM_GUIDE.md", ".agents.md"]
-
-# Max combined instruction bytes (default: 32768)
-project_doc_max_bytes = 65536
-```
-
-## Features (Feature Flags)
-
-```bash
-# List available features
-codex features list
-
-# Enable/disable
-codex features enable unified_exec
-codex features disable shell_snapshot
-codex features enable goals
-```
-
-## Automatic Approval Review
-
-```toml
-approval_policy = "on-request"
-approvals_reviewer = "auto_review"
-```
-
-Routes eligible approval requests through a reviewer agent before execution.
-
-## CLI Shortcuts
-
-Override config with `-c` flags:
-
-```bash
-codex \
-  -c 'features.network_proxy=true' \
-  -c 'sandbox_workspace_write.network_access=true' \
-  -c 'model=gpt-5.4' \
-  "explain this codebase"
-```
-
-## Code Home
-
-```bash
-# Use a different config/home directory
-CODEX_HOME=$(pwd)/.codex codex exec "List active instruction sources"
-```
-
-## See Also
-
-- [AGENTS.md](./agents-md.md)
-- [Sandboxing & Security](./sandboxing.md)
-- [Skills](./skills.md)
-- [Subagents](./subagents.md)
-- [MCP](./mcp.md)
+<CodexDocsOverviewLanding
+  title="Configuration"
+  description="Set defaults, add durable context, and customize how ChatGPT and Codex developer tools work."
+  intro="Configuration shapes how ChatGPT and Codex developer tools behave across chats, repositories, and machines. Durable context, config files, repository guidance, subagents, external connections, and Linux and Windows setup work together to keep those workflows consistent for individuals and teams."
+  primaryCta={{
+    label: "Explore customization",
+    href: "/codex/customization/overview",
+  }}
+  hero={{
+    illustration: "configuration",
+    backgroundImage: "/images/codex/codex-wallpaper-1.webp",
+    alt: "ChatGPT settings navigation, config file options, and personality controls",
+  }}
+  sections={[
+    {
+      title: "Customization",
+      description:
+        "Adapt the experience and carry useful context between chats.",
+      pages: [
+        {
+          title: "Customization overview",
+          description:
+            "Customize ChatGPT and Codex with guidance, skills, MCP, and subagents.",
+          href: "/codex/customization/overview",
+          icon: "customize",
+        },
+        {
+          title: "Memories",
+          description: "Let ChatGPT retain useful context across chats.",
+          href: "/codex/customization/memories",
+          icon: "threads",
+        },
+        {
+          title: "Computer History",
+          description:
+            "Use recent computer activity as context and manage what is included.",
+          href: "/codex/customization/computer-history",
+          icon: "stack",
+        },
+      ],
+    },
+    {
+      title: "Config file",
+      description:
+        "Control models, tools, environments, and defaults with configuration files and variables.",
+      pages: [
+        {
+          title: "Config basics",
+          description:
+            "Understand configuration layers and create a config file.",
+          href: "/codex/config-file/config-basic",
+          icon: "settings",
+        },
+        {
+          title: "Advanced config",
+          description:
+            "Use profiles, providers, policies, and advanced options.",
+          href: "/codex/config-file/config-advanced",
+          icon: "dataControls",
+        },
+        {
+          title: "Config reference",
+          description: "Look up every supported configuration key.",
+          href: "/codex/config-file/config-reference",
+          icon: "code",
+        },
+        {
+          title: "Environment variables",
+          description: "Set values that change across systems and sessions.",
+          href: "/codex/config-file/environment-variables",
+          icon: "terminal",
+        },
+        {
+          title: "Sample config",
+          description:
+            "Start from a complete, annotated configuration example.",
+          href: "/codex/config-file/config-sample",
+          icon: "folder",
+        },
+      ],
+    },
+    {
+      title: "Agent configuration",
+      description: "Shape how agents collaborate and follow project guidance.",
+      pages: [
+        {
+          title: "AGENTS.md",
+          description: "Give Codex durable instructions for a repository.",
+          href: "/codex/agent-configuration/agents-md",
+          icon: "folder",
+        },
+        {
+          title: "Subagents",
+          description: "Delegate focused tasks to specialized agents.",
+          href: "/codex/agent-configuration/subagents",
+          icon: "robot",
+        },
+        {
+          title: "Speed",
+          description: "Control how quickly and deeply Codex works.",
+          href: "/codex/agent-configuration/speed",
+          icon: "settings",
+        },
+        {
+          title: "Rules",
+          description: "Define commands Codex can run automatically.",
+          href: "/codex/agent-configuration/rules",
+          icon: "dataControls",
+        },
+      ],
+    },
+    {
+      title: "Extend ChatGPT and Codex",
+      description: "Package knowledge, connect services, and add capabilities.",
+      pages: [
+        {
+          title: "Record & Replay",
+          description:
+            "Show ChatGPT or Codex a workflow and turn it into a reusable skill.",
+          href: "/codex/extend/record-and-replay",
+          icon: "tools",
+        },
+        {
+          title: "MCP",
+          description:
+            "Connect Codex developer tools to external tools and context.",
+          href: "/codex/extend/mcp",
+          icon: "connect",
+        },
+      ],
+    },
+    {
+      title: "Linux",
+      description: "Install and update ChatGPT on a supported Linux desktop.",
+      pages: [
+        {
+          title: "ChatGPT desktop app",
+          description:
+            "Install the Linux preview on Ubuntu, Debian, or Fedora.",
+          href: "/codex/linux/linux-app",
+          icon: "computerUse",
+        },
+      ],
+    },
+    {
+      title: "Windows",
+      description: "Run Codex natively on Windows or inside WSL.",
+      pages: [
+        {
+          title: "ChatGPT desktop app",
+          description:
+            "Use the ChatGPT desktop app with PowerShell or WSL workflows.",
+          href: "/codex/windows/windows-app",
+          icon: "computerUse",
+        },
+        {
+          title: "Windows sandbox",
+          description:
+            "Run Codex with native filesystem and command isolation.",
+          href: "/codex/windows/windows-sandbox",
+          icon: "lock",
+        },
+        {
+          title: "WSL",
+          description: "Use Codex in a Linux environment managed by Windows.",
+          href: "/codex/windows/wsl",
+          icon: "terminal",
+        },
+      ],
+    },
+  ]}
+/>

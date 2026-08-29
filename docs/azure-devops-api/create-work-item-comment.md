@@ -1,7 +1,7 @@
 # Create Work Item Comment
 
 > Grounding reference for Azure DevOps Work Items API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/comments/create%20comment
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/comments/add-comment?view=azure-devops-rest-7.1
 
 ---
 
