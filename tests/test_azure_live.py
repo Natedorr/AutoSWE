@@ -218,6 +218,48 @@ class TestAzureWriteOps:
         # Post a comment on issue #1 (should always exist)
         tracker.post_comment(ado_live_cfg, 1, "Live test comment from pytest")
 
+    def test_comment_roundtrip_at_7_1(self, ado_live_cfg):
+        """Comment create/read/update round-trip at stable api-version=7.1.
+
+        Creates a throwaway work item, POSTs a markdown comment, reads it
+        back (verifying format=Markdown is stored under 7.1), PATCHes it
+        (verifying the comment-update endpoint works at 7.1 — it has no
+        refreshed reference page; see tracker.update_comment docstring),
+        then closes the work item.
+        """
+        from autoswe.providers.azure.api import _ado_api_version, ado_patch
+        from autoswe.providers.factory import get_tracker
+        tracker = get_tracker(ado_live_cfg)
+        wid = tracker.create_issue(
+            ado_live_cfg, "Live test: comment round-trip @7.1", "Test body from pytest"
+        )
+        assert isinstance(wid, int) and wid > 0
+
+        original = "## Round trip\n\n- **bold**\n- `code`"
+        comment_id = tracker.post_comment(ado_live_cfg, wid, original)
+        assert isinstance(comment_id, int) and comment_id > 0
+
+        comments = tracker.fetch_comments(ado_live_cfg, wid)
+        posted = next(c for c in comments if c.id == comment_id)
+        assert "**bold**" in posted.body, f"markdown markers missing: {posted.body!r}"
+        assert "code" in posted.body
+
+        updated = "## Updated round trip\n\npatched at 7.1"
+        tracker.update_comment(ado_live_cfg, wid, comment_id, updated)
+
+        comments = tracker.fetch_comments(ado_live_cfg, wid)
+        posted = next(c for c in comments if c.id == comment_id)
+        assert "Updated round trip" in posted.body, f"PATCH not stored: {posted.body!r}"
+        assert "**bold**" not in posted.body
+
+        # Tear down: close the throwaway work item
+        close_path = _ado_api_version(
+            f"https://dev.azure.com/{ado_live_cfg['org']}/{ado_live_cfg['project']}"
+            f"/_apis/wit/workitems/{wid}"
+        )
+        ado_patch(close_path, ado_live_cfg["pat"],
+                  body=[{"op": "replace", "path": "/fields/System.State", "value": "Closed"}])
+
     def test_tracker_set_status_transitions(self, ado_live_cfg):
         """Set status through multiple autoswe: transitions."""
         from autoswe.providers.factory import get_tracker
