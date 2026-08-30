@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import types
 from collections.abc import Awaitable
 from pathlib import Path
 
@@ -31,13 +30,17 @@ _PLANS_DIR = Path.home() / ".claude" / "plans"
 # working-directory/environment context. Setting the bare preset makes
 # plan/fix/review run on the full Claude Code prompt.
 #
-# Wrapped in MappingProxyType so the shared module-level constant is immutable:
-# every run reuses the same object, so a stray assignment in any one call site
-# would corrupt the preset for all subsequent runs. The SDK transport only
-# reads it (sp.get("type")), and it still compares equal to a plain dict.
-CLAUDE_CODE_SYSTEM_PROMPT_PRESET = types.MappingProxyType(
-    {"type": "preset", "preset": "claude_code"}
-)
+# Plain dict (NOT MappingProxyType): the Agent SDK branches on
+# ``isinstance(system_prompt, dict)`` (e.g. to read exclude_dynamic_sections),
+# and a MappingProxyType fails that check even though it compares equal to a
+# dict. Content-based equality with a plain dict still holds, so tests that
+# assert ``system_prompt == CLAUDE_CODE_SYSTEM_PROMPT_PRESET`` are unaffected.
+# The shared constant is only ever read by the SDK; call sites that build
+# ``options_kwargs`` pass ``dict(CLAUDE_CODE_SYSTEM_PROMPT_PRESET)`` (a fresh
+# copy) so the module-level object is never mutated.
+CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {
+    "type": "preset", "preset": "claude_code",
+}
 
 # ---------- Mode → Claude Code mapping ----------
 
@@ -78,6 +81,35 @@ _MODE_CONFIG = {
     "read_only": ("plan", _READ_ONLY_TOOLS, ()),
     "read_write": ("bypassPermissions", _READ_WRITE_TOOLS, ()),
 }
+
+
+# Minimum Agent SDK version that exposes ``fork_session`` (and
+# ``resume_session_at``). ``claude-agent-sdk`` ships no pinned ``__version__``
+# everywhere, so we read the installed distribution version defensively and
+# treat an unreadable/unknown version as "new enough" (the capability is still
+# advertised; the guard only degrades to plain resume on a *known* old SDK).
+_FORK_MIN_SDK_VERSION = (0, 2, 137)
+
+
+def _sdk_supports_session_fork() -> bool:
+    """Return True when the installed Agent SDK is new enough for ``fork_session``.
+
+    Reads the installed ``claude-agent-sdk`` distribution version lazily (the
+    SDK is a heavy, possibly-missing dependency). Returns True when the version
+    cannot be read so a fresh/edge install is not needlessly demoted.
+    """
+    try:
+        from importlib.metadata import version  # deferred import
+        raw = version("claude-agent-sdk")
+    except Exception:
+        return True
+    parts = raw.split(".")
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return True
+    patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    return (major, minor, patch) >= _FORK_MIN_SDK_VERSION
 
 
 def _get_retryable_exceptions() -> tuple:
@@ -355,6 +387,7 @@ class ClaudeCodeBackend:
         "can_use_tool",
         "plan_permission",
         "resume",
+        "session_fork",
         "progress_stream",
         "plan_file",
     }
@@ -389,7 +422,9 @@ class ClaudeCodeBackend:
             query,
         )
 
-        log(f"[CLAUDE] starting cwd={spec.cwd} resume={'NEW' if not spec.resume else spec.resume[:8]} model={spec.model} mode={spec.mode}")
+        _resume_lbl = "NEW" if not spec.resume else spec.resume[:8]
+        _fork_lbl = " fork" if (spec.fork_session and spec.resume) else ""
+        log(f"[CLAUDE] starting cwd={spec.cwd} resume={_resume_lbl}{_fork_lbl} model={spec.model} mode={spec.mode}")
 
         # --- Build the per-session child-process env (no os.environ mutation) ---
         # The Claude Agent SDK merges this into the spawned CLI's environment,
@@ -450,8 +485,23 @@ class ClaudeCodeBackend:
             "model": spec.model or None,
             "cli_path": spec.cli_path or harness_cfg.get("cli_path"),
             "mcp_servers": spec.mcp_servers or {},
-            "system_prompt": CLAUDE_CODE_SYSTEM_PROMPT_PRESET,
+            "system_prompt": dict(CLAUDE_CODE_SYSTEM_PROMPT_PRESET),
         }
+
+        # Fork-on-retry: when the spec asks to fork off a resume session, branch
+        # into a NEW session (fork_session=True) so the original stays intact for
+        # rollback. Gated on a non-empty resume and an SDK new enough for
+        # fork_session; on an older SDK we log and degrade to a plain resume
+        # rather than passing an unknown option to the SDK.
+        if spec.fork_session and spec.resume:
+            if _sdk_supports_session_fork():
+                options_kwargs["fork_session"] = True
+            else:
+                log(
+                    f"[CLAUDE] fork_session requested but installed Agent SDK is "
+                    f"older than {_FORK_MIN_SDK_VERSION}; degrading to plain resume "
+                    f"(original session will be continued in place)"
+                )
 
         # Per-session child-process env (see construction above). The SDK merges
         # this over the inherited environment for the spawned CLI only.

@@ -25,15 +25,27 @@ longer exist in the current CLI and are no longer emitted.
 Future phases may add ``mcp`` (MCP comment posting) and structured
 AskUserQuestion handling.  Until then those features degrade gracefully
 — handlers fall back to text parsing when ``"mcp"`` is not advertised.
+
+**Retry semantics (no fork):** ``codex exec resume <id>`` *continues* the
+existing session in place — Codex has no fork primitive (unlike the Claude
+Agent SDK's ``fork_session``). So a Codex ``/retry`` either resumes the same
+session (mutating it) or starts a fresh one; it can never branch from a prior
+checkpoint while leaving the original intact. This backend therefore does NOT
+advertise the ``session_fork`` capability, and handlers gate fork-on-retry on
+``backend_has_capability(harness, "session_fork")`` — which is False here.
+``RunSpec.fork_session`` is ignored by this backend. See
+docs/autoswe/harnesses.md ("Retry semantics").
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import tempfile
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from autoswe.core.logging_utils import log
 from autoswe.harness.backends.base import RunResult, RunSpec
@@ -374,6 +386,27 @@ def _fire_delta_progress(acc: _CodexAccumulator, callback, event: dict, prefix: 
         callback(f"{prefix}{delta[:120]}")
 
 
+def _read_last_message_file(path: str) -> str | None:
+    """Return the assistant's final message Codex wrote to ``-o`` *path*.
+
+    ``codex exec --output-last-message <file>`` writes the final natural-
+    language message to the file — the authoritative source for
+    ``RunResult.text``.  This is more robust than accumulating
+    ``agent_message`` chunks from the JSONL stream, which is fragile across
+    item-type renames (see issue #128 / #003).
+
+    Returns ``None`` when the file is absent or whitespace-only so the caller
+    can fall back to chunk accumulation (older CLI without ``-o``, a run that
+    failed before emitting a final message, or a killed process).
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, OSError):
+        return None
+    text = text.strip()
+    return text or None
+
+
 # ---------- CodexBackend ----------
 
 
@@ -409,10 +442,38 @@ class CodexBackend:
         fires with live updates while the Codex CLI is running.  The runner
         wraps this in ``asyncio.wait_for`` for timeouts.
         """
-        return self._run_async(spec)
+        # Allocate a per-run scratch file for the assistant's final message
+        # (written by codex via ``--output-last-message``).  mkstemp gives a
+        # unique, user-controlled path (no injection) and the file is removed
+        # in the finally so nothing leaks under load.  Close the fd immediately:
+        # codex — not us — writes to the file.
+        last_message_fd, last_message_path = tempfile.mkstemp(
+            prefix="autoswe-codex-lastmsg-", suffix=".txt"
+        )
+        os.close(last_message_fd)
 
-    async def _run_async(self, spec: RunSpec) -> RunResult:
-        """Run Codex CLI subprocess with streaming JSONL. Returns RunResult."""
+        async def _wrapped() -> RunResult:
+            try:
+                return await self._run_async(spec, last_message_path)
+            finally:
+                try:
+                    os.unlink(last_message_path)
+                except OSError:
+                    # Best-effort cleanup: a stray temp file is harmless and the
+                    # OS reclaims it; never let cleanup break the run result.
+                    pass
+
+        return _wrapped()
+
+    async def _run_async(self, spec: RunSpec, last_message_path: str = "") -> RunResult:
+        """Run Codex CLI subprocess with streaming JSONL. Returns RunResult.
+
+        ``last_message_path`` (issue #128) is the file the Codex CLI writes the
+        assistant's final message to via ``--output-last-message``.  When it
+        holds non-whitespace content it is the authoritative source for
+        ``RunResult.text``; otherwise we fall back to the accumulated JSONL
+        chunks (see ``_read_last_message_file``).
+        """
         # Codex has no built-in default model — a profile/spec must name one.
         # The factory enforces this at resolution time; this guard protects
         # direct CodexBackend().run(spec) calls that bypass the factory.
@@ -464,6 +525,13 @@ class CodexBackend:
                 cmd.append(_BYPASS_APPROVALS_AND_SANDBOX)
             cmd.extend(["--model", model, "-C", spec.cwd])
             # Persist session files so resume (codex exec resume <id>) can restore context.
+
+        # --output-last-message writes the assistant's final message to a file we
+        # read back as the authoritative RunResult.text (issue #128).  Supported by
+        # both `codex exec` and `codex exec resume` (verified on codex-cli 0.150.1).
+        # Falls back to chunk accumulation when the file is absent/empty.
+        if last_message_path:
+            cmd.extend(["--output-last-message", last_message_path])
 
         # No turn cap is emitted: `codex exec` has no max_turns key (live-verified
         # on codex-cli 0.150.1 — `-c agent.max_turns=N` errors under
@@ -616,8 +684,19 @@ class CodexBackend:
         # Estimate cost from accumulated token usage
         estimated_cost = estimate_cost(model, acc.usage)
 
+        # Authoritative final message (issue #128): prefer the -o file over the
+        # accumulated JSONL chunks, which are fragile across item-type renames.
+        last_message = _read_last_message_file(last_message_path) if last_message_path else None
+        if last_message is not None:
+            text = last_message
+            source = "-o file"
+        else:
+            text = "\n".join(acc.text_chunks)
+            source = "chunk fallback"
+        log(f"[CODEX] RunResult.text from {source} ({len(text)} chars)")
+
         return RunResult(
-            text="\n".join(acc.text_chunks),
+            text=text,
             session_id=acc.session_id,
             subtype=subtype,
             cost_usd=estimated_cost,

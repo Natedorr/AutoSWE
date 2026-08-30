@@ -1113,3 +1113,29 @@ def test_system_prompt_preset_emitted_for_legacy_no_mode():
         f"legacy path: system_prompt={captured['options'].system_prompt!r} "
         f"expected {CLAUDE_CODE_SYSTEM_PROMPT_PRESET!r}"
     )
+
+
+def test_system_prompt_preset_is_plain_dict():
+    """CLAUDE_CODE_SYSTEM_PROMPT_PRESET must be a real ``dict``.
+
+    The Agent SDK branches on ``isinstance(system_prompt, dict)`` (e.g. to read
+    ``exclude_dynamic_sections``); a ``MappingProxyType`` compares equal to a
+    dict but fails that ``isinstance`` check, so a future SDK that JSON-encodes
+    the preset or guards on type would break every run. Locking in a plain dict
+    keeps the constant safe across SDK versions.
+    """
+    import json
+
+    from autoswe.harness.backends.claude_code import CLAUDE_CODE_SYSTEM_PROMPT_PRESET
+
+    assert isinstance(CLAUDE_CODE_SYSTEM_PROMPT_PRESET, dict), (
+        "preset must be a dict so the SDK's isinstance(system_prompt, dict) "
+        f"check holds; got {type(CLAUDE_CODE_SYSTEM_PROMPT_PRESET).__name__}"
+    )
+    assert CLAUDE_CODE_SYSTEM_PROMPT_PRESET == {
+        "type": "preset", "preset": "claude_code",
+    }
+    # A dict is JSON-serializable; a MappingProxyType is not.
+    assert json.loads(json.dumps(CLAUDE_CODE_SYSTEM_PROMPT_PRESET)) == {
+        "type": "preset", "preset": "claude_code",
+    }

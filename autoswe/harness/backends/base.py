@@ -121,6 +121,14 @@ class RunSpec:
     cwd: str
     model: str | None = None
     resume: str | None = None
+    # Retry semantics: when True AND resume is set, backends that advertise
+    # the "session_fork" capability branch from *resume* into a NEW session
+    # instead of continuing it in place. The original session stays intact
+    # for rollback. Backends without the capability ignore this flag (they
+    # either resume in place or start fresh). The forked run's new session
+    # id is returned via RunResult.session_id. See docs/autoswe/harnesses.md
+    # ("Retry semantics").
+    fork_session: bool = False
 
     # --- Phase 3: generic intent (preferred) ---
     mode: Mode | None = None  # "plan" | "read_only" | "read_write"
@@ -168,6 +176,11 @@ class CodingBackend(Protocol):
     - ``"plan_permission"``: backend supports a dedicated "plan" mode that
       uses plan-specific tool restrictions.
     - ``"resume"``: backend supports resuming a prior session.
+    - ``"session_fork"``: backend supports forking a prior session into a NEW
+      session (``RunSpec.fork_session`` + ``RunSpec.resume``) so the original
+      stays intact for rollback. Backends without this capability ignore
+      ``fork_session`` (they resume in place or start fresh). See
+      docs/autoswe/harnesses.md ("Retry semantics").
     - ``"progress_stream"``: backend fires progress_callback with rendered
       todo/command updates during execution.
     - ``"plan_file"``: backend writes native plan files to ``~/.claude/plans/``;
