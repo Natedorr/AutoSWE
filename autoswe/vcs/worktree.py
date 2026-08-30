@@ -341,7 +341,7 @@ def create_worktree(
         # Best-effort: link branch to issue in platform UI (Development sidebar).
         # Runs BEFORE the remote branch is pushed, so the GraphQL createLinkedBranch
         # mutation can create the ref. Reused branches (branch_exists=True) skip this.
-        if cfg.get("LINK_BRANCH_TO_ISSUE", False):
+        if cfg.get("LINK_BRANCH_TO_ISSUE", True):
             try:
                 full_sha_result = _run(
                     ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],

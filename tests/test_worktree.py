@@ -191,6 +191,104 @@ def test_create_worktree_reuse_local_only_branch(tmp_path, monkeypatch):
     assert result == wt_path
 
 
+def _link_fake_run():
+    """fake_run for the new-branch path: no remote branch, base exists.
+
+    `branch -r --list` -> empty stdout (branch does not exist yet, so the
+    new-branch / link code path is taken). `rev-parse origin/main` -> full SHA
+    that create_worktree passes to link_branch_to_issue.
+    """
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "rev-parse" in cmd and "--short" in cmd:
+            result.stdout = "abc1234"
+        elif "rev-parse" in cmd:
+            # full SHA of origin/{base_branch}
+            result.stdout = "deadbeef" * 5
+        return result
+
+    return fake_run
+
+
+def _mock_vcs(link_calls):
+    vcs = MagicMock()
+    vcs.branch_name.side_effect = lambda n: f"autoswe/issue-{n}"
+
+    def _record_link(issue_num, commit_sha, branch):
+        link_calls.append((issue_num, commit_sha, branch))
+
+    vcs.link_branch_to_issue.side_effect = _record_link
+    return vcs
+
+
+def test_create_worktree_links_new_branch_to_issue_by_default(tmp_path, monkeypatch):
+    """With the default config (LINK_BRANCH_TO_ISSUE=True) a new branch is
+    linked to its issue via VCSProvider.link_branch_to_issue (issue #142)."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt_mod
+    monkeypatch.setattr(wt_mod, "AUTOSWE_DIR", tmp_path)
+
+    main = tmp_path / "worktrees" / "o_r" / "_main"
+    main.mkdir(parents=True, exist_ok=True)
+
+    link_calls = []
+    with patch("autoswe.vcs.worktree._run", side_effect=_link_fake_run()), \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_mock_vcs(link_calls)):
+        from autoswe.vcs.worktree import create_worktree
+        result = create_worktree("o", "r", 7, "main", "token", _cfg())
+
+    assert result == tmp_path / "worktrees" / "o_r" / "issue-7"
+    # Linked at ref-creation time with the full base SHA and the branch name.
+    assert link_calls == [(7, "deadbeef" * 5, "autoswe/issue-7")]
+
+
+def test_create_worktree_skips_link_when_flag_disabled(tmp_path, monkeypatch):
+    """Explicit LINK_BRANCH_TO_ISSUE=False must not attempt the link (opt-out)."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt_mod
+    monkeypatch.setattr(wt_mod, "AUTOSWE_DIR", tmp_path)
+
+    main = tmp_path / "worktrees" / "o_r" / "_main"
+    main.mkdir(parents=True, exist_ok=True)
+
+    link_calls = []
+    cfg = _cfg()
+    cfg["LINK_BRANCH_TO_ISSUE"] = False
+    with patch("autoswe.vcs.worktree._run", side_effect=_link_fake_run()), \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_mock_vcs(link_calls)):
+        from autoswe.vcs.worktree import create_worktree
+        create_worktree("o", "r", 7, "main", "token", cfg)
+
+    assert link_calls == []
+
+
+def test_create_worktree_no_link_on_reused_worktree(tmp_path, monkeypatch):
+    """A reused worktree dir must not re-attempt the Development link (it is
+    gated to the new-branch path only)."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt_mod
+    monkeypatch.setattr(wt_mod, "AUTOSWE_DIR", tmp_path)
+
+    main = tmp_path / "worktrees" / "o_r" / "_main"
+    main.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "worktrees" / "o_r" / "issue-1").mkdir(parents=True, exist_ok=True)
+
+    link_calls = []
+    with patch("autoswe.vcs.worktree._run") as mock_run, \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_mock_vcs(link_calls)):
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = ""
+        from autoswe.vcs.worktree import create_worktree
+        create_worktree("o", "r", 1, "main", "token", _cfg())
+
+    assert link_calls == []
+
+
 def test_apply_pull_strategy_reset_runs_when_fetch_succeeds(tmp_path):
     """When fetch succeeds the reset still executes (guard must not over-suppress)."""
     from autoswe.vcs.worktree import _apply_pull_strategy
