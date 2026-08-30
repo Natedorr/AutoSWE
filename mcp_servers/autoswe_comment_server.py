@@ -21,10 +21,21 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+from pathlib import Path
 from urllib import error as url_error
 from urllib import request
 
 from mcp.types import TextContent
+
+# The MCP servers run as separate `python -m` processes. Make the repo root
+# importable so autoswe.core.constants (the GH API-version pin) resolves even
+# when the server is launched from a non-repo cwd.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from autoswe.core.constants import GH_API_VERSION  # noqa: E402
 
 # mcp SDK version tolerance:
 #   mcp >= 2.0 exposes the high-level MCPServer (.tool() decorator, run_stdio_async)
@@ -70,7 +81,7 @@ def _http(method: str, url: str, body: dict | None) -> dict:
     """Minimal HTTP request with provider-specific auth headers."""
     headers = {
         "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "X-GitHub-Api-Version": GH_API_VERSION,
         "Content-Type": "application/json",
     }
 

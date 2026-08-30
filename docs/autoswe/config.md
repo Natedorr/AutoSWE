@@ -19,6 +19,35 @@ The **tested combo** is that floor against Claude Code CLI **v2.1.251**.
 `claude-agent-sdk` drops below the pinned floor; it skips when the SDK is not installed
 (e.g. Codex-only deploys).
 
+## GitHub API version pin
+
+Every autoSWE call to the GitHub REST API sends a pinned
+`X-GitHub-Api-Version` header. The value lives in a single named constant,
+`GH_API_VERSION = "2022-11-28"`, in `autoswe/core/constants.py`, and is imported
+by every call site:
+
+- `autoswe/tracking/api.py` (`_gh_request`, `gh_post_comment`)
+- `autoswe/commands/setup.py` (`_gh_verify`, `_gh_default_branch`)
+- `mcp_servers/autoswe_comment_server.py` and `mcp_servers/autoswe_inline_comment_server.py`
+
+**Why pin at all:** GitHub's default REST API version drifts over time. Pinning
+makes autoSWE's behavior reproducible regardless of what GitHub serves by
+default, and turns "keep up with GitHub" into a one-line change to a single
+constant instead of a multi-file string hunt.
+
+**Re-check cadence:** when GitHub announces a new recommended
+`X-GitHub-Api-Version` (it appears in the refreshed endpoint docs vendored
+under `docs/github-api/` — e.g. the `2026-03-10` note in
+`docs/github-api/assignees.md`), check whether any endpoint autoSWE actually
+calls has started *requiring* the newer version. If not, leave the pin as is.
+If one does, bump `GH_API_VERSION` in `autoswe/core/constants.py` — one place.
+`tests/test_api_version.py` fails if a call site reintroduces the bare literal
+or if the value documented here stops matching the constant.
+
+> `docs/github-api/README.md` is a vendored snapshot of GitHub's own docs — its
+> `2022-11-28` mention is GitHub's text, not an autoSWE recommendation, and is
+> intentionally left unedited.
+
 ## `config/autoswe.env` (gitignored, copy from `autoswe.env.example`)
 
 Loaded by `core/config.py:load_config()`. Env vars take precedence over file values; file values override defaults.
