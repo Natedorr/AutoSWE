@@ -253,6 +253,7 @@ class TestCapabilityHonesty:
         "can_use_tool",
         "plan_permission",
         "resume",
+        "session_fork",
         "progress_stream",
         "plan_file",
     })
@@ -264,7 +265,7 @@ class TestCapabilityHonesty:
         caps = ClaudeCodeBackend.capabilities()
         expected = {
             "mode", "mcp", "can_use_tool", "plan_permission",
-            "resume", "progress_stream", "plan_file",
+            "resume", "session_fork", "progress_stream", "plan_file",
         }
         assert caps == expected, (
             f"ClaudeCodeBackend capabilities changed: got {caps}"
@@ -291,8 +292,9 @@ class TestCapabilityHonesty:
         from autoswe.harness.backends.codex import CodexBackend
 
         caps = CodexBackend.capabilities()
-        # Phase 4: Codex does NOT support these (mode IS supported via _mode_to_sandbox)
-        claude_exclusives = {"mcp", "can_use_tool", "plan_permission", "plan_file"}
+        # Phase 4: Codex does NOT support these (mode IS supported via _mode_to_sandbox).
+        # session_fork is Claude-exclusive: Codex has no fork primitive (resume in place or fresh).
+        claude_exclusives = {"mcp", "can_use_tool", "plan_permission", "plan_file", "session_fork"}
         overlap = caps & claude_exclusives
         assert not overlap, (
             f"Codex advertises Claude-exclusive capabilities: {overlap}. "

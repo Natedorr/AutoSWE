@@ -13,9 +13,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from autoswe.core.logging_utils import log
+from autoswe.core.config import resolve_harness
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import coder, planner
-from autoswe.harness.runner import HandlerResult
+from autoswe.harness.runner import HandlerResult, backend_has_capability
 from autoswe.orch.types import Action, World
 from autoswe.vcs import ship
 from autoswe.vcs import worktree as worktree_mod
@@ -297,6 +298,8 @@ def _run_fix_with_sync(
     repo_cfg: dict,
     cfg: dict,
     progress_callback: Callable[[str], None] | None,
+    *,
+    fork_session: bool = False,
 ) -> HandlerResult:
     """Pre-dispatch sync before /fix, then run the fix handler."""
     base_branch = task.get("base_branch", "main")
@@ -309,6 +312,7 @@ def _run_fix_with_sync(
         return err
     return coder.run_fix(
         task, guidance, repo_cfg, cfg, progress_callback=progress_callback, wt=wt,
+        fork_session=fork_session,
     )
 
 
@@ -369,6 +373,67 @@ def _run_review_with_sync(
 
 _NON_REPLAYABLE_COMMANDS = frozenset(("/pr", "/sync", "/skip", "/abort", "/retry"))
 
+
+def _fork_session_for_retry(
+    task: dict,
+    repo_cfg: dict,
+    cfg: dict,
+    slug: str,
+) -> bool:
+    """Decide whether a /fix retry forks from the last known-good session.
+
+    Forking is safe only when BOTH hold:
+      * the resolved fix backend advertises ``"session_fork"``, and
+      * the checkpoint (``last_good_session_id``) was produced by the SAME
+        backend. A mixed per-phase config (e.g. Codex ``plan_harness`` + Claude
+        ``fix_harness``) would otherwise hand a Codex session id to the Claude
+        SDK, which cannot resolve it. A missing/foreign checkpoint backend is
+        therefore treated as "no usable checkpoint" → fresh session.
+
+    Returns False (fresh/normal path) whenever either condition fails or the
+    harness cannot be resolved. Pure decision — no handler branching on backend
+    name.
+    """
+    checkpoint_id = task.get("last_good_session_id") or task.get("session_id")
+    if not checkpoint_id:
+        return False
+
+    try:
+        fix_harness = resolve_harness("fix", repo_cfg, cfg)
+    except Exception:
+        # Resolution failed (e.g. a bad harness profile name). Log it and
+        # degrade to the plain path rather than silently forcing Claude.
+        get_debug_logger().warning(
+            "retry: could not resolve fix harness for %s; not forking", slug,
+        )
+        return False
+
+    if not backend_has_capability(fix_harness, "session_fork"):
+        return False
+
+    # Provenance gate: only fork from a checkpoint the same backend produced.
+    # ``last_good_session_backend`` is always written alongside the checkpoint,
+    # so a real checkpoint always carries it. A None here means the checkpoint
+    # predates the field (or its backend was unresolvable) → don't risk a
+    # foreign-backend session id; start fresh instead.
+    checkpoint_backend = task.get("last_good_session_backend")
+    if checkpoint_backend is None:
+        get_debug_logger().warning(
+            "retry: checkpoint for %s has no recorded backend; "
+            "not forking (fresh session)", slug,
+        )
+        return False
+    if checkpoint_backend != fix_harness.get("backend"):
+        get_debug_logger().warning(
+            "retry: checkpoint backend %r != fix backend %r for %s; "
+            "not forking (fresh session)",
+            checkpoint_backend, fix_harness.get("backend"), slug,
+        )
+        return False
+
+    return True
+
+
 def _run_retry(
     action: Action,
     world: World,
@@ -404,6 +469,16 @@ def _run_retry(
     if last_cmd in _NON_REPLAYABLE_COMMANDS:
         last_cmd = "/fix"
     last_cmd = last_cmd or "/fix"
+
+    # Fork-on-retry: branch from the last known-good session on backends that
+    # support session forking (Claude), leaving the original intact for rollback.
+    # Backends without the capability (Codex) resume in place or start fresh —
+    # they ignore the flag. Decided here via the capability so handlers never
+    # branch on backend name. Only the /fix replay can fork: /plan always starts
+    # a fresh session (nothing to fork from) and /review is already throwaway.
+    fork_session = _fork_session_for_retry(task, repo_cfg, cfg, world.task.slug) \
+        if last_cmd == "/fix" else False
+
     if last_cmd == "/plan":
         hr = _run_plan_with_sync(task, action.guidance, None, repo_cfg, cfg,
                                   progress_callback=progress_callback)
@@ -412,5 +487,6 @@ def _run_retry(
                                    progress_callback=progress_callback)
     else:
         hr = _run_fix_with_sync(task, action.guidance, repo_cfg, cfg,
-                                progress_callback=progress_callback)
+                                progress_callback=progress_callback,
+                                fork_session=fork_session)
     return _to_dispatch(hr, task)

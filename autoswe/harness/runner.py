@@ -124,6 +124,7 @@ def run(
     cfg: dict,
     repo_cfg: dict | None = None,
     resume: str | None = None,
+    fork_session: bool = False,
     # Phase 3: generic intent (preferred)
     mode: str | None = None,
     extra_tools: list | None = None,
@@ -173,6 +174,7 @@ def run(
         cwd=cwd,
         model=model,
         resume=resume,
+        fork_session=fork_session,
         mode=mode,
         extra_tools=extra_tools,
         disallowed_tools_override=disallowed_tools_override,

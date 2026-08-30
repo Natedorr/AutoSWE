@@ -63,6 +63,7 @@ def _run_fix_session(
     error_prefix: str,
     guidance: str | None,
     progress_callback=None,
+    fork_session: bool = False,
 ) -> HandlerResult:
     """Shared execution tail for run_fix and resume_fix.
 
@@ -87,6 +88,7 @@ def _run_fix_session(
             cfg=cfg or {},
             repo_cfg=rc,
             resume=resume_id,
+            fork_session=fork_session,
             model=fix_model,
             mode="read_write",
             extra_tools=allowed_tools,
@@ -127,7 +129,7 @@ def _run_fix_session(
     )
 
 
-def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = None, cfg: dict | None = None, *, progress_callback=None, wt=None) -> HandlerResult:
+def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = None, cfg: dict | None = None, *, progress_callback=None, wt=None, fork_session: bool = False) -> HandlerResult:
     """Run fix phase with bypassPermissions. Returns done-file content.
 
     Return format on success:
@@ -211,13 +213,31 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
         )
 
     fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
-    log(f"[FIX] {task['id']} session={'NEW' if use_fresh_session else 'RESUME'} session_id={session_id or 'none'} plan_file={plan_file_path or 'none'}")
+
+    # Fork-on-retry: when *fork_session* is set, branch from the surviving
+    # known-good checkpoint (last_good_session_id) — which the FAILED path
+    # preserves — instead of session_id (nulled out on failure). With no good
+    # checkpoint yet (first-ever failure) there is nothing to fork from, so we
+    # fall back to a fresh session. use_fresh_session (plan-file seeding) still
+    # wins: it always starts a new session, no fork.
+    if fork_session and not use_fresh_session:
+        resume_source = task.get("last_good_session_id") or session_id
+        effective_fork = resume_source is not None
+    else:
+        resume_source = None if use_fresh_session else session_id
+        effective_fork = False
+
+    _sess_lbl = (
+        "NEW" if use_fresh_session
+        else ("FORK" if effective_fork else "RESUME")
+    )
+    log(f"[FIX] {task['id']} session={_sess_lbl} resume_from={resume_source or 'none'} plan_file={plan_file_path or 'none'}")
     log(f"[FIX] {task['id']} model={fix_model or 'default'} guidance={str(guidance or '')[:200]!r} prompt_len={len(prompt)} conflict_files={len(conflict_files or [])}")
     dbg.debug("FIX: model=%s guidance=%s", fix_model or "default", guidance)
 
     return _run_fix_session(
         task, prompt, wt, cfg, rc,
-        resume_id=None if use_fresh_session else session_id,
+        resume_id=resume_source,
         allowed_tools=allowed_tools,
         mcp_servers=mcp_servers,
         fix_model=fix_model,
@@ -225,6 +245,7 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
         error_prefix="run_fix",
         guidance=guidance,
         progress_callback=progress_callback,
+        fork_session=effective_fork,
     )
 
 

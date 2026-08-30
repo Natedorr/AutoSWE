@@ -223,6 +223,7 @@ def assert_claude_calls(cl_fake, expected_calls: list[dict]) -> None:
         phase - "plan" | "fix" (checks permission_mode)
         permission_mode - exact permission mode string
         resume - expected resume session_id (or null for new sessions)
+        fork_session - expected fork_session flag (retry forks from a good session)
         model - expected model
     """
     if not expected_calls:
@@ -263,6 +264,11 @@ def assert_claude_calls(cl_fake, expected_calls: list[dict]) -> None:
             assert call["resume"] == exp["resume"], (
                 f"Call {i}: expected resume={exp['resume']!r}, "
                 f"got {call['resume']!r}"
+            )
+        if "fork_session" in exp:
+            assert call.get("fork_session", False) == exp["fork_session"], (
+                f"Call {i}: expected fork_session={exp['fork_session']!r}, "
+                f"got {call.get('fork_session')!r}"
             )
         if "model" in exp:
             assert call["model"] == exp["model"], (

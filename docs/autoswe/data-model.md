@@ -52,7 +52,9 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `plan_branch` | `str` | Override branch from `/plan --branch <name>` (set once; later `--branch` flags ignored) |
 | `provider` | `str` | `"github"` or `"azure"` |
 | `autoswe_status` | `str \| None` | Run-state enum (see above). **Source of truth.** |
-| `session_id` | `str` | Agent session ID (Claude Code or Codex); used to resume the planner/coder session |
+| `session_id` | `str` | Agent session ID (Claude Code or Codex); used to resume the planner/coder session. **Cleared on `FAILED`** so the next dispatch does not resume a broken session |
+| `last_good_session_id` | `str \| None` | Last known-good session checkpoint. Set by `emit()` on every non-failed run that persists a `session_id`; **never cleared on `FAILED`** (unlike `session_id`). This is the session `/retry` forks from on backends that advertise the `"session_fork"` capability, so a failed retry leaves the checkpoint intact and the next `/retry` re-forks from the same good session. See [harnesses.md](harnesses.md#retry-semantics) |
+| `last_good_session_backend` | `str \| None` | The coding backend (`claude_code` / `codex`) that produced `last_good_session_id`. Written by `emit()` alongside the checkpoint; **never cleared on `FAILED`**. `_run_retry` only forks when this matches the resolved fix backend, so a mixed per-phase config (e.g. Codex `plan_harness` + Claude `fix_harness`) can't hand a foreign-backend session id to the fix backend's SDK. See [harnesses.md](harnesses.md#retry-semantics) |
 | `attempt_count` | `int` | Dispatch attempts; incremented by `decide()` on each restart; reset to 1 by `/retry` |
 | `first_dispatched_at` | `str` | ISO 8601; set on first dispatch, reset on terminal status (wall-clock guard anchor) |
 | `last_dispatched_command` | `str \| None` | The slash command string last dispatched (e.g. `/plan`) |
@@ -125,6 +127,8 @@ class TaskState:
     last_dispatched_command_id: int | None
     last_consumed_reply_id: int | None
     session_id: str | None
+    last_good_session_id: str | None
+    last_good_session_backend: str | None
     pr_number: int | None
     guard_blocked: bool
     gh_closed: bool
@@ -257,6 +261,8 @@ What `planner` / `coder` / `reviewer` / `ship` return after interpreting a `RunR
 ### `RunSpec` — backend invocation intent
 
 `runner.run(...)` packs its kwargs into a `RunSpec` (also in `backends/base.py`) and dispatches to the resolved backend. The key field is **`mode`** — a generic intent string (`"plan"`, `"read_only"`, `"read_write"`) that each backend translates into its own configuration (Claude Code permission modes/tool sets, Codex `--sandbox` flags). It supersedes the legacy `permission_mode` + `allowed_tools` + `disallowed_tools` triple.
+
+**`fork_session` (retry semantics).** `RunSpec.fork_session: bool` (default `False`) is the uniform retry-semantics surface. When `True` **and** `resume` is set, backends that advertise the `"session_fork"` capability branch from `resume` into a *new* session instead of continuing it in place (Claude Agent SDK `fork_session=True`); the original stays intact for rollback. Backends without the capability (Codex) ignore it. Set only by `_run_retry`, gated on `backend_has_capability(harness, "session_fork")` — so handlers never branch on backend name. See [harnesses.md](harnesses.md#retry-semantics).
 
 ## Normalized Dataclasses (`autoswe/providers/base.py`)
 

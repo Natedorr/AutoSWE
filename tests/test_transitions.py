@@ -143,6 +143,9 @@ def test_transition(
     no_claude = expect.get("no_claude_calls", False)
     if no_claude:
         assert len(hw.claude.calls) == 0, "Expected no Claude calls"
+    elif "claude_calls" in expect:
+        # Full per-call expectations (resume / fork_session / permission_mode …)
+        assert_claude_calls(hw.claude, expect["claude_calls"])
     elif "claude_permission" in expect:
         assert_claude_calls(hw.claude, [{"permission_mode": expect["claude_permission"]}])
 

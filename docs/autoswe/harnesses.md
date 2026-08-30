@@ -150,9 +150,51 @@ them. The tools also remain listed in the backend's tool lists as
 belt-and-braces. A profile `env` entry can override the default (e.g.
 `"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "0"}` to disable).
 
-**Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `progress_stream`.
+**Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `session_fork`, `progress_stream`, `plan_file`.
 
 **Retryable subtypes:** `set()` — Claude Code retries on SDK exceptions (`_get_retryable_exceptions`), not return-value subtypes.
+
+<a id="retry-semantics"></a>
+**Retry semantics (fork-on-retry).** The Claude Agent SDK supports
+`fork_session` / `resume_session_at` — a `/retry` can *branch* from the last
+known-good session into a new session, leaving the original intact so a failed
+retry can roll back to it. autoSWE maps the uniform `RunSpec.fork_session` flag
+to this:
+
+- **Checkpoint.** `emit()` records the run's `session_id` into the queue's
+  `last_good_session_id` on every **non-failed** run that persists a session,
+  **and** `last_good_session_backend` with the backend that produced it
+  (the resolved phase harness's `backend`, e.g. `claude_code` / `codex`).
+  Unlike `session_id`, it is **never cleared on `FAILED`** (the `FAILED` path
+  nulls `session_id` so we don't resume a broken session). So the most recent
+  good session — and which backend made it — always survives a failure.
+- **Fork.** `_run_retry` replays the last substantive command. For a `/fix`
+  replay it sets `fork_session=True` **iff** all three hold: the fix backend
+  advertises `"session_fork"`, a checkpoint exists (`last_good_session_id` or
+  `session_id`), and the checkpoint's recorded backend
+  (`last_good_session_backend`) **matches the fix backend**. The last condition
+  is the provenance gate: in a mixed per-phase config (e.g. Codex
+  `plan_harness` + Claude `fix_harness`) a Codex plan's session id would
+  otherwise be handed to the Claude SDK, which cannot resolve a foreign-backend
+  session — so a mismatch (or a missing tag) falls back to a fresh session.
+  `coder.run_fix` then resumes from `last_good_session_id` (not `session_id`,
+  which is `None` after a failure) with `fork_session=True`, so the SDK opens
+  a **new** session whose id becomes the new `session_id` while the original
+  checkpoint stays resumable. With no usable checkpoint yet (first-ever
+  failure) there is nothing to fork from → a fresh session.
+- **Auto-restore.** Because the fork never mutates the original and a failed
+  forked retry leaves `last_good_session_id` untouched, a repeated `/retry`
+  keeps forking from the same good checkpoint until one succeeds — rollback is
+  automatic and zero-effort.
+- **SDK floor.** `fork_session` requires Agent SDK ≥ 0.2.137. The backend reads
+  the installed distribution version and, on an older SDK, logs a warning and
+  degrades to a plain in-place `resume` instead of passing an unknown option.
+  The capability is still advertised; the guard is the runtime safety net.
+- **Follow-up (out of scope here).** `resume_session_at` branches from an
+  *earlier message*, not the whole session. That needs per-message
+  "known-good" bookkeeping the queue schema does not track yet, so only
+  fork-from-whole-session is wired now; the `"session_fork"` capability covers
+  both.
 
 **System prompt:** runs with the `claude_code` system-prompt preset
 (`system_prompt={"type": "preset", "preset": "claude_code"}`), set in
@@ -188,7 +230,17 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 
 **Capabilities (Phase 4, core run only):** `mode`, `resume`, `progress_stream`.
 
-**Capabilities (not yet supported):** `mcp` (no MCP comment posting), `can_use_tool` (no per-tool gating), `plan_permission` (no dedicated plan mode). Handlers degrade gracefully when these are unavailable — e.g. the planner falls back to text parsing instead of MCP plan posting.
+**Capabilities (not yet supported):** `mcp` (no MCP comment posting), `can_use_tool` (no per-tool gating), `plan_permission` (no dedicated plan mode), `session_fork` (no fork primitive). Handlers degrade gracefully when these are unavailable — e.g. the planner falls back to text parsing instead of MCP plan posting.
+
+**Retry semantics (resume-in-place or fresh — no fork).** `codex exec resume
+<id>` *continues* the existing session in place; Codex has no fork primitive
+(analogous to the Claude SDK's `fork_session`). So a Codex `/retry` either
+resumes the same session (mutating it) or starts a fresh one — it cannot
+branch from a checkpoint while leaving the original intact. The backend does
+not advertise `"session_fork"`, so `_run_retry`'s capability gate leaves
+`fork_session` off and `RunSpec.fork_session` is ignored. See
+[harnesses.md#retry-semantics](#retry-semantics) for the Claude fork-on-retry
+contrast.
 
 **Retryable subtypes:** `{"error", "killed"}` — Codex failure is return-value-driven (non-zero exit or `turn.failed`), not exception-driven. The runner inspects `RunResult.subtype` and retries when `AGENT_RETRY_ON_FAILURE > 0`. Override with `AGENT_RETRY_ON_SUBTYPE`.
 
