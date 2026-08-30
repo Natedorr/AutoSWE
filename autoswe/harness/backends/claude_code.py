@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import types
 from collections.abc import Awaitable
 from pathlib import Path
 
@@ -24,6 +25,20 @@ _dbg = get_debug_logger()
 
 _RETRYABLE_SDK_EXCEPTIONS: tuple = ()
 _PLANS_DIR = Path.home() / ".claude" / "plans"
+
+# Claude Code's default system-prompt preset. When system_prompt is unset the
+# SDK falls back to a minimal prompt that covers tool calling but omits the
+# preset's tool-usage guidance, security/safety instructions, and
+# working-directory/environment context. Setting the bare preset makes
+# plan/fix/review run on the full Claude Code prompt.
+#
+# Wrapped in MappingProxyType so the shared module-level constant is immutable:
+# every run reuses the same object, so a stray assignment in any one call site
+# would corrupt the preset for all subsequent runs. The SDK transport only
+# reads it (sp.get("type")), and it still compares equal to a plain dict.
+CLAUDE_CODE_SYSTEM_PROMPT_PRESET = types.MappingProxyType(
+    {"type": "preset", "preset": "claude_code"}
+)
 
 # ---------- Mode → Claude Code mapping ----------
 
@@ -426,6 +441,7 @@ class ClaudeCodeBackend:
                 "model": spec.model or None,
                 "cli_path": spec.cli_path or harness_cfg.get("cli_path"),
                 "mcp_servers": spec.mcp_servers or {},
+                "system_prompt": CLAUDE_CODE_SYSTEM_PROMPT_PRESET,
             }
 
             # --- Setup phase: can_use_tool requires streaming prompt + hooks ---
