@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+import autoswe.harness.backends.codex as _codex_mod
 from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.backends.codex import (
     _BYPASS_APPROVALS_AND_SANDBOX,
@@ -19,9 +20,28 @@ from autoswe.harness.backends.codex import (
     _bypass_approvals,
     _CodexAccumulator,
     _parse_jsonl_line,
+    _probe_output_last_message_support,
 )
 
 # ---------- Helpers ----------
+
+
+@pytest.fixture(autouse=True)
+def _pin_output_last_message_probe(monkeypatch):
+    """Pin the CLI capability probe result to 'supported' for every test.
+
+    ``_probe_output_last_message_support`` returns the cached module global
+    immediately when it is not None, so pinning it to True makes the probe a
+    no-op: flag-emission tests neither spawn a real ``codex`` subprocess nor
+    depend on whether a codex CLI happens to be on PATH in the CI runner.
+
+    Dedicated probe tests that exercise the *real* detection logic reset the
+    global to None and mock ``subprocess.run`` themselves (see
+    ``test_codex_probe_*`` below) — monkeypatch there overrides this pin for
+    that test's duration only.
+    """
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", True)
+    yield
 
 
 def _jsonl(*events: dict) -> str:
@@ -1625,6 +1645,80 @@ def test_codex_no_output_flag_when_path_empty():
 
     cmd = _get_cmd(asyncio.run(_cmd()))
     assert "--output-last-message" not in cmd
+
+
+def test_codex_probe_detects_supported_flag(monkeypatch):
+    """Probe reads `codex exec --help` and returns True when the flag is present."""
+    import subprocess
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", None)
+    monkeypatch.setattr(subprocess, "run",
+                        Mock(return_value=Mock(
+                            stdout="  -o, --output-last-message <FILE>\n",
+                            stderr="", returncode=0,)))
+    assert _probe_output_last_message_support() is True
+    # Second call returns the cached value without re-running subprocess.
+    monkeypatch.setattr(subprocess, "run", Mock(side_effect=AssertionError(
+        "probe must not re-run subprocess after first call")))
+    assert _probe_output_last_message_support() is True
+
+
+def test_codex_probe_detects_unsupported_flag(monkeypatch):
+    """Probe returns False when the CLI help does not mention the flag."""
+    import subprocess
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", None)
+    monkeypatch.setattr(subprocess, "run",
+                        Mock(return_value=Mock(
+                            stdout="Usage: codex exec [OPTIONS] <PROMPT>\n",
+                            stderr="", returncode=0,)))
+    assert _probe_output_last_message_support() is False
+
+
+def test_codex_probe_defaults_true_on_probe_failure(monkeypatch):
+    """If `codex` is missing or times out, assume supported (default True).
+
+    Rationale: a probe failure (e.g. a sandboxed runner without a codex CLI)
+    should not silently degrade to chunk accumulation when the flag would
+    actually have worked — the flag is verified on codex-cli 0.150.1.
+    """
+    import subprocess
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", None)
+    monkeypatch.setattr(subprocess, "run",
+                        Mock(side_effect=FileNotFoundError("codex")))
+    assert _probe_output_last_message_support() is True
+    # Timeout is the same class of failure.
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", None)
+    monkeypatch.setattr(subprocess, "run",
+                        Mock(side_effect=subprocess.TimeoutExpired("codex", 10)))
+    assert _probe_output_last_message_support() is True
+
+
+def test_codex_output_last_message_omitted_when_unsupported(monkeypatch):
+    """On a CLI without the flag, _run_async omits it so codex doesn't reject
+    the whole command up front (the chunk fallback then produces RunResult.text)."""
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", False)
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await backend._run_async(spec, "/tmp/codex-lastmsg-unsup.txt")
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_run()))
+    assert "--output-last-message" not in cmd
+    # The chunk fallback still yields text (no -o file to read).
+    # Re-run to capture the RunResult under the same unsupported condition.
+    async def _run_result():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, "/tmp/codex-lastmsg-unsup.txt")
+
+    result = asyncio.run(_run_result())
+    assert result.text  # chunk accumulation produced non-empty text
+    assert result.subtype == "success"
 
 
 def test_read_last_message_file_absent():
