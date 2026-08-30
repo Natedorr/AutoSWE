@@ -523,6 +523,55 @@ def test_parse_jsonl_line_plan_delta_progress_only():
     assert acc.plan_text is None
 
 
+def test_parse_jsonl_line_plan_delta_throttle_refires_on_growth():
+    """Small streamed plan deltas re-fire progress as they accumulate past ~80 chars.
+
+    Pins the cumulative-growth throttle: a series of small deltas (each far
+    below 80 chars) must fire multiple progress lines, not just the first.
+    """
+    acc = _CodexAccumulator()
+    callback = Mock()
+    # 10 consecutive 30-char deltas = 300 chars of streamed plan text.
+    for _ in range(10):
+        _parse_jsonl_line(
+            json.dumps({
+                "type": "item/plan/delta",
+                "itemId": "p1",
+                "delta": "x" * 30,
+            }),
+            acc=acc,
+            callback=callback,
+        )
+    # First delta fires immediately, then again on every ~80-char growth.
+    # Expected fire points: after delta 1 (first), and at 300-char total in
+    # ~80-char strides → at least 3 fires (30, 90+, 210+ cumulative).
+    assert callback.call_count >= 3, (
+        f"Small deltas should re-fire progress as they accumulate, "
+        f"got {callback.call_count} fire(s)"
+    )
+    # Still no RunResult impact.
+    assert not acc.text_chunks
+    assert acc.plan_text is None
+
+
+def test_parse_jsonl_line_reasoning_delta_refires_on_growth():
+    """reasoning summaryTextDelta progress uses the same cumulative throttle."""
+    acc = _CodexAccumulator()
+    callback = Mock()
+    for _ in range(10):
+        _parse_jsonl_line(
+            json.dumps({
+                "type": "item/reasoning/summaryTextDelta",
+                "itemId": "r1",
+                "delta": "y" * 30,
+            }),
+            acc=acc,
+            callback=callback,
+        )
+    assert callback.call_count >= 3
+    assert not acc.text_chunks
+
+
 # ---------- CodexBackend integration (mocked subprocess) ----------
 
 

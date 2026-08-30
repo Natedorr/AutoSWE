@@ -69,8 +69,11 @@ class _CodexAccumulator:
     # Per-item-id streaming agent-message text (item/agentMessage/delta).
     # Used only as a fallback when the item.completed carries empty text.
     _agent_delta_by_id: dict[str, str] = field(default_factory=dict)
-    # Per-item-id char counts of delta progress already fired (throttling).
-    _delta_progress_chars: dict[str, int] = field(default_factory=dict)
+    # Per-item-id cumulative character position streamed so far (delta progress
+    # throttling; see _fire_delta_progress).
+    _delta_streamed: dict[str, int] = field(default_factory=dict)
+    # Per-item-id cumulative position at which delta progress last fired.
+    _delta_fired_at: dict[str, int] = field(default_factory=dict)
 
 
 # ---------- Name normalization (both-casing tolerance) ----------
@@ -303,6 +306,10 @@ def _file_change_paths(item: dict) -> str:
     return ", ".join(paths)
 
 
+# turn.plan.updated step status → progress icon (shared by _fire_plan_progress).
+_PLAN_STATUS_ICON = {"completed": "✅", "inprogress": "▶", "pending": "☐"}
+
+
 def _fire_plan_progress(callback, plan: list[dict], explanation: str | None = None) -> None:
     """Render a turn.plan.updated step list into a progress callback string.
 
@@ -311,12 +318,11 @@ def _fire_plan_progress(callback, plan: list[dict], explanation: str | None = No
     """
     if not plan:
         return
-    _STATUS_ICON = {"completed": "✅", "inprogress": "▶", "pending": "☐"}
     parts = []
     for step in plan:
         if not isinstance(step, dict):
             continue
-        icon = _STATUS_ICON.get(str(step.get("status", "")).strip().lower(), "☐")
+        icon = _PLAN_STATUS_ICON.get(str(step.get("status", "")).strip().lower(), "☐")
         parts.append(f"{icon} {step.get('step', step.get('text', ''))}")
     if not parts:
         return
@@ -339,12 +345,18 @@ def _fire_delta_progress(acc: _CodexAccumulator, callback, event: dict, prefix: 
     delta = _delta_payload(event)
     if not delta:
         return
-    # Keep a running per-item buffer so we can throttle on growth.
-    buf = acc._delta_progress_chars
-    already = buf.get(item_id, 0)
-    buf[item_id] = already + len(delta)
-    # Fire if this is the first delta, or the buffer has grown ~80 chars since.
-    if already == 0 or buf[item_id] - already >= 80:
+    # Throttle on cumulative growth: re-fire once ~80 chars have streamed
+    # since the last progress line for this item.  Track two positions:
+    #   _delta_streamed — total chars streamed so far (running total)
+    #   _delta_fired_at — the streamed position at which progress last fired
+    # Firing when (streamed - fired_at) >= 80 means small deltas (the common
+    # case) still surface progress as they accumulate, instead of only when a
+    # single delta happens to be >= 80 chars.
+    streamed = acc._delta_streamed.get(item_id, 0) + len(delta)
+    acc._delta_streamed[item_id] = streamed
+    fired_at = acc._delta_fired_at.get(item_id, -1)
+    if fired_at < 0 or streamed - fired_at >= 80:
+        acc._delta_fired_at[item_id] = streamed
         callback(f"{prefix}{delta[:120]}")
 
 
