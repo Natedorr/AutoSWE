@@ -365,7 +365,8 @@ def capture_azure(cfg: dict) -> None:
         "id": first_comment.get("id", 1000) + 1,
         "text": "Example comment text",
         "createdDate": first_comment.get("createdDate", "2026-01-01T00:00:00.000Z"),
-        "createdBy": created_by if created_by else {"uniqueName": "testowner", "id": "1"},
+        "createdBy": sanitize_ado_profile(first_comment.get("createdBy", {}))
+        or {"uniqueName": "testowner", "id": "1"},
     }, "POST /_apis/wit/workitems/{n}/comments", "POST",
                   "docs/azure-devops-api/create-workitem-comment.md")
 
