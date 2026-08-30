@@ -186,7 +186,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--model`, `-C
 - `codex_api_key` or `openai_api_key`: API key for the provider (optional for local providers)
 - `timeout`: Override the default timeout (optional)
 - `env`: Extra environment variables (a `{key: value}` map) merged into the `codex exec` subprocess (optional). User values win over the api-key fields; see [Per-profile `env`](#per-profile-env)
-- `bypass_approvals`: Explicit switch (boolean, **default `true`**) for the `--dangerously-bypass-approvals-and-sandbox` flag. autoSWE's intended deployment is a dedicated, isolated machine, so the default grants full write + network access to every phase. Set it to `false` on a shared host to drop the flag. Precedence: this profile field → `CODEX_BYPASS_APPROVALS_AND_SANDBOX` env var → default `true`
+- `bypass_approvals`: Explicit switch (boolean, **default `true`**) for the `--dangerously-bypass-approvals-and-sandbox` flag. autoSWE's intended deployment is a dedicated, isolated machine, so the default grants full write + network access to every phase. Set it to `false` on a shared host to drop the flag. Precedence: this profile field → `CODEX_BYPASS_APPROVALS_AND_SANDBOX` env var → default `true`. The env var is parsed case-insensitively; `"1"`/`"true"`/`"yes"`/`"on"` (surrounding whitespace ignored) are truthy, anything else is falsy.
 
 **Capabilities (Phase 4, core run only):** `mode`, `resume`, `progress_stream`.
 
@@ -222,3 +222,5 @@ Unknown backend names raise `ValueError`. A `codex` profile without `model` also
 ### Backward Compatibility
 
 With **no** `harnesses.json` and **no** `{phase}_harness` keys, a full plan→fix→review cycle is byte-for-byte equivalent to the legacy path. `resolve_harness()` synthesizes `{"backend": "claude_code", "model": <existing_model>}` so the `PLAN_MODEL`/`FIX_MODEL`/`REVIEW_MODEL` resolution chain keeps working.
+
+For the `codex` backend, a profile that omits `bypass_approvals` gets the **default `true`** (full bypass) — so an existing `codex` profile keeps its current full-access behavior with no config change. Operators on shared hosts should add `"bypass_approvals": false` to opt out.

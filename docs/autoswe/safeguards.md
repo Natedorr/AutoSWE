@@ -4,14 +4,16 @@
 
 autoSWE runs the coding agent with full read/write/`Bash` access for `/fix` (and `/sync` conflict resolution) **on purpose**. The expectation is that it runs on a **dedicated, isolated machine** that does nothing else: it can clone repos, write to `autoswe/issue-*` branches, and push them — and that's the whole blast radius. Don't run autoSWE on a shared workstation, a build box with secrets for other systems, or anywhere a compromised agent run could do damage beyond "messed up a feature branch." The free-permissions choice is only safe under that assumption — treat the isolation as a hard requirement, not a nice-to-have.
 
-The orchestrator's own privilege split still holds inside that machine. Handlers express intent as a generic **`mode`** (see [harnesses.md](harnesses.md)); each backend translates it — Claude Code into permission modes + tool sets, Codex into a `--sandbox` level:
+The orchestrator's own privilege split still holds inside that machine. Handlers express intent as a generic **`mode`** (see [harnesses.md](harnesses.md)); each backend translates it:
 
-- `/plan` and `resume_plan` → `mode="plan"`, tools `["Read", "Glob", "Grep"]` + `PROGRESS_TOOLS` — read-only. Claude Code: plan permission mode (native plan files in `~/.claude/plans/`), with `Write`/`Edit` blocked by the `can_use_tool` callback and `Agent` excluded so sub-agents can't bypass containment. Codex: `read-only` sandbox.
-- `/fix` → `mode="read_write"`, tools `["Read", "Edit", "Write", "Bash", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — full access. Claude Code: `bypassPermissions`. Codex: `workspace-write` sandbox.
+- `/plan` and `resume_plan` → `mode="plan"`, tools `["Read", "Glob", "Grep"]` + `PROGRESS_TOOLS` — read-only. Claude Code: plan permission mode (native plan files in `~/.claude/plans/`), with `Write`/`Edit` blocked by the `can_use_tool` callback and `Agent` excluded so sub-agents can't bypass containment.
+- `/fix` → `mode="read_write"`, tools `["Read", "Edit", "Write", "Bash", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — full access. Claude Code: `bypassPermissions`.
 - `/sync` conflict resolution → same as `/fix` (minus `AskUserQuestion`, kept autonomous).
 - `/review` → `mode="read_only"`, tools `["Read", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — read-only.
 
-The read-only guarantee for `/plan` and `/review` is therefore enforced two different ways depending on backend: Claude Code gates each tool call via `can_use_tool`, while Codex relies on the OS-level `read-only` sandbox. On a backend that supports neither cleanly, treat the machine isolation as the real boundary.
+**Claude Code** translates `mode` into a permission mode + tool sets, so the read-only guarantee for `/plan` and `/review` is enforced by gating each tool call via `can_use_tool`.
+
+**Codex** takes a different posture (issue #129): it does **not** translate `mode` into a `--sandbox` level. `mode` is still accepted for contract parity with Claude Code, but it has no effect on the Codex CLI flags — the previous per-mode `--sandbox` mapping was removed because it was dead weight (the always-on bypass flag neutralized it). Instead every Codex run (all modes, fresh and resume) emits `--dangerously-bypass-approvals-and-sandbox` by default, granting full write + network access. That is controlled by the explicit `bypass_approvals` profile flag (default `true`) / `CODEX_BYPASS_APPROVALS_AND_SANDBOX` env var — see the "Sandbox / bypass policy (issue #129)" section in [harnesses.md](harnesses.md#codex-phase-4). So for Codex, the machine-isolation boundary above **is** the real boundary: `bypass_approvals: false` is the escape hatch for shared hosts, but even then Codex falls back to its own default sandbox/approval policy rather than a per-mode read-only sandbox.
 
 ### Repo-supplied MCP servers, hooks, skills, and tools load by design
 

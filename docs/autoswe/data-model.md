@@ -256,7 +256,7 @@ What `planner` / `coder` / `reviewer` / `ship` return after interpreting a `RunR
 
 ### `RunSpec` — backend invocation intent
 
-`runner.run(...)` packs its kwargs into a `RunSpec` (also in `backends/base.py`) and dispatches to the resolved backend. The key field is **`mode`** — a generic intent string (`"plan"`, `"read_only"`, `"read_write"`) that each backend translates into its own configuration (Claude Code permission modes/tool sets, Codex `--sandbox` flags). It supersedes the legacy `permission_mode` + `allowed_tools` + `disallowed_tools` triple.
+`runner.run(...)` packs its kwargs into a `RunSpec` (also in `backends/base.py`) and dispatches to the resolved backend. The key field is **`mode`** — a generic intent string (`"plan"`, `"read_only"`, `"read_write"`) that each backend translates into its own configuration (Claude Code permission modes/tool sets; Codex accepts it for contract parity but does not map it to a `--sandbox` flag — see [harnesses.md](harnesses.md#codex-phase-4)). It supersedes the legacy `permission_mode` + `allowed_tools` + `disallowed_tools` triple.
 
 ## Normalized Dataclasses (`autoswe/providers/base.py`)
 
