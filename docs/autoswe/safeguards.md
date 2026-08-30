@@ -27,7 +27,7 @@ This is **intentional, not accidental**. autoSWE's deployment model (above) is a
 
 **Opting a repo out (not wired up yet).** Loading a repo's MCP/hook/skill content is the default and there is currently no autoSWE config switch for it. If that is ever needed, the one-line SDK change to make a single run ignore all filesystem MCP/settings for that repo is to pass `strict_mcp_config=True` **and** `setting_sources` without `"project"` to `ClaudeAgentOptions` in `autoswe/harness/backends/claude_code.py` (see `docs/claude-agent-sdk/agent-sdk/mcp.md` and `docs/claude-agent-sdk/agent-sdk/claude-code-features.md`). That would drop the repo's `.mcp.json` servers and `.claude/settings.json` hooks while keeping autoSWE's injected servers.
 
-`PROGRESS_TOOLS` (`TodoWrite`, `TaskCreate`, `TaskUpdate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`) are available in every phase. `AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]` is used only for `/fix`, `/sync` conflict resolution, and `/review` — phases where sub-agent spawning is needed and safe. Plan phase uses `PROGRESS_TOOLS` directly to prevent `Agent` sub-agent escapes.
+`PROGRESS_TOOLS` (`TodoWrite`, `TaskCreate`, `TaskUpdate`, `TaskGet`, `TaskList`, `TaskStop`) are available in every phase. `AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]` is used only for `/fix`, `/sync` conflict resolution, and `/review` — phases where sub-agent spawning is needed and safe. Plan phase uses `PROGRESS_TOOLS` directly to prevent `Agent` sub-agent escapes.
 
 ## Who Can Steer
 

@@ -61,7 +61,7 @@ _READ_WRITE_TOOLS = [
     "Read", "Edit", "Write", "Bash", "Glob", "Grep",
     "AskUserQuestion", *_MCP_COMMENT_TOOLS,
     "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet",
-    "TaskList", "TaskOutput", "TaskStop", "Agent",
+    "TaskList", "TaskStop", "Agent",
 ]
 
 # Plan mode tools (read-only + AskUserQuestion + plan MCP tools, Agent excluded).

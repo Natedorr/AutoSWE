@@ -90,7 +90,7 @@ class HandlerResult:
 # Read-only-safe progress/orchestration tools (no repo mutation)
 PROGRESS_TOOLS = [
     "TodoWrite",
-    "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+    "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop",
 ]
 
 # Full agent toolset: includes sub-agent spawning. Only safe for fix/coder phases.
