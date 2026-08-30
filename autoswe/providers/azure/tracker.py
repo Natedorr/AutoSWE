@@ -300,11 +300,14 @@ class AzureTracker(IssueTracker):
         try:
             me_path = "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1"
             raw = ado_get(me_path, self._pat)
+            # Documented profile fields first (docs/azure-devops-api/get-current-user.md:
+            # displayName, publicAlias, emailAddress, coreRevision, timeStamp, id, revision);
+            # principalName/uniqueName are legacy ADO Server/TFS profile shapes.
             self._authenticated_user = (
-                raw.get("principalName", "")
-                or raw.get("uniqueName", "")
-                or raw.get("emailAddress", "")
+                raw.get("emailAddress", "")
                 or raw.get("displayName", "")
+                or raw.get("principalName", "")
+                or raw.get("uniqueName", "")
             )
             if self._authenticated_user:
                 return self._authenticated_user

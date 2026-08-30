@@ -147,7 +147,7 @@ GITHUB_READS: dict[str, list[tuple[str, str]]] = {
 
 AZURE_READS: dict[str, list[tuple[str, str]]] = {
     "get_current_user": [
-        ("uniqueName", "str"), ("id", "str"),
+        ("emailAddress", "str"), ("id", "str"),
     ],
     "list_repositories": [
         ("count", "int"), ("value", "list"),
