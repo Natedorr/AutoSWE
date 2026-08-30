@@ -1385,6 +1385,185 @@ def test_codex_default_max_turns_no_flag():
     assert not any("max_turns" in part for part in cmd)
 
 
+# ---------------------------------------------------------------------------
+# --output-last-message capture (issue #128)
+#
+# RunResult.text is sourced from the `-o` file when present, and falls back to
+# chunk accumulation when the file is absent or empty. The tests below exercise
+# _run_async directly with a controlled last_message_path so the golden/negative
+# cases are deterministic; flag-presence is asserted on the emitted command.
+
+
+def test_codex_last_message_file_is_authoritative(tmp_path):
+    """When the -o file holds content, RunResult.text is exactly that content,
+    even when the JSONL stream would have produced different text.
+
+    Fixture: a golden -o file whose content differs from the streamed chunks.
+    """
+    backend = CodexBackend()
+    golden = "Final summary from the -o file."
+    path = tmp_path / "lastmsg.txt"
+    path.write_text(golden + "\n", encoding="utf-8")  # trailing newline is stripped
+    # Streamed chunks would yield "Chunk text." — the file must win.
+    jsonl = _make_success_jsonl(thread_id="sess-om", agent_texts=["Chunk text."])
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, str(path))
+
+    result = asyncio.run(_run())
+    assert result.text == golden, f"expected -o file content, got {result.text!r}"
+    assert result.session_id == "sess-om"
+    assert result.subtype == "success"
+
+
+def test_codex_last_message_fallback_when_file_absent(tmp_path):
+    """Negative test: no -o file on disk → fall back to accumulated chunks."""
+    backend = CodexBackend()
+    missing = tmp_path / "does-not-exist.txt"  # never created
+    assert not missing.exists()
+    jsonl = _make_success_jsonl(thread_id="sess-1", agent_texts=["Fallback chunk."])
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, str(missing))
+
+    result = asyncio.run(_run())
+    assert result.text == "Fallback chunk."
+    assert result.subtype == "success"
+
+
+def test_codex_last_message_fallback_when_file_empty(tmp_path):
+    """Empty/whitespace-only -o file → fall back to accumulated chunks."""
+    backend = CodexBackend()
+    empty = tmp_path / "empty.txt"
+    empty.write_text("   \n\n  ", encoding="utf-8")
+    jsonl = _make_success_jsonl(thread_id="sess-2", agent_texts=["Chunk A", "Chunk B"])
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, str(empty))
+
+    result = asyncio.run(_run())
+    assert result.text == "Chunk A\nChunk B"
+    assert result.subtype == "success"
+
+
+def test_codex_output_last_message_flag_fresh():
+    """Fresh exec emits --output-last-message <path> before the -- separator."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await backend._run_async(spec, "/tmp/codex-lastmsg-xyz.txt")
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_run()))
+    assert "--output-last-message" in cmd
+    idx = cmd.index("--output-last-message")
+    assert cmd[idx + 1] == "/tmp/codex-lastmsg-xyz.txt"
+    # Flag must come before the `--` prompt separator (a global CLI flag).
+    assert idx < cmd.index("--")
+
+
+def test_codex_output_last_message_flag_resume():
+    """Resume also emits --output-last-message <path> (verified supported)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Continue", cwd="/tmp",
+                   resume="sess-123", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await backend._run_async(spec, "/tmp/codex-lastmsg-res.txt")
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_run()))
+    assert "resume" in cmd
+    assert "--output-last-message" in cmd
+    idx = cmd.index("--output-last-message")
+    assert cmd[idx + 1] == "/tmp/codex-lastmsg-res.txt"
+
+
+def test_codex_no_output_flag_when_path_empty():
+    """Backwards-compat: with no last_message_path the flag is omitted and
+    text comes purely from chunks (original behavior preserved)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+    jsonl = _make_success_jsonl(thread_id="t-9", agent_texts=["Only chunks."])
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, "")
+
+    result = asyncio.run(_run())
+    assert result.text == "Only chunks."
+    # Re-check the flag is absent on the command line too.
+    async def _cmd():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await backend._run_async(spec, "")
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_cmd()))
+    assert "--output-last-message" not in cmd
+
+
+def test_read_last_message_file_absent():
+    """_read_last_message_file returns None for a missing path."""
+    from autoswe.harness.backends.codex import _read_last_message_file
+    assert _read_last_message_file("/nonexistent/nope-xyz.txt") is None
+
+
+def test_run_allocates_and_cleans_temp_file():
+    """run() passes a real temp path to _run_async and removes it afterwards.
+
+    The subprocess is mocked (no real ``codex`` binary needed — CI runners do
+    not have it on PATH), so this test verifies the temp-file lifecycle of
+    ``run()`` only: path allocation, pre-existence, and post-run cleanup.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+    seen: dict = {}
+
+    orig = backend._run_async
+
+    async def spy(self_, spec_, last_message_path=""):
+        seen["path"] = last_message_path
+        seen["exists_before"] = Path(last_message_path).exists()
+        # orig is the real (pre-patch) bound method, so call it directly.
+        return await orig(spec_, last_message_path)
+
+    mock_exec = AsyncMock(return_value=_mock_create_process(
+        stdout=_make_success_jsonl()
+    ))
+    with patch("asyncio.create_subprocess_exec", mock_exec), \
+            patch.object(CodexBackend, "_run_async", spy):
+        result = asyncio.run(backend.run(spec))
+
+    assert isinstance(result, RunResult)
+    path = seen["path"]
+    assert path, "run() must allocate a last-message temp path"
+    assert seen["exists_before"] is True, "mkstemp should create the file up front"
+    assert not Path(path).exists(), "temp file must be cleaned up after run()"
+    # The run() pass also threads the path into the emitted CLI flag.
+    cmd = _get_cmd(mock_exec)
+    assert "--output-last-message" in cmd
+    assert cmd[cmd.index("--output-last-message") + 1] == path
+
+
 # ---------- Config interpolation ----------
 
 
