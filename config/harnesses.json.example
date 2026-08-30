@@ -24,17 +24,17 @@
     "anthropic_auth_token": "ollama"
   },
 
-  "codex-gpt5": {
-    "_comment": "OpenAI Codex with GPT-5 — requires 'codex' CLI on PATH and CODEX_API_KEY (or openai_api_key as fallback)",
+  "codex-gpt56-terra": {
+    "_comment": "OpenAI Codex with GPT-5.6 Terra — requires 'codex' CLI on PATH and CODEX_API_KEY (or openai_api_key as fallback)",
     "backend": "codex",
-    "model": "gpt-5",
+    "model": "gpt-5.6-terra",
     "codex_api_key": "${CODEX_API_KEY}"
   },
 
   "codex-gpt5-codex": {
     "_comment": "Alternative: use codex_api_key instead of openai_api_key (maps to CODEX_API_KEY env var)",
     "backend": "codex",
-    "model": "gpt-5-codex",
+    "model": "gpt-5.6-sol",
     "codex_api_key": "${CODEX_API_KEY}"
   },
 

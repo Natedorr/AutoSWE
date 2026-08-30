@@ -160,7 +160,7 @@ def _set_tags():
 
 
 def _get_comments():
-    r = ado_get(f"https://dev.azure.com/{ORG}/{PROJECT}/_apis/wit/workitems/1/comments?api-version=7.1-preview.4", PAT)
+    r = ado_get(_ado_api_version(f"https://dev.azure.com/{ORG}/{PROJECT}/_apis/wit/workitems/1/comments"), PAT)
     assert "comments" in r or "totalCount" in r
 
 

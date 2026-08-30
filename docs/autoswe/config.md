@@ -83,7 +83,7 @@ Loaded by ``core/config.py:load_harnesses_config()``. Keys starting with ``_`` a
 
 Defines **named harness profiles** that bundle a coding backend (``claude_code``, ``codex``) with its model and auth/runtime settings. Phases reference a profile by name via ``plan_harness``, ``fix_harness``, or ``review_harness`` in repos.json (or ``PLAN_HARNESS``, ``FIX_HARNESS``, ``REVIEW_HARNESS`` in autoswe.env).
 
-Each profile requires a ``backend`` field (``"claude_code"`` or ``"codex"``). Optional fields: ``model``, ``timeout``, ``cli_path``, ``api_key_env``, ``anthropic_base_url``, ``anthropic_auth_token``.
+Each profile requires a ``backend`` field (``"claude_code"`` or ``"codex"``). ``model`` is required for ``codex`` profiles (no built-in default); optional otherwise. Other optional fields: ``timeout``, ``cli_path``, ``api_key_env``, ``anthropic_base_url``, ``anthropic_auth_token``.
 
 Full documentation: [harnesses.md](harnesses.md).
 
@@ -102,7 +102,7 @@ For each phase (plan, fix, review):
 1. ``repos.json`` phase-specific: ``plan_model`` (for `/plan`), ``fix_model`` (for `/fix`), or ``review_model`` (for `/review`)
 2. ``autoswe.env`` phase-specific: ``PLAN_MODEL``, ``FIX_MODEL``, or ``REVIEW_MODEL``
 3. ``repos.json`` generic: ``model``
-4. Backend default (e.g. Claude Code's or Codex's built-in default model)
+4. Backend default (e.g. Claude Code's built-in default model; Codex has no built-in default — its profile must set ``model``)
 
 Code path: ``config.py:resolve_harness()`` → ``config.py:load_harnesses_config()``. Model fallback inside synthesized profile uses the same chain as handlers (e.g. ``planner.py``, ``coder.py``, ``reviewer.py``).
 
