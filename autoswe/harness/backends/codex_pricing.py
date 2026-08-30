@@ -9,8 +9,11 @@ reported").
 from __future__ import annotations
 
 # USD per 1M tokens, keyed by model ID (lowercase for case-insensitive match).
-# Sources: OpenAI API pricing (platform.openai.com/docs/pricing), updated
-# August 2026.  GPT-5.6 Sol's standard rates are promotional through at least
+# Source: OpenAI API pricing (platform.openai.com/docs/pricing — the API/USD
+# rate card), updated August 2026.  These differ from the credits-per-1M
+# rate card in docs/codex/pricing.md, which applies to ChatGPT plans
+# (Plus/Pro/Business); that doc does not list per-token USD figures.
+# GPT-5.6 Sol's standard rates are promotional through at least
 # November 21, 2026.
 #
 # gpt-5.3-codex-spark is intentionally absent: it is a research preview with
@@ -78,6 +81,14 @@ _PRICES: dict[str, dict[str, float]] = {
         "output": 0.60,
     },
     # Aliases
+    # "gpt-5.6" is the documented shorthand for the family: the default Power
+    # setting resolves it to gpt-5.6-sol (docs/codex/models.md), so its rates
+    # are aliased to Sol's.
+    "gpt-5.6": {
+        "input": 4.00,
+        "cached_input": 0.40,
+        "output": 20.00,
+    },
     "gpt4o": {
         "input": 2.50,
         "cached_input": 0.25,

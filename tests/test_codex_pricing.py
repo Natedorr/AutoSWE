@@ -109,6 +109,34 @@ def test_estimate_cost_gpt56_luna():
     assert abs(cost - 1.42) < 0.0001
 
 
+def test_estimate_cost_gpt56_alias_resolves_to_sol():
+    """'gpt-5.6' is the documented family shorthand (default Power setting
+    resolves to gpt-5.6-sol), so it must use Sol's rates, not None."""
+    usage = [
+        {
+            "input_tokens": 1_000_000,
+            "cached_input_tokens": 1_000_000,
+            "output_tokens": 1_000_000,
+        }
+    ]
+    cost = estimate_cost("gpt-5.6", usage)
+    assert cost is not None
+    # Same as gpt-5.6-sol: 1M * 4.00/1M + 1M * 0.40/1M + 1M * 20.00/1M = 24.40
+    assert abs(cost - 24.40) < 0.0001
+    assert cost == estimate_cost("gpt-5.6-sol", usage)
+
+
+def test_estimate_cost_dated_gpt56_alias():
+    """Dated variant gpt-5.6-2026-08-01 must match the gpt-5.6 alias
+    (dash boundary), not the stale gpt-5 entry."""
+    usage = [{"input_tokens": 1_000_000, "output_tokens": 1_000_000}]
+    cost = estimate_cost("gpt-5.6-2026-08-01", usage)
+    assert cost is not None
+    # gpt-5.6 (Sol) rates: 1M * 4.00/1M + 1M * 20.00/1M = 24.00
+    assert abs(cost - 24.00) < 0.0001
+    # Must NOT resolve to the stale 'gpt-5' prefix (which would give 720.00)
+
+
 def test_estimate_cost_gpt54():
     """gpt-5.4 (current code default): input=$2.50/M, cached=$0.25/M, output=$15.00/M."""
     usage = [
