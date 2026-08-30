@@ -4,6 +4,7 @@ from email.utils import parsedate_to_datetime
 from urllib import error as url_error
 from urllib import request
 
+from autoswe.core.constants import GH_API_VERSION  # re-exported for convenience
 from autoswe.core.logging_utils import get_debug_logger, log, mask_sensitive
 from autoswe.core.redact import redact_worktree_paths
 
@@ -72,7 +73,7 @@ def _gh_request(
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "X-GitHub-Api-Version": GH_API_VERSION,
     }
 
     for attempt in range(max_retries):
@@ -178,7 +179,7 @@ def gh_post_comment(owner: str, repo: str, issue_number: int, body: str, token: 
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "Content-Type": "application/json",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "X-GitHub-Api-Version": GH_API_VERSION,
     })
     try:
         with request.urlopen(req):

@@ -47,6 +47,25 @@ def test_run_spec_extra_tools():
     assert spec.disallowed_tools_override == ["AskUserQuestion"]
 
 
+def test_run_spec_output_format_defaults_to_none():
+    """RunSpec.output_format defaults to None (no structured-output request)."""
+    from autoswe.harness.backends.base import RunSpec
+
+    spec = RunSpec(prompt="p", cwd="/tmp")
+    assert spec.output_format is None
+    spec = RunSpec(prompt="p", cwd="/tmp", output_format={"type": "json_schema", "schema": {}})
+    assert spec.output_format == {"type": "json_schema", "schema": {}}
+
+
+def test_claude_backend_structured_output_capability():
+    """Claude Code supports structured_output; Codex does not (issue #159)."""
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+    from autoswe.harness.backends.codex import CodexBackend
+
+    assert "structured_output" in ClaudeCodeBackend.capabilities()
+    assert "structured_output" not in CodexBackend.capabilities()
+
+
 def test_mode_type_exported():
     """Mode type should be importable from backends and runner."""
     from autoswe.harness.backends import Mode

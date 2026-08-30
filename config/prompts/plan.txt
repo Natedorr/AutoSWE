@@ -102,6 +102,13 @@ Never say "likely handled" or "probably tested" — verify or flag as unknown.
   `post_plan`, and do not write a plan file. The session will be resumed when
   the user replies.**
 
+Your final answer is also validated against a JSON schema. Mirror whatever you
+already produced into its fields, whichever channel you used (the `post_plan` /
+`post_question` tools, `AskUserQuestion`, or the text blocks below): when your
+plan is ready, finish with `is_plan_ready: true` and the full plan in
+`plan_markdown`; when you are still waiting on clarification, finish with
+`is_plan_ready: false` and the same questions in `question_markdown`.
+
 Fallback (only if MCP tools are unavailable):
 Output EXACTLY ONE of these two blocks at the end of your response:
 
