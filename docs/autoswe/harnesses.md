@@ -173,7 +173,9 @@ deferred to a follow-up and is not enabled here.
 
 #### `codex` (Phase 4)
 
-Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--ask-for-approval`). Parses the JSONL event stream into a `RunResult`.
+Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `-C`, `--dangerously-bypass-approvals-and-sandbox`). Parses the JSONL event stream into a `RunResult`.
+
+**Item/event types parsed** (issue #118): the current CLI emits `thread.started`, `turn.started`/`completed`/`failed`, and `item.*`/`turn.plan.updated` events. Item types handled: `agent_message`/`agentMessage` (primary `RunResult.text` source), `plan` (authoritative text → `RunResult.plan_text`), `reasoning`, `command_execution`, `file_change`, `mcp_tool_call`, `web_search` (progress only). `turn.plan.updated` and plan/reasoning deltas render as live progress. The parser normalizes names defensively so both snake_case and camelCase item types, and both dot/slash event spellings, are accepted regardless of CLI version. The legacy `todo_list`/`summary_output` items and the `item.delta`/`item.updated` events no longer exist in the current CLI and are no longer emitted.
 
 **Requirements:** `codex` CLI on PATH (`npm i -g @openai/codex`). API key via `codex_api_key`, `openai_api_key`, or environment variable. For local providers (Ollama), configure via `~/.codex/config.toml` — no API key needed.
 

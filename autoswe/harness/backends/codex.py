@@ -7,8 +7,20 @@ stream into a ``RunResult``.
 **Capabilities (Phase 4, core run only):** ``mode``, ``resume``, ``progress_stream``.
 
 Progress streaming uses ``asyncio.create_subprocess_exec`` with async
-line-reading so that ``progress_callback`` fires with live todo/command
+line-reading so that ``progress_callback`` fires with live plan/command
 updates while the Codex CLI is running (not just after it finishes).
+
+**Wire format — both casings accepted.** The refreshed Codex CLI emits
+item types in snake_case (``agent_message``, ``command_execution``) while the
+app-server item reference names the same types in camelCase
+(``agentMessage``, ``commandExecution``) and uses slash-style event names
+(``item/plan/delta``, ``turn/plan/updated``). The parser normalizes event and
+item names defensively so that either spelling (and both dot/slash event
+forms) is handled, regardless of CLI version. ``agent_message``/``agentMessage``
+remains the primary source for ``RunResult.text``; the authoritative ``plan``
+item populates ``RunResult.plan_text``. The legacy ``todo_list``,
+``summary_output`` items and the ``item.delta`` / ``item.updated`` events no
+longer exist in the current CLI and are no longer emitted.
 
 Future phases may add ``mcp`` (MCP comment posting) and structured
 AskUserQuestion handling.  Until then those features degrade gracefully
@@ -49,6 +61,49 @@ class _CodexAccumulator:
     session_id: str | None = None
     turn_failed: bool = False
     usage: list[dict] = field(default_factory=list)
+    # Authoritative plan item text (last item.completed plan item wins).
+    # Populated onto RunResult.plan_text; never mixed into text_chunks so it
+    # does not pollute RunResult.text (the planner's tag/prose parsing runs on
+    # result.text).
+    plan_text: str | None = None
+    # Per-item-id streaming agent-message text (item/agentMessage/delta).
+    # Used only as a fallback when the item.completed carries empty text.
+    _agent_delta_by_id: dict[str, str] = field(default_factory=dict)
+    # Per-item-id cumulative character position streamed so far (delta progress
+    # throttling; see _fire_delta_progress).
+    _delta_streamed: dict[str, int] = field(default_factory=dict)
+    # Per-item-id cumulative position at which delta progress last fired.
+    _delta_fired_at: dict[str, int] = field(default_factory=dict)
+
+
+# ---------- Name normalization (both-casing tolerance) ----------
+
+# The CLI emits snake_case item/event types while the app-server reference
+# uses camelCase item names and slash-style event names. Normalizing to a
+# single canonical form lets one comparison table cover every spelling.
+
+
+def _norm_event_type(etype: str) -> str:
+    """Normalize an event type: lowercase, slashes → dots, drop underscores.
+
+    Stripping underscores makes ``item.agent_message.delta`` ≡
+    ``item.agentMessage.delta`` ≡ ``item.agentmessage.delta``.  So
+    ``item/plan/delta`` → ``item.plan.delta`` and
+    ``event.turn.plan.updated`` → ``turn.plan.updated``.
+    """
+    s = etype.strip().lower().replace("/", ".").replace("_", "")
+    if s.startswith("event."):
+        s = s[len("event."):]
+    return s
+
+
+def _norm_item_type(itype: str) -> str:
+    """Normalize an item type: lowercase, drop underscores.
+
+    So ``agent_message`` ≡ ``agentMessage`` ≡ ``agentmessage`` and
+    ``command_execution`` ≡ ``commandExecution``.
+    """
+    return itype.strip().lower().replace("_", "")
 
 
 # ---------- Mode → Codex sandbox mapping ----------
@@ -91,7 +146,7 @@ def _parse_jsonl_line(
         # Non-JSON line (stderr leak, progress) — skip
         return
 
-    etype = event.get("type", "")
+    etype = _norm_event_type(event.get("type", ""))
 
     if etype == "thread.started":
         tid = event.get("thread_id")
@@ -100,46 +155,98 @@ def _parse_jsonl_line(
 
     elif etype == "item.started":
         item = event.get("item", {})
-        item_type = item.get("type", "")
-        # item.started is the "in progress" signal — fire progress
-        if callback and item_type in ("agent_message", "command_execution", "summary_output"):
-            info = item.get("text", item.get("command", ""))
-            if info:
-                callback(f"Working: {info[:120]}")
+        item_type = _norm_item_type(item.get("type", ""))
+        # item.started is the "in progress" signal — fire progress.  The
+        # deltas (plan / reasoning / agentMessage) handle their own progress,
+        # so no progress fires for plan/reasoning starts here.
+        if callback:
+            if item_type in ("agentmessage", "commandexecution"):
+                info = item.get("text") or item.get("command", "")
+                if info:
+                    callback(f"Working: {info[:120]}")
+            elif item_type == "filechange":
+                paths = _file_change_paths(item)
+                if paths:
+                    callback(f"Working: {paths[:120]}")
+            elif item_type == "mcptoolcall":
+                server = item.get("server", "")
+                tool = item.get("tool", "")
+                label = f"{server}.{tool}" if server or tool else "tool"
+                callback(f"MCP: {label[:120]}")
+            elif item_type == "websearch":
+                query = item.get("query", "")
+                if query:
+                    callback(f"Searching: {query[:120]}")
 
     elif etype == "item.completed":
         item = event.get("item", {})
-        item_type = item.get("type", "")
+        item_type = _norm_item_type(item.get("type", ""))
+        item_id = item.get("id", "")
 
-        if item_type in ("agent_message", "summary_output"):
-            text = item.get("text", "")
+        if item_type == "agentmessage":
+            # Primary RunResult.text source. Prefer the completed item's
+            # authoritative text; fall back to the streamed deltas only when
+            # the completed item carries empty text (the docs warn that the
+            # final item may not exactly equal the concatenated deltas).
+            text = item.get("text", "") or ""
+            if not text and item_id:
+                text = acc._agent_delta_by_id.pop(item_id, "")
+            else:
+                acc._agent_delta_by_id.pop(item_id, None)
             if text:
                 acc.text_chunks.append(text)
-                # Fire progress with the latest agent message
                 if callback:
                     callback(f"Agent: {text[:120]}")
-        elif item_type == "todo_list":
-            # Render todo items as progress
-            items = item.get("items", [])
-            if callback and items:
-                _fire_todo_progress(callback, items)
 
-    elif etype == "item.updated":
-        item = event.get("item", {})
-        item_type = item.get("type", "")
-        if item_type == "todo_list" and callback:
-            items = item.get("items", [])
-            if items:
-                _fire_todo_progress(callback, items)
+        elif item_type == "plan":
+            # Authoritative plan item — capture onto RunResult.plan_text
+            # (last completion wins per docs).  Never appended to
+            # text_chunks so it does not pollute RunResult.text.
+            text = item.get("text", "") or ""
+            if text:
+                acc.plan_text = text
+                if callback:
+                    callback(f"📝 Plan: {text[:120]}")
 
-    elif etype == "item.delta":
-        # Incremental content — append to last chunk if available
-        delta = event.get("delta", "")
-        if delta:
-            if acc.text_chunks:
-                acc.text_chunks[-1] += delta
-            else:
-                acc.text_chunks.append(delta)
+        elif item_type == "reasoning":
+            summary = (item.get("summary") or "")
+            if summary and callback:
+                callback(f"💭 {summary[:120]}")
+
+        elif item_type == "commandexecution":
+            exit_code = item.get("exitCode", item.get("exit_code"))
+            if callback and exit_code is not None:
+                command = item.get("command", "")
+                label = f"{command[:80]}" if command else "command"
+                callback(f"⌨ {label} (exit {exit_code})")
+
+    elif etype == "turn.plan.updated":
+        # turn/plan/updated — render the plan step list as progress.
+        if callback:
+            _fire_plan_progress(
+                callback,
+                event.get("plan", []),
+                explanation=event.get("explanation"),
+            )
+
+    elif etype == "item.agentmessage.delta" or etype == "item.delta":
+        # Incremental agent-message text.  item/agentMessage/delta carries the
+        # item-scoped id/type; a bare item.delta falls back to the same.
+        item_id = _delta_item_id(event)
+        delta = _delta_payload(event)
+        if delta and item_id:
+            acc._agent_delta_by_id[item_id] = acc._agent_delta_by_id.get(item_id, "") + delta
+
+    elif etype == "item.plan.delta":
+        # Plan text stream — progress only, no RunResult impact.
+        _fire_delta_progress(acc, callback, event, "📝 ")
+
+    elif etype in ("item.reasoning.summarytextdelta", "item.reasoning.textdelta"):
+        # Reasoning summary stream — progress only.
+        _fire_delta_progress(acc, callback, event, "💭 ")
+
+    # item.commandExecution.outputDelta / item.fileChange.outputDelta are
+    # intentionally ignored (high-volume, no progress value).
 
     elif etype == "turn.failed":
         # error field is a dict with "message" key (live-verified)
@@ -159,13 +266,94 @@ def _parse_jsonl_line(
         log(f"[CODEX] error event: {error}")
 
 
-def _fire_todo_progress(callback, items: list[dict]) -> None:
-    """Render a todo_list item array into a progress callback string."""
+def _delta_payload(event: dict) -> str:
+    """Extract the text delta from a delta event (either casing)."""
+    delta = event.get("delta")
+    if isinstance(delta, str):
+        return delta
+    # Some delta events carry the text under a nested "text" key.
+    return event.get("text", "") or ""
+
+
+def _delta_item_id(event: dict) -> str:
+    """Resolve the item id a delta event belongs to.
+
+    Prefers an explicit ``itemId``/``item_id``; falls back to the id inside a
+    nested ``item`` object; otherwise returns "" (delta ignored).
+    """
+    item_id = event.get("itemId") or event.get("item_id") or ""
+    if item_id:
+        return item_id
+    item = event.get("item")
+    if isinstance(item, dict):
+        return item.get("id", "")
+    return ""
+
+
+def _file_change_paths(item: dict) -> str:
+    """Render a file_change item's changed paths as a compact label."""
+    changes = item.get("changes", [])
+    paths: list[str] = []
+    for c in changes:
+        if isinstance(c, dict):
+            p = c.get("path")
+            if p:
+                paths.append(p)
+    return ", ".join(paths)
+
+
+# turn.plan.updated step status → progress icon (shared by _fire_plan_progress).
+_PLAN_STATUS_ICON = {"completed": "✅", "inprogress": "▶", "pending": "☐"}
+
+
+def _fire_plan_progress(callback, plan: list[dict], explanation: str | None = None) -> None:
+    """Render a turn.plan.updated step list into a progress callback string.
+
+    Status mapping: completed → ✅, inProgress → ▶, pending → ☐.  An optional
+    *explanation* prefixes the line.
+    """
+    if not plan:
+        return
     parts = []
-    for ti in items:
-        status = "✅" if ti.get("completed") else "☐"
-        parts.append(f"{status} {ti.get('text', '')}")
-    callback("📋 " + " | ".join(parts))
+    for step in plan:
+        if not isinstance(step, dict):
+            continue
+        icon = _PLAN_STATUS_ICON.get(str(step.get("status", "")).strip().lower(), "☐")
+        parts.append(f"{icon} {step.get('step', step.get('text', ''))}")
+    if not parts:
+        return
+    prefix = f"📝 {explanation} — " if explanation else "📋 "
+    callback(prefix + " | ".join(parts))
+
+
+def _fire_delta_progress(acc: _CodexAccumulator, callback, event: dict, prefix: str) -> None:
+    """Fire throttled progress for a plan/reasoning delta event.
+
+    Progress lines are fire-and-forget; bounding output matters.  Fires on the
+    first delta for an item and again once the accumulated text has grown by
+    ~80 chars since the last fire.
+    """
+    if not callback:
+        return
+    item_id = _delta_item_id(event)
+    if not item_id:
+        return
+    delta = _delta_payload(event)
+    if not delta:
+        return
+    # Throttle on cumulative growth: re-fire once ~80 chars have streamed
+    # since the last progress line for this item.  Track two positions:
+    #   _delta_streamed — total chars streamed so far (running total)
+    #   _delta_fired_at — the streamed position at which progress last fired
+    # Firing when (streamed - fired_at) >= 80 means small deltas (the common
+    # case) still surface progress as they accumulate, instead of only when a
+    # single delta happens to be >= 80 chars.
+    streamed = acc._delta_streamed.get(item_id, 0) + len(delta)
+    acc._delta_streamed[item_id] = streamed
+    fired_at = acc._delta_fired_at.get(item_id, -1)
+    if fired_at < 0 or streamed - fired_at >= 80:
+        acc._delta_fired_at[item_id] = streamed
+        callback(f"{prefix}{delta[:120]}")
 
 
 # ---------- CodexBackend ----------
@@ -421,4 +609,5 @@ class CodexBackend:
             plan_file_path=None,
             plan_posted=False,
             question_posted=False,
+            plan_text=acc.plan_text,
         )

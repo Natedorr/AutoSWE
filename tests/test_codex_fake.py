@@ -128,6 +128,50 @@ class TestCodexFakeFidelity:
         assert "Fix login" in result.text
         assert result.subtype == "success"
 
+    def test_plan_item_run_result(self):
+        """script_plan_item → real backend: plan_text captured, tag-free text."""
+        fake = CodexFake()
+        fake.script_plan_item("Refactor auth", message_text="Done.", session_id="s-pi")
+
+        spec = _make_spec()
+        from autoswe.harness.backends.codex import CodexBackend
+
+        async def _run():
+            with fake:
+                backend = CodexBackend()
+                return await backend.run(spec)
+
+        result = _run_async(_run())
+
+        # Authoritative plan item drives plan_text.
+        assert result.plan_text == "Refactor auth"
+        # RunResult.text is the agent message, not the plan item.
+        assert result.text == "Done."
+        assert "Refactor auth" not in result.text
+        assert result.subtype == "success"
+
+    def test_script_plan_sets_both_tags_and_plan_text(self):
+        """script_plan keeps the <AUTOSWE_PLAN> tag in text AND sets plan_text."""
+        fake = CodexFake()
+        fake.script_plan("1. Fix login\n2. Add tests", session_id="s-plan2")
+
+        spec = _make_spec()
+        from autoswe.harness.backends.codex import CodexBackend
+
+        async def _run():
+            with fake:
+                backend = CodexBackend()
+                return await backend.run(spec)
+
+        result = _run_async(_run())
+
+        # Legacy tag path still intact...
+        assert "<AUTOSWE_PLAN>" in result.text
+        assert "Fix login" in result.text
+        # ...and the new plan item populates plan_text.
+        assert result.plan_text == "1. Fix login\n2. Add tests"
+        assert result.subtype == "success"
+
     def test_question_tags_in_text(self):
         """CodexFake questions response preserves AUTOSWE_QUESTIONS tags."""
         fake = CodexFake()
