@@ -17,13 +17,13 @@ def _make_spec(cwd: str = "/tmp") -> RunSpec:
     return RunSpec(
         prompt="test prompt",
         cwd=cwd,
-        model="gpt-5.4",
+        model="gpt-5.6-terra",
         resume=None,
         mode="read_only",
         extra_tools=[],
         max_turns=200,
         timeout=30,
-        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.4"}},
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra"}},
     )
 
 
@@ -32,13 +32,13 @@ def _make_resume_spec(session_id: str, cwd: str = "/tmp") -> RunSpec:
     return RunSpec(
         prompt="resume prompt",
         cwd=cwd,
-        model="gpt-5.4",
+        model="gpt-5.6-terra",
         resume=session_id,
         mode="read_write",
         extra_tools=[],
         max_turns=200,
         timeout=30,
-        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.4"}},
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra"}},
     )
 
 
@@ -155,13 +155,13 @@ class TestCodexFakeFidelity:
         spec = RunSpec(
             prompt="plan prompt",
             cwd="/tmp",
-            model="gpt-5.4",
+            model="gpt-5.6-terra",
             resume=None,
             mode="plan",
             extra_tools=[],
             max_turns=200,
             timeout=30,
-            state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.4"}},
+            state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra"}},
         )
 
         from autoswe.harness.backends.codex import CodexBackend
@@ -186,13 +186,13 @@ class TestCodexFakeFidelity:
         spec = RunSpec(
             prompt="fix prompt",
             cwd="/tmp",
-            model="gpt-5.4",
+            model="gpt-5.6-terra",
             resume=None,
             mode="read_write",
             extra_tools=[],
             max_turns=200,
             timeout=30,
-            state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.4"}},
+            state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra"}},
         )
 
         from autoswe.harness.backends.codex import CodexBackend

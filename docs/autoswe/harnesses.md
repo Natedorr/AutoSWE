@@ -11,7 +11,7 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | Field | Required | Default | Description |
 |-------|----------|---------|-----------|
 | `backend` | **Yes** | — | Backend implementation: `"claude_code"` or `"codex"` |
-| `model` | No | `""` | Model ID (e.g. `"claude-opus-4-8"`, `"gpt-5"`) |
+| `model` | No for `claude_code`, **required** for `codex` | `""` | Model ID (e.g. `"claude-opus-4-8"`, `"gpt-5.6-terra"`). No default for `codex` — resolution fails if missing |
 | `timeout` | No | (from env) | Backend-specific timeout in seconds |
 | `cli_path` | No | (from env) | Path to the CLI binary (e.g. `claude` or `codex`) |
 | `codex_api_key` | No | — | API key for Codex backend (sets `CODEX_API_KEY` env var) |
@@ -45,9 +45,9 @@ Code path: `config.py:resolve_harness()`.
     "backend": "claude_code",
     "model": "claude-sonnet-4-6"
   },
-  "codex-gpt5": {
+  "codex-gpt56-terra": {
     "backend": "codex",
-    "model": "gpt-5",
+    "model": "gpt-5.6-terra",
     "codex_api_key": "${CODEX_API_KEY}"
   }
 }
@@ -60,7 +60,7 @@ Referenced in `repos.json`:
     "provider": "github",
     "pat": "ghp_...",
     "plan_harness": "claude-opus",
-    "fix_harness": "codex-gpt5",
+    "fix_harness": "codex-gpt56-terra",
     "review_harness": "claude-sonnet"
   }
 }
@@ -69,7 +69,7 @@ Referenced in `repos.json`:
 Or globally in `autoswe.env`:
 ```
 PLAN_HARNESS=claude-opus
-FIX_HARNESS=codex-gpt5
+FIX_HARNESS=codex-gpt56-terra
 ```
 
 ### Mixing Backends
@@ -87,7 +87,7 @@ Different phases can use different backends. Common patterns:
     "provider": "github",
     "pat": "ghp_...",
     "plan_harness": "codex-4o",
-    "fix_harness": "codex-gpt5",
+    "fix_harness": "codex-gpt56-terra",
     "review_harness": "claude-sonnet"
   }
 }
@@ -113,7 +113,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 
 **Profile fields:**
 - `backend`: `"codex"` (required)
-- `model`: Codex model ID (e.g. `"gpt-5"`, `"gpt-4o"`, `"qwen3.6:27b"` for Ollama)
+- `model`: **required** Codex model ID (e.g. `"gpt-5.6-sol"`, `"gpt-5.6-terra"`, `"gpt-5.6-luna"`, `"gpt-5.5"`, `"qwen3.6:27b"` for Ollama). There is no built-in default — a missing `model` fails resolution with a `ValueError`
 - `codex_api_key` or `openai_api_key`: API key for the provider (optional for local providers)
 - `timeout`: Override the default timeout (optional)
 
@@ -141,7 +141,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 
 Backend instances are created by `autoswe/harness/backends/factory.py:get_backend(harness_cfg)`. Dispatch on `harness_cfg["backend"]` field. Mirrors the provider factory pattern (`providers/factory.py`).
 
-Unknown backend names raise `ValueError`. Case-insensitive matching.
+Unknown backend names raise `ValueError`. A `codex` profile without `model` also raises `ValueError` (no default model). Case-insensitive matching.
 
 ### Backward Compatibility
 
