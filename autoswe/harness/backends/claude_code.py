@@ -25,6 +25,13 @@ _dbg = get_debug_logger()
 _RETRYABLE_SDK_EXCEPTIONS: tuple = ()
 _PLANS_DIR = Path.home() / ".claude" / "plans"
 
+# Claude Code's default system-prompt preset. When system_prompt is unset the
+# SDK falls back to a minimal prompt that covers tool calling but omits the
+# preset's tool-usage guidance, security/safety instructions, and
+# working-directory/environment context. Setting the bare preset makes
+# plan/fix/review run on the full Claude Code prompt.
+CLAUDE_CODE_SYSTEM_PROMPT_PRESET: dict = {"type": "preset", "preset": "claude_code"}
+
 # ---------- Mode → Claude Code mapping ----------
 
 # MCP comment tool names (shared across plan/read_write modes).
@@ -426,6 +433,7 @@ class ClaudeCodeBackend:
                 "model": spec.model or None,
                 "cli_path": spec.cli_path or harness_cfg.get("cli_path"),
                 "mcp_servers": spec.mcp_servers or {},
+                "system_prompt": CLAUDE_CODE_SYSTEM_PROMPT_PRESET,
             }
 
             # --- Setup phase: can_use_tool requires streaming prompt + hooks ---
