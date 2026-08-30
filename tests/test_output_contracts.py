@@ -324,7 +324,7 @@ class TestAzureOutputContracts:
         comment_body = {"text": "Plan posted"}
         azure_fake.handle_request(
             "POST",
-            "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/1/comments?format=Markdown&api-version=7.1-preview.4",
+            "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/1/comments?format=Markdown&api-version=7.1",
             "pat", body=comment_body,
         )
 
@@ -342,7 +342,7 @@ class TestAzureOutputContracts:
         comment_body = {"text": body_text}
         azure_fake.handle_request(
             "POST",
-            "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/2/comments?format=Markdown&api-version=7.1-preview.4",
+            "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/2/comments?format=Markdown&api-version=7.1",
             "pat", body=comment_body,
         )
 
