@@ -127,6 +127,10 @@ def _parse_command(cmd: list[str]) -> dict:
                 result["resume"] = cmd[i + 1]
             i += 2
             continue
+        if part in ("--output-last-message", "-o") and i + 1 < len(cmd):
+            result["output_last_message"] = cmd[i + 1]
+            i += 2
+            continue
         i += 1
 
     # Prompt is after "--"

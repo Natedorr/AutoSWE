@@ -173,7 +173,7 @@ deferred to a follow-up and is not enabled here.
 
 #### `codex` (Phase 4)
 
-Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--ask-for-approval`). Parses the JSONL event stream into a `RunResult`.
+Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--output-last-message`). Parses the JSONL event stream into a `RunResult`, sourcing `RunResult.text` from the assistant's final message written via `--output-last-message` (falling back to the accumulated JSONL `agent_message` chunks when the file is absent or empty).
 
 **Requirements:** `codex` CLI on PATH (`npm i -g @openai/codex`). API key via `codex_api_key`, `openai_api_key`, or environment variable. For local providers (Ollama), configure via `~/.codex/config.toml` — no API key needed.
 
@@ -195,8 +195,10 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 - `read_write` → `--sandbox workspace-write`
 
 **Command mapping:**
-- Fresh run: `codex exec --json --sandbox <mode> --model <model> -C <cwd> -- <prompt>` (session persisted)
-- Resume: `codex exec resume <session_id> --json --model <model>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`)
+- Fresh run: `codex exec --json --sandbox <mode> --model <model> -C <cwd> --output-last-message <tmp> -- <prompt>` (session persisted)
+- Resume: `codex exec resume <session_id> --json --model <model> --output-last-message <tmp>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`)
+
+**Final-message capture (`--output-last-message`, issue #128).** Each run allocates a private temp file (`mkstemp`) and passes it as `--output-last-message`, which Codex writes the assistant's final message to. After the subprocess exits, that file is read back as the authoritative `RunResult.text` — more robust than assembling `agent_message` chunks from the JSONL stream, which is fragile across item-type renames. If the file is absent or whitespace-only (older CLI, a run that failed or was killed before emitting a final message), the backend falls back to the accumulated chunks, preserving the original behavior. The temp file is always cleaned up (including the timeout/kill path).
 
 **Known limitations:**
 - ``RunSpec.max_turns`` is **not honored** — Codex `exec` exposes no turn cap (the old `agent.max_turns` config key was removed; live-verified on codex-cli 0.150.1, where `-c agent.max_turns=N` is rejected under `--strict-config` and silently ignored otherwise). The effective anti-runaway guard is the wall-clock timeout (`timeout` profile field / `AGENT_TIMEOUT`).
