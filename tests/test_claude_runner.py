@@ -1115,27 +1115,43 @@ def test_system_prompt_preset_emitted_for_legacy_no_mode():
     )
 
 
-def test_system_prompt_preset_is_plain_dict():
-    """CLAUDE_CODE_SYSTEM_PROMPT_PRESET must be a real ``dict``.
+def test_system_prompt_preset_is_a_plain_dict_for_sdk_boundary():
+    """CLAUDE_CODE_SYSTEM_PROMPT_PRESET must be a real dict, not a
+    MappingProxyType, because the Claude Agent SDK consumes it through an
+    ``isinstance(sp, dict)`` guard (client.py / _internal/client.py, for the
+    ``exclude_dynamic_sections`` preset field) and its transport path expects a
+    JSON-serializable value.
 
-    The Agent SDK branches on ``isinstance(system_prompt, dict)`` (e.g. to read
-    ``exclude_dynamic_sections``); a ``MappingProxyType`` compares equal to a
-    dict but fails that ``isinstance`` check, so a future SDK that JSON-encodes
-    the preset or guards on type would break every run. Locking in a plain dict
-    keeps the constant safe across SDK versions.
+    A MappingProxyType is not a dict subclass (isinstance → False) and is not
+    JSON-serializable (json.dumps → TypeError), so either trait would silently
+    drop or break the system-prompt preset at the SDK boundary. This test locks
+    in that contract: it would fail if the constant regressed to a
+    MappingProxyType even though dict/mappingproxy compare equal (the
+    ==-based assertions above would not catch it).
     """
     import json
+    import types
 
-    from autoswe.harness.backends.claude_code import CLAUDE_CODE_SYSTEM_PROMPT_PRESET
+    from claude_agent_sdk import ClaudeAgentOptions
 
-    assert isinstance(CLAUDE_CODE_SYSTEM_PROMPT_PRESET, dict), (
-        "preset must be a dict so the SDK's isinstance(system_prompt, dict) "
-        f"check holds; got {type(CLAUDE_CODE_SYSTEM_PROMPT_PRESET).__name__}"
+    from autoswe.harness.backends.claude_code import (
+        CLAUDE_CODE_SYSTEM_PROMPT_PRESET as preset,
     )
-    assert CLAUDE_CODE_SYSTEM_PROMPT_PRESET == {
-        "type": "preset", "preset": "claude_code",
-    }
-    # A dict is JSON-serializable; a MappingProxyType is not.
-    assert json.loads(json.dumps(CLAUDE_CODE_SYSTEM_PROMPT_PRESET)) == {
-        "type": "preset", "preset": "claude_code",
-    }
+
+    # The core SDK contract: must pass isinstance(sp, dict) so the SDK's
+    # preset-handling guard treats it as a dict.
+    assert isinstance(preset, dict), (
+        f"system_prompt preset must be a dict, got {type(preset).__name__}"
+    )
+    assert not isinstance(preset, types.MappingProxyType)
+
+    # Must be JSON-serializable (SDK transport may encode options).
+    json.dumps(preset)
+
+    # Content is the bare claude_code preset.
+    assert preset == {"type": "preset", "preset": "claude_code"}
+
+    # It must survive actual ClaudeAgentOptions construction (the value the
+    # real run passes on every Claude invocation).
+    options = ClaudeAgentOptions(cwd="/tmp", system_prompt=preset)
+    assert options.system_prompt == preset
