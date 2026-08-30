@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import types
 from collections.abc import Awaitable
 from pathlib import Path
 
@@ -31,13 +30,13 @@ _PLANS_DIR = Path.home() / ".claude" / "plans"
 # working-directory/environment context. Setting the bare preset makes
 # plan/fix/review run on the full Claude Code prompt.
 #
-# Wrapped in MappingProxyType so the shared module-level constant is immutable:
-# every run reuses the same object, so a stray assignment in any one call site
-# would corrupt the preset for all subsequent runs. The SDK transport only
-# reads it (sp.get("type")), and it still compares equal to a plain dict.
-CLAUDE_CODE_SYSTEM_PROMPT_PRESET = types.MappingProxyType(
-    {"type": "preset", "preset": "claude_code"}
-)
+# A plain dict (not a MappingProxyType): the Claude Agent SDK guards
+# system_prompt handling with isinstance(sp, dict) (e.g. its
+# exclude_dynamic_sections extraction in client.py) — a MappingProxyType is
+# not a dict subclass, so it would silently fail that guard, and it is also not
+# JSON-serializable (a risk if the SDK ever json-encodes options). The constant
+# is only read, never mutated, so no immutability wrapper is needed.
+CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {"type": "preset", "preset": "claude_code"}
 
 # ---------- Mode → Claude Code mapping ----------
 
