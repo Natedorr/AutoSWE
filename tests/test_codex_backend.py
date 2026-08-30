@@ -194,7 +194,7 @@ def test_codex_satisfies_protocol():
 def test_codex_run_returns_awaitable():
     """run(spec) should return an awaitable (coroutine)."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="test", cwd="/tmp")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="test", cwd="/tmp")
     result = backend.run(spec)
     assert asyncio.iscoroutine(result)
     result.close()
@@ -455,7 +455,7 @@ def test_codex_basic_run():
     spec = RunSpec(
         prompt="Fix the bug",
         cwd="/tmp/repo",
-        model="gpt-5.4",
+        model="gpt-5.6-terra",
         mode="read_write",
     )
     jsonl = _make_success_jsonl(thread_id="sess-codex-1", agent_texts=["Bug fixed."])
@@ -543,7 +543,7 @@ def test_codex_ignore_user_config_with_api_key():
 def test_codex_read_only_mode():
     """mode='read_only' produces --sandbox read-only."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Review code", cwd="/tmp/repo", mode="read_only")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Review code", cwd="/tmp/repo", mode="read_only")
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     idx = cmd.index("--sandbox")
@@ -553,7 +553,7 @@ def test_codex_read_only_mode():
 def test_codex_plan_mode():
     """mode='plan' produces --sandbox read-only."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Plan the fix", cwd="/tmp/repo", mode="plan")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Plan the fix", cwd="/tmp/repo", mode="plan")
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     idx = cmd.index("--sandbox")
@@ -563,7 +563,8 @@ def test_codex_plan_mode():
 def test_codex_resume_mode():
     """spec.resume produces 'codex exec resume <id>' command."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Continue the fix",
         cwd="/tmp/repo",
         resume="sess-abc-123",
@@ -578,7 +579,8 @@ def test_codex_resume_mode():
 def test_codex_resume_no_sandbox_or_cd():
     """Resume command must NOT include --sandbox or -C (unsupported by resume subcommand)."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Continue",
         cwd="/tmp/repo",
         resume="sess-123",
@@ -594,7 +596,8 @@ def test_codex_resume_no_sandbox_or_cd():
 def test_codex_prompt_starts_with_dash():
     """Prompt starting with - must be protected by -- separator."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="-Fix the bug",
         cwd="/tmp/repo",
         mode="read_write",
@@ -610,7 +613,7 @@ def test_codex_prompt_starts_with_dash():
 def test_codex_error_returncode():
     """Non-zero exit code → subtype='error'."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -632,7 +635,7 @@ def test_codex_killed_subtype():
     into positive values.
     """
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -648,7 +651,7 @@ def test_codex_killed_subtype():
 def test_codex_timeout():
     """asyncio.TimeoutError is re-raised after killing the process."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", timeout=0.5)
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write", timeout=0.5)
 
     mock_process = Mock()
     mock_process.stdout = None
@@ -683,7 +686,7 @@ def test_codex_timeout():
 def test_codex_not_found():
     """FileNotFoundError → RuntimeError with install hint."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(side_effect=FileNotFoundError("codex"))
@@ -698,20 +701,30 @@ def test_codex_not_found():
         assert "npm" in str(e)
 
 
-def test_codex_default_model():
-    """When spec.model is None, default to gpt-5.4."""
+def test_codex_missing_model_raises():
+    """When spec.model is None, _run_async fails fast (no hardcoded default)."""
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", model=None, mode="read_write")
 
+    with pytest.raises(ValueError, match="missing required 'model'"):
+        asyncio.run(_run_backend(backend, spec))
+
+
+def test_codex_explicit_model_passthrough():
+    """An explicit spec.model is passed through to --model unchanged."""
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", model="gpt-5.6-terra", mode="read_write")
+
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     idx = cmd.index("--model")
-    assert cmd[idx + 1] == "gpt-5.4"
+    assert cmd[idx + 1] == "gpt-5.6-terra"
 
 
 def test_codex_env_openai_api_key_from_harness():
     """OPENAI_API_KEY from harness profile is passed to subprocess env."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -733,7 +746,8 @@ def test_codex_env_openai_api_key_from_harness():
 def test_codex_env_codex_api_key_from_harness():
     """CODEX_API_KEY from harness profile is passed to subprocess env."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -755,7 +769,8 @@ def test_codex_env_codex_api_key_from_harness():
 def test_codex_env_overrides():
     """Explicit env_overrides are merged into subprocess env."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -783,7 +798,8 @@ def test_codex_progress_callback_streaming():
         thread_id="t-1",
         agent_texts=["Step 1 done.", "Step 2 done."],
     )
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -829,7 +845,8 @@ def test_codex_progress_callback_todo():
             "usage": {"input_tokens": 1, "output_tokens": 1},
         },
     )
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -851,7 +868,7 @@ def test_codex_progress_callback_todo():
 def test_codex_result_no_mcp_flags():
     """Phase 4: plan_posted and question_posted are always False."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Plan", cwd="/tmp", mode="plan")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Plan", cwd="/tmp", mode="plan")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -869,7 +886,7 @@ def test_codex_result_no_mcp_flags():
 def test_codex_fresh_passes_cwd():
     """Fresh run passes cwd= to subprocess (authoritative alongside -C flag)."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp/repo", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp/repo", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -891,7 +908,8 @@ def test_codex_resume_passes_cwd():
     mechanism that ensures the resumed session touches the right files.
     """
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Continue",
         cwd="/tmp/repo",
         resume="sess-123",
@@ -929,7 +947,7 @@ def test_codex_summary_output_collected():
             "usage": {"input_tokens": 1, "output_tokens": 1},
         },
     )
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
@@ -1020,7 +1038,7 @@ def test_codex_turn_failed_affects_subtype():
         {"type": "thread.started", "thread_id": "t-1"},
         {"type": "turn.failed", "error": {"message": "Model quota exceeded"}},
     )
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -1037,7 +1055,7 @@ def test_codex_fresh_run_persists_session():
     """Fresh run (no resume) does NOT include --ephemeral so the session is persisted
     for subsequent resume (codex exec resume <session_id>) calls."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "--ephemeral" not in cmd
@@ -1046,7 +1064,8 @@ def test_codex_fresh_run_persists_session():
 def test_codex_no_ephemeral_resume():
     """Resume run omits --ephemeral (needs persistent session files)."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Continue",
         cwd="/tmp",
         resume="sess-abc",
@@ -1079,7 +1098,7 @@ def test_codex_max_turns_never_emitted(turns):
     no longer exists, so emitting it would be a silent no-op (or a hard error).
     """
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=turns)
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write", max_turns=turns)
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "-c" not in cmd
@@ -1093,7 +1112,7 @@ def test_codex_default_max_turns_no_flag():
     turn cap; the guard is the wall-clock timeout) — consistent for any value.
     """
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=200)
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write", max_turns=200)
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "-c" not in cmd
@@ -1161,7 +1180,7 @@ def test_factory_codex_case_insensitive():
     from autoswe.harness.backends.factory import get_backend
 
     for val in ("codex", "CODEX", "Codex"):
-        backend = get_backend({"backend": val})
+        backend = get_backend({"backend": val, "model": "gpt-5.6-terra"})
         assert isinstance(backend, CodexBackend)
 
 
@@ -1172,7 +1191,7 @@ def test_backend_has_capability_codex():
     """backend_has_capability returns correct values for Codex."""
     from autoswe.harness.runner import backend_has_capability
 
-    harness = {"backend": "codex"}
+    harness = {"backend": "codex", "model": "gpt-5.6-terra"}
     # Phase 4: mode, resume, and progress_stream
     assert backend_has_capability(harness, "mode")
     assert backend_has_capability(harness, "resume")
@@ -1196,7 +1215,7 @@ def test_codex_stream_limit_stdout_truncates(monkeypatch):
     from autoswe.harness.backends import codex as codex_mod
 
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     # Each JSONL line is ~100 bytes. 1000 lines ≈ 100 KB.
     small_limit = 500
@@ -1229,7 +1248,7 @@ def test_codex_stream_limit_stdout_truncates(monkeypatch):
 def test_codex_stream_limit_within_bounds():
     """Normal-sized stream (~1KB) completes without hitting the limit."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     # Build a ~1KB JSONL stream — well within 16MB
     jsonl = _jsonl(
@@ -1261,7 +1280,7 @@ def test_codex_stream_limit_stderr_truncates(monkeypatch):
     from autoswe.harness.backends import codex as codex_mod
 
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
     jsonl = _make_success_jsonl()
 
     # Create a process with large stderr (64KB is enough for 2+ read(64KB) calls
@@ -1293,7 +1312,7 @@ def test_codex_stream_limit_drains_pipe_after_truncation(monkeypatch):
     from autoswe.harness.backends import codex as codex_mod
 
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     # Build stdout that exceeds the limit
     jsonl = _jsonl(

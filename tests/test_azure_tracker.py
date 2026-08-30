@@ -96,6 +96,99 @@ def test_list_open_issues(tracker, mock_ado_request, ado_route_table):
     assert result[1].status == "fixed"
 
 
+def test_list_open_issues_chunks_batch_gets(tracker, mock_ado_request, ado_route_table):
+    """Many WIQL ids are split into chunked batch GETs, merged, and sorted by id.
+
+    issue #127: ADO caps the number of ids per batch GET; a busy project with
+    2000 open items must not be sent in one request.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    ids = list(range(1000, 1250))  # 250 ids -> 3 chunks (100/100/50)
+    ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/wiql")] = {
+        "workItems": [{"id": i} for i in ids],
+    }
+
+    def fake_batch_get(method, path, pat, body):
+        query = parse_qs(urlparse(path).query)
+        chunk_ids = [int(x) for x in query["ids"][0].split(",")]
+        return {
+            "value": [
+                {
+                    "id": i,
+                    "fields": {
+                        "System.Title": f"Item {i}",
+                        "System.Description": "",
+                        "System.Tags": "",
+                        "System.State": "New",
+                    },
+                }
+                for i in chunk_ids
+            ]
+        }
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems?ids=")] = fake_batch_get
+
+    result = tracker.list_open_issues({})
+
+    # Exactly 3 batch GETs (100 / 100 / 50); no call carries more than 100 ids.
+    get_calls = [c for c in mock_ado_request.calls if c["method"] == "GET"]
+    assert len(get_calls) == 3
+    for call in get_calls:
+        query = parse_qs(urlparse(call["path"]).query)
+        assert len(query["ids"][0].split(",")) <= 100
+
+    # Merged result: one issue per id, ascending order.
+    assert len(result) == 250
+    assert [issue.number for issue in result] == sorted(ids)
+
+
+def test_list_open_issues_dedupes_duplicate_ids(tracker, mock_ado_request, ado_route_table):
+    """Duplicate WIQL ids never appear in a request and are de-duped in output."""
+    from urllib.parse import parse_qs, urlparse
+
+    # 10 unique ids, duplicated/interleaved in the WIQL result.
+    unique = list(range(50, 60))
+    wiql_ids = [unique[i % len(unique)] for i in range(30)]
+    ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/wiql")] = {
+        "workItems": [{"id": i} for i in wiql_ids],
+    }
+
+    seen_request_ids: list[list[int]] = []
+
+    def fake_batch_get(method, path, pat, body):
+        query = parse_qs(urlparse(path).query)
+        chunk_ids = [int(x) for x in query["ids"][0].split(",")]
+        seen_request_ids.append(chunk_ids)
+        return {
+            "value": [
+                {
+                    "id": i,
+                    "fields": {
+                        "System.Title": f"Item {i}",
+                        "System.Description": "",
+                        "System.Tags": "",
+                        "System.State": "New",
+                    },
+                }
+                for i in chunk_ids
+            ]
+        }
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems?ids=")] = fake_batch_get
+
+    result = tracker.list_open_issues({})
+
+    # No chunk request carries a duplicate id.
+    for chunk in seen_request_ids:
+        assert len(chunk) == len(set(chunk))
+    # Exactly one chunk — all 10 unique ids fit in the 100-id cap.
+    assert len(seen_request_ids) == 1
+
+    # Output is de-duped, one issue per id, ascending.
+    assert [issue.number for issue in result] == sorted(unique)
+
+
 # -- fetch_issue --
 
 def test_fetch_issue(tracker, mock_ado_request, ado_route_table):
@@ -123,6 +216,10 @@ def test_fetch_comments_pending(tracker, mock_ado_request, ado_route_table):
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = workitem
 
     result = tracker.fetch_comments({}, 100)
+
+    # issue #125: comment reads must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in mock_ado_request.calls[0]["path"]
+    assert "preview" not in mock_ado_request.calls[0]["path"]
 
     assert len(result) == 2
     assert result[0].body == "/plan --branch develop"
@@ -370,6 +467,10 @@ def test_authenticated_user_cached(tracker, mock_ado_request, ado_route_table):
     first = tracker.authenticated_user({})
     second = tracker.authenticated_user({})
 
+    # issue #125: profile endpoint must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in mock_ado_request.calls[0]["path"]
+    assert "preview" not in mock_ado_request.calls[0]["path"]
+
     assert first == "natedorr@example.com"
     assert first == second
     # Should only call once — cached (Profile API succeeds, no fallback needed)
@@ -418,6 +519,9 @@ def test_post_comment(tracker, mock_ado_request, ado_route_table):
     assert call["method"] == "POST"
     assert "workitems/100/comments" in call["path"]
     assert "format=Markdown" in call["path"]
+    # issue #125: comment POST must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in call["path"]
+    assert "preview" not in call["path"]
     assert call["body"] == {"text": "This is a test comment"}
 
 
@@ -622,6 +726,9 @@ def test_update_comment_markdown(tracker, mock_ado_request, ado_route_table):
     assert call["method"] == "PATCH"
     assert "workitems/100/comments/42" in call["path"]
     assert "format=Markdown" in call["path"]
+    # issue #125: comment PATCH must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in call["path"]
+    assert "preview" not in call["path"]
     assert call["body"] == {"text": "Updated text, no bot marker"}
 
 

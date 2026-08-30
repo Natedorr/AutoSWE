@@ -183,7 +183,7 @@ def test_run_fix_codex_harness_cfg(tmp_path):
             with patch("autoswe.harness.runner.run", side_effect=fake_run):
                 with patch("autoswe.harness.coder.commit_and_push", return_value=FAKE_COMMIT_RESULT):
                     with patch("autoswe.core.config.load_harnesses_config",
-                               return_value={"codex-fix": {"backend": "codex", "model": "gpt-5.4"}}):
+                               return_value={"codex-fix": {"backend": "codex", "model": "gpt-5.6-terra"}}):
                         from autoswe.harness.coder import run_fix
                         run_fix(task, cfg={"FIX_HARNESS": "codex-fix"})
 
@@ -191,4 +191,4 @@ def test_run_fix_codex_harness_cfg(tmp_path):
     harness_cfg = run_calls[0].get("harness_cfg")
     assert harness_cfg is not None
     assert harness_cfg.get("backend") == "codex"
-    assert harness_cfg.get("model") == "gpt-5.4"
+    assert harness_cfg.get("model") == "gpt-5.6-terra"

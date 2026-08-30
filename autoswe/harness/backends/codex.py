@@ -207,8 +207,17 @@ class CodexBackend:
 
     async def _run_async(self, spec: RunSpec) -> RunResult:
         """Run Codex CLI subprocess with streaming JSONL. Returns RunResult."""
+        # Codex has no built-in default model — a profile/spec must name one.
+        # The factory enforces this at resolution time; this guard protects
+        # direct CodexBackend().run(spec) calls that bypass the factory.
+        model = str(spec.model or "").strip()
+        if not model:
+            raise ValueError(
+                "Codex harness profile is missing required 'model'. "
+                "Set it to a current Codex model, e.g. 'gpt-5.6-sol', 'gpt-5.6-terra', "
+                "'gpt-5.6-luna', or 'gpt-5.5'."
+            )
         sandbox = _mode_to_sandbox(spec.mode)
-        model = spec.model or "gpt-5.4"
         resume = bool(spec.resume)
 
         # Resolve auth early (needed for command-building below).

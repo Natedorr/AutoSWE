@@ -237,7 +237,7 @@ def _setup_codex_harness(isolated_dir: Path) -> None:
     harnesses_cfg = {
         "codex": {
             "backend": "codex",
-            "model": "gpt-5.4",
+            "model": "gpt-5.6-terra",
         }
     }
 

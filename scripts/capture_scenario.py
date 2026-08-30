@@ -305,7 +305,7 @@ def capture_azure(pat: str, repo_path: str, issue_number: int, scenario_name: st
 
     # Fetch comments
     print(f"  GET work item #{issue_number} comments")
-    comments_url = f"{base}/wit/workitems/{issue_number}/comments?api-version=7.1-preview.4"
+    comments_url = _ado_api_version(f"{base}/wit/workitems/{issue_number}/comments")
     comments_resp = ado_get(comments_url, pat)
     comments = [sanitize_ado_comment(c) for c in comments_resp.get("comments", [])]
 

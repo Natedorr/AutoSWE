@@ -353,7 +353,7 @@ def capture_azure(cfg: dict) -> None:
 
     # list_workitem_comments
     print(f"  GET work item #{first_id} comments")
-    comments_url = f"{base}/wit/workitems/{first_id}/comments?api-version=7.1-preview.4"
+    comments_url = _ado_api_version(f"{base}/wit/workitems/{first_id}/comments")
     comments_resp = ado_get(comments_url, pat)
     write_fixture(out_dir, "list_workitem_comments", {
         "count": len(comments_resp.get("comments", [])),

@@ -4,6 +4,8 @@ import asyncio
 import sys
 from unittest.mock import patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # run() — env overrides and parameter resolution
 # ---------------------------------------------------------------------------
@@ -880,3 +882,74 @@ def test_credentials_restore_preexisting_values():
             os.environ.pop("ANTHROPIC_API_KEY", None)
         else:
             os.environ["ANTHROPIC_API_KEY"] = original_key
+
+
+# ---------------------------------------------------------------------------
+# system-prompt preset — all phases must run on the claude_code preset
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("mode", ["plan", "read_only", "read_write"])
+def test_system_prompt_preset_emitted_for_all_phases(mode):
+    """All three phases (plan/fix/review) pass the claude_code system-prompt
+    preset through to ClaudeAgentOptions.
+
+    Phase → mode mapping (planner/coder/reviewer): plan→"plan",
+    fix→"read_write", review→"read_only".
+    """
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.backends.claude_code import CLAUDE_CODE_SYSTEM_PROMPT_PRESET
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt", cwd="/tmp", mode=mode, state={"_harness_cfg": {}}
+        ))
+
+    assert "options" in captured, "fake_query was not called"
+    assert captured["options"].system_prompt == CLAUDE_CODE_SYSTEM_PROMPT_PRESET, (
+        f"mode={mode!r}: system_prompt={captured['options'].system_prompt!r} "
+        f"expected {CLAUDE_CODE_SYSTEM_PROMPT_PRESET!r}"
+    )
+
+
+def test_system_prompt_preset_emitted_for_legacy_no_mode():
+    """The legacy path (mode=None, explicit permission_mode/allowed_tools) also
+    receives the preset, because it sits in the base options_kwargs dict rather
+    than any mode-specific branch.
+
+    Locks in the claude_code.py:420-424 legacy branch.
+    """
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.backends.claude_code import CLAUDE_CODE_SYSTEM_PROMPT_PRESET
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt",
+            cwd="/tmp",
+            permission_mode="default",
+            allowed_tools=["Read"],
+            state={"_harness_cfg": {}},
+        ))
+
+    assert "options" in captured, "fake_query was not called"
+    assert captured["options"].system_prompt == CLAUDE_CODE_SYSTEM_PROMPT_PRESET, (
+        f"legacy path: system_prompt={captured['options'].system_prompt!r} "
+        f"expected {CLAUDE_CODE_SYSTEM_PROMPT_PRESET!r}"
+    )
