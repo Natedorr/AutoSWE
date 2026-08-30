@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from autoswe.providers.azure.api import _ado_api_version, ado_patch_json
 from autoswe.providers.azure.vcs import AzureVCS
 from tests.conftest import load_ado_fixture
 
@@ -272,6 +273,53 @@ def test_open_pull_request_develop_base(vcs, mock_ado_request, ado_route_table):
 
     call = mock_ado_request.calls[0]
     assert call["body"]["targetRefName"] == "refs/heads/develop"
+
+
+# -- close PR roundtrip: open then close via PATCH (issue #126) --
+
+
+def test_close_pull_request_uses_patch_not_post(vcs, mock_ado_request, ado_route_table):
+    """Closing a PR must be a PATCH to the PR resource, not a POST.
+
+    Mirrors the live/diagnostic flow in tests/test_azure_live.py and
+    scripts/test_azure_live.py: open a PR (POST), then set
+    ``status: completed`` on the plain-JSON update resource (PATCH). Locks the
+    close-step method and body so it cannot silently regress to POST.
+    """
+    base = "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo"
+    created = load_ado_fixture("pullrequest_created.json")
+    pr_number = created["pullRequestId"]  # 43
+
+    ado_route_table[("POST", f"{base}/pullrequests")] = created
+    ado_route_table[("PATCH", f"{base}/pullrequests/{pr_number}")] = {**created, "status": "completed"}
+
+    # 1. Open the PR (POST create — correct).
+    pr = vcs.open_pull_request(
+        {},
+        branch="autoswe/issue-126",
+        base="main",
+        title="Live test PR",
+        body="Test body",
+    )
+    assert pr.number == pr_number
+
+    # 2. Close it via the plain-JSON update resource (PATCH).
+    close_path = _ado_api_version(f"{base}/pullrequests/{pr.number}")
+    ado_patch_json(
+        close_path,
+        "fake_pat_123",
+        body={"status": "completed", "completionOptions": {"deleteSourceBranch": False}},
+    )
+
+    create_call, close_call = mock_ado_request.calls[0], mock_ado_request.calls[1]
+    assert create_call["method"] == "POST"
+    # The close step must be PATCH, not POST.
+    assert close_call["method"] == "PATCH"
+    assert f"/pullrequests/{pr_number}" in close_call["path"]
+    assert close_call["body"] == {
+        "status": "completed",
+        "completionOptions": {"deleteSourceBranch": False},
+    }
 
 
 # -- get_ci_status --

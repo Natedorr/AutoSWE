@@ -286,7 +286,7 @@ class TestAzureFakeContract:
     def test_get_workitem_comments(self, azure_fake):
         azure_fake.load(_SAMPLE_STATE_AZ)
         resp = azure_fake.handle_request(
-            "GET", "https://dev.azure.com/testorg/testproject/_apis/wit/workitems/42/comments?api-version=7.1-preview.4", "pat",
+            "GET", "https://dev.azure.com/testorg/testproject/_apis/wit/workitems/42/comments?api-version=7.1", "pat",
         )
         # Production reads: count, comments[].id, comments[].text, comments[].createdDate
         assert "count" in resp and "comments" in resp
@@ -297,7 +297,7 @@ class TestAzureFakeContract:
     def test_create_workitem_comment(self, azure_fake):
         azure_fake.load(_SAMPLE_STATE_AZ)
         resp = azure_fake.handle_request(
-            "POST", "https://dev.azure.com/testorg/testproject/_apis/wit/workitems/42/comments?api-version=7.1-preview.4", "pat",
+            "POST", "https://dev.azure.com/testorg/testproject/_apis/wit/workitems/42/comments?api-version=7.1", "pat",
             body={"text": "Test comment"},
         )
         # Production reads: id, text, createdDate
@@ -307,7 +307,7 @@ class TestAzureFakeContract:
     def test_patch_workitem(self, azure_fake):
         azure_fake.load(_SAMPLE_STATE_AZ)
         resp = azure_fake.handle_request(
-            "PATCH", "https://dev.azure.com/testorg/testproject/_apis/wit/workitems/42?api-version=7.1-preview.4", "pat",
+            "PATCH", "https://dev.azure.com/testorg/testproject/_apis/wit/workitems/42?api-version=7.1", "pat",
             body=[{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:dispatched"}],
         )
         # PATCH returns the workitem

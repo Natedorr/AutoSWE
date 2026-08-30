@@ -199,11 +199,11 @@ class AzureTracker(IssueTracker):
         - User comments matching the PAT authenticated user → ``"OWNER"``
         - Everything else → raw ``uniqueName`` (email)
         """
-        preview_path = (
+        path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments?api-version=7.1-preview.4"
+            f"{issue_number}/comments"
         )
-        raw = ado_get(preview_path, self._pat)
+        raw = ado_get(path, self._pat)
         comments_raw = raw.get("comments", [])
 
         # Resolve the authenticated PAT owner for comparison
@@ -272,7 +272,7 @@ class AzureTracker(IssueTracker):
 
         # Primary: Profile API — works regardless of work item existence
         try:
-            me_path = "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1-preview.1"
+            me_path = "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1"
             raw = ado_get(me_path, self._pat)
             self._authenticated_user = (
                 raw.get("principalName", "")
@@ -308,16 +308,22 @@ class AzureTracker(IssueTracker):
         """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments?format=Markdown&api-version=7.1-preview.4"
+            f"{issue_number}/comments?format=Markdown&api-version=7.1"
         )
         result = ado_post(path, self._pat, body={"text": redact_worktree_paths(body)})
         return result.get("id") if result else None
 
     def update_comment(self, repo_cfg: dict, issue_number: int, comment_id: int, body: str) -> None:
-        """Edit a comment on a work item via PATCH."""
+        """Edit a comment on a work item via PATCH.
+
+        ``PATCH .../comments/{id}`` has no refreshed reference page in
+        docs/azure-devops-api/; its availability at stable 7.1 is covered by
+        the live round-trip test in tests/test_azure_live.py (if it ever
+        regresses, re-introduce the preview version here — tracked in issue 022).
+        """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1-preview.4"
+            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1"
         )
         ado_patch_json(path, self._pat, body={"text": redact_worktree_paths(body)})
 

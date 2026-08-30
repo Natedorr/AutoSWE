@@ -440,7 +440,9 @@ def test_interpret_plan_result_codex_prose_skips_fs_scan(tmp_path):
     result = RunResult("Just some prose output", "s1", "success", plan_file_path=None)
 
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=stale):
-        done, pf = _interpret_plan_result(result, state={}, harness={"backend": "codex"})
+        done, pf = _interpret_plan_result(
+            result, state={}, harness={"backend": "codex", "model": "gpt-5.6-terra"}
+        )
 
     assert "WAITING: see comment" in done
     assert pf is None

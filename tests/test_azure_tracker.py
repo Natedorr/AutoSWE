@@ -124,6 +124,10 @@ def test_fetch_comments_pending(tracker, mock_ado_request, ado_route_table):
 
     result = tracker.fetch_comments({}, 100)
 
+    # issue #125: comment reads must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in mock_ado_request.calls[0]["path"]
+    assert "preview" not in mock_ado_request.calls[0]["path"]
+
     assert len(result) == 2
     assert result[0].body == "/plan --branch develop"
     # User comment (matches PAT owner) → OWNER
@@ -370,6 +374,10 @@ def test_authenticated_user_cached(tracker, mock_ado_request, ado_route_table):
     first = tracker.authenticated_user({})
     second = tracker.authenticated_user({})
 
+    # issue #125: profile endpoint must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in mock_ado_request.calls[0]["path"]
+    assert "preview" not in mock_ado_request.calls[0]["path"]
+
     assert first == "natedorr@example.com"
     assert first == second
     # Should only call once — cached (Profile API succeeds, no fallback needed)
@@ -418,6 +426,9 @@ def test_post_comment(tracker, mock_ado_request, ado_route_table):
     assert call["method"] == "POST"
     assert "workitems/100/comments" in call["path"]
     assert "format=Markdown" in call["path"]
+    # issue #125: comment POST must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in call["path"]
+    assert "preview" not in call["path"]
     assert call["body"] == {"text": "This is a test comment"}
 
 
@@ -622,6 +633,9 @@ def test_update_comment_markdown(tracker, mock_ado_request, ado_route_table):
     assert call["method"] == "PATCH"
     assert "workitems/100/comments/42" in call["path"]
     assert "format=Markdown" in call["path"]
+    # issue #125: comment PATCH must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in call["path"]
+    assert "preview" not in call["path"]
     assert call["body"] == {"text": "Updated text, no bot marker"}
 
 
