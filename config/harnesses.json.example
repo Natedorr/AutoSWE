@@ -4,13 +4,13 @@
   "claude-opus": {
     "_comment": "The Claude backend sets CLAUDE_CODE_ENABLE_TODO_TOOLS=1 by default (enables the task-tracking tools that render the sticky progress comment on newer models). Override via per-profile `env` — user values win over backend defaults; `${VAR}` supported.",
     "backend": "claude_code",
-    "model": "claude-opus-4-8",
+    "model": "claude-opus-5",
     "env": { "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" }
   },
 
   "claude-sonnet": {
     "backend": "claude_code",
-    "model": "claude-sonnet-4-6"
+    "model": "claude-sonnet-5"
   },
 
   "claude-haiku": {

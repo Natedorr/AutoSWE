@@ -477,6 +477,29 @@ def test_authenticated_user_cached(tracker, mock_ado_request, ado_route_table):
     assert len(mock_ado_request.calls) == 1
 
 
+def test_authenticated_user_prefers_documented_fields(tracker, mock_ado_request, ado_route_table):
+    """Documented profile fields (emailAddress) win over legacy principalName."""
+    ado_route_table[("GET", "https://app.vssps.visualstudio.com/_apis/profile")] = {
+        "id": "guid-doc",
+        "displayName": "Doc User",
+        "emailAddress": "doc@example.com",
+        "principalName": "legacy@example.com",
+    }
+
+    assert tracker.authenticated_user({}) == "doc@example.com"
+
+
+def test_authenticated_user_legacy_fallback(tracker, mock_ado_request, ado_route_table):
+    """Legacy ADO Server/TFS profile shapes (principalName/uniqueName) still resolve."""
+    ado_route_table[("GET", "https://app.vssps.visualstudio.com/_apis/profile")] = {
+        "id": "guid-legacy",
+        "principalName": "legacy@example.com",
+        "uniqueName": "legacy@example.com",
+    }
+
+    assert tracker.authenticated_user({}) == "legacy@example.com"
+
+
 # -- is_pull_request always False --
 
 def test_is_pull_request_false(tracker, mock_ado_request, ado_route_table):

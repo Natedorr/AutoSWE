@@ -1,5 +1,6 @@
 import json
 import time
+from email.utils import parsedate_to_datetime
 from urllib import error as url_error
 from urllib import request
 
@@ -8,12 +9,60 @@ from autoswe.core.redact import redact_worktree_paths
 
 dbg = get_debug_logger()
 
+# Bounds for a rate-limit backoff derived from a `Retry-After` header. A
+# well-behaved GitHub secondary-limit header is seconds (delta) or an HTTP-date
+# a short while out; clamp to [1, 300] so a malformed or far-future header
+# can't block a dispatch for hours.
+_RETRY_AFTER_MIN = 1.0
+_RETRY_AFTER_MAX = 300.0
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a ``Retry-After`` header value into seconds to wait.
+
+    Handles both the delta-seconds form (``Retry-After: 120``) and the
+    HTTP-date form. Returns ``None`` when the value is absent or malformed,
+    in which case the caller falls back to exponential backoff.
+    """
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    # Delta-seconds form.
+    try:
+        seconds = float(value)
+        return min(max(_RETRY_AFTER_MIN, seconds), _RETRY_AFTER_MAX)
+    except ValueError:
+        pass
+    # HTTP-date form.
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    try:
+        now = time.time()
+        delta = dt.timestamp() - now
+    except (AttributeError, OverflowError, ValueError):
+        return None
+    return min(max(_RETRY_AFTER_MIN, delta), _RETRY_AFTER_MAX)
+
 
 def _gh_request(
     method: str, path: str, token: str, body: dict | None = None,
     max_retries: int = 3, timeout: float = 30,
 ):
     """Generic GitHub API request with exponential backoff on rate-limit/errors.
+
+    Rate-limit / transient-error handling:
+    - 403 (primary limit): sleep until ``X-RateLimit-Reset``.
+    - 403 (secondary limit, ``Retry-After`` present): honor ``Retry-After``.
+    - 429: honor ``Retry-After`` if present, else exponential backoff; retry.
+    - 5xx: exponential backoff; retry.
+    All retryable paths are bounded by ``max_retries``; after the last attempt
+    a ``RuntimeError`` is raised (a transient 429 no longer aborts mid-loop).
 
     Best-effort callers (e.g. link_branch_to_issue) should pass max_retries=1
     and a short timeout to avoid blocking the pipeline.
@@ -44,11 +93,29 @@ def _gh_request(
                 # Archived repos return 403 with "archived" in the body — no point sleeping.
                 if "archived" in content:
                     raise RuntimeError(f"GitHub API {path} -> HTTP {e.code}: {mask_sensitive(content)}") from e
+                retry_after = _parse_retry_after(e.headers.get("Retry-After"))
+                if retry_after is not None and attempt < max_retries - 1:
+                    # Secondary-limit 403: honor the server-provided Retry-After
+                    # rather than sleeping to the full primary X-RateLimit-Reset.
+                    log(f"[RATELIM] 403 secondary rate limit hit. Waiting {retry_after:.0f}s (Retry-After)")
+                    time.sleep(retry_after)
+                    continue
                 reset_ts = int(e.headers.get("X-RateLimit-Reset", 0))
                 if reset_ts and attempt < max_retries - 1:
                     wait_seconds = max(60, reset_ts - time.time())
                     log(f"[RATELIM] 403 rate limit hit. Waiting {wait_seconds:.0f}s until reset")
                     time.sleep(wait_seconds)
+                    continue
+                raise RuntimeError(f"GitHub API {path} -> HTTP {e.code}: {mask_sensitive(content)}") from e
+            elif e.code == 429:
+                # 429 is a rate-limit signal, not a fatal error. Honor
+                # Retry-After when present; fall back to exponential backoff.
+                if attempt < max_retries - 1:
+                    wait = _parse_retry_after(e.headers.get("Retry-After"))
+                    if wait is None:
+                        wait = (2 ** attempt) + 5
+                    log(f"[RATELIM] 429 rate limit hit. Waiting {wait:.0f}s")
+                    time.sleep(wait)
                     continue
                 raise RuntimeError(f"GitHub API {path} -> HTTP {e.code}: {mask_sensitive(content)}") from e
             elif e.code >= 500 and attempt < max_retries - 1:
