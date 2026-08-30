@@ -275,7 +275,7 @@ class TestAzureWriteOps:
 
     def test_vcs_open_pull_request_roundtrip(self, ado_live_cfg):
         """Open a PR, verify it exists, then close it."""
-        from autoswe.providers.azure.api import _ado_api_version, ado_post
+        from autoswe.providers.azure.api import _ado_api_version, ado_patch_json
         from autoswe.providers.factory import get_vcs
         vcs = get_vcs(ado_live_cfg)
         branch = f"autoswe/live-test-{int(time.time())}"
@@ -291,8 +291,8 @@ class TestAzureWriteOps:
             f"https://dev.azure.com/{ado_live_cfg['org']}/{ado_live_cfg['project']}"
             f"/_apis/git/repositories/{ado_live_cfg['repo']}/pullrequests/{pr.number}"
         )
-        ado_post(close_path, ado_live_cfg["pat"],
-                 body={"status": "completed", "completionOptions": {"deleteSourceBranch": False}})
+        ado_patch_json(close_path, ado_live_cfg["pat"],
+                       body={"status": "completed", "completionOptions": {"deleteSourceBranch": False}})
 
     def test_factory_sync_workflow(self, ado_live_cfg):
         """Full factory-based sync workflow."""
