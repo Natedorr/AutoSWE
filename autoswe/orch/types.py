@@ -55,6 +55,7 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("last_dispatched_command_id", "last_dispatched_command_id", None),
     TaskField("last_consumed_reply_id", "last_consumed_reply_id", None),
     TaskField("session_id", "session_id", None),
+    TaskField("last_good_session_id", "last_good_session_id", None),
     TaskField("pr_number", "pr_number", None),
     TaskField("guard_blocked", "_guard_blocked", False),
     TaskField("gh_closed", "gh_closed", False),
@@ -140,6 +141,14 @@ class TaskState:
     # Set by emit() alongside last_phase. Used by _resume_kind() as the
     # authoritative source (falls back to last_phase if missing).
     resume_phase: str | None = None
+    # Last known-good session checkpoint. Set by emit() on every non-failed run
+    # that persists a session_id, and NEVER cleared on FAILED (unlike
+    # session_id, which the FAILED path nulls out). This is what /retry forks
+    # from on backends that advertise the "session_fork" capability, so a
+    # failed retry leaves the checkpoint intact and the next /retry re-forks
+    # from the same good session. Defaulted so positional TaskState(...)
+    # construction in tests is unaffected.
+    last_good_session_id: str | None = None
     created_at: str = ""
     last_synced: str = ""
     provider: str = "github"

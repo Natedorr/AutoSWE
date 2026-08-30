@@ -1034,6 +1034,60 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "retry_forks_from_last_good_session",
+        "description": (
+            "/retry from failed state forks from last_good_session_id "
+            "(fork_session=True, resume=good session), leaving the original intact"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: timeout\n\nPost `/retry` to continue.\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 2,
+                "last_dispatched_command": "/fix",
+                # session_id was nulled on the FAILED path; the surviving
+                # known-good checkpoint (from the successful plan) remains.
+                "session_id": None,
+                "last_good_session_id": "s-plan-good-42",
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command"],
+            # The /fix replay must branch from the good checkpoint: resume from
+            # last_good_session_id AND request a fork so the original stays intact.
+            "claude_calls": [
+                {"resume": "s-plan-good-42", "fork_session": True},
+            ],
+        },
+    },
+    {
         "name": "dispatched_command_noop",
         "description": "Task in planning state; new /fix command → noop",
         "start": {
@@ -1657,6 +1711,7 @@ CODEX_TRANSITIONS: list[str] = [
     "sync_conflict_unresolved",      # Conflict resolution fails → failed
     "planned_then_review",           # Review phase
     "planned_then_review_blocked",   # Review verdict gating (Blocked → review_blocked)
+    "retry_forks_from_last_good_session",  # /retry: Codex lacks session_fork → degrades to fresh/resume, still reaches fixed
 ]
 
 

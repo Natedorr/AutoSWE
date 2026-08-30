@@ -13,9 +13,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from autoswe.core.config import resolve_harness
 from autoswe.core.logging_utils import log
 from autoswe.harness import coder, planner
-from autoswe.harness.runner import HandlerResult
+from autoswe.harness.runner import HandlerResult, backend_has_capability
 from autoswe.orch.types import Action, World
 from autoswe.vcs import ship
 from autoswe.vcs import worktree as worktree_mod
@@ -297,6 +298,8 @@ def _run_fix_with_sync(
     repo_cfg: dict,
     cfg: dict,
     progress_callback: Callable[[str], None] | None,
+    *,
+    fork_session: bool = False,
 ) -> HandlerResult:
     """Pre-dispatch sync before /fix, then run the fix handler."""
     base_branch = task.get("base_branch", "main")
@@ -309,6 +312,7 @@ def _run_fix_with_sync(
         return err
     return coder.run_fix(
         task, guidance, repo_cfg, cfg, progress_callback=progress_callback, wt=wt,
+        fork_session=fork_session,
     )
 
 
@@ -404,6 +408,25 @@ def _run_retry(
     if last_cmd in _NON_REPLAYABLE_COMMANDS:
         last_cmd = "/fix"
     last_cmd = last_cmd or "/fix"
+
+    # Fork-on-retry: branch from the last known-good session on backends that
+    # support session forking (Claude), leaving the original intact for rollback.
+    # Backends without the capability (Codex) resume in place or start fresh —
+    # they ignore the flag. Decided here via the capability so handlers never
+    # branch on backend name. Only the /fix replay can fork: /plan always starts
+    # a fresh session (nothing to fork from) and /review is already throwaway.
+    if last_cmd == "/fix":
+        try:
+            fix_harness = resolve_harness("fix", repo_cfg, cfg)
+        except Exception:
+            fix_harness = {"backend": "claude_code"}
+        fork_session = bool(
+            backend_has_capability(fix_harness, "session_fork")
+            and (task.get("last_good_session_id") or task.get("session_id"))
+        )
+    else:
+        fork_session = False
+
     if last_cmd == "/plan":
         hr = _run_plan_with_sync(task, action.guidance, None, repo_cfg, cfg,
                                   progress_callback=progress_callback)
@@ -412,5 +435,6 @@ def _run_retry(
                                    progress_callback=progress_callback)
     else:
         hr = _run_fix_with_sync(task, action.guidance, repo_cfg, cfg,
-                                progress_callback=progress_callback)
+                                progress_callback=progress_callback,
+                                fork_session=fork_session)
     return _to_dispatch(hr, task)

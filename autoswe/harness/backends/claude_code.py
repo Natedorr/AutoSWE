@@ -80,6 +80,35 @@ _MODE_CONFIG = {
 }
 
 
+# Minimum Agent SDK version that exposes ``fork_session`` (and
+# ``resume_session_at``). ``claude-agent-sdk`` ships no pinned ``__version__``
+# everywhere, so we read the installed distribution version defensively and
+# treat an unreadable/unknown version as "new enough" (the capability is still
+# advertised; the guard only degrades to plain resume on a *known* old SDK).
+_FORK_MIN_SDK_VERSION = (0, 2, 137)
+
+
+def _sdk_supports_session_fork() -> bool:
+    """Return True when the installed Agent SDK is new enough for ``fork_session``.
+
+    Reads the installed ``claude-agent-sdk`` distribution version lazily (the
+    SDK is a heavy, possibly-missing dependency). Returns True when the version
+    cannot be read so a fresh/edge install is not needlessly demoted.
+    """
+    try:
+        from importlib.metadata import version  # deferred import
+        raw = version("claude-agent-sdk")
+    except Exception:
+        return True
+    parts = raw.split(".")
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return True
+    patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    return (major, minor, patch) >= _FORK_MIN_SDK_VERSION
+
+
 def _get_retryable_exceptions() -> tuple:
     """Lazily build the tuple of SDK exception types to retry on.
 
@@ -355,6 +384,7 @@ class ClaudeCodeBackend:
         "can_use_tool",
         "plan_permission",
         "resume",
+        "session_fork",
         "progress_stream",
         "plan_file",
     }
@@ -389,7 +419,9 @@ class ClaudeCodeBackend:
             query,
         )
 
-        log(f"[CLAUDE] starting cwd={spec.cwd} resume={'NEW' if not spec.resume else spec.resume[:8]} model={spec.model} mode={spec.mode}")
+        _resume_lbl = "NEW" if not spec.resume else spec.resume[:8]
+        _fork_lbl = " fork" if (spec.fork_session and spec.resume) else ""
+        log(f"[CLAUDE] starting cwd={spec.cwd} resume={_resume_lbl}{_fork_lbl} model={spec.model} mode={spec.mode}")
 
         # --- Build the per-session child-process env (no os.environ mutation) ---
         # The Claude Agent SDK merges this into the spawned CLI's environment,
@@ -452,6 +484,21 @@ class ClaudeCodeBackend:
             "mcp_servers": spec.mcp_servers or {},
             "system_prompt": CLAUDE_CODE_SYSTEM_PROMPT_PRESET,
         }
+
+        # Fork-on-retry: when the spec asks to fork off a resume session, branch
+        # into a NEW session (fork_session=True) so the original stays intact for
+        # rollback. Gated on a non-empty resume and an SDK new enough for
+        # fork_session; on an older SDK we log and degrade to a plain resume
+        # rather than passing an unknown option to the SDK.
+        if spec.fork_session and spec.resume:
+            if _sdk_supports_session_fork():
+                options_kwargs["fork_session"] = True
+            else:
+                log(
+                    f"[CLAUDE] fork_session requested but installed Agent SDK is "
+                    f"older than {_FORK_MIN_SDK_VERSION}; degrading to plain resume "
+                    f"(original session will be continued in place)"
+                )
 
         # Per-session child-process env (see construction above). The SDK merges
         # this over the inherited environment for the spawned CLI only.

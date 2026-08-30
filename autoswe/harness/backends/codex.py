@@ -13,6 +13,16 @@ updates while the Codex CLI is running (not just after it finishes).
 Future phases may add ``mcp`` (MCP comment posting) and structured
 AskUserQuestion handling.  Until then those features degrade gracefully
 — handlers fall back to text parsing when ``"mcp"`` is not advertised.
+
+**Retry semantics (no fork):** ``codex exec resume <id>`` *continues* the
+existing session in place — Codex has no fork primitive (unlike the Claude
+Agent SDK's ``fork_session``). So a Codex ``/retry`` either resumes the same
+session (mutating it) or starts a fresh one; it can never branch from a prior
+checkpoint while leaving the original intact. This backend therefore does NOT
+advertise the ``session_fork`` capability, and handlers gate fork-on-retry on
+``backend_has_capability(harness, "session_fork")`` — which is False here.
+``RunSpec.fork_session`` is ignored by this backend. See
+docs/autoswe/harnesses.md ("Retry semantics").
 """
 from __future__ import annotations
 

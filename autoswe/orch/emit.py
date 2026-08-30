@@ -368,6 +368,14 @@ def emit(
     # uses a throwaway session and should not overwrite the persistent fix session)
     if session_id and kind != "review":
         queue_patch["session_id"] = session_id
+        # Record the last known-good session checkpoint. Only a NON-failed run is
+        # a good checkpoint — a failed run's session is not one we want to fork
+        # from. This is intentionally NOT nullled on the FAILED path below (which
+        # nulls session_id), so /retry forks from the most recent *good* session
+        # and a failed retry leaves the checkpoint intact for the next /retry.
+        # Review is excluded: its throwaway session is not a checkpoint.
+        if new_status != "failed":
+            queue_patch["last_good_session_id"] = session_id
 
     # Merge lifecycle field mutations (last_phase, resume_phase, plan_file_path,
     # review_file_path, first_dispatched_at, _guard_blocked). Computed once up
