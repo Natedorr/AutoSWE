@@ -60,10 +60,6 @@ _MODE_SANDBOX = {
     "read_write": "workspace-write",
 }
 
-# Matches RunSpec.max_turns default — only emit -c flag when the caller
-# requests a value different from the default, keeping the command minimal.
-_DEFAULT_MAX_TURNS = 200
-
 
 def _mode_to_sandbox(mode: str | None) -> str:
     """Translate a RunSpec mode string to a Codex sandbox flag value."""
@@ -265,9 +261,11 @@ class CodexBackend:
             ])
             # Persist session files so resume (codex exec resume <id>) can restore context.
 
-        # Limit turns to prevent runaway sessions (only add flag when non-default)
-        if spec.max_turns and spec.max_turns != _DEFAULT_MAX_TURNS:
-            cmd.extend(["-c", f"agent.max_turns={spec.max_turns}"])
+        # No turn cap is emitted: `codex exec` has no max_turns key (live-verified
+        # on codex-cli 0.150.1 — `-c agent.max_turns=N` errors under
+        # --strict-config and is silently ignored otherwise). RunSpec.max_turns
+        # is a no-op for this backend; the anti-runaway guard is the wall-clock
+        # timeout applied below (spec.timeout).
 
         # Append the prompt behind `--` so prompts starting with `-` are safe
         cmd.extend(["--", spec.prompt])
@@ -278,6 +276,10 @@ class CodexBackend:
             env["OPENAI_API_KEY"] = harness_cfg["openai_api_key"]
         if harness_cfg.get("codex_api_key"):
             env["CODEX_API_KEY"] = harness_cfg["codex_api_key"]
+        # Per-harness-profile `env` override (Part B): user values win over the
+        # harness api-key fields above (precedence: os.environ < api-key fields
+        # < profile "env" < spec.env_overrides).
+        env.update(harness_cfg.get("env") or {})
         # Apply explicit env overrides (take precedence)
         if spec.env_overrides:
             env.update(spec.env_overrides)

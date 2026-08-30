@@ -603,7 +603,7 @@ def test_set_status_preserves_non_autoswe_tags(tracker, mock_ado_request, ado_ro
     assert patch_call["method"] == "PATCH"
     patch_body = patch_call["body"]
     assert len(patch_body) == 1
-    assert patch_body[0]["op"] == "replace"
+    assert patch_body[0]["op"] == "add"
     assert patch_body[0]["path"] == "/fields/System.Tags"
     # Should have feature; bug; autoswe:fixed (no autoswe:pending)
     new_tags = patch_body[0]["value"]
@@ -625,7 +625,7 @@ def test_set_status_no_existing_tags(tracker, mock_ado_request, ado_route_table)
 
     assert len(mock_ado_request.calls) == 2
     patch_call = mock_ado_request.calls[1]
-    assert patch_call["body"] == [{"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:pending"}]
+    assert patch_call["body"] == [{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending"}]
 
 
 def test_set_status_with_full_label_no_double_prefix(tracker, mock_ado_request, ado_route_table):
@@ -679,7 +679,7 @@ def test_assign_to_user_explicit_login(tracker, mock_ado_request, ado_route_tabl
     assert len(mock_ado_request.calls) == 1
     call = mock_ado_request.calls[0]
     assert call["method"] == "PATCH"
-    assert call["body"] == [{"op": "replace", "path": "/fields/System.AssignedTo", "value": "dev@example.com"}]
+    assert call["body"] == [{"op": "add", "path": "/fields/System.AssignedTo", "value": "dev@example.com"}]
     # Should NOT call authenticated_user
     assert len([c for c in mock_ado_request.calls if "profile" in c["path"]]) == 0
 
@@ -700,7 +700,7 @@ def test_assign_to_user_resolves_authenticated(tracker, mock_ado_request, ado_ro
     assert "profile" in mock_ado_request.calls[0]["path"]
     assert mock_ado_request.calls[1]["method"] == "PATCH"
     assert mock_ado_request.calls[1]["body"] == [
-        {"op": "replace", "path": "/fields/System.AssignedTo", "value": "natedorr@example.com"}
+        {"op": "add", "path": "/fields/System.AssignedTo", "value": "natedorr@example.com"}
     ]
 
 

@@ -258,7 +258,7 @@ class TestAzureWriteOps:
             f"/_apis/wit/workitems/{wid}"
         )
         ado_patch(close_path, ado_live_cfg["pat"],
-                  body=[{"op": "replace", "path": "/fields/System.State", "value": "Closed"}])
+                  body=[{"op": "add", "path": "/fields/System.State", "value": "Closed"}])
 
     def test_tracker_set_status_transitions(self, ado_live_cfg):
         """Set status through multiple autoswe: transitions."""

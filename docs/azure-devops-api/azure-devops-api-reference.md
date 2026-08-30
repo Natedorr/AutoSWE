@@ -237,9 +237,8 @@ Azure DevOps uses JSON Patch for creating and updating work items. This is NOT a
 
 | Operation | Description |
 |---|---|
-| `add` | Set or change a field value |
+| `add` | Set or change a field value (also when the field already has a value) |
 | `remove` | Clear a field (no `value` needed) |
-| `replace` | Replace an existing value (same as `add` for fields) |
 
 ### Content-Type
 

@@ -371,7 +371,7 @@ def capture_azure(cfg: dict) -> None:
 
     # update_workitem (representative JSON-Patch shape)
     write_fixture(out_dir, "update_workitem", [
-        {"op": "replace", "path": "/fields/System.Tags", "value": "tag1; autoswe:pending"},
+        {"op": "add", "path": "/fields/System.Tags", "value": "tag1; autoswe:pending"},
     ], "PATCH /_apis/wit/workitems/{n}", "PATCH",
                   "docs/azure-devops-api/update-workitem.md")
 
@@ -431,7 +431,7 @@ def _write_empty_azure_fixtures(out_dir: Path, org: str, project: str, repo: str
     }, "POST /_apis/wit/workitems/{n}/comments", "POST",
                   "docs/azure-devops-api/create-workitem-comment.md")
     write_fixture(out_dir, "update_workitem", [
-        {"op": "replace", "path": "/fields/System.Tags", "value": "tag1; autoswe:pending"},
+        {"op": "add", "path": "/fields/System.Tags", "value": "tag1; autoswe:pending"},
     ], "PATCH /_apis/wit/workitems/{n}", "PATCH",
                   "docs/azure-devops-api/update-workitem.md")
     write_fixture(out_dir, "create_workitem", [

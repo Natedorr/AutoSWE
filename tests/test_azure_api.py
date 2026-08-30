@@ -162,7 +162,7 @@ def test_ado_patch_uses_json_patch_content_type():
         return {}
 
     with patch("autoswe.providers.azure.api._ado_request", fake_request):
-        ado_patch("/test", "pat", body=[{"op": "replace", "path": "/x", "value": 1}])
+        ado_patch("/test", "pat", body=[{"op": "add", "path": "/x", "value": 1}])
 
     assert captured["content_type"] == "application/json-patch+json"
 

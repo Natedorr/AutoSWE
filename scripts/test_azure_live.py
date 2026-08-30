@@ -148,13 +148,13 @@ def _create_wi():
 
 
 def _update_wi(wid):
-    payload = [{"op": "replace", "path": "/fields/System.Title", "value": f"Updated {wid}"}]
+    payload = [{"op": "add", "path": "/fields/System.Title", "value": f"Updated {wid}"}]
     r = ado_patch(_ado_api_version(f"https://dev.azure.com/{ORG}/{PROJECT}/_apis/wit/workitems/{wid}"), PAT, body=payload)
     assert r["id"] == wid
 
 
 def _set_tags():
-    payload = [{"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:pending; test-tag"}]
+    payload = [{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending; test-tag"}]
     r = ado_patch(_ado_api_version(f"https://dev.azure.com/{ORG}/{PROJECT}/_apis/wit/workitems/1"), PAT, body=payload)
     assert r["id"] == 1
 
@@ -366,7 +366,7 @@ def _bad_project():
 
 
 def _multi_tags():
-    payload = [{"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:pending; tag1; tag2"}]
+    payload = [{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending; tag1; tag2"}]
     r = ado_patch(_ado_api_version(f"https://dev.azure.com/{ORG}/{PROJECT}/_apis/wit/workitems/1"), PAT, body=payload)
     assert r["id"] == 1
 
