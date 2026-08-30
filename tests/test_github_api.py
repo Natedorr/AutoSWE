@@ -242,3 +242,137 @@ def test_gh_request_403_reset_in_past_raises(mocker):
 
     with pytest.raises(RuntimeError, match="403"):
         _gh_request("GET", "/user", "tok", max_retries=2)
+
+
+# ------ 429 (Too Many Requests) handling --------
+
+
+def test_gh_request_429_retries_then_succeeds(mocker):
+    """429 (no Retry-After) should back off with exponential backoff and retry."""
+    err = make_http_error(429)
+    ok = make_response({"ok": True})
+    call_count = {"n": 0}
+
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            raise err
+        return ok
+
+    mocker.patch("urllib.request.urlopen", side_effect=side_effect)
+    mock_sleep = mocker.patch("time.sleep")
+
+    result = _gh_request("GET", "/user", "tok", max_retries=3)
+    assert result == {"ok": True}
+    assert call_count["n"] == 3
+    # Exponential backoff: attempt 0 -> 2^0 + 5 = 6, attempt 1 -> 2^1 + 5 = 7
+    assert mock_sleep.call_args_list[0].args[0] == 6
+    assert mock_sleep.call_args_list[1].args[0] == 7
+
+
+def test_gh_request_429_honors_retry_after_delta(mocker):
+    """429 with a numeric Retry-After should sleep exactly that many seconds."""
+    err = make_http_error(429, headers={"Retry-After": "7"})
+    ok = make_response({"ok": True})
+    call_count = {"n": 0}
+
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise err
+        return ok
+
+    mocker.patch("urllib.request.urlopen", side_effect=side_effect)
+    mock_sleep = mocker.patch("time.sleep")
+
+    result = _gh_request("GET", "/user", "tok", max_retries=3)
+    assert result == {"ok": True}
+    assert call_count["n"] == 2
+    # Retry-After=7 honored, not the backoff fallback (which would be 6).
+    assert mock_sleep.call_args_list[0].args[0] == 7
+
+
+def test_gh_request_429_retry_after_capped(mocker):
+    """A far-future/bogus Retry-After is clamped to the cap so it can't hang a dispatch."""
+    err = make_http_error(429, headers={"Retry-After": "999999"})
+    ok = make_response({"ok": True})
+    call_count = {"n": 0}
+
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise err
+        return ok
+
+    mocker.patch("urllib.request.urlopen", side_effect=side_effect)
+    mock_sleep = mocker.patch("time.sleep")
+
+    _gh_request("GET", "/user", "tok", max_retries=2)
+    # Capped at _RETRY_AFTER_MAX (300s), not the raw 999999.
+    assert mock_sleep.call_args_list[0].args[0] == 300.0
+
+
+def test_gh_request_429_exhausted_raises(mocker):
+    """Persistent 429 should raise a clean RuntimeError after exhausting retries."""
+    err = make_http_error(429)
+    mocker.patch("urllib.request.urlopen", side_effect=err)
+    mock_sleep = mocker.patch("time.sleep")
+
+    with pytest.raises(RuntimeError, match="429"):
+        _gh_request("GET", "/user", "tok", max_retries=2)
+    # Only the first attempt (retryable) sleeps; the final attempt raises.
+    assert mock_sleep.call_count == 1
+
+
+def test_gh_request_403_secondary_honors_retry_after(mocker):
+    """Secondary-limit 403 with Retry-After should honor it, not the primary reset."""
+    import time
+
+    # A far-future primary reset so we can prove the primary path is NOT taken.
+    far_reset = int(time.time()) + 7200
+    err = make_http_error(
+        403,
+        headers={"Retry-After": "12", "X-RateLimit-Reset": str(far_reset)},
+    )
+    ok = make_response({"ok": True})
+    call_count = {"n": 0}
+
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise err
+        return ok
+
+    mocker.patch("urllib.request.urlopen", side_effect=side_effect)
+    mock_sleep = mocker.patch("time.sleep")
+
+    result = _gh_request("GET", "/user", "tok", max_retries=2)
+    assert result == {"ok": True}
+    assert call_count["n"] == 2
+    # Honors Retry-After=12; the primary path would have slept ~7200s.
+    assert mock_sleep.call_args_list[0].args[0] == 12
+
+
+def test_gh_request_403_primary_path_unaffected(mocker):
+    """403 with X-RateLimit-Reset and no Retry-After still sleeps to reset."""
+    import time
+
+    future_reset = int(time.time()) + 3600
+    err = make_http_error(403, headers={"X-RateLimit-Reset": str(future_reset)})
+    ok = make_response({"ok": True})
+    call_count = {"n": 0}
+
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise err
+        return ok
+
+    mocker.patch("urllib.request.urlopen", side_effect=side_effect)
+    mock_sleep = mocker.patch("time.sleep")
+
+    result = _gh_request("GET", "/user", "tok", max_retries=2)
+    assert result == {"ok": True}
+    assert call_count["n"] == 2
+    # Primary path: sleep to reset (>= 60s floor), not the retry-after path.
+    assert mock_sleep.call_args_list[0].args[0] >= 60

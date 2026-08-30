@@ -30,13 +30,49 @@ def _event(obj: dict) -> str:
 
 
 def _build_success_jsonl(session_id: str, text: str) -> list[str]:
-    """JSONL lines for a successful run yielding *text*."""
+    """JSONL lines for a successful run yielding *text*.
+
+    Mirrors the current-CLI sample stream (docs/codex/codex-manual.md
+    L32957–32961): thread.started → turn.started → item.started →
+    item.completed → turn.completed, all current item/event types.
+    """
     lines: list[str] = []
     lines.append(_event({"type": "thread.started", "thread_id": session_id}))
+    lines.append(_event({"type": "turn.started"}))
+    lines.append(_event({
+        "type": "item.started",
+        "item": {"id": "item_1", "type": "agent_message", "text": text},
+    }))
     lines.append(_event({
         "type": "item.completed",
-        "item": {"type": "agent_message", "text": text},
+        "item": {"id": "item_1", "type": "agent_message", "text": text},
     }))
+    lines.append(_event({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}}))
+    return lines
+
+
+def _build_plan_item_jsonl(session_id: str, plan_text: str, message_text: str = "") -> list[str]:
+    """JSONL lines for a plan-phase run that emits an authoritative ``plan`` item.
+
+    The plan item populates ``RunResult.plan_text``; the optional agent message
+    text is the primary ``RunResult.text`` source.
+    """
+    lines: list[str] = []
+    lines.append(_event({"type": "thread.started", "thread_id": session_id}))
+    lines.append(_event({"type": "turn.started"}))
+    lines.append(_event({
+        "type": "item.completed",
+        "item": {"id": "item_plan", "type": "plan", "text": plan_text},
+    }))
+    if message_text:
+        lines.append(_event({
+            "type": "item.started",
+            "item": {"id": "item_msg", "type": "agent_message", "text": message_text},
+        }))
+        lines.append(_event({
+            "type": "item.completed",
+            "item": {"id": "item_msg", "type": "agent_message", "text": message_text},
+        }))
     lines.append(_event({"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}}))
     return lines
 
@@ -160,6 +196,8 @@ class CodexFake:
 
     def __init__(self):
         self._scripts: list[tuple[str, str, str]] = []  # (text, session_id, subtype)
+        # Per-script optional authoritative plan item text (index → str).
+        self._plan_items: dict[int, str] = {}
         self._call_index = 0
         self.calls: list[dict[str, Any]] = []
         self._raises: list[Exception] = []
@@ -186,11 +224,30 @@ class CodexFake:
         self._killed.append(False)
 
     def script_plan(self, plan_text: str, session_id: str = "s1") -> None:
-        """Add a plan-phase response."""
+        """Add a plan-phase response.
+
+        Emits the ``<AUTOSWE_PLAN>`` tag in the agent message (the planner's
+        tag parsing must keep working) **and** an authoritative ``plan`` item
+        so plan-phase runs also exercise ``RunResult.plan_text`` capture.
+        """
+        idx = len(self._scripts)
         self.script_response(
             f"<AUTOSWE_PLAN>{plan_text}</AUTOSWE_PLAN>",
             session_id=session_id,
         )
+        self._plan_items[idx] = plan_text
+
+    def script_plan_item(self, plan_text: str, message_text: str = "",
+                         session_id: str = "s1") -> None:
+        """Add a plan-phase response built from an authoritative ``plan`` item.
+
+        Unlike :meth:`script_plan` (which wraps the text in ``<AUTOSWE_PLAN>``
+        tags in the agent message), this emits a bare ``plan`` item so the
+        parser's ``plan_text`` capture path is exercised directly.
+        """
+        idx = len(self._scripts)
+        self.script_response(message_text, session_id=session_id)
+        self._plan_items[idx] = plan_text
 
     def script_questions(self, questions: str, session_id: str = "s1") -> None:
         """Add a plan-phase response with questions."""
@@ -231,6 +288,11 @@ class CodexFake:
             # Killed: thread.started + no completion
             lines = [_event({"type": "thread.started", "thread_id": session_id})]
             return lines, -9
+
+        plan_text = self._plan_items.get(self._call_index)
+        if plan_text is not None and subtype == "success":
+            lines = _build_plan_item_jsonl(session_id, plan_text, text)
+            return lines, 0
 
         lines = _build_text_jsonl(session_id, text, subtype)
         return lines, 0
