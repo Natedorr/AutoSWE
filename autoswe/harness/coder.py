@@ -39,6 +39,21 @@ _MCP_INLINE_COMMENT_TOOLS = [
 _COMMIT_RE = re.compile(r"<AUTOSWE_COMMIT>\s*(.*?)</AUTOSWE_COMMIT>", re.DOTALL)
 
 
+def _strip_commit_block(text: str) -> str:
+    """Remove the <AUTOSWE_COMMIT> block from an agent response.
+
+    Used for the human-facing fix summary: the block is internal scaffolding
+    that should not be posted to the issue or PR body. Removes every block and
+    collapses the whitespace gap it leaves so the remaining prose reads cleanly.
+    """
+    if not text:
+        return ""
+    stripped = _COMMIT_RE.sub("\n", text)
+    # Collapse the 3+ newlines the removal can leave (block sat on its own lines).
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+    return stripped.strip()
+
+
 def _parse_commit_message(text: str) -> tuple[str | None, str | None]:
     """Parse the <AUTOSWE_COMMIT> block from an agent response.
 
@@ -361,7 +376,11 @@ def _finalize_fix(
 
     Shared by run_fix and resume_fix to avoid duplicating the commit/push flow.
     """
-    summary_lines = [line.strip() for line in run_result.text.split("\n") if line.strip()]
+    # Build the human-facing summary from the response WITHOUT the internal
+    # <AUTOSWE_COMMIT> block, so the "Summary:" issue comment and the PR body
+    # show the agent's prose rather than the commit-message scaffold.
+    prose = _strip_commit_block(run_result.text or "")
+    summary_lines = [line.strip() for line in prose.split("\n") if line.strip()]
     summary_text = "\n".join(summary_lines[-10:]) if summary_lines else "Changes applied."
 
     # Build the commit message from the agent's structured <AUTOSWE_COMMIT>

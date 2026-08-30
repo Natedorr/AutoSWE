@@ -10,7 +10,7 @@ Covers two things:
 from contextlib import ExitStack
 from unittest.mock import patch
 
-from autoswe.harness.coder import _parse_commit_message
+from autoswe.harness.coder import _parse_commit_message, _strip_commit_block
 from autoswe.harness.runner import RunResult
 
 
@@ -136,6 +136,56 @@ def test_parse_commit_message_subject_containing_body_colon():
 
 
 # ---------------------------------------------------------------------------
+# _strip_commit_block — the human-facing summary must not leak the block
+# ---------------------------------------------------------------------------
+
+
+def test_strip_commit_block_removes_block_keeps_prose():
+    text = (
+        "I refactored the paginator and fixed the off-by-one.\n"
+        "Ran the tests, all green.\n"
+        "\n"
+        "<AUTOSWE_COMMIT>\n"
+        "subject: Fix off-by-one in pagination cursor\n"
+        "body:\n"
+        "Clamps the offset to the available range.\n"
+        "</AUTOSWE_COMMIT>\n"
+    )
+    result = _strip_commit_block(text)
+    assert "AUTOSWE_COMMIT" not in result
+    assert "subject:" not in result
+    assert "I refactored the paginator" in result
+    assert "Ran the tests, all green." in result
+    # No triple-newline gap left behind by the removal.
+    assert "\n\n\n" not in result
+
+
+def test_strip_commit_block_no_block_is_noop():
+    text = "Just prose, nothing else."
+    assert _strip_commit_block(text) == text
+
+
+def test_strip_commit_block_empty():
+    assert _strip_commit_block("") == ""
+    assert _strip_commit_block(None) == ""
+
+
+def test_strip_commit_block_multiple_blocks():
+    text = (
+        "first part\n"
+        "<AUTOSWE_COMMIT>\nsubject: a\nbody:\nx\n</AUTOSWE_COMMIT>\n"
+        "middle prose\n"
+        "<AUTOSWE_COMMIT>\nsubject: b\nbody:\ny\n</AUTOSWE_COMMIT>\n"
+        "last part\n"
+    )
+    result = _strip_commit_block(text)
+    assert result.count("AUTOSWE_COMMIT") == 0
+    assert "first part" in result
+    assert "middle prose" in result
+    assert "last part" in result
+
+
+# ---------------------------------------------------------------------------
 # run_fix / resume_fix integration — commit message via commit_and_push spy
 # ---------------------------------------------------------------------------
 
@@ -212,6 +262,45 @@ def test_run_fix_falls_back_to_issue_title_when_block_missing(tmp_path):
     assert "Fixes #1" in msg
     # Body falls back to the agent's raw summary.
     assert "I made the change" in msg
+
+
+def test_run_fix_summary_does_not_leak_commit_block(tmp_path):
+    """The DONE_SUMMARY payload (posted to the issue + PR body) must not show
+    the internal <AUTOSWE_COMMIT> scaffold — only the agent's prose."""
+    task = make_task(title="Fix pagination bug")
+    agent_text = (
+        "I refactored the paginator and fixed the off-by-one.\n"
+        "Verified with the new test.\n"
+        "<AUTOSWE_COMMIT>\n"
+        "subject: Fix off-by-one in pagination cursor\n"
+        "body:\n"
+        "Clamps the offset to the available range.\n"
+        "</AUTOSWE_COMMIT>\n"
+    )
+    commit_msgs = []
+
+    def fake_run(prompt, **kwargs):
+        return _r(agent_text)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("autoswe.harness.coder.create_worktree", return_value=tmp_path))
+        stack.enter_context(patch("autoswe.harness.coder.fast_forward_worktree", return_value=True))
+        stack.enter_context(_fetch_comments_patch())
+        stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+        stack.enter_context(patch("autoswe.harness.coder.commit_and_push", side_effect=_commit_msg_spy(commit_msgs)))
+        from autoswe.harness.coder import run_fix
+        result = run_fix(task, cfg={})
+
+    done_content = result.done_content
+    # The summary segment (between "DONE_SUMMARY\t" and the final "\t<sha>")
+    # must not contain the block scaffold.
+    assert done_content.startswith("DONE_SUMMARY\t")
+    summary = done_content[len("DONE_SUMMARY\t"):].rsplit("\t", 1)[0]
+    assert "AUTOSWE_COMMIT" not in summary
+    assert "subject:" not in summary
+    assert "I refactored the paginator" in summary
+    # The commit message itself still carries the generated subject.
+    assert commit_msgs[0].splitlines()[0] == "Fix off-by-one in pagination cursor"
 
 
 def test_run_fix_falls_back_to_issue_title_when_subject_empty(tmp_path):
