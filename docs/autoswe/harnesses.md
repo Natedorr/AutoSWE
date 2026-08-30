@@ -19,6 +19,7 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | `anthropic_base_url` | No | (from env) | Custom API endpoint (Claude Code only) |
 | `anthropic_auth_token` | No | (from env) | Auth token (Claude Code only) |
 | `anthropic_api_key` | No | (from env) | API key (Claude Code only) |
+| `env` | No | — | Extra environment variables (a `{key: value}` map) merged into the backend's child process. Values override backend defaults; ``${VAR}``/``${VAR:-default}`` supported. See [Per-profile `env`](#per-profile-env) |
 
 String values support ``${VAR}`` and ``${VAR:-default}`` environment variable
 interpolation (expanded at load time from the current process environment).
@@ -93,13 +94,61 @@ Different phases can use different backends. Common patterns:
 }
 ```
 
-### Backends
+### Per-profile `env`
+
+Every profile accepts an optional `env` map of extra environment variables,
+merged into the backend's child process. This is the hook for passing values
+that the backend itself does not model as named fields (e.g. pointing Codex at
+a self-hosted OpenAI-compatible endpoint via `OPENAI_API_BASE`).
+
+- **Claude Code** — merged into the SDK `env` option, so the variables reach the
+  spawned CLI only (never the poller's own process environment).
+- **Codex** — merged into the `codex exec` subprocess environment.
+
+**Precedence** (highest wins):
+
+| Claude Code | Codex |
+|-------------|-------|
+| 1. `spec.env_overrides` (internal) | 1. `spec.env_overrides` (internal) |
+| 2. profile `env` | 2. profile `env` |
+| 3. backend defaults (e.g. `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, Anthropic creds) | 3. api-key fields (`OPENAI_API_KEY` / `CODEX_API_KEY`) |
+| 4. inherited `os.environ` | 4. inherited `os.environ` |
+
+So a profile `env` value overrides a backend default but loses to the internal
+`env_overrides` seam. `${VAR}` / `${VAR:-default}` expansion is applied to `env`
+values at load time, like every other profile string.
+
+```json
+{
+  "claude-custom": {
+    "backend": "claude_code",
+    "model": "claude-opus-4-8",
+    "env": { "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" }
+  },
+  "codex-custom": {
+    "backend": "codex",
+    "model": "custom-model",
+    "env": { "OPENAI_API_BASE": "http://localhost:8080" }
+  }
+}
+```
 
 #### `claude_code` (current default)
 
 Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuestion interception, plan file capture, progress streaming, session resume.
 
-**Profile fields:** `backend`, `model`, `cli_path`, `anthropic_base_url`, `anthropic_auth_token`, `anthropic_api_key`, `timeout`.
+**Profile fields:** `backend`, `model`, `cli_path`, `anthropic_base_url`, `anthropic_auth_token`, `anthropic_api_key`, `timeout`, `env`.
+
+**Task-tracking tools (default opt-in):** the backend sets
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` on the spawned CLI by default (via the SDK
+`env` option). On Agent SDK ≥ 0.2.139 the task-tracking tools
+(`TodoWrite`, `TaskCreate`, `TaskGet`, `TaskUpdate`, `TaskList`) are *not*
+provided by default on the newer model families (Opus 4.8, Sonnet 5, …); this
+opt-in restores them (honored when the CLI is ≥ v2.1.233). They are the
+planner/coder's only live feedback — the sticky progress comment renders from
+them. The tools also remain listed in the backend's tool lists as
+belt-and-braces. A profile `env` entry can override the default (e.g.
+`"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "0"}` to disable).
 
 **Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `progress_stream`.
 
@@ -131,6 +180,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 - `model`: **required** Codex model ID (e.g. `"gpt-5.6-sol"`, `"gpt-5.6-terra"`, `"gpt-5.6-luna"`, `"gpt-5.5"`, `"qwen3.6:27b"` for Ollama). There is no built-in default — a missing `model` fails resolution with a `ValueError`
 - `codex_api_key` or `openai_api_key`: API key for the provider (optional for local providers)
 - `timeout`: Override the default timeout (optional)
+- `env`: Extra environment variables (a `{key: value}` map) merged into the `codex exec` subprocess (optional). User values win over the api-key fields; see [Per-profile `env`](#per-profile-env)
 
 **Capabilities (Phase 4, core run only):** `mode`, `resume`, `progress_stream`.
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import types
 from collections.abc import Awaitable
 from pathlib import Path
@@ -392,176 +391,183 @@ class ClaudeCodeBackend:
 
         log(f"[CLAUDE] starting cwd={spec.cwd} resume={'NEW' if not spec.resume else spec.resume[:8]} model={spec.model} mode={spec.mode}")
 
-        # --- Apply Anthropic env vars from harness profile ---
+        # --- Build the per-session child-process env (no os.environ mutation) ---
+        # The Claude Agent SDK merges this into the spawned CLI's environment,
+        # so these values reach only the child CLI — never the poller's own
+        # process env (credential isolation, task-tracking opt-in).
         harness_cfg = (spec.state or {}).get("_harness_cfg") or {}
-        _claude_env = {}
+
+        # Backend default: opt into the task-tracking tools. On Agent SDK
+        # >= 0.2.139 these are NOT provided by default on the newer model
+        # families (Opus 4.8, Sonnet 5, ...); CLAUDE_CODE_ENABLE_TODO_TOOLS=1
+        # restores them (honor requires CLI >= v2.1.233). The sticky progress
+        # comment renders from these tools, so opt in by default.
+        env = {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"}
+
+        # Anthropic credentials from the harness profile.
         if harness_cfg.get("anthropic_base_url"):
-            _claude_env["ANTHROPIC_BASE_URL"] = harness_cfg["anthropic_base_url"]
+            env["ANTHROPIC_BASE_URL"] = harness_cfg["anthropic_base_url"]
         if harness_cfg.get("anthropic_auth_token"):
-            _claude_env["ANTHROPIC_AUTH_TOKEN"] = harness_cfg["anthropic_auth_token"]
+            env["ANTHROPIC_AUTH_TOKEN"] = harness_cfg["anthropic_auth_token"]
         if harness_cfg.get("anthropic_api_key"):
-            _claude_env["ANTHROPIC_API_KEY"] = harness_cfg["anthropic_api_key"]
-        # Merge with spec.env_overrides (explicit overrides take precedence)
-        _env_to_set = {}
-        if _claude_env or spec.env_overrides:
-            merged_env = dict(_claude_env)
-            merged_env.update(spec.env_overrides or {})
-            _env_to_set = {k: v for k, v in merged_env.items() if v}
+            env["ANTHROPIC_API_KEY"] = harness_cfg["anthropic_api_key"]
 
-        # Snapshot original values so we can restore them (credential cleanup)
-        _original_env = {k: os.environ.get(k) for k in _env_to_set}
+        # Per-harness-profile `env` override (Part B): user values win over
+        # backend defaults (including CLAUDE_CODE_ENABLE_TODO_TOOLS above).
+        env.update(harness_cfg.get("env") or {})
 
-        try:
-            if _env_to_set:
-                os.environ.update(_env_to_set)
+        # Explicit spec-level overrides take highest precedence.
+        if spec.env_overrides:
+            env.update(spec.env_overrides)
 
-            # --- Resolve permission_mode + tool lists from mode (Phase 3) ---
-            if spec.mode is not None:
-                _perm, _tools, _disallowed = _MODE_CONFIG[spec.mode]
-                final_allowed = list(_tools)
-                # Append extra_tools (e.g. inline comment MCP tools)
-                if spec.extra_tools:
-                    final_allowed.extend(spec.extra_tools)
-                # Remove disallowed_tools_override (e.g. exclude AskUserQuestion)
-                if spec.disallowed_tools_override:
-                    _disallowed = list(_disallowed) + list(spec.disallowed_tools_override)
-            else:
-                # Legacy path: use explicit fields directly (backward compat)
-                _perm = spec.permission_mode
-                final_allowed = spec.allowed_tools or ["Read", "Glob", "Grep"]
-                _disallowed = spec.disallowed_tools or []
+        # Drop empty-string values (a blank credential must not clobber a
+        # real one in the inherited environment).
+        env = {k: v for k, v in env.items() if v}
 
-            options_kwargs = {
-                "cwd": spec.cwd,
-                "resume": spec.resume,
-                "permission_mode": _perm,
-                "allowed_tools": final_allowed,
-                "disallowed_tools": _disallowed,
-                "max_turns": spec.max_turns,
-                "model": spec.model or None,
-                "cli_path": spec.cli_path or harness_cfg.get("cli_path"),
-                "mcp_servers": spec.mcp_servers or {},
-                "system_prompt": CLAUDE_CODE_SYSTEM_PROMPT_PRESET,
+        # --- Resolve permission_mode + tool lists from mode (Phase 3) ---
+        if spec.mode is not None:
+            _perm, _tools, _disallowed = _MODE_CONFIG[spec.mode]
+            final_allowed = list(_tools)
+            # Append extra_tools (e.g. inline comment MCP tools)
+            if spec.extra_tools:
+                final_allowed.extend(spec.extra_tools)
+            # Remove disallowed_tools_override (e.g. exclude AskUserQuestion)
+            if spec.disallowed_tools_override:
+                _disallowed = list(_disallowed) + list(spec.disallowed_tools_override)
+        else:
+            # Legacy path: use explicit fields directly (backward compat)
+            _perm = spec.permission_mode
+            final_allowed = spec.allowed_tools or ["Read", "Glob", "Grep"]
+            _disallowed = spec.disallowed_tools or []
+
+        options_kwargs = {
+            "cwd": spec.cwd,
+            "resume": spec.resume,
+            "permission_mode": _perm,
+            "allowed_tools": final_allowed,
+            "disallowed_tools": _disallowed,
+            "max_turns": spec.max_turns,
+            "model": spec.model or None,
+            "cli_path": spec.cli_path or harness_cfg.get("cli_path"),
+            "mcp_servers": spec.mcp_servers or {},
+            "system_prompt": CLAUDE_CODE_SYSTEM_PROMPT_PRESET,
+        }
+
+        # Per-session child-process env (see construction above). The SDK merges
+        # this over the inherited environment for the spawned CLI only.
+        options_kwargs["env"] = env
+
+        # --- Setup phase: can_use_tool requires streaming prompt + hooks ---
+        if spec.can_use_tool is not None:
+            from claude_agent_sdk import HookMatcher  # deferred import: SDK may not be installed
+
+            async def dummy_hook(input_data, tool_use_id, ctx):
+                return {"continue_": True}
+
+            options_kwargs["can_use_tool"] = spec.can_use_tool
+            options_kwargs["hooks"] = {
+                "PreToolUse": [HookMatcher(matcher=None, hooks=[dummy_hook])]
             }
 
-            # --- Setup phase: can_use_tool requires streaming prompt + hooks ---
-            if spec.can_use_tool is not None:
-                from claude_agent_sdk import HookMatcher  # deferred import: SDK may not be installed
+            async def _prompt_stream():
+                yield {"type": "user", "message": {"role": "user", "content": spec.prompt}}
 
-                async def dummy_hook(input_data, tool_use_id, ctx):
-                    return {"continue_": True}
+            prompt_source = _prompt_stream()
+        else:
+            prompt_source = spec.prompt
 
-                options_kwargs["can_use_tool"] = spec.can_use_tool
-                options_kwargs["hooks"] = {
-                    "PreToolUse": [HookMatcher(matcher=None, hooks=[dummy_hook])]
-                }
+        options = ClaudeAgentOptions(**options_kwargs)
 
-                async def _prompt_stream():
-                    yield {"type": "user", "message": {"role": "user", "content": spec.prompt}}
+        # --- Single message-processing loop ---
+        text_chunks, session_id, subtype = [], None, None
+        cost_usd = None
+        duration_ms = 0
+        captured_plan_file: str | None = None
+        captured_plan_text: str | None = None
+        plan_posted, question_posted = False, False
+        progress_state = ProgressState()
 
-                prompt_source = _prompt_stream()
-            else:
-                prompt_source = spec.prompt
+        def _question_asked() -> bool:
+            return bool(spec.state and spec.state.get("asked_question_md"))
 
-            options = ClaudeAgentOptions(**options_kwargs)
-
-            # --- Single message-processing loop ---
-            text_chunks, session_id, subtype = [], None, None
-            cost_usd = None
-            duration_ms = 0
-            captured_plan_file: str | None = None
-            captured_plan_text: str | None = None
-            plan_posted, question_posted = False, False
-            progress_state = ProgressState()
-
-            def _question_asked() -> bool:
-                return bool(spec.state and spec.state.get("asked_question_md"))
-
-            try:
-                async for msg in query(prompt=prompt_source, options=options):
-                    if isinstance(msg, AssistantMessage):
-                        if session_id is None and msg.session_id:
-                            session_id = msg.session_id
+        try:
+            async for msg in query(prompt=prompt_source, options=options):
+                if isinstance(msg, AssistantMessage):
+                    if session_id is None and msg.session_id:
+                        session_id = msg.session_id
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            text_chunks.append(block.text)
+                        elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
+                            if spec.progress_callback and not _question_asked() and progress_state.note_tool_use(block):
+                                body = progress_state.render()
+                                if body:
+                                    spec.progress_callback(body)
+                            if isinstance(block, ToolUseBlock):
+                                if block.name == "mcp__autoswe_comment__post_plan":
+                                    if (block.input or {}).get("body", "").strip():
+                                        plan_posted = True
+                                elif block.name == "mcp__autoswe_comment__post_question":
+                                    if (block.input or {}).get("body", "").strip():
+                                        question_posted = True
+                                elif block.name == "ExitPlanMode":
+                                    # ExitPlanMode is disallowed in plan mode, but the
+                                    # tool-use block (with the plan markdown) still
+                                    # appears in the stream. Capture it so the planner
+                                    # can post the plan instead of "Tool: ExitPlanMode".
+                                    exit_plan = (block.input or {}).get("plan", "").strip()
+                                    if exit_plan:
+                                        captured_plan_text = exit_plan
+                                plan_path = _extract_plan_file_path(block)
+                                if plan_path is not None:
+                                    captured_plan_file = plan_path
+                elif isinstance(msg, UserMessage):
+                    if spec.progress_callback and not _question_asked():
                         for block in msg.content:
-                            if isinstance(block, TextBlock):
-                                text_chunks.append(block.text)
-                            elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
-                                if spec.progress_callback and not _question_asked() and progress_state.note_tool_use(block):
+                            if isinstance(block, ToolResultBlock):
+                                if progress_state.note_tool_result(block):
                                     body = progress_state.render()
                                     if body:
                                         spec.progress_callback(body)
-                                if isinstance(block, ToolUseBlock):
-                                    if block.name == "mcp__autoswe_comment__post_plan":
-                                        if (block.input or {}).get("body", "").strip():
-                                            plan_posted = True
-                                    elif block.name == "mcp__autoswe_comment__post_question":
-                                        if (block.input or {}).get("body", "").strip():
-                                            question_posted = True
-                                    elif block.name == "ExitPlanMode":
-                                        # ExitPlanMode is disallowed in plan mode, but the
-                                        # tool-use block (with the plan markdown) still
-                                        # appears in the stream. Capture it so the planner
-                                        # can post the plan instead of "Tool: ExitPlanMode".
-                                        exit_plan = (block.input or {}).get("plan", "").strip()
-                                        if exit_plan:
-                                            captured_plan_text = exit_plan
-                                    plan_path = _extract_plan_file_path(block)
-                                    if plan_path is not None:
-                                        captured_plan_file = plan_path
-                    elif isinstance(msg, UserMessage):
-                        if spec.progress_callback and not _question_asked():
-                            for block in msg.content:
-                                if isinstance(block, ToolResultBlock):
-                                    if progress_state.note_tool_result(block):
-                                        body = progress_state.render()
-                                        if body:
-                                            spec.progress_callback(body)
-                    elif isinstance(msg, ResultMessage):
-                        if session_id is None:
-                            session_id = msg.session_id
-                        subtype = msg.subtype
-                        cost_usd = msg.total_cost_usd
-                        duration_ms = msg.duration_ms
-                        log(f"[CLAUDE] session={session_id} subtype={subtype} cost=${cost_usd or 0:.4f} duration={duration_ms/1000:.1f}s")
+                elif isinstance(msg, ResultMessage):
+                    if session_id is None:
+                        session_id = msg.session_id
+                    subtype = msg.subtype
+                    cost_usd = msg.total_cost_usd
+                    duration_ms = msg.duration_ms
+                    log(f"[CLAUDE] session={session_id} subtype={subtype} cost=${cost_usd or 0:.4f} duration={duration_ms/1000:.1f}s")
 
-                    # Break early when AskUserQuestion fired — prevents the agent from
-                    # running more tools after posting a question.
-                    if spec.state and spec.state.get("asked_question_md"):
-                        break
-            except (RuntimeError, Exception) as e:
-                error_msg = str(e).lower()
-                # Async generator crashes and "Claude Code returned an error result:
-                # success" (SDK throws Exception on ollama even after a successful run).
-                # In both cases we already captured the result via the message stream,
-                # so return partial results rather than failing.
-                if ("generator" in error_msg and ("async" in error_msg or "aclose" in error_msg)) \
-                   or "returned an error result" in error_msg:
-                    log(f"[CLAUDE] {type(e).__name__}: {e} — returning partial results "
-                        f"(session_id={session_id}, subtype={subtype})")
-                else:
-                    raise
+                # Break early when AskUserQuestion fired — prevents the agent from
+                # running more tools after posting a question.
+                if spec.state and spec.state.get("asked_question_md"):
+                    break
+        except (RuntimeError, Exception) as e:
+            error_msg = str(e).lower()
+            # Async generator crashes and "Claude Code returned an error result:
+            # success" (SDK throws Exception on ollama even after a successful run).
+            # In both cases we already captured the result via the message stream,
+            # so return partial results rather than failing.
+            if ("generator" in error_msg and ("async" in error_msg or "aclose" in error_msg)) \
+               or "returned an error result" in error_msg:
+                log(f"[CLAUDE] {type(e).__name__}: {e} — returning partial results "
+                    f"(session_id={session_id}, subtype={subtype})")
+            else:
+                raise
 
-            # Re-assert the question as the final sticky-comment content. Guards
-            # against any progress update that fired in the same message as the
-            # AskUserQuestion call (before the flag became visible to the loop).
-            if _question_asked() and spec.progress_callback:
-                spec.progress_callback(spec.state["asked_question_md"] + BOT_MARKER)
+        # Re-assert the question as the final sticky-comment content. Guards
+        # against any progress update that fired in the same message as the
+        # AskUserQuestion call (before the flag became visible to the loop).
+        if _question_asked() and spec.progress_callback:
+            spec.progress_callback(spec.state["asked_question_md"] + BOT_MARKER)
 
-            return RunResult(
-                text="\n".join(text_chunks),
-                session_id=session_id,
-                subtype=subtype,
-                cost_usd=cost_usd,
-                duration_seconds=duration_ms / 1000,
-                plan_file_path=captured_plan_file,
-                plan_posted=plan_posted,
-                question_posted=question_posted,
-                plan_text=captured_plan_text,
-            )
-        finally:
-            # Restore original environment — prevents credential leakage between tasks
-            for k, v in _original_env.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+        return RunResult(
+            text="\n".join(text_chunks),
+            session_id=session_id,
+            subtype=subtype,
+            cost_usd=cost_usd,
+            duration_seconds=duration_ms / 1000,
+            plan_file_path=captured_plan_file,
+            plan_posted=plan_posted,
+            question_posted=question_posted,
+            plan_text=captured_plan_text,
+        )

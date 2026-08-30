@@ -789,6 +789,54 @@ def test_codex_env_overrides():
     assert env.get("CUSTOM_VAR") == "hello"
 
 
+def test_codex_profile_env_merged_into_subprocess_env():
+    """Per-profile `env` is merged into the `codex exec` subprocess env
+    (issue #120 Part B)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp",
+        mode="read_write",
+        state={"_harness_cfg": {"env": {"OPENAI_API_BASE": "http://x"}}},
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec.call_args[1].get("env", {})
+
+    env = asyncio.run(_run())
+    assert env.get("OPENAI_API_BASE") == "http://x"
+
+
+def test_codex_profile_env_wins_over_api_key_field():
+    """Profile `env` overrides the named api-key fields (precedence)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp",
+        mode="read_write",
+        state={"_harness_cfg": {
+            "openai_api_key": "sk-from-field",
+            "env": {"OPENAI_API_KEY": "sk-from-profile-env"},
+        }},
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec.call_args[1].get("env", {})
+
+    env = asyncio.run(_run())
+    assert env.get("OPENAI_API_KEY") == "sk-from-profile-env"
+
+
 def test_codex_progress_callback_streaming():
     """progress_callback fires with live agent messages during execution."""
     backend = CodexBackend()

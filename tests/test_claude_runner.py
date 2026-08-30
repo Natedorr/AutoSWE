@@ -885,6 +885,166 @@ def test_credentials_restore_preexisting_values():
 
 
 # ---------------------------------------------------------------------------
+# Per-session env — task-tracking opt-in + no process-env mutation (issue #120)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["plan", "read_only", "read_write"])
+def test_todo_tools_enabled_by_default_in_options_env(mode):
+    """ClaudeCodeBackend opts into the task-tracking tools by default.
+
+    CLAUDE_CODE_ENABLE_TODO_TOOLS=1 must be set on options.env (the child CLI
+    env) for every mode when no profile env is configured — this keeps the
+    sticky progress comment rendering on newer model families that no longer
+    provide those tools by default.
+    """
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt", cwd="/tmp", mode=mode, state={"_harness_cfg": {}}
+        ))
+
+    assert "options" in captured, "fake_query was not called"
+    opts_env = captured["options"].env
+    assert opts_env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "1", (
+        f"mode={mode!r}: expected default opt-in, got env={opts_env!r}"
+    )
+
+
+def test_todo_tools_default_via_legacy_no_mode():
+    """The legacy path (mode=None) also gets the default opt-in on options.env."""
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt",
+            cwd="/tmp",
+            permission_mode="default",
+            allowed_tools=["Read"],
+            state={"_harness_cfg": {}},
+        ))
+
+    assert captured["options"].env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "1"
+
+
+def test_profile_env_overrides_todo_tools_default():
+    """A per-profile `env` value wins over the backend's todo-tools default."""
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt",
+            cwd="/tmp",
+            mode="read_write",
+            state={"_harness_cfg": {"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "0"}}},
+        ))
+
+    # user value wins over the "1" default
+    assert captured["options"].env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "0"
+
+
+def test_profile_env_extra_var_and_credentials_on_options_env():
+    """Profile `env` vars + Anthropic creds all land on options.env, not os.environ."""
+    import os
+
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    orig_api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    async def run_it():
+        sdk = sys.modules["claude_agent_sdk"]
+        with patch.object(sdk, "query", fake_query):
+            await _run_async(
+                "test prompt",
+                cwd="/tmp",
+                mode="read_write",
+                state={"_harness_cfg": {
+                    "anthropic_api_key": "sk-per-session",
+                    "env": {"MY_CUSTOM_VAR": "from-profile"},
+                }},
+            )
+
+    try:
+        asyncio.run(run_it())
+    finally:
+        if orig_api_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = orig_api_key
+
+    opts_env = captured["options"].env
+    assert opts_env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "1"
+    assert opts_env.get("ANTHROPIC_API_KEY") == "sk-per-session"
+    assert opts_env.get("MY_CUSTOM_VAR") == "from-profile"
+    # Process env must NOT have been mutated — creds reach only the child CLI.
+    assert os.environ.get("ANTHROPIC_API_KEY") == orig_api_key, \
+        "ANTHROPIC_API_KEY leaked into the poller process env"
+    assert "MY_CUSTOM_VAR" not in os.environ
+
+
+def test_spec_env_overrides_win_over_profile_env():
+    """spec.env_overrides has highest precedence, beating both profile `env`
+    and the backend default."""
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt",
+            cwd="/tmp",
+            mode="read_write",
+            env_overrides={"CLAUDE_CODE_ENABLE_TODO_TOOLS": "spec-wins"},
+            state={"_harness_cfg": {"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "0"}}},
+        ))
+
+    assert captured["options"].env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "spec-wins"
+
+
+# ---------------------------------------------------------------------------
 # system-prompt preset — all phases must run on the claude_code preset
 # ---------------------------------------------------------------------------
 

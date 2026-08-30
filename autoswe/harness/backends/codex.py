@@ -278,6 +278,10 @@ class CodexBackend:
             env["OPENAI_API_KEY"] = harness_cfg["openai_api_key"]
         if harness_cfg.get("codex_api_key"):
             env["CODEX_API_KEY"] = harness_cfg["codex_api_key"]
+        # Per-harness-profile `env` override (Part B): user values win over the
+        # harness api-key fields above (precedence: os.environ < api-key fields
+        # < profile "env" < spec.env_overrides).
+        env.update(harness_cfg.get("env") or {})
         # Apply explicit env overrides (take precedence)
         if spec.env_overrides:
             env.update(spec.env_overrides)
