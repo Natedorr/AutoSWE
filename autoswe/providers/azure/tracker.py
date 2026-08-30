@@ -27,6 +27,11 @@ from autoswe.tracking.labels import _validate_status
 
 _PREFIX = "autoswe:"
 
+# ADO's batch work-item GET caps the number of ids per request (undocumented).
+# Keep well under that cap — docs/azure-devops-api/list-work-items.md,
+# Common Pitfalls #3 ("split into multiple requests").
+_BATCH_CHUNK_SIZE = 100
+
 
 def _is_bot_comment(body: str) -> bool:
     """Check if a comment body was posted by autoSWE.
@@ -169,16 +174,37 @@ class AzureTracker(IssueTracker):
         if not work_items:
             return []
 
-        id_list = [w["id"] for w in work_items]
-        ids_param = ",".join(str(i) for i in id_list)
-        batch_path = _ado_api_version(
-            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems"
-            f"?ids={ids_param}&$expand=all"
-        )
-        batch_result = ado_get(batch_path, self._pat)
-        batch_items = batch_result.get("value", [])
+        # De-dup ids up front (first occurrence wins) so no chunk request
+        # carries duplicate IDs.
+        seen: set[int] = set()
+        id_list: list[int] = []
+        for w in work_items:
+            wid = w["id"]
+            if wid not in seen:
+                seen.add(wid)
+                id_list.append(wid)
 
-        return [self._to_normalized(item) for item in batch_items]
+        # ADO caps the number of ids a single batch GET can carry; split into
+        # chunks of _BATCH_CHUNK_SIZE and merge the responses.
+        merged: list[dict] = []
+        for start in range(0, len(id_list), _BATCH_CHUNK_SIZE):
+            chunk = id_list[start:start + _BATCH_CHUNK_SIZE]
+            ids_param = ",".join(str(i) for i in chunk)
+            batch_path = _ado_api_version(
+                f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems"
+                f"?ids={ids_param}&$expand=all"
+            )
+            batch_result = ado_get(batch_path, self._pat)
+            merged.extend(batch_result.get("value", []))
+
+        # De-dup merged items by id (first occurrence wins) and sort by id so
+        # output ordering is deterministic regardless of chunk boundaries.
+        merged_by_id: dict[int, dict] = {}
+        for item in merged:
+            merged_by_id.setdefault(item["id"], item)
+        merged_sorted = sorted(merged_by_id.values(), key=lambda item: item["id"])
+
+        return [self._to_normalized(item) for item in merged_sorted]
 
     def fetch_issue(self, repo_cfg: dict, issue_number: int) -> NormalizedIssue:
         """Fetch a single work item by number."""

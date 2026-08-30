@@ -86,7 +86,7 @@ Both trackers populate `NormalizedIssue.state` (`"open"` / `"closed"`) so the di
 
 ## Azure Implementation (`providers/azure/`)
 
-- **`tracker.py:AzureTracker`** — WIQL for discovery, batch API for expand, tag-based label mirror (semicolons in `System.Tags`). Normalizes `author_login` same way as GitHub. `state` maps `System.State`: `Closed`/`Done`/`Removed` → `"closed"`, otherwise `"open"`. HTML stripping via `_StripHTML` parser preserves `<AUTOSWE_*>` tags. All outbound comment bodies are redacted via `redact_worktree_paths()`.
+- **`tracker.py:AzureTracker`** — WIQL for discovery, batch API for expand (chunked at 100 ids/request, then merged, de-duped, and sorted by id — `list-work-items.md` Common Pitfalls #3), tag-based label mirror (semicolons in `System.Tags`). Normalizes `author_login` same way as GitHub. `state` maps `System.State`: `Closed`/`Done`/`Removed` → `"closed"`, otherwise `"open"`. HTML stripping via `_StripHTML` parser preserves `<AUTOSWE_*>` tags. All outbound comment bodies are redacted via `redact_worktree_paths()`.
 - **`vcs.py:AzureVCS`** — Azure Repos REST API for clone URL, PR creation, PR discovery. PAT embedded in HTTPS URL. PR title and body are redacted before creation. `link_branch_to_issue()` is a documented no-op (Azure DevOps has no equivalent feature). `get_ci_status()` queries the most recent Azure Pipelines build for the branch (`GET .../_apis/build/builds?branchName=...`); `notStarted`/`inProgress` → `pending`, `failed`/`canceled` → `failure`, `succeeded`/`partiallySucceeded` → `success`, no builds → `none`.
 - **`adapter.py`** — `read_api()` and `apply_effect()` bridge the tracker/VCS to the orchestrator. Sets `is_bot` from `bot_ids` membership and body marker fallback.
 
