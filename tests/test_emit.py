@@ -102,6 +102,8 @@ def _load_world(data: dict) -> World:
         bot_comment_ids=tuple(task_data.get("bot_comment_ids", [])),
         last_phase=task_data.get("last_phase", "plan"),
         resume_phase=task_data.get("resume_phase"),
+        last_good_session_id=task_data.get("last_good_session_id"),
+        last_good_session_backend=task_data.get("last_good_session_backend"),
         created_at=task_data.get("created_at", ""),
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
@@ -406,6 +408,203 @@ def test_retry_clears_review_file_path():
         "retry emit must explicitly clear review_file_path (set to None)"
     )
     assert patch["review_file_path"] is None
+
+
+def test_fix_success_sets_last_good_session_id():
+    """A non-failed run that persists a session_id must record it as the
+    last-known-good checkpoint so /retry can fork from it later."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "action.json").read_text()
+    ))
+    result = _load_result(FIXTURE_DIR / "fix_action_success" / "result.json")
+    assert result is not None
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "fix success must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    # The run persisted session_id=session-fix-789 → it becomes the checkpoint.
+    assert patch.get("session_id") == "session-fix-789"
+    assert patch.get("last_good_session_id") == "session-fix-789", (
+        "non-failed run must record last_good_session_id as a fork checkpoint"
+    )
+    # ...and tag which backend produced it, so a later /retry only forks when
+    # the fix backend matches. The default (no harnesses.json) backend is Claude.
+    assert patch.get("last_good_session_backend") == "claude_code", (
+        "checkpoint must record its producing backend for the fork provenance gate"
+    )
+
+
+def test_failure_does_not_clear_last_good_session_id():
+    """On FAILED, session_id is nulled but the last-known-good checkpoint must
+    survive — it is the whole point of fork-on-retry (a failed retry leaves
+    the checkpoint intact so the next /retry re-forks from the same good session)."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "failed_clears_session_id" / "world.json").read_text()
+    ))
+    # Seed a surviving checkpoint from a prior successful run.
+    world = World(
+        api=world.api,
+        task=TaskState(
+            slug=world.task.slug,
+            owner=world.task.owner,
+            repo=world.task.repo,
+            issue_number=world.task.issue_number,
+            title=world.task.title,
+            body=world.task.body,
+            status=world.task.status,
+            plan_branch=world.task.plan_branch,
+            base_branch=world.task.base_branch,
+            attempt_count=world.task.attempt_count,
+            first_dispatched_at=world.task.first_dispatched_at,
+            last_dispatched_command=world.task.last_dispatched_command,
+            last_dispatched_command_id=world.task.last_dispatched_command_id,
+            last_consumed_reply_id=world.task.last_consumed_reply_id,
+            session_id=world.task.session_id,
+            last_good_session_id="last-good-checkpoint",
+            pr_number=world.task.pr_number,
+            guard_blocked=world.task.guard_blocked,
+            gh_closed=world.task.gh_closed,
+            pending_command=world.task.pending_command,
+            pending_guidance=world.task.pending_guidance,
+            pending_user_reply=world.task.pending_user_reply,
+            suppress_welcome=world.task.suppress_welcome,
+            welcome_comment_id=world.task.welcome_comment_id,
+            bot_comment_ids=world.task.bot_comment_ids,
+            last_phase=world.task.last_phase,
+            resume_phase=world.task.resume_phase,
+            created_at=world.task.created_at,
+            last_synced=world.task.last_synced,
+            provider=world.task.provider,
+            fix_summary=world.task.fix_summary,
+        ),
+        cfg=world.cfg,
+        repo_cfg=world.repo_cfg,
+    )
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "failed_clears_session_id" / "action.json").read_text()
+    ))
+    result = _load_result(FIXTURE_DIR / "failed_clears_session_id" / "result.json")
+    assert result is not None
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "failure must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    # session_id is nulled on failure...
+    assert patch.get("session_id") is None
+    # ...but the checkpoint must NOT be touched (absent from the patch → unchanged).
+    assert "last_good_session_id" not in patch, (
+        "FAILED must not write/overwrite last_good_session_id — the checkpoint "
+        "survives so the next /retry forks from the same good session"
+    )
+
+
+def test_review_success_does_not_set_last_good_session_id():
+    """Review uses a throwaway session; it must not record a fork checkpoint,
+    even though it completes non-failed."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "plan_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="review",
+        slug=world.task.slug,
+        plan_branch=world.task.plan_branch,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="REVIEW_READY\tLGTM looks good",
+        cost_usd=0.05,
+        duration_seconds=20.0,
+        session_id="review-session-xyz",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "review must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert "last_good_session_id" not in patch, (
+        "review's throwaway session must not become a fork checkpoint"
+    )
+    # Review also must not overwrite the persistent session_id.
+    assert patch.get("session_id") is None
+
+
+def test_sync_branch_does_not_clobber_checkpoint_backend():
+    """A non-failed sync run that carries a session_id must NOT touch the
+    last-known-good checkpoint. Before the fix, sync_branch (phase unresolvable)
+    would write last_good_session_id=<sync session> and last_good_session_backend
+    = None, silently disabling fork-on-retry for the task. Regression for the
+    cross-phase clobber: the surviving plan/fix checkpoint must be left intact."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="sync_branch",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    # DONE_SUMMARY → "synced" (non-failed), and the run carries a session_id.
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tMerged origin/main into autoswe/issue-42\tabc1234",
+        cost_usd=0.01,
+        duration_seconds=5.0,
+        session_id="sync-session-xyz",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "sync_branch must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    # The sync's own session becomes the live session_id...
+    assert patch.get("session_id") == "sync-session-xyz"
+    # ...but it must NOT become a fork checkpoint, and must not clobber the
+    # backend tag a prior plan/fix run wrote. Neither key is present → the
+    # surviving checkpoint (last_good_session_id + last_good_session_backend)
+    # is unchanged by the queue merge.
+    assert "last_good_session_id" not in patch, (
+        "a sync run must not overwrite last_good_session_id"
+    )
+    assert "last_good_session_backend" not in patch, (
+        "a sync run must not clobber last_good_session_backend — "
+        "clobbering it to None silently disables fork-on-retry"
+    )
+
+
+def test_ship_pr_does_not_clobber_checkpoint_backend():
+    """Same clobber guard for /pr: a successful ship carries a session_id but
+    its session is not a fork checkpoint (ship_pr has no coding phase)."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="ship_pr",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="DONE: PR https://github.com/o/r/pull/7",
+        cost_usd=0.01,
+        duration_seconds=5.0,
+        session_id="ship-session-xyz",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "ship_pr must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert "last_good_session_id" not in patch, (
+        "a ship_pr run must not overwrite last_good_session_id"
+    )
+    assert "last_good_session_backend" not in patch, (
+        "a ship_pr run must not clobber last_good_session_backend"
+    )
 
 
 def test_review_preserves_status_only_emits_queue_patch():

@@ -368,6 +368,33 @@ def emit(
     # uses a throwaway session and should not overwrite the persistent fix session)
     if session_id and kind != "review":
         queue_patch["session_id"] = session_id
+        # Record the last known-good session checkpoint. Only a NON-failed run in
+        # a *coding* phase (plan/fix/retry, i.e. one that maps to a phase in
+        # _KIND_TO_PHASE) is a good checkpoint. A failed run's session is not one
+        # we want to fork from. Non-coding kinds (sync_branch, ship_pr) must NOT
+        # touch the checkpoint: they would otherwise clobber the backend tag a
+        # prior plan/fix wrote (their phase is unresolvable → None) and leave a
+        # non-fix session id behind, silently disabling fork-on-retry. This is
+        # intentionally NOT nullled on the FAILED path below (which nulls
+        # session_id), so /retry forks from the most recent *good* coding session
+        # and a failed retry leaves the checkpoint intact for the next /retry.
+        # Review is excluded above: its throwaway session is not a checkpoint.
+        if new_status != "failed" and _KIND_TO_PHASE.get(kind) is not None:
+            phase = _KIND_TO_PHASE.get(kind)
+            queue_patch["last_good_session_id"] = session_id
+            # Tag which backend produced this checkpoint. A /retry later only
+            # forks when the checkpoint's backend matches the phase's resolved
+            # backend, so a Codex-produced session id can never be resumed by a
+            # Claude fix (the SDK can't resolve a foreign-backend session). Best
+            # effort: if the harness can't be resolved we record None and the
+            # fork gate simply treats the checkpoint as unusable (fresh start).
+            checkpoint_backend = None
+            try:
+                from autoswe.core.config import resolve_harness
+                checkpoint_backend = resolve_harness(phase, world.repo_cfg, cfg).get("backend")
+            except Exception:
+                checkpoint_backend = None
+            queue_patch["last_good_session_backend"] = checkpoint_backend
 
     # Merge lifecycle field mutations (last_phase, resume_phase, plan_file_path,
     # review_file_path, first_dispatched_at, _guard_blocked). Computed once up

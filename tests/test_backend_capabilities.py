@@ -10,6 +10,8 @@ Verifies:
 """
 from unittest.mock import patch
 
+import pytest
+
 # ---------- RunSpec.mode field ----------
 
 
@@ -164,6 +166,152 @@ def test_legacy_path_without_mode():
 
     assert asyncio.iscoroutine(coro)
     coro.close()
+
+
+# ---------- fork-on-retry (session_fork capability) ----------
+
+
+def test_claude_backend_has_session_fork_capability():
+    """ClaudeCodeBackend should advertise 'session_fork' (it has fork_session)."""
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+
+    assert "session_fork" in ClaudeCodeBackend.capabilities()
+
+
+@pytest.mark.parametrize(
+    "version_str, expected",
+    [
+        ("0.2.137", True),   # exactly the floor
+        ("0.2.136", False),  # one patch below → no fork
+        ("0.2.138", True),
+        ("0.3.0", True),     # higher minor wins even with patch 0
+        ("0.1.999", False),  # lower minor loses even with a huge patch
+        ("1.0.0", True),     # higher major
+        ("0.2", False),      # 2-component → patch 0 → below the floor
+    ],
+)
+def test_sdk_supports_session_fork_version_boundary(monkeypatch, version_str, expected):
+    """_sdk_supports_session_fork compares the installed SDK against the floor
+    (>= 0.2.137). The installed SDK in the test env is exactly the floor, so this
+    branch is otherwise only exercised through its absence; pin the boundary
+    directly by faking importlib.metadata.version.
+    """
+    import importlib.metadata
+
+    from autoswe.harness.backends import claude_code as cc
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: version_str)
+    assert cc._sdk_supports_session_fork() is expected
+
+
+def test_sdk_supports_session_fork_unparseable_version(monkeypatch):
+    """An unreadable/unparseable SDK version is treated as 'new enough' (safe
+    direction) rather than demoting the capability."""
+    import importlib.metadata
+
+    from autoswe.harness.backends import claude_code as cc
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "not-a-version")
+    assert cc._sdk_supports_session_fork() is True
+
+
+def test_codex_backend_lacks_session_fork_capability():
+    """CodexBackend must NOT advertise 'session_fork' (no fork primitive)."""
+    from autoswe.harness.backends.codex import CodexBackend
+
+    assert "session_fork" not in CodexBackend.capabilities()
+
+
+def _capture_claude_options(spec):
+    """Run ClaudeCodeBackend with the SDK query() monkeypatched to a no-op that
+    records the ClaudeAgentOptions it receives. Returns the captured options.
+
+    ``_run_async`` consumes the SDK as ``async for msg in query(prompt=..., options=...)``
+    (the name ``query`` is imported fresh from claude_agent_sdk inside the
+    coroutine), so the patch target is ``claude_agent_sdk.query`` and it must
+    return an async iterable that yields nothing.
+    """
+    import asyncio
+
+    import claude_agent_sdk as sdk
+
+    from autoswe.harness.backends import claude_code as cc
+
+    captured = {}
+
+    def fake_query(prompt, options):
+        captured["options"] = options
+
+        async def _empty():
+            return
+            yield  # pragma: no cover
+
+        return _empty()
+
+    original_query = sdk.query
+    try:
+        sdk.query = fake_query
+        asyncio.run(cc.ClaudeCodeBackend()._run_async(spec))
+    finally:
+        sdk.query = original_query
+
+    return captured["options"]
+
+
+def test_claude_wires_fork_session_flag_on_retry_spec():
+    """fork_session=True + resume must reach ClaudeAgentOptions.fork_session=True."""
+    from autoswe.harness.backends.base import RunSpec
+
+    spec = RunSpec(
+        prompt="retry",
+        cwd="/tmp",
+        resume="last-good",
+        fork_session=True,
+        mode="read_write",
+    )
+    options = _capture_claude_options(spec)
+    assert getattr(options, "fork_session", False) is True, (
+        "ClaudeAgentOptions must carry fork_session=True on a fork spec"
+    )
+    assert options.resume == "last-good"
+
+
+def test_claude_no_fork_flag_when_not_requested():
+    """A plain resume (fork_session unset) must NOT set fork_session=True."""
+    from autoswe.harness.backends.base import RunSpec
+
+    spec = RunSpec(
+        prompt="resume",
+        cwd="/tmp",
+        resume="prior",
+        mode="read_write",
+    )
+    options = _capture_claude_options(spec)
+    assert getattr(options, "fork_session", False) in (False, None), (
+        "fork_session must stay falsy when the spec did not request a fork"
+    )
+
+
+def test_claude_degrades_to_resume_when_sdk_too_old(monkeypatch):
+    """On an SDK older than the floor, a fork spec degrades to plain resume
+    (no fork_session flag) instead of passing an unknown option / crashing."""
+    from autoswe.harness.backends import claude_code as cc
+    from autoswe.harness.backends.base import RunSpec
+
+    monkeypatch.setattr(cc, "_sdk_supports_session_fork", lambda: False)
+
+    spec = RunSpec(
+        prompt="retry",
+        cwd="/tmp",
+        resume="last-good",
+        fork_session=True,
+        mode="read_write",
+    )
+    options = _capture_claude_options(spec)
+    assert getattr(options, "fork_session", False) in (False, None), (
+        "An old SDK must NOT receive fork_session=True — degrade to plain resume"
+    )
+    assert options.resume == "last-good"
 
 
 # ---------- backend_has_capability helper ----------

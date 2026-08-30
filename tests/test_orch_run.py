@@ -359,6 +359,60 @@ def test_run_retry_falls_back_to_fix():
     mock_fix.assert_called_once()
 
 
+# ------ _fork_session_for_retry (fork provenance gate) ------
+
+
+def test_fork_session_true_when_backend_matches():
+    """A checkpoint produced by the same backend as the resolved fix backend
+    and a fork-capable fix backend → fork."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-good",
+        "last_good_session_backend": "claude_code",
+    }
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is True
+
+
+def test_fork_session_false_when_checkpoint_backend_mismatches():
+    """A checkpoint produced by a DIFFERENT backend than the fix backend must
+    not be forked — the fix backend's SDK can't resolve a foreign session id."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-codex-plan",
+        "last_good_session_backend": "codex",
+    }
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is False
+
+
+def test_fork_session_false_when_checkpoint_has_no_backend():
+    """A checkpoint with no recorded backend (pre-field / unresolvable) is
+    treated as unusable → fresh session, no fork."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {"last_good_session_id": "s-good"}
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is False
+
+
+def test_fork_session_false_when_no_checkpoint():
+    """Nothing to fork from → no fork."""
+    from autoswe.orch.run import _fork_session_for_retry
+    assert _fork_session_for_retry({}, {"provider": "github"}, {}, "slug") is False
+
+
+def test_fork_session_false_for_codex_fix_backend():
+    """Even with a matching checkpoint backend, a Codex fix backend lacks the
+    session_fork capability → no fork."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-good",
+        "last_good_session_backend": "codex",
+    }
+    cfg = {"FIX_HARNESS": "codex_profile"}
+    with patch("autoswe.orch.run.resolve_harness", return_value={
+        "backend": "codex", "model": "gpt-5.6-terra",
+    }):
+        assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") is False
+
+
 # ------ Task dict builder ------
 
 

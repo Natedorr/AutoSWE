@@ -25,6 +25,16 @@ longer exist in the current CLI and are no longer emitted.
 Future phases may add ``mcp`` (MCP comment posting) and structured
 AskUserQuestion handling.  Until then those features degrade gracefully
 — handlers fall back to text parsing when ``"mcp"`` is not advertised.
+
+**Retry semantics (no fork):** ``codex exec resume <id>`` *continues* the
+existing session in place — Codex has no fork primitive (unlike the Claude
+Agent SDK's ``fork_session``). So a Codex ``/retry`` either resumes the same
+session (mutating it) or starts a fresh one; it can never branch from a prior
+checkpoint while leaving the original intact. This backend therefore does NOT
+advertise the ``session_fork`` capability, and handlers gate fork-on-retry on
+``backend_has_capability(harness, "session_fork")`` — which is False here.
+``RunSpec.fork_session`` is ignored by this backend. See
+docs/autoswe/harnesses.md ("Retry semantics").
 """
 from __future__ import annotations
 
@@ -108,22 +118,40 @@ def _norm_item_type(itype: str) -> str:
     return itype.strip().lower().replace("_", "")
 
 
-# ---------- Mode → Codex sandbox mapping ----------
+# ---------- Bypass approvals / sandbox ----------
 
-# RunSpec.mode → Codex --sandbox value
-_MODE_SANDBOX = {
-    "plan": "read-only",
-    "read_only": "read-only",
-    "read_write": "workspace-write",
-}
+# Codex runs on autoSWE target a dedicated, isolated machine (see
+# docs/autoswe/safeguards.md), so the default posture is full bypass. The
+# bypass is no longer implicit: it is derived from an explicit profile flag
+# (``bypass_approvals``, default true) with an environment-variable override,
+# so the "full access" intent is intentional rather than buried in the flag
+# list.
+#
+# RunSpec.mode is still accepted (contract parity with claude_code) but no
+# longer maps to a ``--sandbox`` value. Emitting a per-mode ``--sandbox`` was
+# dead weight: the bypass flag always neutralized it, so plan/review runs got
+# full access regardless. With the mapping removed, the emitted flag set now
+# matches the documented intent.
+_BYPASS_APPROVALS_AND_SANDBOX = "--dangerously-bypass-approvals-and-sandbox"
+# Env override for operators who want to disable the bypass on a shared host.
+_BYPASS_ENV_VAR = "CODEX_BYPASS_APPROVALS_AND_SANDBOX"
 
 
-def _mode_to_sandbox(mode: str | None) -> str:
-    """Translate a RunSpec mode string to a Codex sandbox flag value."""
-    if mode is None:
-        # Default: read-only (safe default for unspecified intent)
-        return "read-only"
-    return _MODE_SANDBOX.get(mode, "read-only")
+def _bypass_approvals(harness_cfg: dict | None) -> bool:
+    """Resolve whether to emit the bypass-approvals-and-sandbox flag.
+
+    Precedence (highest wins):
+    1. Profile ``bypass_approvals`` (explicit bool from harnesses.json)
+    2. ``CODEX_BYPASS_APPROVALS_AND_SANDBOX`` env var ("1"/"true" → True,
+       "0"/"false" → False, case-insensitive; unset → fall through)
+    3. Default: ``True`` (dedicated isolated machine — see safeguards.md).
+    """
+    if harness_cfg and "bypass_approvals" in harness_cfg:
+        return bool(harness_cfg["bypass_approvals"])
+    env_val = os.environ.get(_BYPASS_ENV_VAR)
+    if env_val is not None:
+        return env_val.strip().lower() in ("1", "true", "yes", "on")
+    return True
 
 
 # ---------- JSONL line parser ----------
@@ -456,7 +484,6 @@ class CodexBackend:
                 "Set it to a current Codex model, e.g. 'gpt-5.6-sol', 'gpt-5.6-terra', "
                 "'gpt-5.6-luna', or 'gpt-5.5'."
             )
-        sandbox = _mode_to_sandbox(spec.mode)
         resume = bool(spec.resume)
 
         # Resolve auth early (needed for command-building below).
@@ -466,6 +493,9 @@ class CodexBackend:
         has_api_key = bool(harness_cfg.get("openai_api_key") or harness_cfg.get("codex_api_key")
                            or os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"))
         needs_ignore_user_config = has_api_key
+
+        # Explicit bypass decision (default on — dedicated isolated machine).
+        bypass = _bypass_approvals(harness_cfg)
 
         # Build the command
         cmd: list[str] = ["codex", "exec"]
@@ -481,23 +511,19 @@ class CodexBackend:
             cmd.extend(["--json"])
             if needs_ignore_user_config:
                 cmd.append("--ignore-user-config")
-            cmd.extend([
-                "--ignore-rules",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--model", model,
-            ])
+            cmd.extend(["--ignore-rules"])
+            if bypass:
+                cmd.append(_BYPASS_APPROVALS_AND_SANDBOX)
+            cmd.extend(["--model", model])
         else:
             # Fresh exec — full flag set
             cmd.extend(["--json"])
             if needs_ignore_user_config:
                 cmd.append("--ignore-user-config")
-            cmd.extend([
-                "--ignore-rules",
-                "--sandbox", sandbox,
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--model", model,
-                "-C", spec.cwd,
-            ])
+            cmd.extend(["--ignore-rules"])
+            if bypass:
+                cmd.append(_BYPASS_APPROVALS_AND_SANDBOX)
+            cmd.extend(["--model", model, "-C", spec.cwd])
             # Persist session files so resume (codex exec resume <id>) can restore context.
 
         # --output-last-message writes the assistant's final message to a file we
@@ -530,7 +556,7 @@ class CodexBackend:
         if spec.env_overrides:
             env.update(spec.env_overrides)
 
-        log(f"[CODEX] running model={model} sandbox={sandbox} "
+        log(f"[CODEX] running model={model} bypass={bypass} "
             f"resume={'NEW' if not resume else spec.resume[:8]} "
             f"auth={'local' if not has_api_key else 'api_key'}")
 
