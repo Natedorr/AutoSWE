@@ -11,6 +11,7 @@ from autoswe.providers.azure.api import (
     ado_get,
     ado_get_paged,
     ado_patch,
+    ado_patch_json,
     ado_post,
 )
 
@@ -164,6 +165,29 @@ def test_ado_patch_uses_json_patch_content_type():
         ado_patch("/test", "pat", body=[{"op": "replace", "path": "/x", "value": 1}])
 
     assert captured["content_type"] == "application/json-patch+json"
+
+
+def test_ado_patch_json_uses_patch_method_and_plain_json_content_type():
+    """ado_patch_json must send PATCH with a plain application/json body.
+
+    This is the helper used to close a pull request (status: completed) — the
+    Update-PR endpoint takes a plain-JSON object body, not a JSON-Patch
+    document. Locks the method and content type so a regression to POST or to
+    the json-patch content type is caught.
+    """
+    captured = {}
+
+    def fake_request(method, path, pat, body=None, content_type="application/json", max_retries=3):
+        captured.update(method=method, content_type=content_type, body=body)
+        return {"status": "completed"}
+
+    with patch("autoswe.providers.azure.api._ado_request", fake_request):
+        result = ado_patch_json("/pr", "pat", body={"status": "completed"})
+
+    assert result == {"status": "completed"}
+    assert captured["method"] == "PATCH"
+    assert captured["content_type"] == "application/json"
+    assert captured["body"] == {"status": "completed"}
 
 
 # ---------------------------------------------------------------------------
