@@ -10,7 +10,11 @@ Covers two things:
 from contextlib import ExitStack
 from unittest.mock import patch
 
-from autoswe.harness.coder import _parse_commit_message, _strip_commit_block
+from autoswe.harness.coder import (
+    _clean_commit_subject,
+    _parse_commit_message,
+    _strip_commit_block,
+)
 from autoswe.harness.runner import RunResult
 
 
@@ -117,6 +121,24 @@ def test_parse_commit_message_case_insensitive_keys():
     assert body == "the body"
 
 
+def test_parse_commit_message_indented_keys():
+    # Regression (review F1): keys with leading indentation must parse cleanly.
+    # Detection and value-slicing must agree on the same representation, so an
+    # indented "  body:" must not leak a "y:" fragment into the body.
+    text = (
+        "<AUTOSWE_COMMIT>\n"
+        "  subject:  Fix thing\n"
+        "  body:\n"
+        "  the body\n"
+        "  second line\n"
+        "</AUTOSWE_COMMIT>\n"
+    )
+    subject, body = _parse_commit_message(text)
+    assert subject == "Fix thing"
+    assert body == "the body\nsecond line"
+    assert not body.startswith("y:")
+
+
 def test_parse_commit_message_subject_containing_body_colon():
     # Regression: a subject that contains the literal substring "body:" must
     # not corrupt the extracted body. Only a line that STARTS with "body:"
@@ -133,6 +155,31 @@ def test_parse_commit_message_subject_containing_body_colon():
     assert subject == "Add body:logging to the request layer"
     assert body == "Real body line one.\nReal body line two."
     assert "body:" not in (body or "").split("\n")[0]  # no stray key line leaked in
+
+
+# ---------------------------------------------------------------------------
+# _clean_commit_subject — single-line, length-bounded subject (review F2)
+# ---------------------------------------------------------------------------
+
+
+def test_clean_subject_collapses_newlines():
+    assert _clean_commit_subject("Fix off-by-one\nin the paginator") == "Fix off-by-one in the paginator"
+
+
+def test_clean_subject_truncates_past_git_soft_limit():
+    long_subject = "Fix" + "a" * 100
+    result = _clean_commit_subject(long_subject)
+    assert len(result) <= 72
+    assert result.endswith("…")
+
+
+def test_clean_subject_short_unchanged():
+    assert _clean_commit_subject("Fix off-by-one") == "Fix off-by-one"
+
+
+def test_clean_subject_exactly_72_untruncated():
+    s = "a" * 72
+    assert _clean_commit_subject(s) == s
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +283,35 @@ def test_run_fix_uses_generated_subject_no_autoswe_prefix(tmp_path):
     assert not msg.startswith("autoswe:")
     assert "Fixes #1" in msg
     assert "skipped the last page" in msg
+
+
+def test_run_fix_truncates_long_generated_subject(tmp_path):
+    task = make_task(title="Fix pagination bug")
+    long_subject = "Fix" + "a" * 100  # >72 chars
+    agent_text = (
+        "<AUTOSWE_COMMIT>\n"
+        f"subject: {long_subject}\n"
+        "body:\n"
+        "A body.\n"
+        "</AUTOSWE_COMMIT>\n"
+    )
+    commit_msgs = []
+
+    def fake_run(prompt, **kwargs):
+        return _r(agent_text)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("autoswe.harness.coder.create_worktree", return_value=tmp_path))
+        stack.enter_context(patch("autoswe.harness.coder.fast_forward_worktree", return_value=True))
+        stack.enter_context(_fetch_comments_patch())
+        stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+        stack.enter_context(patch("autoswe.harness.coder.commit_and_push", side_effect=_commit_msg_spy(commit_msgs)))
+        from autoswe.harness.coder import run_fix
+        run_fix(task, cfg={})
+
+    subject = commit_msgs[0].splitlines()[0]
+    assert len(subject) <= 72
+    assert subject.endswith("…")
 
 
 def test_run_fix_falls_back_to_issue_title_when_block_missing(tmp_path):

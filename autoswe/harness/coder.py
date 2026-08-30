@@ -39,6 +39,24 @@ _MCP_INLINE_COMMENT_TOOLS = [
 _COMMIT_RE = re.compile(r"<AUTOSWE_COMMIT>\s*(.*?)</AUTOSWE_COMMIT>", re.DOTALL)
 
 
+# git's soft limit for a single-line commit subject; longer lines wrap poorly
+# in `git log`/GitHub. We only truncate when the agent exceeds it.
+_MAX_SUBJECT_LEN = 72
+
+
+def _clean_commit_subject(subject: str) -> str:
+    """Reduce an agent/fallback subject to a single, git-friendly line.
+
+    Collapses internal newlines (an LLM sometimes wraps the subject) to spaces
+    and truncates to git's ~72-char soft limit. The commit trailer already
+    carries the ``Fixes #N`` attribution, so a trimmed subject stays readable.
+    """
+    one_line = " ".join(subject.split())
+    if len(one_line) > _MAX_SUBJECT_LEN:
+        one_line = one_line[: _MAX_SUBJECT_LEN - 1].rstrip() + "…"
+    return one_line
+
+
 def _strip_commit_block(text: str) -> str:
     """Remove the <AUTOSWE_COMMIT> block from an agent response.
 
@@ -54,40 +72,46 @@ def _strip_commit_block(text: str) -> str:
     return stripped.strip()
 
 
+# Matches a key line with optional leading indentation and an optional inline
+# value: ``subject: ...`` / ``body: ...`` (case-insensitive). Detecting and
+# slicing the value off the *same* representation avoids the indented-key bug
+# where a raw-line slice grabbed the wrong characters.
+_COMMIT_KEY_RE = re.compile(r"^\s*(subject|body)\s*:\s*(.*)$", re.IGNORECASE)
+
+
 def _parse_commit_message(text: str) -> tuple[str | None, str | None]:
     """Parse the <AUTOSWE_COMMIT> block from an agent response.
 
-    Returns ``(subject, body)`` with both stripped. ``subject`` is the first
-    non-blank line after ``subject:``; ``body`` is everything after ``body:``
-    up to the closing tag. When the block is missing or has no usable subject,
-    the corresponding value is ``None`` so the caller can fall back.
+    Returns ``(subject, body)`` with both stripped. ``subject`` is the inline
+    value of the first ``subject:`` line (single-line by contract); ``body`` is
+    everything from the ``body:`` line to the closing tag. Leading indentation
+    on the keys is tolerated. When the block is missing or has no usable
+    subject, the corresponding value is ``None`` so the caller can fall back.
     """
     m = _COMMIT_RE.search(text or "")
     if not m:
         return None, None
     block = m.group(1)
 
-    # Line-based parse: the `subject:` line is single-line; the `body:` line
-    # begins the (possibly multi-line) body that runs to the closing tag. Going
-    # line-by-line means a subject that itself contains the literal text
-    # "body:" can never be mistaken for the body key — only a line that
-    # *starts* with "body:" (case-insensitive) opens the body.
+    # A subject that itself contains the literal text "body:" must not be
+    # mistaken for the body key — so only a line that *starts* with the
+    # ``body`` key (case-insensitive, any leading indent) opens the body.
     subject = None
-    body = None
     body_lines: list[str] = []
     in_body = False
     for line in block.split("\n"):
-        stripped = line.strip().lower()
+        key_m = _COMMIT_KEY_RE.match(line)
         if in_body:
-            body_lines.append(line)
-        elif stripped == "body:" or stripped.startswith("body:"):
-            rest = line[len("body:") :].strip()
+            # Drop the block's leading indentation so an indented block still
+            # yields a clean, non-indented commit body.
+            body_lines.append(line.lstrip())
+        elif key_m and key_m.group(1).lower() == "body":
+            rest = key_m.group(2).strip()
             if rest:
                 body_lines.append(rest)
             in_body = True
-        elif subject is None and (stripped == "subject:" or stripped.startswith("subject:")):
-            raw = line[len("subject:") :].strip()
-            subject = raw or None
+        elif key_m and key_m.group(1).lower() == "subject" and subject is None:
+            subject = key_m.group(2).strip() or None
 
     body = "\n".join(body_lines).strip() or None
     return subject, body
@@ -387,7 +411,11 @@ def _finalize_fix(
     # block. Fall back to the issue title as the subject (and the raw summary
     # as the body) when the agent omitted or malformed the block.
     parsed_subject, parsed_body = _parse_commit_message(run_result.text or "")
-    subject = parsed_subject or task.get("title") or f"Issue #{issue_num}"
+    # Screen the subject to a single, git-friendly line (collapse any internal
+    # newlines the LLM may have introduced; truncate past git's ~72-char soft
+    # limit). Applied to both the agent-generated subject and the issue-title
+    # fallback so the subject line is always clean.
+    subject = _clean_commit_subject(parsed_subject or task.get("title") or f"Issue #{issue_num}")
     body_text = parsed_body or "\n".join(summary_lines[-15:])
     if body_text:
         commit_msg = f"{subject}\n\n{body_text}\n\nFixes #{issue_num}"
