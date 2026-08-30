@@ -87,6 +87,7 @@ async def _run_async(
     progress_callback=None,
     can_use_tool=None,
     state: dict | None = None,
+    output_format: dict | None = None,
 ):
     """Backward-compatible wrapper around ClaudeCodeBackend._run_async().
 
@@ -111,6 +112,7 @@ async def _run_async(
         progress_callback=progress_callback,
         can_use_tool=can_use_tool,
         state=state,
+        output_format=output_format,
     )
     backend = ClaudeCodeBackend()
     return await backend._run_async(spec)
@@ -141,6 +143,7 @@ def run(
     can_use_tool=None,
     state: dict | None = None,
     harness_cfg: dict | None = None,
+    output_format: dict | None = None,
 ):
     """Synchronous wrapper. Returns a RunResult dataclass.
 
@@ -187,6 +190,7 @@ def run(
         progress_callback=progress_callback,
         can_use_tool=can_use_tool,
         state=effective_state,
+        output_format=output_format,
     )
 
     if harness_cfg is not None:

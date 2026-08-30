@@ -97,11 +97,11 @@ Different phases can use different backends. Common patterns:
 
 #### `claude_code` (current default)
 
-Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuestion interception, plan file capture, progress streaming, session resume.
+Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuestion interception, plan file capture, progress streaming, session resume, structured outputs.
 
 **Profile fields:** `backend`, `model`, `cli_path`, `anthropic_base_url`, `anthropic_auth_token`, `anthropic_api_key`, `timeout`.
 
-**Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `progress_stream`.
+**Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `progress_stream`, `plan_file`, `structured_output`.
 
 **Retryable subtypes:** `set()` — Claude Code retries on SDK exceptions (`_get_retryable_exceptions`), not return-value subtypes.
 
@@ -119,6 +119,22 @@ worktree misses the prompt-cache prefix. Setting
 consecutive issues share the cache prefix, at the cost of moving that context
 into the first user message (marginally less authoritative). That lever is
 deferred to a follow-up and is not enabled here.
+
+**SDK floor:** `claude-agent-sdk>=0.2.87` (see `requirements.txt`). 0.2.87 is
+the version where `ClaudeAgentOptions.output_format` and
+`ResultMessage.structured_output` exist. The reviewer uses them:
+`reviewer.py` passes `output_format={"type": "json_schema", "schema":
+REVIEW_OUTPUT_SCHEMA}` so the run ends in a schema-validated
+`{verdict, critical_count, medium_count, informational_count, report}`;
+`verdict` (`"LGTM" | "Needs changes" | "Blocked"`) gates `/pr` via
+`_map_done_to_status`. When `structured_output` is absent (run without a
+structured result, or an SDK older than the floor) the handler falls back to
+text-parsing the `## Verdict` section out of the report
+(`tracking/labels.py:parse_review_verdict`). Structured output is
+capability-gated (`"structured_output"` in `capabilities()`): backends without
+it (Codex) never receive an `output_format` and keep the text path. The planner
+/plan schema is a follow-up — the plan is a markdown comment delivered via the
+MCP `post_plan` tool, not a parsed return value.
 
 #### `codex` (Phase 4)
 

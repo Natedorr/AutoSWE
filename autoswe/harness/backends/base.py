@@ -50,6 +50,10 @@ class RunResult:
     # the stream). Capturing it here lets the planner post the plan as a comment
     # instead of leaking the bare "Tool: ExitPlanMode" progress line.
     plan_text: str | None = None
+    # Schema-validated structured output from ResultMessage.structured_output
+    # when the run used RunSpec.output_format (Claude Agent SDK >= 0.2.87).
+    # None for every other run (and for backends that don't support it).
+    structured_output: dict | None = None
 
     def __iter__(self):
         """Allow tuple-style unpacking: text, session_id, subtype = result."""
@@ -140,6 +144,13 @@ class RunSpec:
     can_use_tool: Callable | None = None  # async callable(name, input, ctx) -> PermissionResult
     progress_callback: Callable | None = None  # callable(str) for progress updates
     state: dict | None = None
+    # Optional JSON-Schema structured-output contract for the run's final
+    # result (Claude Agent SDK output_format). Shape:
+    # {"type": "json_schema", "schema": <JSON Schema draft-07 object>}.
+    # Only consumed by backends that advertise the "structured_output"
+    # capability; otherwise ignored. Validated payloads land in
+    # RunResult.structured_output.
+    output_format: dict | None = None
 
 
 # ---------- CodingBackend Protocol ----------
@@ -172,6 +183,11 @@ class CodingBackend(Protocol):
       only meaningful for such backends.  Backends that lack this capability
       (e.g. Codex) never produce plan files there, so the scan is skipped to
       prevent cross-issue plan file pollution.
+    - ``"structured_output"``: backend honors ``RunSpec.output_format`` (a
+      JSON-Schema ``{"type": "json_schema", "schema": ...}`` dict) and returns
+      the validated payload in ``RunResult.structured_output``.  Handlers check
+      this before relying on the field; backends without it (Codex) run
+      unstructured and handlers keep their text-pattern fallbacks.
     """
 
     @classmethod

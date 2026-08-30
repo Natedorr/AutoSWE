@@ -29,6 +29,16 @@ findings; your review file is automatically injected into its prompt. If somethi
 is ambiguous, list it as a finding with [QUESTION] severity and a concrete
 recommendation — never as an interactive question.
 
+Structured capture: Your final answer is captured as structured output with
+these fields — set them exactly as described:
+- `verdict`: exactly one of `LGTM`, `Needs changes`, `Blocked` (matching the
+  `## Verdict` section of your report).
+- `critical_count`, `medium_count`, `informational_count`: the number of
+  findings at each severity (0 if none). Off-topic findings count as
+  informational.
+- `report`: your full markdown review report (all sections, including the
+  `## Verdict` section), unchanged from what you would post.
+
 ---
 
 ## Review Scope

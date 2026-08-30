@@ -9,6 +9,7 @@ prompt context, then clears it (pop-after-first-use).
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 from pathlib import Path
 
@@ -19,11 +20,82 @@ from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.prompts import _find_plan_in_comments, build_review_prompt
 from autoswe.harness.runner import HandlerResult
 from autoswe.providers.factory import get_tracker
+from autoswe.tracking.labels import parse_review_verdict
 from autoswe.vcs.worktree import create_worktree, worktree_path
 
 dbg = get_debug_logger()
 
 _REVIEW_MAX_DIFF_LINES = 2000
+
+# Canonical verdict tokens (must match parse_review_verdict's recognition of
+# the "## Verdict" section: LGTM / Needs changes / Blocked).
+_REVIEW_VERDICTS = ("LGTM", "Needs changes", "Blocked")
+
+# Claude Agent SDK output_format payload for review runs (SDK >= 0.2.87).
+# The full markdown report stays in `report` (posted as the review comment and
+# persisted to ~/.claude/reviews/); `verdict` replaces the fragile
+# "## Verdict" section scrape as the /pr gate (see _resolve_review_report).
+REVIEW_OUTPUT_SCHEMA = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": list(_REVIEW_VERDICTS)},
+            "critical_count": {"type": "integer", "minimum": 0},
+            "medium_count": {"type": "integer", "minimum": 0},
+            "informational_count": {"type": "integer", "minimum": 0},
+            "report": {"type": "string", "minLength": 1},
+        },
+        "required": ["verdict", "report"],
+    },
+}
+
+# Trailing "## Verdict" section (heading to next heading or end of text).
+# Stripped when the structured verdict replaces it, so the posted report never
+# carries two verdict sections (or one contradicting the gated status).
+_VERDICT_SECTION_RE = re.compile(
+    r"^#{1,6}\s*Verdict\b.*?(?:\n#{1,6}\s|\Z)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE,
+)
+
+
+def _resolve_review_report(result) -> tuple[str, str]:
+    """Resolve (report_text, status) for a review RunResult.
+
+    Returns the markdown report to post/persist and the gating status
+    ("reviewed" / "review_failed" / "review_blocked") derived from the final
+    report — so the logged status and the downstream
+    ``_map_done_to_status`` gate always agree.
+
+    Priority:
+    1. ``result.structured_output`` (set by the Claude backend when the run
+       used ``output_format`` with REVIEW_OUTPUT_SCHEMA, SDK >= 0.2.87) —
+       schema-validated verdict + report. The report's trailing "## Verdict"
+       section is stripped and, for a non-LGTM verdict, re-appended with the
+       structured token, so the posted document carries exactly one verdict
+       section that agrees with the gated status.
+    2. Text fallback — the whole free-text response is the report. Kept
+       intact so runs without structured output (old SDKs, backend without the
+       "structured_output" capability, error subtypes) behave exactly as
+       before.
+    """
+    so = getattr(result, "structured_output", None)
+    if isinstance(so, dict):
+        verdict = so.get("verdict")
+        report = so.get("report")
+        if verdict in _REVIEW_VERDICTS and isinstance(report, str) and report.strip():
+            stripped = _VERDICT_SECTION_RE.sub("", report, count=1)
+            if verdict != "LGTM":
+                # Reinforce the verdict section for the (human-readable) report
+                # so parse_review_verdict() on the stored text agrees with the
+                # structured gate.
+                stripped = stripped.rstrip() + f"\n\n## Verdict\n\n{verdict}\n"
+            report_text = stripped.strip()
+            dbg.debug("REVIEW: using structured verdict=%s (report=%d chars)", verdict, len(report))
+            return report_text, parse_review_verdict(report_text)
+        dbg.debug("REVIEW: structured_output present but unusable (verdict=%r, report=%r) — falling back to text",
+                  verdict, (report or "")[:80])
+    return result.text or "", parse_review_verdict(result.text or "")
 
 
 def _get_reviews_dir() -> Path:
@@ -131,9 +203,17 @@ def run_review(
     review_model = harness.get("model")
     log(f"[REVIEW] {task['id']} session=NEW model={review_model or 'default'} diff_stat_lines={diff_stat.count(chr(10))}")
 
-    # 5. Read-only session (fresh, no resume)
+    # 5. Read-only session (fresh, no resume).
+    #    Structured output: when the backend supports it ("structured_output"
+    #    capability — Claude Agent SDK >= 0.2.87), pass the review JSON Schema
+    #    so the run ends in a validated {verdict, report}; otherwise (Codex,
+    #    older SDKs) the run stays free-text and the verdict is parsed from
+    #    the "## Verdict" section.
     state = {}
     cut = make_can_use_tool(task, repo_cfg, state, read_only=True)
+    output_format = None
+    if runner.backend_has_capability(harness, "structured_output"):
+        output_format = REVIEW_OUTPUT_SCHEMA
 
     try:
         result = runner.run(
@@ -149,6 +229,7 @@ def run_review(
             state=state,
             progress_callback=progress_callback,
             harness_cfg=harness,
+            output_format=output_format,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during review phase")
@@ -157,16 +238,23 @@ def run_review(
 
     log(f"[REVIEW] {task['id']} session={result.session_id} cost=${result.cost_usd or 0:.4f}")
 
-    # 6. Persist report to ~/.claude/reviews/<slug>.md
-    review_path = _get_reviews_dir() / _review_filename(task["id"])
-    review_path.write_text(result.text, encoding="utf-8")
+    # 6. Resolve report + verdict (structured output preferred, text fallback).
+    report_text, review_status = _resolve_review_report(result)
+    log(f"[REVIEW] {task['id']} status={review_status} structured={'yes' if result.structured_output else 'no'}")
 
-    # 7. Return HandlerResult with review text embedded in done_content.
+    # 7. Persist report to ~/.claude/reviews/<slug>.md
+    review_path = _get_reviews_dir() / _review_filename(task["id"])
+    review_path.write_text(report_text, encoding="utf-8")
+
+    # 8. Return HandlerResult with review text embedded in done_content.
+    #    done_content stays a plain "## Verdict"-style document so every
+    #    downstream consumer (labels._map_done_to_status →
+    #    parse_review_verdict, emit comment body) works unchanged.
     #    emit() will produce a post_comment effect → progress.finalize()
     #    patches the sticky progress comment in-place, consistent with all
     #    other handlers (plan, fix, sync, etc.).
     return HandlerResult(
-        done_content="REVIEW_READY\t" + result.text,
+        done_content="REVIEW_READY\t" + report_text,
         cost_usd=result.cost_usd,
         duration_seconds=result.duration_seconds,
         session_id=result.session_id,          # actual review session (not fix session)

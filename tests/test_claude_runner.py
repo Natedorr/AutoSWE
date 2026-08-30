@@ -953,3 +953,135 @@ def test_system_prompt_preset_emitted_for_legacy_no_mode():
         f"legacy path: system_prompt={captured['options'].system_prompt!r} "
         f"expected {CLAUDE_CODE_SYSTEM_PROMPT_PRESET!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Structured output (Claude Agent SDK >= 0.2.87, issue #130)
+# ---------------------------------------------------------------------------
+
+def test_run_async_passes_output_format_to_options():
+    """A well-formed RunSpec.output_format must reach ClaudeAgentOptions."""
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"}}}
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt",
+            cwd="/tmp",
+            permission_mode="default",
+            allowed_tools=["Read"],
+            output_format={"type": "json_schema", "schema": schema},
+        ))
+
+    assert "options" in captured, "fake_query was not called"
+    assert getattr(captured["options"], "output_format", None) == {
+        "type": "json_schema", "schema": schema
+    }, "output_format was not forwarded to ClaudeAgentOptions"
+
+
+def test_run_async_ignores_malformed_output_format():
+    """A non-json_schema or schema-less output_format must NOT be forwarded
+    (keeps the run unstructured rather than crashing the SDK)."""
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    for bad in (
+        {"type": "json_schema"},                                   # no schema
+        {"type": "something_else", "schema": {"type": "object"}},   # wrong type
+        "not-a-dict",                                               # not a dict
+    ):
+        captured.clear()
+        with patch.object(sdk, "query", fake_query):
+            asyncio.run(_run_async(
+                "test prompt", cwd="/tmp",
+                permission_mode="default", allowed_tools=["Read"],
+                output_format=bad,
+            ))
+        assert getattr(captured["options"], "output_format", None) is None, (
+            f"malformed output_format {bad!r} must not be forwarded"
+        )
+
+
+def test_run_async_captures_structured_output_from_result():
+    """ResultMessage.structured_output (subtype success) must land on
+    RunResult.structured_output."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    payload = {"verdict": "LGTM", "report": "## Verdict\n\nLGTM"}
+
+    async def fake_query(prompt, options):
+        yield AssistantMessage(content=[TextBlock(text="free text")], model="test")
+        yield ResultMessage(
+            subtype="success", duration_ms=100, duration_api_ms=90,
+            is_error=False, num_turns=1, session_id="sess-1",
+            structured_output=payload,
+        )
+
+    sdk = sys.modules["claude_agent_sdk"]
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"}}}
+    with patch.object(sdk, "query", fake_query):
+        result = asyncio.run(_run_async(
+            "test prompt", cwd="/tmp",
+            permission_mode="default", allowed_tools=["Read"],
+            output_format={"type": "json_schema", "schema": schema},
+        ))
+
+    assert result.structured_output == payload
+    assert "free text" in result.text  # text still captured alongside
+
+
+def test_run_async_no_structured_output_stays_none():
+    """A plain run (no output_format) must leave structured_output None, and a
+    non-success subtype with structured_output must not leak the payload."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    # Case 1: no structured output at all
+    async def plain_query(prompt, options):
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+        yield ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1,
+            is_error=False, num_turns=1, session_id="s",
+        )
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", plain_query):
+        result = asyncio.run(_run_async(
+            "p", cwd="/tmp", permission_mode="default", allowed_tools=["Read"],
+        ))
+    assert result.structured_output is None
+
+    # Case 2: structured_output present but subtype is an error -> dropped
+    async def error_query(prompt, options):
+        yield ResultMessage(
+            subtype="error_max_structured_output_retries",
+            duration_ms=1, duration_api_ms=1, is_error=True, num_turns=2,
+            session_id="s",
+            structured_output={"verdict": "LGTM"},
+        )
+
+    with patch.object(sdk, "query", error_query):
+        result = asyncio.run(_run_async(
+            "p", cwd="/tmp", permission_mode="default", allowed_tools=["Read"],
+        ))
+    assert result.structured_output is None

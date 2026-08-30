@@ -638,3 +638,135 @@ def test_full_review_injection_flow(tmp_path):
     assert "Bug found in auth.py:42" in prompt
     assert "null pointer" in prompt
     assert task_dict["review_file_path"] is None  # popped after first use
+
+
+# ---------------------------------------------------------------------------
+# Structured-output verdict (Claude Agent SDK >= 0.2.87, issue #130)
+# ---------------------------------------------------------------------------
+
+def test_run_review_passes_output_format_when_supported(tmp_path, mock_gh_post_comment):
+    """run_review passes REVIEW_OUTPUT_SCHEMA as output_format when the backend
+    advertises the 'structured_output' capability (Claude default harness)."""
+    from autoswe.harness.reviewer import REVIEW_OUTPUT_SCHEMA
+
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        return _r("## Verdict\n\nLGTM")
+
+    task = make_task()
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.reviewer._run_git", return_value="stat"):
+            with FETCH_COMMENTS_PATCH:
+                with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                    from autoswe.harness.reviewer import run_review
+                    run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert "output_format" in run_calls[0], "output_format kwarg not passed to runner.run"
+    assert run_calls[0]["output_format"] == REVIEW_OUTPUT_SCHEMA
+
+
+def test_run_review_omits_output_format_when_unsupported(tmp_path, mock_gh_post_comment):
+    """When the backend lacks the capability (Codex), output_format must be
+    None so the run stays free-text (Codex has no structured output)."""
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        return _r("## Verdict\n\nLGTM")
+
+    task = make_task()
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.reviewer._run_git", return_value="stat"):
+            with FETCH_COMMENTS_PATCH:
+                with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                    with patch("autoswe.harness.reviewer.runner.backend_has_capability",
+                               return_value=False):
+                        from autoswe.harness.reviewer import run_review
+                        run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert run_calls[0].get("output_format") is None
+
+
+def test_resolve_review_report_prefers_structured_verdict():
+    """A schema-validated structured_output wins over the text verdict, and the
+    report's own '## Verdict' section is stripped so the posted doc has exactly
+    one (matching) verdict section."""
+    from autoswe.harness.reviewer import _resolve_review_report
+
+    report = "## Summary\n\nok\n\n## Verdict\n\nLGTM"
+    result = RunResult(
+        text=report, session_id="s", subtype="success",
+        structured_output={"verdict": "Needs changes", "report": report},
+    )
+    report_out, status = _resolve_review_report(result)
+    # Status is derived from the (corrected) report, so it agrees with the gate.
+    assert status == "review_failed"
+    # The stale "## Verdict\n\nLGTM" section is stripped and replaced with the
+    # structured one so parse_review_verdict agrees with the gate.
+    assert "LGTM" not in report_out
+    assert "## Verdict" in report_out
+    assert "Needs changes" in report_out
+
+
+def test_resolve_review_report_structured_lgtm_dedups_section():
+    """LGTM structured verdict: the existing '## Verdict' section is stripped
+    (not re-appended) since parse_review_verdict already defaults LGTM."""
+    from autoswe.harness.reviewer import _resolve_review_report
+
+    report = "## Summary\n\nfine\n\n## Verdict\n\nLGTM"
+    result = RunResult(
+        text=report, session_id="s", subtype="success",
+        structured_output={"verdict": "LGTM", "report": report},
+    )
+    report_out, status = _resolve_review_report(result)
+    assert status == "reviewed"
+    # No "## Verdict" section remains (stripped) and none re-added for LGTM.
+    assert "## Verdict" not in report_out
+    assert "LGTM" not in report_out
+
+
+def test_resolve_review_report_falls_back_to_text_when_no_structured():
+    """No structured_output (Codex / older SDK) -> whole text is the report and
+    the verdict is scraped from the '## Verdict' section (historical path)."""
+    from autoswe.harness.reviewer import _resolve_review_report
+
+    text = "## Summary\n\nbug\n\n## Verdict\n\nBlocked"
+    result = RunResult(text=text, session_id="s", subtype="success")
+    report_out, verdict = _resolve_review_report(result)
+    assert verdict == "review_blocked"
+    assert report_out == text  # text returned verbatim on fallback
+
+
+def test_resolve_review_report_unusable_structured_falls_back():
+    """structured_output present but with an invalid verdict token must not be
+    trusted -> fall back to text parsing."""
+    from autoswe.harness.reviewer import _resolve_review_report
+
+    text = "## Verdict\n\nBlocked"
+    result = RunResult(
+        text=text, session_id="s", subtype="success",
+        structured_output={"verdict": "MAYBE", "report": "whatever"},
+    )
+    report_out, verdict = _resolve_review_report(result)
+    assert verdict == "review_blocked"
+    assert report_out == text
+
+
+def test_structured_verdict_maps_to_status():
+    """The structured verdict, embedded in done_content, gates /pr exactly like
+    the text path: _map_done_to_status -> parse_review_verdict."""
+    from autoswe.tracking.labels import _map_done_to_status
+
+    report = "## Summary\n\nx\n\n## Verdict\n\nNeeds changes"
+    result = RunResult(
+        text=report, session_id="s", subtype="success",
+        structured_output={"verdict": "Needs changes", "report": report},
+    )
+    from autoswe.harness.reviewer import _resolve_review_report
+    report_out, status = _resolve_review_report(result)
+    done = "REVIEW_READY\t" + report_out
+    # done_content gate and the reported status agree.
+    assert _map_done_to_status(done, kind="review") == "review_failed"
+    assert status == "review_failed"

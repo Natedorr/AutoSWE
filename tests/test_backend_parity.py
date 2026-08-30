@@ -114,6 +114,7 @@ class TestRunResultShape:
         expected = {
             "text", "session_id", "subtype", "cost_usd", "duration_seconds",
             "plan_file_path", "plan_posted", "question_posted", "plan_text",
+            "structured_output",
         }
         actual = {f.name for f in fields(RunResult)}
         assert actual == expected, f"RunResult fields drifted: {actual ^ expected}"
@@ -126,6 +127,7 @@ class TestRunResultShape:
         assert r.plan_file_path is None
         assert r.plan_posted is False
         assert r.question_posted is False
+        assert r.structured_output is None
 
     def test_runresult_tuple_unpacking(self):
         """RunResult supports tuple-style 3-element unpacking (back-compat)."""
@@ -255,6 +257,7 @@ class TestCapabilityHonesty:
         "resume",
         "progress_stream",
         "plan_file",
+        "structured_output",
     })
 
     def test_claude_code_full_capabilities(self):
@@ -264,7 +267,7 @@ class TestCapabilityHonesty:
         caps = ClaudeCodeBackend.capabilities()
         expected = {
             "mode", "mcp", "can_use_tool", "plan_permission",
-            "resume", "progress_stream", "plan_file",
+            "resume", "progress_stream", "plan_file", "structured_output",
         }
         assert caps == expected, (
             f"ClaudeCodeBackend capabilities changed: got {caps}"
@@ -292,7 +295,8 @@ class TestCapabilityHonesty:
 
         caps = CodexBackend.capabilities()
         # Phase 4: Codex does NOT support these (mode IS supported via _mode_to_sandbox)
-        claude_exclusives = {"mcp", "can_use_tool", "plan_permission", "plan_file"}
+        claude_exclusives = {"mcp", "can_use_tool", "plan_permission", "plan_file",
+                             "structured_output"}
         overlap = caps & claude_exclusives
         assert not overlap, (
             f"Codex advertises Claude-exclusive capabilities: {overlap}. "

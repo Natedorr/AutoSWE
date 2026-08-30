@@ -358,6 +358,7 @@ class ClaudeCodeBackend:
         "resume",
         "progress_stream",
         "plan_file",
+        "structured_output",
     }
 
     @classmethod
@@ -444,6 +445,19 @@ class ClaudeCodeBackend:
                 "system_prompt": CLAUDE_CODE_SYSTEM_PROMPT_PRESET,
             }
 
+            # --- Structured output (Claude Agent SDK >= 0.2.87) ---
+            # Pass through only when the caller supplied a well-formed
+            # json_schema payload; everything else runs unstructured.
+            # Older SDKs without the option would reject the kwarg — the
+            # requirements.txt floor pins 0.2.87+ so that cannot happen on
+            # supported installs.
+            if (
+                isinstance(spec.output_format, dict)
+                and spec.output_format.get("type") == "json_schema"
+                and isinstance(spec.output_format.get("schema"), dict)
+            ):
+                options_kwargs["output_format"] = spec.output_format
+
             # --- Setup phase: can_use_tool requires streaming prompt + hooks ---
             if spec.can_use_tool is not None:
                 from claude_agent_sdk import HookMatcher  # deferred import: SDK may not be installed
@@ -471,6 +485,7 @@ class ClaudeCodeBackend:
             duration_ms = 0
             captured_plan_file: str | None = None
             captured_plan_text: str | None = None
+            structured_output: dict | None = None
             plan_posted, question_posted = False, False
             progress_state = ProgressState()
 
@@ -522,6 +537,12 @@ class ClaudeCodeBackend:
                         subtype = msg.subtype
                         cost_usd = msg.total_cost_usd
                         duration_ms = msg.duration_ms
+                        # Schema-validated payload when the run was issued with
+                        # output_format (Claude Agent SDK >= 0.2.87). None when
+                        # the run ended without structured output or with a
+                        # subtype other than "success".
+                        if msg.subtype == "success" and isinstance(getattr(msg, "structured_output", None), dict):
+                            structured_output = msg.structured_output
                         log(f"[CLAUDE] session={session_id} subtype={subtype} cost=${cost_usd or 0:.4f} duration={duration_ms/1000:.1f}s")
 
                     # Break early when AskUserQuestion fired — prevents the agent from
@@ -557,6 +578,7 @@ class ClaudeCodeBackend:
                 plan_posted=plan_posted,
                 question_posted=question_posted,
                 plan_text=captured_plan_text,
+                structured_output=structured_output,
             )
         finally:
             # Restore original environment — prevents credential leakage between tasks

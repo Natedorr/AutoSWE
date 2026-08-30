@@ -1,4 +1,9 @@
-claude-agent-sdk
+# Floor: 0.2.87 is the version where ClaudeAgentOptions.output_format and
+# ResultMessage.structured_output (JSON-Schema structured outputs) are
+# available. The reviewer uses them for a validated verdict
+# (autoswe/harness/reviewer.py); older SDKs degrade to the text-parsing
+# fallback but the gate is enforced here.
+claude-agent-sdk>=0.2.87
 # Pinned to the 1.x line: that is the major exercised by CI and by
 # mcp_servers/autoswe_inline_comment_server.py (unconditional v1 imports).
 # The mcp>=2.0 branch in mcp_servers/autoswe_comment_server.py is a
