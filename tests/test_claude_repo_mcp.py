@@ -143,20 +143,60 @@ def test_repo_and_autoswe_servers_coexist(tmp_path):
     assert options.cwd == cwd
 
 
-def test_repo_server_name_does_not_shadow_autoswe(tmp_path):
-    """Even if a repo *did* define a server named 'autoswe_comment', autoSWE's
-    programmatic definition takes precedence (highest scope), so autoSWE's
-    tools are never shadowed.
+def test_autoswe_server_names_are_stable_and_unique(tmp_path):
+    """autoSWE's injected servers use stable, unique names (`autoswe_comment`
+    and `autoswe_inline_comment`), so they are not expected to collide with a
+    repo's `.mcp.json` server names.
 
-    We assert the two definitions are the ones autoSWE passes: the fixture repo
-    uses a distinct name, and the backend forwards exactly autoSWE's dict.
+    This is an offline, name-uniqueness check: it pins that the backend
+    forwards autoSWE's own server dict untouched, and that the autoSWE name
+    does not overlap the fixture repo's server name. It does NOT assert a
+    same-name collision precedence — the shipped SDK docs rank only *file*
+    scopes (local > project > user > plugin), so programmatic-vs-`.mcp.json`
+    precedence for an identical name is not documented and is not verified here.
     """
-    cwd, _ = _make_fixture_repo(tmp_path)
+    cwd, repo_server = _make_fixture_repo(tmp_path)
     options = asyncio.run(_capture_options("plan the fix", cwd, _autoswe_servers()))
 
-    # The backend forwards autoSWE's server dict untouched — its config wins
-    # over any same-named repo entry at runtime.
+    # The backend forwards autoSWE's server dict untouched.
     assert options.mcp_servers["autoswe_comment"]["env"]["AUTOSWE_COMMENT_ID"] == "12345"
+    # autoSWE's name and the repo's name are distinct — no collision by construction.
+    assert repo_server != "autoswe_comment"
+    assert repo_server not in options.mcp_servers
+
+
+def test_inline_server_is_mcp_version_tolerant():
+    """Issue #122 (review finding): requirements.txt permits mcp<3, so a fresh
+    install lands on mcp 2.x, under which the 1.x-only ``Server.call_tool()``
+    API no longer exists. The inline comment server must import cleanly under
+    whichever mcp major version is installed, selecting the matching API.
+
+    This is an offline import test: it loads the module by path under the
+    installed mcp version and asserts (a) it imports without AttributeError,
+    (b) the version branch (_MCP_V2) matches whether mcp.server exposes the
+    high-level MCPServer, and (c) the post_inline_comment tool is registered.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    import mcp.server
+
+    has_v2 = hasattr(mcp.server, "MCPServer")
+
+    mod_path = Path(__file__).resolve().parent.parent / "mcp_servers" / "autoswe_inline_comment_server.py"
+    spec = importlib.util.spec_from_file_location("autoswe_inline_comment_server_under_test", mod_path)
+    module = importlib.util.module_from_spec(spec)
+    # Loading must not raise AttributeError('Server' object has no attribute 'call_tool')
+    # under mcp 2.x — that was the regression this test guards against.
+    spec.loader.exec_module(module)
+
+    # The branch chosen must match the installed mcp major version.
+    assert module._MCP_V2 is has_v2, (
+        f"_MCP_V2={module._MCP_V2} but installed mcp.server.MCPServer exists={has_v2} "
+        "— version-tolerance branch selected the wrong API"
+    )
+    # The tool is registered and exposed on the module.
+    assert hasattr(module, "post_inline_comment")
 
 
 def test_setting_sources_default_loads_project_settings():
