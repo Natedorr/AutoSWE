@@ -710,9 +710,10 @@ def test_resolve_review_report_prefers_structured_verdict():
     assert "Needs changes" in report_out
 
 
-def test_resolve_review_report_structured_lgtm_dedups_section():
+def test_resolve_review_report_structured_lgtm_reanchors_section():
     """LGTM structured verdict: the existing '## Verdict' section is stripped
-    (not re-appended) since parse_review_verdict already defaults LGTM."""
+    and re-appended with the structured token (as with every verdict), so the
+    posted doc carries exactly one verdict section reading LGTM."""
     from autoswe.harness.reviewer import _resolve_review_report
 
     report = "## Summary\n\nfine\n\n## Verdict\n\nLGTM"
@@ -722,9 +723,29 @@ def test_resolve_review_report_structured_lgtm_dedups_section():
     )
     report_out, status = _resolve_review_report(result)
     assert status == "reviewed"
-    # No "## Verdict" section remains (stripped) and none re-added for LGTM.
-    assert "## Verdict" not in report_out
-    assert "LGTM" not in report_out
+    # The verdict section survives (re-anchored to the structured token) and is
+    # the single source parse_review_verdict reads.
+    assert report_out.count("## Verdict") == 1
+    assert "LGTM" in report_out
+
+
+def test_resolve_review_report_lgtm_not_downgraded_by_blocking_word_in_body():
+    """Regression (review finding #1): an LGTM structured verdict must NOT be
+    flipped to review_blocked/review_failed just because the report body
+    mentions 'Blocked'/'Needs changes'. The re-anchored '## Verdict' section is
+    what parse_review_verdict reads, so body prose can't override the verdict."""
+    from autoswe.harness.reviewer import _resolve_review_report
+
+    body = "## Summary\n\nNo production impact.\n\n## Findings\n\nNo findings are Blocked.\n\n## Verdict\n\nLGTM"
+    result = RunResult(
+        text=body, session_id="s", subtype="success",
+        structured_output={"verdict": "LGTM", "report": body},
+    )
+    report_out, status = _resolve_review_report(result)
+    # Even though "Blocked" appears in the body prose, the gate must stay LGTM.
+    assert status == "reviewed"
+    # The verdict section still reads LGTM (body prose "Blocked" is not the gate).
+    assert "## Verdict\n\nLGTM" in report_out
 
 
 def test_resolve_review_report_falls_back_to_text_when_no_structured():

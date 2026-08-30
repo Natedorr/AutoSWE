@@ -71,9 +71,10 @@ def _resolve_review_report(result) -> tuple[str, str]:
     1. ``result.structured_output`` (set by the Claude backend when the run
        used ``output_format`` with REVIEW_OUTPUT_SCHEMA, SDK >= 0.2.87) —
        schema-validated verdict + report. The report's trailing "## Verdict"
-       section is stripped and, for a non-LGTM verdict, re-appended with the
-       structured token, so the posted document carries exactly one verdict
-       section that agrees with the gated status.
+       section is stripped and re-appended with the structured token (for every
+       verdict, including LGTM), so the posted document carries exactly one
+       verdict section that agrees with the gated status and the section scope —
+       not body prose — is what ``parse_review_verdict`` reads.
     2. Text fallback — the whole free-text response is the report. Kept
        intact so runs without structured output (old SDKs, backend without the
        "structured_output" capability, error subtypes) behave exactly as
@@ -85,11 +86,12 @@ def _resolve_review_report(result) -> tuple[str, str]:
         report = so.get("report")
         if verdict in _REVIEW_VERDICTS and isinstance(report, str) and report.strip():
             stripped = _VERDICT_SECTION_RE.sub("", report, count=1)
-            if verdict != "LGTM":
-                # Reinforce the verdict section for the (human-readable) report
-                # so parse_review_verdict() on the stored text agrees with the
-                # structured gate.
-                stripped = stripped.rstrip() + f"\n\n## Verdict\n\n{verdict}\n"
+            # Always re-append the structured verdict section (for every verdict,
+            # including LGTM) so parse_review_verdict() reads the section scope —
+            # which contains only the validated token — rather than scanning the
+            # whole report body, where prose mentioning "Blocked"/"Needs changes"
+            # would otherwise override the schema-validated verdict.
+            stripped = stripped.rstrip() + f"\n\n## Verdict\n\n{verdict}\n"
             report_text = stripped.strip()
             dbg.debug("REVIEW: using structured verdict=%s (report=%d chars)", verdict, len(report))
             return report_text, parse_review_verdict(report_text)
