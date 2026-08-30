@@ -60,6 +60,7 @@ _MODE_SANDBOX = {
     "read_write": "workspace-write",
 }
 
+
 def _mode_to_sandbox(mode: str | None) -> str:
     """Translate a RunSpec mode string to a Codex sandbox flag value."""
     if mode is None:

@@ -1067,21 +1067,22 @@ def test_codex_no_ephemeral_resume():
 # all, so RunSpec.max_turns must never be translated into a config override.
 # The effective anti-runaway guard is the wall-clock timeout (spec.timeout →
 # asyncio.wait_for + process.kill in codex.py).
-_LIVE_STRICT_CONFIG_ERROR = "unknown configuration field `agent` in -c/--config override"
 
 
-def test_codex_max_turns_never_emitted():
-    """Non-default max_turns does NOT add any -c agent.max_turns override.
+@pytest.mark.parametrize("turns", [1, 50, 80, 199, 200, 400])
+def test_codex_max_turns_never_emitted(turns):
+    """No max_turns value (incl. the 200 default) adds any -c agent.max_turns override.
 
     Fixture/proof: live run of `codex exec --strict-config -c agent.max_turns=5`
-    on codex-cli 0.150.1 fails with {_LIVE_STRICT_CONFIG_ERROR!r} — the key no
-    longer exists, so emitting it would be a silent no-op (or a hard error).
+    on codex-cli 0.150.1 failed with exit 1 and stderr
+    ``unknown configuration field `agent` in -c/--config override`` — the key
+    no longer exists, so emitting it would be a silent no-op (or a hard error).
     """
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=80)
+    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=turns)
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    assert "agent.max_turns=80" not in cmd
+    assert "-c" not in cmd
     assert not any("max_turns" in part for part in cmd)
 
 
