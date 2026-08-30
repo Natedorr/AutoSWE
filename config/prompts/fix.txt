@@ -97,6 +97,24 @@ your changes are correct.
 Do NOT open a pull request — that will be handled separately.
 Summarize what you changed at the end of your response.
 
+## Commit Message Contract
+autoSWE builds the git commit title and description from the block you output
+at the very end of your response — after your prose summary. It is parsed with
+a tolerant regex and falls back to the issue title when the block is missing or
+malformed, so make it present and well-formed:
+
+<AUTOSWE_COMMIT>
+subject: <one imperative, human-readable line describing the change; ≤72 chars; no trailing period>
+body:
+<2-5 lines: what you changed and why — the concrete behavior, not the issue text>
+</AUTOSWE_COMMIT>
+
+Rules for the block:
+- `subject:` must be a single line, imperative mood ("Add retry backoff to poller",
+  "Fix off-by-one in pagination"), no `autoswe:` prefix, no trailing period.
+- `body:` may span several lines (everything after `body:` up to the closing tag).
+- Do not include a `Fixes #N` trailer — autoSWE appends it itself.
+
 TESTING REQUIREMENT: If your changes touch dispatch, lifecycle, sync, planner, coder,
 or ship, you MUST add or extend tests in tests/. See CLAUDE.md ## Testing for the
 layout and conventions. The fix is not complete without test coverage for the new path.

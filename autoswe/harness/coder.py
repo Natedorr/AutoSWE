@@ -1,4 +1,5 @@
 import asyncio
+import re
 import subprocess
 from pathlib import Path
 
@@ -31,6 +32,40 @@ _MCP_COMMENT_TOOLS = [
 _MCP_INLINE_COMMENT_TOOLS = [
     "mcp__autoswe_inline_comment__post_inline_comment",
 ]
+
+# Tolerant extractor for the fix agent's structured commit message.
+# The agent ends its response with a fenced <AUTOSWE_COMMIT> block carrying a
+# one-line `subject:` and a multi-line `body:` — see config/prompts/fix.txt.
+_COMMIT_RE = re.compile(r"<AUTOSWE_COMMIT>\s*(.*?)</AUTOSWE_COMMIT>", re.DOTALL)
+
+
+def _parse_commit_message(text: str) -> tuple[str | None, str | None]:
+    """Parse the <AUTOSWE_COMMIT> block from an agent response.
+
+    Returns ``(subject, body)`` with both stripped. ``subject`` is the first
+    non-blank line after ``subject:``; ``body`` is everything after ``body:``
+    up to the closing tag. When the block is missing or has no usable subject,
+    the corresponding value is ``None`` so the caller can fall back.
+    """
+    m = _COMMIT_RE.search(text or "")
+    if not m:
+        return None, None
+    block = m.group(1)
+
+    subject = None
+    body = None
+    for line in block.split("\n"):
+        if line.strip().lower().startswith("subject:"):
+            raw = line[len("subject:") :].strip()
+            # Subject is single-line by contract — take only this line.
+            subject = raw or None
+            break
+
+    body_m = re.search(r"\n?\s*body:\s*\n?(.*?)\s*$", block, re.DOTALL | re.IGNORECASE)
+    if body_m:
+        body = body_m.group(1).strip() or None
+
+    return subject, body
 
 
 def _get_branch_head_sha(wt, branch: str) -> str | None:
@@ -323,8 +358,12 @@ def _finalize_fix(
     summary_lines = [line.strip() for line in run_result.text.split("\n") if line.strip()]
     summary_text = "\n".join(summary_lines[-10:]) if summary_lines else "Changes applied."
 
-    subject = f"autoswe: {guidance[:60]}" if guidance else "autoswe: automated fix"
-    body_text = "\n".join(summary_lines[-15:]) if summary_lines else ""
+    # Build the commit message from the agent's structured <AUTOSWE_COMMIT>
+    # block. Fall back to the issue title as the subject (and the raw summary
+    # as the body) when the agent omitted or malformed the block.
+    parsed_subject, parsed_body = _parse_commit_message(run_result.text or "")
+    subject = parsed_subject or task.get("title") or f"Issue #{issue_num}"
+    body_text = parsed_body or "\n".join(summary_lines[-15:])
     if body_text:
         commit_msg = f"{subject}\n\n{body_text}\n\nFixes #{issue_num}"
     else:
