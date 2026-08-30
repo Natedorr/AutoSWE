@@ -120,6 +120,8 @@ consecutive issues share the cache prefix, at the cost of moving that context
 into the first user message (marginally less authoritative). That lever is
 deferred to a follow-up and is not enabled here.
 
+**Repo content loading (MCP / hooks / skills).** The backend passes autoSWE's injected `mcp_servers` (the comment servers built by `autoswe/harness/mcp_config.py`) to `ClaudeAgentOptions` but leaves `strict_mcp_config` and `setting_sources` at their SDK defaults (`False` / all sources). The practical effect: inside a target repo's worktree, the SDK **also loads** the repo's `.mcp.json` servers, `.claude/settings.json` hooks, and `.claude/` skills/agents/commands — alongside autoSWE's own servers. This is by design (autoSWE runs on a dedicated, isolated machine; see [safeguards.md](safeguards.md#repo-supplied-mcp-servers-hooks-skills-and-tools-load-by-design)). autoSWE's injected servers are programmatic and therefore highest-precedence — a repo cannot shadow `autoswe_comment` / `autoswe_inline_comment`. No per-repo opt-out is currently exposed; if ever needed it would be `strict_mcp_config=True` + `setting_sources` without `"project"`.
+
 #### `codex` (Phase 4)
 
 Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--ask-for-approval`). Parses the JSONL event stream into a `RunResult`.
