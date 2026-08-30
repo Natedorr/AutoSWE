@@ -1310,7 +1310,12 @@ def test_read_last_message_file_absent():
 
 
 def test_run_allocates_and_cleans_temp_file():
-    """run() passes a real temp path to _run_async and removes it afterwards."""
+    """run() passes a real temp path to _run_async and removes it afterwards.
+
+    The subprocess is mocked (no real ``codex`` binary needed — CI runners do
+    not have it on PATH), so this test verifies the temp-file lifecycle of
+    ``run()`` only: path allocation, pre-existence, and post-run cleanup.
+    """
     backend = CodexBackend()
     spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
     seen: dict = {}
@@ -1323,7 +1328,11 @@ def test_run_allocates_and_cleans_temp_file():
         # orig is the real (pre-patch) bound method, so call it directly.
         return await orig(spec_, last_message_path)
 
-    with patch.object(CodexBackend, "_run_async", spy):
+    mock_exec = AsyncMock(return_value=_mock_create_process(
+        stdout=_make_success_jsonl()
+    ))
+    with patch("asyncio.create_subprocess_exec", mock_exec), \
+            patch.object(CodexBackend, "_run_async", spy):
         result = asyncio.run(backend.run(spec))
 
     assert isinstance(result, RunResult)
@@ -1331,6 +1340,10 @@ def test_run_allocates_and_cleans_temp_file():
     assert path, "run() must allocate a last-message temp path"
     assert seen["exists_before"] is True, "mkstemp should create the file up front"
     assert not Path(path).exists(), "temp file must be cleaned up after run()"
+    # The run() pass also threads the path into the emitted CLI flag.
+    cmd = _get_cmd(mock_exec)
+    assert "--output-last-message" in cmd
+    assert cmd[cmd.index("--output-last-message") + 1] == path
 
 
 # ---------- Config interpolation ----------
