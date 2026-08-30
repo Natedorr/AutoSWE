@@ -1,4 +1,5 @@
 import asyncio
+import re
 import subprocess
 from pathlib import Path
 
@@ -32,6 +33,89 @@ _MCP_INLINE_COMMENT_TOOLS = [
     "mcp__autoswe_inline_comment__post_inline_comment",
 ]
 
+# Tolerant extractor for the fix agent's structured commit message.
+# The agent ends its response with a fenced <AUTOSWE_COMMIT> block carrying a
+# one-line `subject:` and a multi-line `body:` — see config/prompts/fix.txt.
+_COMMIT_RE = re.compile(r"<AUTOSWE_COMMIT>\s*(.*?)</AUTOSWE_COMMIT>", re.DOTALL)
+
+
+# git's soft limit for a single-line commit subject; longer lines wrap poorly
+# in `git log`/GitHub. We only truncate when the agent exceeds it.
+_MAX_SUBJECT_LEN = 72
+
+
+def _clean_commit_subject(subject: str) -> str:
+    """Reduce an agent/fallback subject to a single, git-friendly line.
+
+    Collapses internal newlines (an LLM sometimes wraps the subject) to spaces
+    and truncates to git's ~72-char soft limit. The commit trailer already
+    carries the ``Fixes #N`` attribution, so a trimmed subject stays readable.
+    """
+    one_line = " ".join(subject.split())
+    if len(one_line) > _MAX_SUBJECT_LEN:
+        one_line = one_line[: _MAX_SUBJECT_LEN - 1].rstrip() + "…"
+    return one_line
+
+
+def _strip_commit_block(text: str) -> str:
+    """Remove the <AUTOSWE_COMMIT> block from an agent response.
+
+    Used for the human-facing fix summary: the block is internal scaffolding
+    that should not be posted to the issue or PR body. Removes every block and
+    collapses the whitespace gap it leaves so the remaining prose reads cleanly.
+    """
+    if not text:
+        return ""
+    stripped = _COMMIT_RE.sub("\n", text)
+    # Collapse the 3+ newlines the removal can leave (block sat on its own lines).
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+    return stripped.strip()
+
+
+# Matches a key line with optional leading indentation and an optional inline
+# value: ``subject: ...`` / ``body: ...`` (case-insensitive). Detecting and
+# slicing the value off the *same* representation avoids the indented-key bug
+# where a raw-line slice grabbed the wrong characters.
+_COMMIT_KEY_RE = re.compile(r"^\s*(subject|body)\s*:\s*(.*)$", re.IGNORECASE)
+
+
+def _parse_commit_message(text: str) -> tuple[str | None, str | None]:
+    """Parse the <AUTOSWE_COMMIT> block from an agent response.
+
+    Returns ``(subject, body)`` with both stripped. ``subject`` is the inline
+    value of the first ``subject:`` line (single-line by contract); ``body`` is
+    everything from the ``body:`` line to the closing tag. Leading indentation
+    on the keys is tolerated. When the block is missing or has no usable
+    subject, the corresponding value is ``None`` so the caller can fall back.
+    """
+    m = _COMMIT_RE.search(text or "")
+    if not m:
+        return None, None
+    block = m.group(1)
+
+    # A subject that itself contains the literal text "body:" must not be
+    # mistaken for the body key — so only a line that *starts* with the
+    # ``body`` key (case-insensitive, any leading indent) opens the body.
+    subject = None
+    body_lines: list[str] = []
+    in_body = False
+    for line in block.split("\n"):
+        key_m = _COMMIT_KEY_RE.match(line)
+        if in_body:
+            # Drop the block's leading indentation so an indented block still
+            # yields a clean, non-indented commit body.
+            body_lines.append(line.lstrip())
+        elif key_m and key_m.group(1).lower() == "body":
+            rest = key_m.group(2).strip()
+            if rest:
+                body_lines.append(rest)
+            in_body = True
+        elif key_m and key_m.group(1).lower() == "subject" and subject is None:
+            subject = key_m.group(2).strip() or None
+
+    body = "\n".join(body_lines).strip() or None
+    return subject, body
+
 
 def _get_branch_head_sha(wt, branch: str) -> str | None:
     """Get the latest commit SHA on a branch."""
@@ -61,7 +145,6 @@ def _run_fix_session(
     fix_model: str | None,
     timeout_msg: str,
     error_prefix: str,
-    guidance: str | None,
     progress_callback=None,
     fork_session: bool = False,
 ) -> HandlerResult:
@@ -124,7 +207,7 @@ def _run_fix_session(
 
     return _finalize_fix(
         task, run_result, wt, owner, repo, issue_num,
-        guidance, base_branch, provider, token, rc, cfg or {},
+        base_branch, provider, token, rc, cfg or {},
         session_id=run_result.session_id,
     )
 
@@ -243,7 +326,6 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
         fix_model=fix_model,
         timeout_msg="timeout during fix phase",
         error_prefix="run_fix",
-        guidance=guidance,
         progress_callback=progress_callback,
         fork_session=effective_fork,
     )
@@ -295,7 +377,6 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
         fix_model=fix_model,
         timeout_msg="timeout during fix resume",
         error_prefix="resume_fix",
-        guidance=None,
         progress_callback=progress_callback,
     )
 
@@ -307,7 +388,6 @@ def _finalize_fix(
     owner: str,
     repo: str,
     issue_num: int,
-    guidance: str,
     base_branch: str,
     provider: str,
     token: str,
@@ -320,11 +400,23 @@ def _finalize_fix(
 
     Shared by run_fix and resume_fix to avoid duplicating the commit/push flow.
     """
-    summary_lines = [line.strip() for line in run_result.text.split("\n") if line.strip()]
+    # Build the human-facing summary from the response WITHOUT the internal
+    # <AUTOSWE_COMMIT> block, so the "Summary:" issue comment and the PR body
+    # show the agent's prose rather than the commit-message scaffold.
+    prose = _strip_commit_block(run_result.text or "")
+    summary_lines = [line.strip() for line in prose.split("\n") if line.strip()]
     summary_text = "\n".join(summary_lines[-10:]) if summary_lines else "Changes applied."
 
-    subject = f"autoswe: {guidance[:60]}" if guidance else "autoswe: automated fix"
-    body_text = "\n".join(summary_lines[-15:]) if summary_lines else ""
+    # Build the commit message from the agent's structured <AUTOSWE_COMMIT>
+    # block. Fall back to the issue title as the subject (and the raw summary
+    # as the body) when the agent omitted or malformed the block.
+    parsed_subject, parsed_body = _parse_commit_message(run_result.text or "")
+    # Screen the subject to a single, git-friendly line (collapse any internal
+    # newlines the LLM may have introduced; truncate past git's ~72-char soft
+    # limit). Applied to both the agent-generated subject and the issue-title
+    # fallback so the subject line is always clean.
+    subject = _clean_commit_subject(parsed_subject or task.get("title") or f"Issue #{issue_num}")
+    body_text = parsed_body or "\n".join(summary_lines[-15:])
     if body_text:
         commit_msg = f"{subject}\n\n{body_text}\n\nFixes #{issue_num}"
     else:
