@@ -10,6 +10,8 @@ Verifies:
 """
 from unittest.mock import patch
 
+import pytest
+
 # ---------- RunSpec.mode field ----------
 
 
@@ -174,6 +176,43 @@ def test_claude_backend_has_session_fork_capability():
     from autoswe.harness.backends.claude_code import ClaudeCodeBackend
 
     assert "session_fork" in ClaudeCodeBackend.capabilities()
+
+
+@pytest.mark.parametrize(
+    "version_str, expected",
+    [
+        ("0.2.137", True),   # exactly the floor
+        ("0.2.136", False),  # one patch below → no fork
+        ("0.2.138", True),
+        ("0.3.0", True),     # higher minor wins even with patch 0
+        ("0.1.999", False),  # lower minor loses even with a huge patch
+        ("1.0.0", True),     # higher major
+        ("0.2", False),      # 2-component → patch 0 → below the floor
+    ],
+)
+def test_sdk_supports_session_fork_version_boundary(monkeypatch, version_str, expected):
+    """_sdk_supports_session_fork compares the installed SDK against the floor
+    (>= 0.2.137). The installed SDK in the test env is exactly the floor, so this
+    branch is otherwise only exercised through its absence; pin the boundary
+    directly by faking importlib.metadata.version.
+    """
+    import importlib.metadata
+
+    from autoswe.harness.backends import claude_code as cc
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: version_str)
+    assert cc._sdk_supports_session_fork() is expected
+
+
+def test_sdk_supports_session_fork_unparseable_version(monkeypatch):
+    """An unreadable/unparseable SDK version is treated as 'new enough' (safe
+    direction) rather than demoting the capability."""
+    import importlib.metadata
+
+    from autoswe.harness.backends import claude_code as cc
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "not-a-version")
+    assert cc._sdk_supports_session_fork() is True
 
 
 def test_codex_backend_lacks_session_fork_capability():

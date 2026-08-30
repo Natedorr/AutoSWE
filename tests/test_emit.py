@@ -534,6 +534,79 @@ def test_review_success_does_not_set_last_good_session_id():
     assert patch.get("session_id") is None
 
 
+def test_sync_branch_does_not_clobber_checkpoint_backend():
+    """A non-failed sync run that carries a session_id must NOT touch the
+    last-known-good checkpoint. Before the fix, sync_branch (phase unresolvable)
+    would write last_good_session_id=<sync session> and last_good_session_backend
+    = None, silently disabling fork-on-retry for the task. Regression for the
+    cross-phase clobber: the surviving plan/fix checkpoint must be left intact."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="sync_branch",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    # DONE_SUMMARY → "synced" (non-failed), and the run carries a session_id.
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tMerged origin/main into autoswe/issue-42\tabc1234",
+        cost_usd=0.01,
+        duration_seconds=5.0,
+        session_id="sync-session-xyz",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "sync_branch must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    # The sync's own session becomes the live session_id...
+    assert patch.get("session_id") == "sync-session-xyz"
+    # ...but it must NOT become a fork checkpoint, and must not clobber the
+    # backend tag a prior plan/fix run wrote. Neither key is present → the
+    # surviving checkpoint (last_good_session_id + last_good_session_backend)
+    # is unchanged by the queue merge.
+    assert "last_good_session_id" not in patch, (
+        "a sync run must not overwrite last_good_session_id"
+    )
+    assert "last_good_session_backend" not in patch, (
+        "a sync run must not clobber last_good_session_backend — "
+        "clobbering it to None silently disables fork-on-retry"
+    )
+
+
+def test_ship_pr_does_not_clobber_checkpoint_backend():
+    """Same clobber guard for /pr: a successful ship carries a session_id but
+    its session is not a fork checkpoint (ship_pr has no coding phase)."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="ship_pr",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="DONE: PR https://github.com/o/r/pull/7",
+        cost_usd=0.01,
+        duration_seconds=5.0,
+        session_id="ship-session-xyz",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "ship_pr must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert "last_good_session_id" not in patch, (
+        "a ship_pr run must not overwrite last_good_session_id"
+    )
+    assert "last_good_session_backend" not in patch, (
+        "a ship_pr run must not clobber last_good_session_backend"
+    )
+
+
 def test_review_preserves_status_only_emits_queue_patch():
     """A review action transitions to 'reviewed' status and emits
     post_comment + set_status + patch_queue."""

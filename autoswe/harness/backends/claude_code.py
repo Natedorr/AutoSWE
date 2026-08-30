@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import types
 from collections.abc import Awaitable
 from pathlib import Path
 
@@ -31,13 +30,17 @@ _PLANS_DIR = Path.home() / ".claude" / "plans"
 # working-directory/environment context. Setting the bare preset makes
 # plan/fix/review run on the full Claude Code prompt.
 #
-# Wrapped in MappingProxyType so the shared module-level constant is immutable:
-# every run reuses the same object, so a stray assignment in any one call site
-# would corrupt the preset for all subsequent runs. The SDK transport only
-# reads it (sp.get("type")), and it still compares equal to a plain dict.
-CLAUDE_CODE_SYSTEM_PROMPT_PRESET = types.MappingProxyType(
-    {"type": "preset", "preset": "claude_code"}
-)
+# Plain dict (NOT MappingProxyType): the Agent SDK branches on
+# ``isinstance(system_prompt, dict)`` (e.g. to read exclude_dynamic_sections),
+# and a MappingProxyType fails that check even though it compares equal to a
+# dict. Content-based equality with a plain dict still holds, so tests that
+# assert ``system_prompt == CLAUDE_CODE_SYSTEM_PROMPT_PRESET`` are unaffected.
+# The shared constant is only ever read by the SDK; call sites that build
+# ``options_kwargs`` pass ``dict(CLAUDE_CODE_SYSTEM_PROMPT_PRESET)`` (a fresh
+# copy) so the module-level object is never mutated.
+CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {
+    "type": "preset", "preset": "claude_code",
+}
 
 # ---------- Mode → Claude Code mapping ----------
 
@@ -482,7 +485,7 @@ class ClaudeCodeBackend:
             "model": spec.model or None,
             "cli_path": spec.cli_path or harness_cfg.get("cli_path"),
             "mcp_servers": spec.mcp_servers or {},
-            "system_prompt": CLAUDE_CODE_SYSTEM_PROMPT_PRESET,
+            "system_prompt": dict(CLAUDE_CODE_SYSTEM_PROMPT_PRESET),
         }
 
         # Fork-on-retry: when the spec asks to fork off a resume session, branch
