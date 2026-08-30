@@ -90,6 +90,42 @@ _MODE_CONFIG = {
 # advertised; the guard only degrades to plain resume on a *known* old SDK).
 _FORK_MIN_SDK_VERSION = (0, 2, 137)
 
+# Minimum Agent SDK version that exposes ``output_format`` on
+# ``ClaudeAgentOptions`` and ``ResultMessage.structured_output``. Verified to
+# be 0.2.137 — the same floor as ``fork_session`` (see requirements.txt /
+# tests/test_sdk_version.py). On a *known* older SDK the guard degrades to a
+# plain run (no output_format) rather than passing an unknown option.
+_STRUCTURED_OUTPUT_MIN_SDK_VERSION = (0, 2, 137)
+
+
+def _sdk_version_tuple() -> tuple | None:
+    """Return the installed ``claude-agent-sdk`` (major, minor, patch), or None."""
+    try:
+        from importlib.metadata import version  # deferred import
+        raw = version("claude-agent-sdk")
+    except Exception:
+        return None
+    parts = raw.split(".")
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return None
+    patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    return (major, minor, patch)
+
+
+def _sdk_supports_structured_output() -> bool:
+    """Return True when the installed Agent SDK is new enough for ``output_format``.
+
+    Reads the installed ``claude-agent-sdk`` distribution version lazily. Returns
+    True when the version cannot be read so a fresh/edge install is not needlessly
+    demoted; the guard only skips the option on a *known* old SDK.
+    """
+    ver = _sdk_version_tuple()
+    if ver is None:
+        return True
+    return ver >= _STRUCTURED_OUTPUT_MIN_SDK_VERSION
+
 
 def _sdk_supports_session_fork() -> bool:
     """Return True when the installed Agent SDK is new enough for ``fork_session``.
@@ -98,18 +134,10 @@ def _sdk_supports_session_fork() -> bool:
     SDK is a heavy, possibly-missing dependency). Returns True when the version
     cannot be read so a fresh/edge install is not needlessly demoted.
     """
-    try:
-        from importlib.metadata import version  # deferred import
-        raw = version("claude-agent-sdk")
-    except Exception:
+    ver = _sdk_version_tuple()
+    if ver is None:
         return True
-    parts = raw.split(".")
-    try:
-        major, minor = int(parts[0]), int(parts[1])
-    except (IndexError, ValueError):
-        return True
-    patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-    return (major, minor, patch) >= _FORK_MIN_SDK_VERSION
+    return ver >= _FORK_MIN_SDK_VERSION
 
 
 def _get_retryable_exceptions() -> tuple:
@@ -390,6 +418,7 @@ class ClaudeCodeBackend:
         "session_fork",
         "progress_stream",
         "plan_file",
+        "structured_output",
     }
 
     @classmethod
@@ -488,6 +517,21 @@ class ClaudeCodeBackend:
             "system_prompt": dict(CLAUDE_CODE_SYSTEM_PROMPT_PRESET),
         }
 
+        # Structured output (issue #159): when the spec requests a JSON-Schema
+        # validated payload, hand it to the SDK so the agent's result is
+        # delivered on ``ResultMessage.structured_output``. Gated on an SDK new
+        # enough for ``output_format``; on a known-old SDK we log and run
+        # without it (the handler's text-pattern fallback then applies).
+        if spec.output_format is not None:
+            if _sdk_supports_structured_output():
+                options_kwargs["output_format"] = spec.output_format
+            else:
+                log(
+                    f"[CLAUDE] output_format requested but installed Agent SDK is "
+                    f"older than {_STRUCTURED_OUTPUT_MIN_SDK_VERSION}; running without "
+                    f"structured output (text-pattern fallback will apply)"
+                )
+
         # Fork-on-retry: when the spec asks to fork off a resume session, branch
         # into a NEW session (fork_session=True) so the original stays intact for
         # rollback. Gated on a non-empty resume and an SDK new enough for
@@ -535,6 +579,7 @@ class ClaudeCodeBackend:
         captured_plan_file: str | None = None
         captured_plan_text: str | None = None
         plan_posted, question_posted = False, False
+        structured_output: dict | None = None
         progress_state = ProgressState()
 
         def _question_asked() -> bool:
@@ -585,6 +630,18 @@ class ClaudeCodeBackend:
                     subtype = msg.subtype
                     cost_usd = msg.total_cost_usd
                     duration_ms = msg.duration_ms
+                    # Structured output (issue #159): the validated payload is
+                    # only ever on the final result message. ``getattr`` guards
+                    # against an SDK build predating the field (reads None).
+                    # On ``error_max_structured_output_retries`` (or any
+                    # success-without-structured-output) this is None, so the
+                    # handler falls back to the text-pattern path.
+                    so = getattr(msg, "structured_output", None)
+                    if isinstance(so, dict):
+                        structured_output = so
+                    elif subtype == "error_max_structured_output_retries":
+                        log(f"[CLAUDE] structured-output retries exhausted "
+                            f"(session={session_id}); falling back to text-pattern path")
                     log(f"[CLAUDE] session={session_id} subtype={subtype} cost=${cost_usd or 0:.4f} duration={duration_ms/1000:.1f}s")
 
                 # Break early when AskUserQuestion fired — prevents the agent from
@@ -620,4 +677,5 @@ class ClaudeCodeBackend:
             plan_posted=plan_posted,
             question_posted=question_posted,
             plan_text=captured_plan_text,
+            structured_output=structured_output,
         )

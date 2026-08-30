@@ -50,6 +50,14 @@ class RunResult:
     # the stream). Capturing it here lets the planner post the plan as a comment
     # instead of leaking the bare "Tool: ExitPlanMode" progress line.
     plan_text: str | None = None
+    # Schema-validated structured output, read from
+    # ``ResultMessage.structured_output`` when the run was issued with an
+    # ``output_format`` (JSON Schema) and the SDK returned validated data.
+    # ``None`` when the run had no output_format, when the model did not
+    # produce structured data, or when the run ended in
+    # ``error_max_structured_output_retries`` — handlers fall back to the
+    # text-pattern path in those cases (graceful degrade, issue #159).
+    structured_output: dict | None = None
 
     def __iter__(self):
         """Allow tuple-style unpacking: text, session_id, subtype = result."""
@@ -147,6 +155,13 @@ class RunSpec:
     timeout: int = 7200
     cli_path: str | None = None
     env_overrides: dict | None = None
+    # Structured-output request (issue #159). When set (typically
+    # ``{"type": "json_schema", "schema": <JSON Schema>}``), backends that
+    # advertise the ``"structured_output"`` capability pass it to the agent and
+    # deliver the validated payload on ``RunResult.structured_output``.  A
+    # backend without the capability ignores this field entirely (graceful
+    # degrade), so handlers gate on the capability before populating it.
+    output_format: dict | None = None
     mcp_servers: dict | None = None
     can_use_tool: Callable | None = None  # async callable(name, input, ctx) -> PermissionResult
     progress_callback: Callable | None = None  # callable(str) for progress updates
@@ -188,6 +203,12 @@ class CodingBackend(Protocol):
       only meaningful for such backends.  Backends that lack this capability
       (e.g. Codex) never produce plan files there, so the scan is skipped to
       prevent cross-issue plan file pollution.
+    - ``"structured_output"``: backend supports ``RunSpec.output_format`` (a
+      JSON Schema passed to the agent) and delivers the validated payload on
+      ``RunResult.structured_output``.  Only Claude Code supports this (Codex
+      does not), so the planner/reviewer gate on the capability before passing
+      an ``output_format``; when the capability is absent the field is simply
+      ignored and the text-pattern fallback path is used (issue #159).
     """
 
     @classmethod

@@ -114,6 +114,7 @@ class TestRunResultShape:
         expected = {
             "text", "session_id", "subtype", "cost_usd", "duration_seconds",
             "plan_file_path", "plan_posted", "question_posted", "plan_text",
+            "structured_output",
         }
         actual = {f.name for f in fields(RunResult)}
         assert actual == expected, f"RunResult fields drifted: {actual ^ expected}"
@@ -126,6 +127,7 @@ class TestRunResultShape:
         assert r.plan_file_path is None
         assert r.plan_posted is False
         assert r.question_posted is False
+        assert r.structured_output is None
 
     def test_runresult_tuple_unpacking(self):
         """RunResult supports tuple-style 3-element unpacking (back-compat)."""
@@ -256,6 +258,7 @@ class TestCapabilityHonesty:
         "session_fork",
         "progress_stream",
         "plan_file",
+        "structured_output",
     })
 
     def test_claude_code_full_capabilities(self):
@@ -266,6 +269,7 @@ class TestCapabilityHonesty:
         expected = {
             "mode", "mcp", "can_use_tool", "plan_permission",
             "resume", "session_fork", "progress_stream", "plan_file",
+            "structured_output",
         }
         assert caps == expected, (
             f"ClaudeCodeBackend capabilities changed: got {caps}"
