@@ -13,6 +13,20 @@ The orchestrator's own privilege split still holds inside that machine. Handlers
 
 The read-only guarantee for `/plan` and `/review` is therefore enforced two different ways depending on backend: Claude Code gates each tool call via `can_use_tool`, while Codex relies on the OS-level `read-only` sandbox. On a backend that supports neither cleanly, treat the machine isolation as the real boundary.
 
+### Repo-supplied MCP servers, hooks, skills, and tools load by design
+
+The Claude Code backend runs on the Claude Agent SDK's default settings: it passes its own `mcp_servers` (the `autoswe_comment` and, when a PR exists, `autoswe_inline_comment` comment servers from `autoswe/harness/mcp_config.py`) but **does not** set `strict_mcp_config` (default `False`) or `setting_sources` (default = all sources). As a result, when the agent runs inside a target repo's worktree, the SDK *also* loads that repo's:
+
+- `.mcp.json` → additional MCP servers and their tools
+- `.claude/settings.json` → hooks (e.g. `PreToolUse` shell commands) that run in the session
+- `.claude/skills`, `.claude/agents`, `.claude/commands`, and `CLAUDE.md` → project instructions and on-demand skills
+
+This is **intentional, not accidental**. autoSWE's deployment model (above) is a dedicated, isolated machine, so untrusted-repo MCP servers and hooks executing inside autoSWE sessions is acceptable *by design* — the blast radius is still "a repo we already chose to process, on a machine that does nothing else." The same reasoning justifies the free `Bash`/edit permissions: isolation, not tool gating, is the boundary.
+
+**autoSWE's own MCP servers are never shadowed.** They are passed programmatically via `options.mcp_servers`, which is the highest-precedence MCP scope in the SDK (per `docs/claude-agent-sdk/mcp.md`, "Scope hierarchy and precedence"). Even if a target repo happened to define a server named `autoswe_comment`, the programmatic definition wins, so autoSWE's comment-posting tools always resolve to autoSWE's server. The two autoSWE servers use unique names, so collisions are not expected in practice.
+
+**Opting a repo out (not wired up yet).** Loading a repo's MCP/hook/skill content is the default and there is currently no autoSWE config switch for it. If that is ever needed, the one-line SDK change to make a single run ignore all filesystem MCP/settings for that repo is to pass `strict_mcp_config=True` **and** `setting_sources` without `"project"` to `ClaudeAgentOptions` in `autoswe/harness/backends/claude_code.py` (see `docs/claude-agent-sdk/agent-sdk/mcp.md` and `claude-code-features.md`). That would drop the repo's `.mcp.json` servers and `.claude/settings.json` hooks while keeping autoSWE's injected servers.
+
 `PROGRESS_TOOLS` (`TodoWrite`, `TaskCreate`, `TaskUpdate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`) are available in every phase. `AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]` is used only for `/fix`, `/sync` conflict resolution, and `/review` — phases where sub-agent spawning is needed and safe. Plan phase uses `PROGRESS_TOOLS` directly to prevent `Agent` sub-agent escapes.
 
 ## Who Can Steer
