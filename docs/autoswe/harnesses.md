@@ -151,7 +151,16 @@ them. The tools also remain listed in the backend's tool lists as
 belt-and-braces. A profile `env` entry can override the default (e.g.
 `"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "0"}` to disable).
 
-**Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `session_fork`, `progress_stream`, `plan_file`.
+**Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `session_fork`, `progress_stream`, `plan_file`, `structured_output`.
+
+**Structured output (issue #159).** When the installed Agent SDK is new enough
+for `output_format` (≥ 0.2.137 — the same floor as `fork_session`), a plan or
+review run can request a JSON-Schema-validated payload (`RunSpec.output_format`).
+The validated data is delivered on `RunResult.structured_output` and the planner
+/reviewer prefer it over free-text pattern parsing; when the SDK returned no
+validated data (e.g. `error_max_structured_output_retries`), they fall back to
+the text-pattern path. On a known-old SDK the option is skipped so the run
+degrades to plain text output.
 
 **Retryable subtypes:** `set()` — Claude Code retries on SDK exceptions (`_get_retryable_exceptions`), not return-value subtypes.
 
@@ -232,7 +241,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--model`, `-C
 
 **Capabilities (Phase 4, core run only):** `mode`, `resume`, `progress_stream`.
 
-**Capabilities (not yet supported):** `mcp` (no MCP comment posting), `can_use_tool` (no per-tool gating), `plan_permission` (no dedicated plan mode), `session_fork` (no fork primitive). Handlers degrade gracefully when these are unavailable — e.g. the planner falls back to text parsing instead of MCP plan posting.
+**Capabilities (not yet supported):** `mcp` (no MCP comment posting), `can_use_tool` (no per-tool gating), `plan_permission` (no dedicated plan mode), `session_fork` (no fork primitive), `structured_output` (Codex has no JSON-Schema-validated structured output, so `RunSpec.output_format` is ignored and the planner/reviewer fall back to their text-pattern paths). Handlers degrade gracefully when these are unavailable — e.g. the planner falls back to text parsing instead of MCP plan posting.
 
 **Retry semantics (resume-in-place or fresh — no fork).** `codex exec resume
 <id>` *continues* the existing session in place; Codex has no fork primitive
