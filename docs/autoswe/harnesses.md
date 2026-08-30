@@ -105,6 +105,21 @@ Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuesti
 
 **Retryable subtypes:** `set()` — Claude Code retries on SDK exceptions (`_get_retryable_exceptions`), not return-value subtypes.
 
+**System prompt:** runs with the `claude_code` system-prompt preset
+(`system_prompt={"type": "preset", "preset": "claude_code"}`), set in
+`ClaudeCodeBackend`'s `options_kwargs` for every run. Without it the Agent SDK
+falls back to a minimal prompt that covers tool calling but omits the preset's
+tool-usage guidance, security/safety instructions, and working-directory /
+environment context — all of which the plan/fix/review workflow implicitly
+assumes. The **bare** preset is intentionally used (no `append`, no
+`exclude_dynamic_sections`). Cache note: the preset embeds per-worktree context
+(cwd, git status, platform) in the system prompt, so each fresh per-issue
+worktree misses the prompt-cache prefix. Setting
+`exclude_dynamic_sections: True` would make the system prompt static and let
+consecutive issues share the cache prefix, at the cost of moving that context
+into the first user message (marginally less authoritative). That lever is
+deferred to a follow-up and is not enabled here.
+
 #### `codex` (Phase 4)
 
 Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--ask-for-approval`). Parses the JSONL event stream into a `RunResult`.
@@ -132,6 +147,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 - Resume: `codex exec resume <session_id> --json --model <model>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`)
 
 **Known limitations:**
+- **No system-prompt knob (asymmetry with `claude_code`):** Codex always uses its built-in system prompt; there is no equivalent of Claude Code's `claude_code` preset to select. The nearest levers (`AGENTS.md`, rules) are intentionally disabled via `--ignore-rules` / `--ignore-user-config` for reproducibility, so autoSWE cannot steer the Codex system prompt the way it can for Claude.
 - ``cost_usd`` is an **estimate** from a maintained price table (`codex_pricing.py`). Returns ``None`` for unknown models — never guesses.
 - ``plan_file_path`` is always ``None`` — Codex doesn't write to `~/.claude/plans/`.
 - ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting yet.
