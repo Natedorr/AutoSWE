@@ -96,11 +96,43 @@ def test_parse_commit_message_subject_only_no_body():
     assert body is None
 
 
+def test_parse_commit_message_body_inline_and_multiline():
+    # `body:` with content on the same line, then more lines.
+    text = (
+        "<AUTOSWE_COMMIT>\n"
+        "subject: Inline body test\n"
+        "body: first line after the key\n"
+        "second line\n"
+        "</AUTOSWE_COMMIT>\n"
+    )
+    subject, body = _parse_commit_message(text)
+    assert subject == "Inline body test"
+    assert body == "first line after the key\nsecond line"
+
+
 def test_parse_commit_message_case_insensitive_keys():
     text = "<AUTOSWE_COMMIT>\nSubject: Fix it\nBODY:\nthe body\n</AUTOSWE_COMMIT>\n"
     subject, body = _parse_commit_message(text)
     assert subject == "Fix it"
     assert body == "the body"
+
+
+def test_parse_commit_message_subject_containing_body_colon():
+    # Regression: a subject that contains the literal substring "body:" must
+    # not corrupt the extracted body. Only a line that STARTS with "body:"
+    # opens the body.
+    text = (
+        "<AUTOSWE_COMMIT>\n"
+        "subject: Add body:logging to the request layer\n"
+        "body:\n"
+        "Real body line one.\n"
+        "Real body line two.\n"
+        "</AUTOSWE_COMMIT>\n"
+    )
+    subject, body = _parse_commit_message(text)
+    assert subject == "Add body:logging to the request layer"
+    assert body == "Real body line one.\nReal body line two."
+    assert "body:" not in (body or "").split("\n")[0]  # no stray key line leaked in
 
 
 # ---------------------------------------------------------------------------

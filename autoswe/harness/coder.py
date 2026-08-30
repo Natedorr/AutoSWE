@@ -52,19 +52,29 @@ def _parse_commit_message(text: str) -> tuple[str | None, str | None]:
         return None, None
     block = m.group(1)
 
+    # Line-based parse: the `subject:` line is single-line; the `body:` line
+    # begins the (possibly multi-line) body that runs to the closing tag. Going
+    # line-by-line means a subject that itself contains the literal text
+    # "body:" can never be mistaken for the body key — only a line that
+    # *starts* with "body:" (case-insensitive) opens the body.
     subject = None
     body = None
+    body_lines: list[str] = []
+    in_body = False
     for line in block.split("\n"):
-        if line.strip().lower().startswith("subject:"):
+        stripped = line.strip().lower()
+        if in_body:
+            body_lines.append(line)
+        elif stripped == "body:" or stripped.startswith("body:"):
+            rest = line[len("body:") :].strip()
+            if rest:
+                body_lines.append(rest)
+            in_body = True
+        elif subject is None and (stripped == "subject:" or stripped.startswith("subject:")):
             raw = line[len("subject:") :].strip()
-            # Subject is single-line by contract — take only this line.
             subject = raw or None
-            break
 
-    body_m = re.search(r"\n?\s*body:\s*\n?(.*?)\s*$", block, re.DOTALL | re.IGNORECASE)
-    if body_m:
-        body = body_m.group(1).strip() or None
-
+    body = "\n".join(body_lines).strip() or None
     return subject, body
 
 
@@ -96,7 +106,6 @@ def _run_fix_session(
     fix_model: str | None,
     timeout_msg: str,
     error_prefix: str,
-    guidance: str | None,
     progress_callback=None,
     fork_session: bool = False,
 ) -> HandlerResult:
@@ -159,7 +168,7 @@ def _run_fix_session(
 
     return _finalize_fix(
         task, run_result, wt, owner, repo, issue_num,
-        guidance, base_branch, provider, token, rc, cfg or {},
+        base_branch, provider, token, rc, cfg or {},
         session_id=run_result.session_id,
     )
 
@@ -278,7 +287,6 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
         fix_model=fix_model,
         timeout_msg="timeout during fix phase",
         error_prefix="run_fix",
-        guidance=guidance,
         progress_callback=progress_callback,
         fork_session=effective_fork,
     )
@@ -330,7 +338,6 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
         fix_model=fix_model,
         timeout_msg="timeout during fix resume",
         error_prefix="resume_fix",
-        guidance=None,
         progress_callback=progress_callback,
     )
 
@@ -342,7 +349,6 @@ def _finalize_fix(
     owner: str,
     repo: str,
     issue_num: int,
-    guidance: str,
     base_branch: str,
     provider: str,
     token: str,
