@@ -9,8 +9,44 @@ reported").
 from __future__ import annotations
 
 # USD per 1M tokens, keyed by model ID (lowercase for case-insensitive match).
-# Sources: OpenAI pricing pages, updated June 2026.
+# Sources: OpenAI API pricing (platform.openai.com/docs/pricing), updated
+# August 2026.  GPT-5.6 Sol's standard rates are promotional through at least
+# November 21, 2026.
+#
+# gpt-5.3-codex-spark is intentionally absent: it is a research preview with
+# no public per-token USD rate, and the never-guess contract requires
+# estimate_cost() to return None rather than a made-up figure.
 _PRICES: dict[str, dict[str, float]] = {
+    "gpt-5.6-sol": {
+        "input": 4.00,
+        "cached_input": 0.40,
+        "output": 20.00,
+    },
+    "gpt-5.6-terra": {
+        "input": 2.00,
+        "cached_input": 0.20,
+        "output": 12.00,
+    },
+    "gpt-5.6-luna": {
+        "input": 0.20,
+        "cached_input": 0.02,
+        "output": 1.20,
+    },
+    "gpt-5.5": {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "output": 30.00,
+    },
+    "gpt-5.4": {
+        "input": 2.50,
+        "cached_input": 0.25,
+        "output": 15.00,
+    },
+    "gpt-5.4-mini": {
+        "input": 0.75,
+        "cached_input": 0.075,
+        "output": 4.50,
+    },
     "gpt-5-codex": {
         "input": 1_250.0,
         "cached_input": 125.0,
@@ -79,13 +115,17 @@ def estimate_cost(model: str, usage: list[dict]) -> float | None:
     # Case-insensitive lookup
     prices = _PRICES.get(model.lower())
     if prices is None:
-        # Try longest prefix match for model variants (e.g. "gpt-5-2025-08-07"
-        # should match "gpt-5" not "gpt-5-codex"; "gpt-5-mini-2025-08-07" should
-        # match "gpt-5-mini" not "gpt-5").
+        # Try longest prefix match for dated model variants.  The boundary
+        # must be a dash so that one family's name never matches another
+        # family's bare string prefix: "gpt-5.6-terra-2026-08-01" matches
+        # "gpt-5.6-terra" but not "gpt-5"; "gpt-5.3-codex-spark" matches no
+        # key (the character after "gpt-5" is ".", not "-") and correctly
+        # returns None rather than the stale gpt-5 rate.
+        m = model.lower()
         best_key = None
         best_len = 0
         for key in _PRICES:
-            if model.lower().startswith(key) and len(key) > best_len:
+            if m.startswith(key + "-") and len(key) > best_len:
                 best_key = key
                 best_len = len(key)
         if best_key is not None:
