@@ -19,6 +19,7 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | `anthropic_base_url` | No | (from env) | Custom API endpoint (Claude Code only) |
 | `anthropic_auth_token` | No | (from env) | Auth token (Claude Code only) |
 | `anthropic_api_key` | No | (from env) | API key (Claude Code only) |
+| `env` | No | — | Extra environment variables (a `{key: value}` map) merged into the backend's child process. Values override backend defaults; ``${VAR}``/``${VAR:-default}`` supported. See [Per-profile `env`](#per-profile-env) |
 
 String values support ``${VAR}`` and ``${VAR:-default}`` environment variable
 interpolation (expanded at load time from the current process environment).
@@ -93,13 +94,61 @@ Different phases can use different backends. Common patterns:
 }
 ```
 
-### Backends
+### Per-profile `env`
+
+Every profile accepts an optional `env` map of extra environment variables,
+merged into the backend's child process. This is the hook for passing values
+that the backend itself does not model as named fields (e.g. pointing Codex at
+a self-hosted OpenAI-compatible endpoint via `OPENAI_API_BASE`).
+
+- **Claude Code** — merged into the SDK `env` option, so the variables reach the
+  spawned CLI only (never the poller's own process environment).
+- **Codex** — merged into the `codex exec` subprocess environment.
+
+**Precedence** (highest wins):
+
+| Claude Code | Codex |
+|-------------|-------|
+| 1. `spec.env_overrides` (internal) | 1. `spec.env_overrides` (internal) |
+| 2. profile `env` | 2. profile `env` |
+| 3. backend defaults (e.g. `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, Anthropic creds) | 3. api-key fields (`OPENAI_API_KEY` / `CODEX_API_KEY`) |
+| 4. inherited `os.environ` | 4. inherited `os.environ` |
+
+So a profile `env` value overrides a backend default but loses to the internal
+`env_overrides` seam. `${VAR}` / `${VAR:-default}` expansion is applied to `env`
+values at load time, like every other profile string.
+
+```json
+{
+  "claude-custom": {
+    "backend": "claude_code",
+    "model": "claude-opus-4-8",
+    "env": { "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" }
+  },
+  "codex-custom": {
+    "backend": "codex",
+    "model": "custom-model",
+    "env": { "OPENAI_API_BASE": "http://localhost:8080" }
+  }
+}
+```
 
 #### `claude_code` (current default)
 
 Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuestion interception, plan file capture, progress streaming, session resume.
 
-**Profile fields:** `backend`, `model`, `cli_path`, `anthropic_base_url`, `anthropic_auth_token`, `anthropic_api_key`, `timeout`.
+**Profile fields:** `backend`, `model`, `cli_path`, `anthropic_base_url`, `anthropic_auth_token`, `anthropic_api_key`, `timeout`, `env`.
+
+**Task-tracking tools (default opt-in):** the backend sets
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` on the spawned CLI by default (via the SDK
+`env` option). On Agent SDK ≥ 0.2.139 the task-tracking tools
+(`TodoWrite`, `TaskCreate`, `TaskGet`, `TaskUpdate`, `TaskList`) are *not*
+provided by default on the newer model families (Opus 4.8, Sonnet 5, …); this
+opt-in restores them (honored when the CLI is ≥ v2.1.233). They are the
+planner/coder's only live feedback — the sticky progress comment renders from
+them. The tools also remain listed in the backend's tool lists as
+belt-and-braces. A profile `env` entry can override the default (e.g.
+`"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "0"}` to disable).
 
 **Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `progress_stream`.
 
@@ -120,6 +169,8 @@ consecutive issues share the cache prefix, at the cost of moving that context
 into the first user message (marginally less authoritative). That lever is
 deferred to a follow-up and is not enabled here.
 
+**Repo content loading (MCP / hooks / skills).** The backend passes autoSWE's injected `mcp_servers` (the comment servers built by `autoswe/harness/mcp_config.py`) to `ClaudeAgentOptions` but leaves `strict_mcp_config` and `setting_sources` at their SDK defaults (`False` / all sources). The practical effect: inside a target repo's worktree, the SDK **also loads** the repo's `.mcp.json` servers, `.claude/settings.json` hooks, and `.claude/` skills/agents/commands — alongside autoSWE's own servers. This is by design (autoSWE runs on a dedicated, isolated machine; see [safeguards.md](safeguards.md#repo-supplied-mcp-servers-hooks-skills-and-tools-load-by-design)). autoSWE's injected servers are programmatic and therefore highest-precedence — a repo cannot shadow `autoswe_comment` / `autoswe_inline_comment`. No per-repo opt-out is currently exposed; if ever needed it would be `strict_mcp_config=True` + `setting_sources` without `"project"`.
+
 #### `codex` (Phase 4)
 
 Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--ask-for-approval`). Parses the JSONL event stream into a `RunResult`.
@@ -131,6 +182,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 - `model`: **required** Codex model ID (e.g. `"gpt-5.6-sol"`, `"gpt-5.6-terra"`, `"gpt-5.6-luna"`, `"gpt-5.5"`, `"qwen3.6:27b"` for Ollama). There is no built-in default — a missing `model` fails resolution with a `ValueError`
 - `codex_api_key` or `openai_api_key`: API key for the provider (optional for local providers)
 - `timeout`: Override the default timeout (optional)
+- `env`: Extra environment variables (a `{key: value}` map) merged into the `codex exec` subprocess (optional). User values win over the api-key fields; see [Per-profile `env`](#per-profile-env)
 
 **Capabilities (Phase 4, core run only):** `mode`, `resume`, `progress_stream`.
 
@@ -147,6 +199,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 - Resume: `codex exec resume <session_id> --json --model <model>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`)
 
 **Known limitations:**
+- ``RunSpec.max_turns`` is **not honored** — Codex `exec` exposes no turn cap (the old `agent.max_turns` config key was removed; live-verified on codex-cli 0.150.1, where `-c agent.max_turns=N` is rejected under `--strict-config` and silently ignored otherwise). The effective anti-runaway guard is the wall-clock timeout (`timeout` profile field / `AGENT_TIMEOUT`).
 - **No system-prompt knob (asymmetry with `claude_code`):** Codex always uses its built-in system prompt; there is no equivalent of Claude Code's `claude_code` preset to select. The nearest levers (`AGENTS.md`, rules) are intentionally disabled via `--ignore-rules` / `--ignore-user-config` for reproducibility, so autoSWE cannot steer the Codex system prompt the way it can for Claude.
 - ``cost_usd`` is an **estimate** from a maintained price table (`codex_pricing.py`). Returns ``None`` for unknown models — never guesses.
 - ``plan_file_path`` is always ``None`` — Codex doesn't write to `~/.claude/plans/`.

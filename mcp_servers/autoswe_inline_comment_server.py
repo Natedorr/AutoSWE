@@ -22,9 +22,24 @@ import os
 from urllib import error as url_error
 from urllib import request
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import TextContent
+
+# mcp SDK version tolerance (mirrors autoswe_comment_server.py):
+#   mcp >= 2.0 exposes the high-level MCPServer (.tool() decorator, run_stdio_async)
+#   mcp 1.x only exposes the low-level Server (.call_tool() decorator, server.run)
+try:
+    from mcp.server import MCPServer
+
+    server = MCPServer("autoswe-inline-comment")
+    _tool = server.tool
+    _MCP_V2 = True
+except ImportError:
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
+
+    server = Server("autoswe-inline-comment")
+    _tool = server.call_tool
+    _MCP_V2 = False
 
 # ---- Env ----
 
@@ -79,10 +94,8 @@ def _post_inline_comment(file: str, line: int, body: str) -> str:
 
 # ---- MCP Server ----
 
-server = Server("autoswe-inline-comment")
 
-
-@server.call_tool()
+@_tool()
 async def post_inline_comment(*, file: str, line: int, body: str) -> list[TextContent]:
     """Post an inline review comment on a specific file and line of the PR.
 
@@ -104,8 +117,11 @@ async def post_inline_comment(*, file: str, line: int, body: str) -> list[TextCo
 # ---- Entry point ----
 
 async def main():
-    async with stdio_server() as (stdin, stdout):
-        await server.run(stdin, stdout, server.create_initialization_options())
+    if _MCP_V2:
+        await server.run_stdio_async()
+    else:
+        async with stdio_server() as (stdin, stdout):
+            await server.run(stdin, stdout, server.create_initialization_options())
 
 
 if __name__ == "__main__":

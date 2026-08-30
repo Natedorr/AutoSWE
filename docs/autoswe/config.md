@@ -102,7 +102,7 @@ Loaded by ``core/config.py:load_harnesses_config()``. Keys starting with ``_`` a
 
 Defines **named harness profiles** that bundle a coding backend (``claude_code``, ``codex``) with its model and auth/runtime settings. Phases reference a profile by name via ``plan_harness``, ``fix_harness``, or ``review_harness`` in repos.json (or ``PLAN_HARNESS``, ``FIX_HARNESS``, ``REVIEW_HARNESS`` in autoswe.env).
 
-Each profile requires a ``backend`` field (``"claude_code"`` or ``"codex"``). ``model`` is required for ``codex`` profiles (no built-in default); optional otherwise. Other optional fields: ``timeout``, ``cli_path``, ``api_key_env``, ``anthropic_base_url``, ``anthropic_auth_token``.
+Each profile requires a ``backend`` field (``"claude_code"`` or ``"codex"``). ``model`` is required for ``codex`` profiles (no built-in default); optional otherwise. Other optional fields: ``timeout``, ``cli_path``, ``api_key_env``, ``anthropic_base_url``, ``anthropic_auth_token``, ``env`` (a ``{key: value}`` map of extra environment variables merged into the backend's child process — see [harnesses.md](harnesses.md#per-profile-env)).
 
 Full documentation: [harnesses.md](harnesses.md).
 

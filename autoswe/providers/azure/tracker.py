@@ -398,7 +398,7 @@ class AzureTracker(IssueTracker):
         )
         ado_patch(
             patch_path, self._pat,
-            body=[{"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)}],
+            body=[{"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)}],
         )
 
     def assign_to_user(self, repo_cfg: dict, issue_number: int, login: str | None) -> None:
@@ -415,7 +415,7 @@ class AzureTracker(IssueTracker):
         )
         ado_patch(
             patch_path, self._pat,
-            body=[{"op": "replace", "path": "/fields/System.AssignedTo", "value": login}],
+            body=[{"op": "add", "path": "/fields/System.AssignedTo", "value": login}],
         )
 
     # ---- Internal helpers ----

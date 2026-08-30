@@ -909,6 +909,56 @@ def test_progress_state_task_create_to_update_flow():
     assert "✅" in body
 
 
+def test_progress_state_task_tools_only_drive_progress_callback():
+    """Regression (issue #120): when the task-tracking tools are the ONLY
+    progress source, the sticky-comment callback still fires.
+
+    Exercises the exact path the backend uses: fire progress_callback only
+    when note_tool_use / note_tool_result report a change. With TodoWrite
+    unavailable (newer models), TaskCreate/TaskUpdate must still produce a
+    non-empty rendered body.
+    """
+    from autoswe.harness.runner import ProgressState
+
+    fired = []
+
+    def progress_callback(body):
+        fired.append(body)
+
+    ps = ProgressState()
+
+    # TaskCreate — stashed, nothing rendered yet → no callback
+    changed = ps.note_tool_use(
+        _make_tool_use("TaskCreate", {"subject": "Investigate bug"}, bid="tc_1")
+    )
+    assert changed is False
+    if changed:
+        progress_callback(ps.render())
+
+    # ToolResultBlock resolves the task id → task now rendered → callback fires
+    changed = ps.note_tool_result(_make_tool_result("tc_1", "task-x"))
+    assert changed is True
+    if changed:
+        progress_callback(ps.render())
+
+    # TaskUpdate to in_progress → change → callback fires
+    changed = ps.note_tool_use(_make_tool_use(
+        "TaskUpdate", {"taskId": "task-x", "status": "in_progress",
+                       "activeForm": "Investigating bug"}
+    ))
+    assert changed is True
+    if changed:
+        progress_callback(ps.render())
+
+    # The callback received non-empty bodies and the rendered output is the todo list
+    assert len(fired) >= 1, "progress callback never fired with task-tools-only source"
+    assert all(body for body in fired), "empty progress body fired"
+    body = ps.render()
+    assert body is not None
+    assert "Todo List" in body
+    assert "Investigating bug" in body
+
+
 def test_progress_state_task_delete_removal():
     """TaskUpdate with status=deleted removes the task."""
     from autoswe.harness.runner import ProgressState

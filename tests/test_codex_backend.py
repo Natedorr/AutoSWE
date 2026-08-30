@@ -789,6 +789,54 @@ def test_codex_env_overrides():
     assert env.get("CUSTOM_VAR") == "hello"
 
 
+def test_codex_profile_env_merged_into_subprocess_env():
+    """Per-profile `env` is merged into the `codex exec` subprocess env
+    (issue #120 Part B)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp",
+        mode="read_write",
+        state={"_harness_cfg": {"env": {"OPENAI_API_BASE": "http://x"}}},
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec.call_args[1].get("env", {})
+
+    env = asyncio.run(_run())
+    assert env.get("OPENAI_API_BASE") == "http://x"
+
+
+def test_codex_profile_env_wins_over_api_key_field():
+    """Profile `env` overrides the named api-key fields (precedence)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp",
+        mode="read_write",
+        state={"_harness_cfg": {
+            "openai_api_key": "sk-from-field",
+            "env": {"OPENAI_API_KEY": "sk-from-profile-env"},
+        }},
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec.call_args[1].get("env", {})
+
+    env = asyncio.run(_run())
+    assert env.get("OPENAI_API_KEY") == "sk-from-profile-env"
+
+
 def test_codex_progress_callback_streaming():
     """progress_callback fires with live agent messages during execution."""
     backend = CodexBackend()
@@ -1076,24 +1124,47 @@ def test_codex_no_ephemeral_resume():
     assert "--ephemeral" not in cmd
 
 
-def test_codex_max_turns_flag():
-    """Non-default max_turns adds -c agent.max_turns=N to command."""
+# `agent.max_turns` was removed from the Codex CLI config schema. Live capture on
+# the installed CLI (codex-cli 0.150.1, 2026-08-29):
+#   $ codex exec --strict-config -c agent.max_turns=5 "hi"
+#   Error loading config.toml: unknown configuration field `agent` in -c/--config
+#   override   (exit 1)
+# Without --strict-config (autoSWE does not use it) the unknown override is
+# silently ignored — a no-op runaway guard. `codex exec` exposes no turn cap at
+# all, so RunSpec.max_turns must never be translated into a config override.
+# The effective anti-runaway guard is the wall-clock timeout (spec.timeout →
+# asyncio.wait_for + process.kill in codex.py).
+
+
+@pytest.mark.parametrize("turns", [1, 50, 80, 199, 200, 400])
+def test_codex_max_turns_never_emitted(turns):
+    """No max_turns value (incl. the 200 default) adds any -c agent.max_turns override.
+
+    Fixture/proof: live run of `codex exec --strict-config -c agent.max_turns=5`
+    on codex-cli 0.150.1 failed with exit 1 and stderr
+    ``unknown configuration field `agent` in -c/--config override`` — the key
+    no longer exists, so emitting it would be a silent no-op (or a hard error).
+    """
     backend = CodexBackend()
-    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write", max_turns=80)
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write", max_turns=turns)
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    assert "-c" in cmd
-    idx = cmd.index("-c")
-    assert cmd[idx + 1] == "agent.max_turns=80"
+    assert "-c" not in cmd
+    assert not any("max_turns" in part for part in cmd)
 
 
 def test_codex_default_max_turns_no_flag():
-    """Default max_turns (200) does NOT add -c flag."""
+    """Default max_turns (200) does NOT add any -c override either.
+
+    max_turns is a documented no-op on the Codex backend (Codex `exec` has no
+    turn cap; the guard is the wall-clock timeout) — consistent for any value.
+    """
     backend = CodexBackend()
     spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write", max_turns=200)
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "-c" not in cmd
+    assert not any("max_turns" in part for part in cmd)
 
 
 # ---------- Config interpolation ----------
