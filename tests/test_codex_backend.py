@@ -257,22 +257,58 @@ def test_parse_jsonl_line_agent_message_completed():
     assert acc.text_chunks == ["Hello"]
 
 
-def test_parse_jsonl_line_summary_output_collected():
-    """item.completed summary_output accumulates text."""
+def test_parse_jsonl_line_reasoning_completed():
+    """item.completed reasoning item fires a progress line; does not enter text_chunks."""
     acc = _CodexAccumulator()
     callback = Mock()
     _parse_jsonl_line(
         json.dumps({
             "type": "item.completed",
-            "item": {"id": "s1", "type": "summary_output", "text": "All done."},
+            "item": {"id": "r1", "type": "reasoning", "summary": "Thinking it through…"},
         }),
         acc=acc,
         callback=callback,
     )
-    assert acc.text_chunks == ["All done."]
-    # Callback should have fired with Agent: prefix
+    # Reasoning is not agent text — it must not pollute RunResult.text.
+    assert not acc.text_chunks
     callback.assert_called_once()
-    assert "Agent: All done." in callback.call_args[0][0]
+    assert "💭" in callback.call_args[0][0]
+    assert "Thinking it through" in callback.call_args[0][0]
+
+
+def test_parse_jsonl_line_reasoning_completed_no_summary_no_fire():
+    """A reasoning item with no summary fires no progress."""
+    acc = _CodexAccumulator()
+    callback = Mock()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "r1", "type": "reasoning"},
+        }),
+        acc=acc,
+        callback=callback,
+    )
+    assert not acc.text_chunks
+    callback.assert_not_called()
+
+
+def test_parse_jsonl_line_plan_item_completed_sets_plan_text():
+    """item.completed plan item sets acc.plan_text, fires progress, no text_chunks."""
+    acc = _CodexAccumulator()
+    callback = Mock()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "p1", "type": "plan", "text": "1. Fix login\n2. Add tests"},
+        }),
+        acc=acc,
+        callback=callback,
+    )
+    assert acc.plan_text == "1. Fix login\n2. Add tests"
+    # Plan text must not pollute RunResult.text.
+    assert not acc.text_chunks
+    callback.assert_called_once()
+    assert "📝 Plan:" in callback.call_args[0][0]
 
 
 def test_parse_jsonl_line_empty_text_skipped():
@@ -365,48 +401,78 @@ def test_parse_jsonl_line_error_event():
     assert not acc.text_chunks
 
 
-def test_parse_jsonl_line_todo_progress():
-    """todo_list item fires callback with rendered items."""
+def test_parse_jsonl_line_turn_plan_updated():
+    """turn.plan.updated renders step statuses; both dot and slash forms accepted."""
+    for etype in ("turn.plan.updated", "turn/plan/updated"):
+        acc = _CodexAccumulator()
+        callback = Mock()
+        _parse_jsonl_line(
+            json.dumps({
+                "type": etype,
+                "turnId": "t",
+                "plan": [
+                    {"step": "Fix bug", "status": "completed"},
+                    {"step": "Add tests", "status": "pending"},
+                ],
+            }),
+            acc=acc,
+            callback=callback,
+        )
+        callback.assert_called_once()
+        rendered = callback.call_args[0][0]
+        assert "✅" in rendered
+        assert "☐" in rendered
+        assert "Fix bug" in rendered
+        assert "Add tests" in rendered
+
+
+def test_parse_jsonl_line_turn_plan_updated_explanation():
+    """turn.plan.updated with an explanation prefixes the progress line."""
     acc = _CodexAccumulator()
     callback = Mock()
     _parse_jsonl_line(
         json.dumps({
-            "type": "item.completed",
-            "item": {
-                "type": "todo_list",
-                "items": [
-                    {"text": "Fix bug", "completed": True},
-                    {"text": "Add tests", "completed": False},
-                ],
-            },
+            "type": "turn/plan/updated",
+            "turnId": "t",
+            "explanation": "Refactor auth",
+            "plan": [{"step": "Step A", "status": "inProgress"}],
         }),
         acc=acc,
         callback=callback,
     )
-    callback.assert_called_once()
-    assert "✅" in callback.call_args[0][0]
-    assert "☐" in callback.call_args[0][0]
-    assert "Fix bug" in callback.call_args[0][0]
-    assert "Add tests" in callback.call_args[0][0]
+    rendered = callback.call_args[0][0]
+    assert "📝 Refactor auth" in rendered
+    assert "▶" in rendered
 
 
-def test_parse_jsonl_line_item_delta_appends():
-    """item.delta appends incremental content to the last chunk."""
+def test_parse_jsonl_line_agent_message_delta_accumulates():
+    """item.agentMessage.delta accumulates text; used when completed text is empty."""
     acc = _CodexAccumulator()
-    # Seed with a completed agent message
     _parse_jsonl_line(
         json.dumps({
-            "type": "item.completed",
-            "item": {"id": "i1", "type": "agent_message", "text": "Hello"},
+            "type": "item/agentMessage/delta",
+            "itemId": "i1",
+            "delta": "Hello",
         }),
         acc=acc,
         callback=None,
     )
-    # Delta extends it
     _parse_jsonl_line(
         json.dumps({
-            "type": "item.delta",
+            "type": "item.agent_message.delta",
+            "itemId": "i1",
             "delta": " world",
+        }),
+        acc=acc,
+        callback=None,
+    )
+    # Deltas buffer — nothing in text_chunks until the item completes.
+    assert not acc.text_chunks
+    # Completed item with empty text falls back to the buffered delta.
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "i1", "type": "agent_message", "text": ""},
         }),
         acc=acc,
         callback=None,
@@ -414,18 +480,96 @@ def test_parse_jsonl_line_item_delta_appends():
     assert acc.text_chunks == ["Hello world"]
 
 
-def test_parse_jsonl_line_item_delta_no_chunks():
-    """item.delta with no prior chunks creates a new one."""
+def test_parse_jsonl_line_completed_text_wins_over_delta():
+    """When the completed item carries text, it wins over the accumulated deltas."""
     acc = _CodexAccumulator()
     _parse_jsonl_line(
         json.dumps({
-            "type": "item.delta",
-            "delta": "streaming content",
+            "type": "item.agentMessage/delta",
+            "itemId": "i1",
+            "delta": "stale streaming text",
         }),
         acc=acc,
         callback=None,
     )
-    assert acc.text_chunks == ["streaming content"]
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "i1", "type": "agent_message", "text": "Authoritative."},
+        }),
+        acc=acc,
+        callback=None,
+    )
+    assert acc.text_chunks == ["Authoritative."]
+
+
+def test_parse_jsonl_line_plan_delta_progress_only():
+    """item.plan.delta fires throttled progress; does not touch text_chunks/plan_text."""
+    acc = _CodexAccumulator()
+    callback = Mock()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item/plan/delta",
+            "itemId": "p1",
+            "delta": "Step one of the plan…",
+        }),
+        acc=acc,
+        callback=callback,
+    )
+    # Progress fired for the first delta.
+    assert callback.call_count >= 1
+    # No RunResult impact.
+    assert not acc.text_chunks
+    assert acc.plan_text is None
+
+
+def test_parse_jsonl_line_plan_delta_throttle_refires_on_growth():
+    """Small streamed plan deltas re-fire progress as they accumulate past ~80 chars.
+
+    Pins the cumulative-growth throttle: a series of small deltas (each far
+    below 80 chars) must fire multiple progress lines, not just the first.
+    """
+    acc = _CodexAccumulator()
+    callback = Mock()
+    # 10 consecutive 30-char deltas = 300 chars of streamed plan text.
+    for _ in range(10):
+        _parse_jsonl_line(
+            json.dumps({
+                "type": "item/plan/delta",
+                "itemId": "p1",
+                "delta": "x" * 30,
+            }),
+            acc=acc,
+            callback=callback,
+        )
+    # First delta fires immediately, then again on every ~80-char growth.
+    # Expected fire points: after delta 1 (first), and at 300-char total in
+    # ~80-char strides → at least 3 fires (30, 90+, 210+ cumulative).
+    assert callback.call_count >= 3, (
+        f"Small deltas should re-fire progress as they accumulate, "
+        f"got {callback.call_count} fire(s)"
+    )
+    # Still no RunResult impact.
+    assert not acc.text_chunks
+    assert acc.plan_text is None
+
+
+def test_parse_jsonl_line_reasoning_delta_refires_on_growth():
+    """reasoning summaryTextDelta progress uses the same cumulative throttle."""
+    acc = _CodexAccumulator()
+    callback = Mock()
+    for _ in range(10):
+        _parse_jsonl_line(
+            json.dumps({
+                "type": "item/reasoning/summaryTextDelta",
+                "itemId": "r1",
+                "delta": "y" * 30,
+            }),
+            acc=acc,
+            callback=callback,
+        )
+    assert callback.call_count >= 3
+    assert not acc.text_chunks
 
 
 # ---------- CodexBackend integration (mocked subprocess) ----------
@@ -868,21 +1012,19 @@ def test_codex_progress_callback_streaming():
     assert len(agent_calls) >= 2
 
 
-def test_codex_progress_callback_todo():
-    """progress_callback fires with rendered todo list for todo_list events."""
+def test_codex_progress_callback_plan():
+    """progress_callback fires with rendered plan step list for turn.plan.updated."""
     backend = CodexBackend()
     callback = Mock()
     jsonl = _jsonl(
         {"type": "thread.started", "thread_id": "t-1"},
         {
-            "type": "item.completed",
-            "item": {
-                "type": "todo_list",
-                "items": [
-                    {"text": "Fix bug", "completed": True},
-                    {"text": "Write tests", "completed": False},
-                ],
-            },
+            "type": "turn.plan.updated",
+            "turnId": "t-1",
+            "plan": [
+                {"step": "Fix bug", "status": "completed"},
+                {"step": "Write tests", "status": "pending"},
+            ],
         },
         {
             "type": "item.completed",
@@ -907,10 +1049,84 @@ def test_codex_progress_callback_todo():
             return await _run_backend(backend, spec)
 
     asyncio.run(_run())
-    # Should have fired at least once with todo content
-    todo_calls = [c for c in callback.call_args_list if "📋" in c[0][0]]
-    assert len(todo_calls) >= 1
-    assert "Fix bug" in todo_calls[0][0][0]
+    # Should have fired at least once with plan content
+    plan_calls = [c for c in callback.call_args_list if "✅" in c[0][0] or "📋" in c[0][0]]
+    assert len(plan_calls) >= 1
+    assert "Fix bug" in plan_calls[0][0][0]
+
+
+def test_codex_plan_text_in_run_result():
+    """A plan item populates RunResult.plan_text and is excluded from RunResult.text."""
+    backend = CodexBackend()
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "p1", "type": "plan", "text": "Plan: refactor auth"},
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "msg1", "type": "agent_message", "text": "Done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    )
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Plan", cwd="/tmp", mode="plan")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.plan_text == "Plan: refactor auth"
+    # Plan text must not be in RunResult.text (only the agent message is).
+    assert result.text == "Done."
+    assert "refactor auth" not in result.text
+
+
+def test_codex_camel_case_tolerance():
+    """A camelCase wire stream (agentMessage/commandExecution) parses end-to-end."""
+    backend = CodexBackend()
+    callback = Mock()
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {
+            "type": "item.started",
+            "item": {"id": "cmd1", "type": "commandExecution", "command": "ls"},
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "cmd1", "type": "commandExecution", "command": "ls", "exitCode": 0},
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "msg1", "type": "agentMessage", "text": "All good."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    )
+    spec = RunSpec(model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp",
+        mode="read_write",
+        progress_callback=callback,
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.text == "All good."
+    # commandExecution (camelCase) fired Working + exit progress
+    working = [c for c in callback.call_args_list if "Working: ls" in c[0][0]]
+    assert len(working) >= 1
 
 
 def test_codex_result_no_mcp_flags():
@@ -977,18 +1193,18 @@ def test_codex_resume_passes_cwd():
     assert cwd == "/tmp/repo", "Resume run should pass cwd= to subprocess"
 
 
-def test_codex_summary_output_collected():
-    """summary_output items are accumulated in RunResult.text."""
+def test_codex_plan_item_does_not_pollute_text():
+    """A plan item and an agent message coexist; only the agent message lands in text."""
     backend = CodexBackend()
     jsonl = _jsonl(
         {"type": "thread.started", "thread_id": "t-1"},
         {
             "type": "item.completed",
-            "item": {"id": "msg1", "type": "agent_message", "text": "Step 1"},
+            "item": {"id": "p1", "type": "plan", "text": "Plan: update parser"},
         },
         {
             "type": "item.completed",
-            "item": {"id": "sum1", "type": "summary_output", "text": "Summary: done"},
+            "item": {"id": "msg1", "type": "agent_message", "text": "Step 1"},
         },
         {
             "type": "turn.completed",
@@ -1004,7 +1220,9 @@ def test_codex_summary_output_collected():
 
     result = asyncio.run(_run())
     assert "Step 1" in result.text
-    assert "Summary: done" in result.text
+    # Plan text is surfaced via plan_text, not mixed into text.
+    assert "update parser" not in result.text
+    assert result.plan_text == "Plan: update parser"
 
 
 def test_codex_cost_usd_populated_for_known_model():

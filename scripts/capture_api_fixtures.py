@@ -295,14 +295,12 @@ def capture_azure(cfg: dict) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nCapturing Azure DevOps API fixtures from {org}/{project} ({repo}) ...\n")
 
-    # get_current_user — use work item #1 fallback (same as AzureTracker.authenticated_user)
-    print("  GET work item #1 (authenticated_user fallback)")
-    wi_1_url = f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems/1?api-version=7.1"
-    wi_1 = ado_get(wi_1_url, pat)
-    created_by = wi_1.get("fields", {}).get("System.CreatedBy", {})
-    profile_data = sanitize_ado_profile(created_by) if created_by else {"uniqueName": "testowner", "id": "1"}
+    # get_current_user — the Profile API endpoint used by AzureTracker.authenticated_user
+    print("  GET profile profiles/me")
+    me_url = "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1"
+    profile_data = ado_get(me_url, pat)
     write_fixture(out_dir, "get_current_user", profile_data,
-                  "GET /_apis/wit/workitems/1 (fallback)", "GET", "docs/azure-devops-api/get-user.md")
+                  "GET /_apis/profile/profiles/me", "GET", "docs/azure-devops-api/get-current-user.md")
 
     # list_repositories
     print("  GET repos")
@@ -367,7 +365,8 @@ def capture_azure(cfg: dict) -> None:
         "id": first_comment.get("id", 1000) + 1,
         "text": "Example comment text",
         "createdDate": first_comment.get("createdDate", "2026-01-01T00:00:00.000Z"),
-        "createdBy": created_by if created_by else {"uniqueName": "testowner", "id": "1"},
+        "createdBy": sanitize_ado_profile(first_comment.get("createdBy", {}))
+        or {"uniqueName": "testowner", "id": "1"},
     }, "POST /_apis/wit/workitems/{n}/comments", "POST",
                   "docs/azure-devops-api/create-workitem-comment.md")
 
