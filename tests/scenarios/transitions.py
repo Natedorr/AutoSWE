@@ -1758,10 +1758,10 @@ TRANSITIONS: list[dict[str, Any]] = [
 # MCP-only rows (waiting_resume_mcp_post_plan) are excluded — Claude only.
 
 CODEX_TRANSITIONS: list[str] = [
-    "fresh_plan_command",            # Plan with read-only sandbox
+    "fresh_plan_command",            # Plan phase (bypass flag, no --sandbox)
     "fresh_plan_with_questions",     # Questions → waiting
     "codex_plan_prose_only",         # Prose-only output → waiting (fs scan skipped)
-    "fresh_fix_command",             # Fix with workspace-write sandbox
+    "fresh_fix_command",             # Fix phase (bypass flag, no --sandbox)
     "fresh_fix_fails",               # Error subtype → failed
     "plan_ready_then_fix",           # Resume fix from planned
     "waiting_user_plain_reply",      # Resume plan from waiting
@@ -1771,25 +1771,6 @@ CODEX_TRANSITIONS: list[str] = [
     "planned_then_review_blocked",   # Review verdict gating (Blocked → review_blocked)
     "retry_forks_from_last_good_session",  # /retry: Codex lacks session_fork → degrades to fresh/resume, still reaches fixed
 ]
-
-
-# ---------------------------------------------------------------------------
-# Helper: translate claude_permission → codex sandbox
-
-
-def _permission_to_sandbox(permission: str) -> str:
-    """Map a claude_permission expectation to the Codex sandbox value.
-
-    ``"plan"`` → ``"read-only"``
-    ``"bypassPermissions"`` → ``"workspace-write"``
-    ``"read_only"`` → ``"read-only"``
-    """
-    mapping = {
-        "plan": "read-only",
-        "bypassPermissions": "workspace-write",
-        "read_only": "read-only",
-    }
-    return mapping.get(permission, "read-only")
 
 
 # ---------------------------------------------------------------------------

@@ -292,7 +292,7 @@ class TestCapabilityHonesty:
         from autoswe.harness.backends.codex import CodexBackend
 
         caps = CodexBackend.capabilities()
-        # Phase 4: Codex does NOT support these (mode IS supported via _mode_to_sandbox).
+        # Phase 4: Codex does NOT support these (mode IS accepted; no Codex --sandbox mapping).
         # session_fork is Claude-exclusive: Codex has no fork primitive (resume in place or fresh).
         claude_exclusives = {"mcp", "can_use_tool", "plan_permission", "plan_file", "session_fork"}
         overlap = caps & claude_exclusives
@@ -467,7 +467,9 @@ class TestModeTranslationParity:
     """Each backend translates RunSpec.mode to its own config correctly.
 
     Claude Code: mode → permission_mode + tool lists.
-    Codex: mode → --sandbox flag.
+    Codex: mode is accepted for contract parity but no longer maps to a
+    ``--sandbox`` flag (issue #129 — the per-mode sandbox was dead weight,
+    neutralized by the always-on bypass flag).
 
     Both must handle all three modes without raising.
     """
@@ -488,35 +490,14 @@ class TestModeTranslationParity:
             )
             assert len(tools) > 0, f"allowed_tools for {mode!r} should not be empty"
 
-    def test_codex_mode_sandbox_coverage(self):
-        """CodexBackend _MODE_SANDBOX covers all three modes."""
-        from autoswe.harness.backends.codex import _MODE_SANDBOX
+    def test_codex_has_no_sandbox_mapping(self):
+        """Since issue #129 Codex no longer maps mode → --sandbox.
 
-        for mode in ("plan", "read_only", "read_write"):
-            assert mode in _MODE_SANDBOX, (
-                f"CodexBackend missing mode translation for {mode!r}"
-            )
-            sandbox = _MODE_SANDBOX[mode]
-            assert sandbox in ("read-only", "workspace-write"), (
-                f"Unexpected sandbox value for {mode!r}: {sandbox!r}"
-            )
+        The per-mode sandbox mapping was dead weight (the always-on bypass
+        flag neutralized it). Confirm the module no longer exposes a
+        mode→sandbox table or helper.
+        """
+        import autoswe.harness.backends.codex as codex_mod
 
-    def test_mode_readonly_equivalence(self):
-        """plan and read_only both map to read-only sandbox for Codex."""
-        from autoswe.harness.backends.codex import _MODE_SANDBOX
-
-        assert _MODE_SANDBOX["plan"] == "read-only"
-        assert _MODE_SANDBOX["read_only"] == "read-only"
-
-    def test_mode_readwrite_is_workspace(self):
-        """read_write mode maps to workspace-write sandbox for Codex."""
-        from autoswe.harness.backends.codex import _MODE_SANDBOX
-
-        assert _MODE_SANDBOX["read_write"] == "workspace-write"
-
-    def test_mode_none_defaults_safe(self):
-        """Unspecified mode defaults to read-only (safe) for Codex."""
-        from autoswe.harness.backends.codex import _mode_to_sandbox
-
-        assert _mode_to_sandbox(None) == "read-only"
-        assert _mode_to_sandbox("unknown_mode") == "read-only"
+        assert not hasattr(codex_mod, "_MODE_SANDBOX")
+        assert not hasattr(codex_mod, "_mode_to_sandbox")

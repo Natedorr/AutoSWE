@@ -144,7 +144,14 @@ class FakeProcess:
 
 
 def _parse_command(cmd: list[str]) -> dict:
-    """Extract model, sandbox, resume, prompt_prefix from a codex exec command."""
+    """Extract model, sandbox, bypass, resume, prompt_prefix from a codex exec command.
+
+    Note: since issue #129 the backend no longer emits ``--sandbox`` (the
+    mode→sandbox mapping was dead weight — the bypass flag neutralized it).
+    ``bypass`` records the presence of the now-explicit
+    ``--dangerously-bypass-approvals-and-sandbox`` flag; ``sandbox`` is kept
+    for any test that still wants to assert its absence.
+    """
     result: dict[str, Any] = {}
     i = 0
     while i < len(cmd):
@@ -157,6 +164,14 @@ def _parse_command(cmd: list[str]) -> dict:
             result["sandbox"] = cmd[i + 1]
             i += 2
             continue
+        if part == "--dangerously-bypass-approvals-and-sandbox":
+            result["bypass"] = True
+            i += 1
+            continue
+        if part == "--approve-for-me":
+            result["approve_for_me"] = True
+            i += 1
+            continue
         if part == "resume" and i > 0 and cmd[i - 1] == "exec":
             # Resume mode: next arg is the session id
             if i + 1 < len(cmd):
@@ -168,6 +183,9 @@ def _parse_command(cmd: list[str]) -> dict:
             i += 2
             continue
         i += 1
+
+    result.setdefault("bypass", False)
+    result.setdefault("approve_for_me", False)
 
     # Prompt is after "--"
     try:
