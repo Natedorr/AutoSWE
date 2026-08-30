@@ -757,6 +757,39 @@ def test_load_harnesses_config_with_list_values(isolated_autoswe_dir):
     assert result["with-list"]["extra_tools"] == ["Read", "Write"]
 
 
+def test_load_harnesses_config_nested_env_preserved_and_expanded(
+    isolated_autoswe_dir, monkeypatch
+):
+    """A per-profile `env` map is preserved as a nested dict and its string
+    values undergo ${VAR} / ${VAR:-default} expansion (issue #120 Part B)."""
+    harnesses_json = isolated_autoswe_dir / "config" / "harnesses.json"
+    harnesses_json.write_text(
+        '{"claude-env": {"backend": "claude_code", "model": "m", '
+        '"env": {"FOO": "${BAR:-default}", "STATIC": "1"}}, '
+        '"codex-env": {"backend": "codex", "model": "gpt-5", '
+        '"env": {"OPENAI_API_BASE": "${CUSTOM_BASE:-http://x}"}}}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("BAR", raising=False)
+    monkeypatch.delenv("CUSTOM_BASE", raising=False)
+
+    from autoswe.core import config as config_mod
+    config_mod._harnesses_cache.clear()
+
+    from autoswe.core.config import load_harnesses_config
+
+    result = load_harnesses_config()
+    claude_env = result["claude-env"]["env"]
+    assert isinstance(claude_env, dict)
+    assert claude_env["FOO"] == "default"  # ${BAR:-default} → default
+    assert claude_env["STATIC"] == "1"
+
+    codex_env = result["codex-env"]["env"]
+    assert isinstance(codex_env, dict)
+    assert codex_env["OPENAI_API_BASE"] == "http://x"
+
+
 # ---------------------------------------------------------------------------
 # AGENT_RETRY_ON_SUBTYPE config
 # ---------------------------------------------------------------------------

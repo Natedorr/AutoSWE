@@ -132,6 +132,9 @@ class RunSpec:
     allowed_tools: list | None = None
     disallowed_tools: list | None = None
 
+    # Turn cap: honored by backends that expose one (claude_code); no-op on
+    # codex (Codex `exec` has no turn cap — the guard is `timeout`). See
+    # docs/autoswe/harnesses.md.
     max_turns: int = 200
     timeout: int = 7200
     cli_path: str | None = None

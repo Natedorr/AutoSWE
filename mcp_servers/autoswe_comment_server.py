@@ -64,8 +64,6 @@ COMMENT_ID = os.environ.get("AUTOSWE_COMMENT_ID", "")
 SUPPRESS_POSTING = os.environ.get("AUTOSWE_SUPPRESS_POSTING", "0") == "1"
 
 
-
-
 # ---- HTTP helpers (no external deps) ----
 
 def _http(method: str, url: str, body: dict | None) -> dict:
