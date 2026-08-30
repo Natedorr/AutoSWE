@@ -8,9 +8,9 @@
     "provider": "github",
     "base_branch": "develop",
     "pat": "github_pat_here",
-    "model": "claude-opus-4-7",
+    "model": "claude-opus-5",
     "plan_model": "claude-haiku-4-5-20251001",
-    "fix_model": "claude-opus-4-7",
+    "fix_model": "claude-opus-5",
     "agent_timeout": 7200,
     "auto_dispatch_new": false
   },
@@ -18,7 +18,7 @@
     "provider": "azure",
     "base_branch": "main",
     "pat": "azure_pat_here",
-    "model": "claude-opus-4-7",
+    "model": "claude-opus-5",
     "agent_timeout": 7200
   }
 }
