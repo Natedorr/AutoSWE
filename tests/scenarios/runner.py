@@ -275,7 +275,12 @@ def assert_codex_calls(cx_fake, expected_calls: list[dict]) -> None:
     """Assert Codex subprocess calls match expectations.
 
     Each entry in *expected_calls* is a dict with optional keys:
-        sandbox - expected sandbox value (``"read-only"`` or ``"workspace-write"``)
+        sandbox - expected sandbox value (``"read-only"`` or ``"workspace-write"``).
+            Since issue #129 the backend no longer emits ``--sandbox``; this key is
+            only meaningful when asserting its *absence* (``sandbox: None``) or in
+            legacy fixtures.
+        bypass - expected presence of the
+            ``--dangerously-bypass-approvals-and-sandbox`` flag (``True``/``False``)
         is_resume - True for resume mode, False for fresh exec
         model - expected model
     """
@@ -290,6 +295,11 @@ def assert_codex_calls(cx_fake, expected_calls: list[dict]) -> None:
             )
 
         call = cx_fake.calls[i]
+        if "bypass" in exp:
+            assert call.get("bypass") == exp["bypass"], (
+                f"Call {i}: expected bypass={exp['bypass']!r}, "
+                f"got {call.get('bypass')!r}"
+            )
         if "sandbox" in exp:
             assert call.get("sandbox") == exp["sandbox"], (
                 f"Call {i}: expected sandbox={exp['sandbox']!r}, "

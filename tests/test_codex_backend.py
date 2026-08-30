@@ -13,9 +13,11 @@ import pytest
 
 from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.backends.codex import (
+    _BYPASS_APPROVALS_AND_SANDBOX,
+    _BYPASS_ENV_VAR,
     CodexBackend,
+    _bypass_approvals,
     _CodexAccumulator,
-    _mode_to_sandbox,
     _parse_jsonl_line,
 )
 
@@ -200,32 +202,58 @@ def test_codex_run_returns_awaitable():
     result.close()
 
 
-# ---------- Mode → sandbox mapping ----------
+# ---------- Bypass approvals / sandbox ----------
 
 
-def test_mode_to_sandbox_plan():
-    """mode='plan' → read-only sandbox."""
-    assert _mode_to_sandbox("plan") == "read-only"
+def test_bypass_flag_constant():
+    """The explicit flag string is the documented Codex bypass flag."""
+    assert _BYPASS_APPROVALS_AND_SANDBOX == "--dangerously-bypass-approvals-and-sandbox"
 
 
-def test_mode_to_sandbox_read_only():
-    """mode='read_only' → read-only sandbox."""
-    assert _mode_to_sandbox("read_only") == "read-only"
+def test_bypass_default_true_when_no_config_or_env(monkeypatch):
+    """No profile field, no env var → bypass defaults to True (isolated machine)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    assert _bypass_approvals(None) is True
+    assert _bypass_approvals({}) is True
 
 
-def test_mode_to_sandbox_read_write():
-    """mode='read_write' → workspace-write sandbox."""
-    assert _mode_to_sandbox("read_write") == "workspace-write"
+def test_bypass_profile_field_true():
+    """Profile bypass_approvals=True wins (highest precedence)."""
+    assert _bypass_approvals({"bypass_approvals": True}) is True
 
 
-def test_mode_to_sandbox_none():
-    """mode=None → read-only (safe default)."""
-    assert _mode_to_sandbox(None) == "read-only"
+def test_bypass_profile_field_false_beats_env(monkeypatch):
+    """Profile bypass_approvals=False wins even when the env var is 'true'."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "true")
+    assert _bypass_approvals({"bypass_approvals": False}) is False
 
 
-def test_mode_to_sandbox_unknown():
-    """Unknown mode → read-only (fail-safe)."""
-    assert _mode_to_sandbox("unknown_mode") == "read-only"
+def test_bypass_env_var_true(monkeypatch):
+    """Env var 'true' (no profile field) → bypass on."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "true")
+    assert _bypass_approvals({}) is True
+
+
+def test_bypass_env_var_false(monkeypatch):
+    """Env var 'false' (no profile field) → bypass off."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "false")
+    assert _bypass_approvals({}) is False
+
+
+def test_bypass_env_var_case_and_whitespace(monkeypatch):
+    """Env var parsing is case-insensitive and tolerant of surrounding space."""
+    for raw in ("1", "TRUE", " Yes", " on"):
+        monkeypatch.setenv(_BYPASS_ENV_VAR, raw)
+        assert _bypass_approvals({}) is True, raw
+    for raw in ("0", "FALSE", " no", " off"):
+        monkeypatch.setenv(_BYPASS_ENV_VAR, raw)
+        assert _bypass_approvals({}) is False, raw
+
+
+def test_bypass_env_var_unset_falls_to_default(monkeypatch):
+    """Unset env var + empty harness_cfg → default True."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    assert _bypass_approvals({}) is True
 
 
 # ---------- JSONL line parser ----------
@@ -621,8 +649,13 @@ def test_codex_basic_run():
     assert result.duration_seconds >= 0
 
 
-def test_codex_run_calls_with_correct_flags():
-    """CodexBackend builds the correct command-line flags."""
+def test_codex_run_calls_with_correct_flags(monkeypatch):
+    """CodexBackend builds the correct command-line flags (Option A: no --sandbox).
+
+    Since issue #129 the backend no longer emits a per-mode ``--sandbox`` value
+    (the bypass flag neutralized it). It emits the explicit bypass flag instead.
+    """
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
     backend = CodexBackend()
     spec = RunSpec(
         prompt="Fix bug",
@@ -647,8 +680,9 @@ def test_codex_run_calls_with_correct_flags():
     # Without an API key, --ignore-user-config is absent (use local codex config)
     assert "--ignore-user-config" not in cmd
     assert "--ignore-rules" in cmd
-    assert "--sandbox" in cmd
-    assert "workspace-write" in cmd
+    # No per-mode sandbox value is emitted anymore (dead-weight removal)
+    assert "--sandbox" not in cmd
+    # Explicit bypass flag is present by default
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     # Old --ask-for-approval must NOT be present
     assert "--ask-for-approval" not in cmd
@@ -684,24 +718,94 @@ def test_codex_ignore_user_config_with_api_key():
     assert cmd[dash_idx + 1] == "Fix bug"
 
 
-def test_codex_read_only_mode():
-    """mode='read_only' produces --sandbox read-only."""
+def test_codex_read_only_mode_no_sandbox(monkeypatch):
+    """mode='read_only' no longer emits --sandbox; default bypass is present."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
     backend = CodexBackend()
     spec = RunSpec(model="gpt-5.6-terra", prompt="Review code", cwd="/tmp/repo", mode="read_only")
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    idx = cmd.index("--sandbox")
-    assert cmd[idx + 1] == "read-only"
+    assert "--sandbox" not in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
 
-def test_codex_plan_mode():
-    """mode='plan' produces --sandbox read-only."""
+def test_codex_plan_mode_no_sandbox(monkeypatch):
+    """mode='plan' no longer emits --sandbox; default bypass is present."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
     backend = CodexBackend()
     spec = RunSpec(model="gpt-5.6-terra", prompt="Plan the fix", cwd="/tmp/repo", mode="plan")
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    idx = cmd.index("--sandbox")
-    assert cmd[idx + 1] == "read-only"
+    assert "--sandbox" not in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+
+
+def test_codex_fresh_bypass_off_via_profile(monkeypatch):
+    """bypass_approvals=False in the profile drops the bypass flag (fresh exec)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    backend = CodexBackend()
+    spec = RunSpec(
+        model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp/repo",
+        mode="read_write",
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra",
+                                "bypass_approvals": False}},
+    )
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+
+def test_codex_fresh_bypass_on_via_profile_true(monkeypatch):
+    """bypass_approvals=True in the profile keeps the bypass flag (fresh exec)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    backend = CodexBackend()
+    spec = RunSpec(
+        model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp/repo",
+        mode="read_write",
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra",
+                                "bypass_approvals": True}},
+    )
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+
+
+def test_codex_fresh_bypass_on_via_env(monkeypatch):
+    """CODEX_BYPASS_APPROVALS_AND_SANDBOX=true (no profile field) → bypass on."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "true")
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp/repo", mode="read_write")
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+
+
+def test_codex_fresh_bypass_off_via_env(monkeypatch):
+    """CODEX_BYPASS_APPROVALS_AND_SANDBOX=false (no profile field) → bypass off."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "false")
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp/repo", mode="read_write")
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+
+def test_codex_resume_bypass_off_via_profile(monkeypatch):
+    """bypass_approvals=False drops the flag on resume too (no sandbox on resume)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    backend = CodexBackend()
+    spec = RunSpec(
+        model="gpt-5.6-terra",
+        prompt="Continue",
+        cwd="/tmp/repo",
+        resume="sess-x",
+        mode="read_write",
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra",
+                                "bypass_approvals": False}},
+    )
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    assert "--sandbox" not in cmd
 
 
 def test_codex_resume_mode():
@@ -720,8 +824,9 @@ def test_codex_resume_mode():
     assert "sess-abc-123" in cmd
 
 
-def test_codex_resume_no_sandbox_or_cd():
+def test_codex_resume_no_sandbox_or_cd(monkeypatch):
     """Resume command must NOT include --sandbox or -C (unsupported by resume subcommand)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
     backend = CodexBackend()
     spec = RunSpec(model="gpt-5.6-terra",
 
@@ -734,6 +839,7 @@ def test_codex_resume_no_sandbox_or_cd():
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "--sandbox" not in cmd
     assert "-C" not in cmd
+    # Default-on bypass is still emitted on resume (resume keeps full access)
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
 

@@ -16,6 +16,7 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | `cli_path` | No | (from env) | Path to the CLI binary (e.g. `claude` or `codex`) |
 | `codex_api_key` | No | — | API key for Codex backend (sets `CODEX_API_KEY` env var) |
 | `openai_api_key` | No | — | Alternative API key for Codex backend (sets `OPENAI_API_KEY` env var) |
+| `bypass_approvals` | No | `true` (Codex only) | Explicit switch for Codex's `--dangerously-bypass-approvals-and-sandbox` flag. `true` (default) grants full write + network access — intended for the dedicated isolated machine (see [safeguards.md](safeguards.md)). Set `false` to drop the flag on a shared host. Overridable via the `CODEX_BYPASS_APPROVALS_AND_SANDBOX` env var (see below) |
 | `anthropic_base_url` | No | (from env) | Custom API endpoint (Claude Code only) |
 | `anthropic_auth_token` | No | (from env) | Auth token (Claude Code only) |
 | `anthropic_api_key` | No | (from env) | API key (Claude Code only) |
@@ -173,7 +174,7 @@ deferred to a follow-up and is not enabled here.
 
 #### `codex` (Phase 4)
 
-Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `-C`, `--dangerously-bypass-approvals-and-sandbox`). Parses the JSONL event stream into a `RunResult`.
+Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--model`, `-C`, and — when enabled by the `bypass_approvals` profile flag, default on — `--dangerously-bypass-approvals-and-sandbox`). Parses the JSONL event stream into a `RunResult`.
 
 **Item/event types parsed** (issue #118): the current CLI emits `thread.started`, `turn.started`/`completed`/`failed`, and `item.*`/`turn.plan.updated` events. Item types handled: `agent_message`/`agentMessage` (primary `RunResult.text` source), `plan` (authoritative text → `RunResult.plan_text`), `reasoning`, `command_execution`, `file_change`, `mcp_tool_call`, `web_search` (progress only). `turn.plan.updated` and plan/reasoning deltas render as live progress. The parser normalizes names defensively so both snake_case and camelCase item types, and both dot/slash event spellings, are accepted regardless of CLI version. The legacy `todo_list`/`summary_output` items and the `item.delta`/`item.updated` events no longer exist in the current CLI and are no longer emitted.
 
@@ -185,6 +186,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 - `codex_api_key` or `openai_api_key`: API key for the provider (optional for local providers)
 - `timeout`: Override the default timeout (optional)
 - `env`: Extra environment variables (a `{key: value}` map) merged into the `codex exec` subprocess (optional). User values win over the api-key fields; see [Per-profile `env`](#per-profile-env)
+- `bypass_approvals`: Explicit switch (boolean, **default `true`**) for the `--dangerously-bypass-approvals-and-sandbox` flag. autoSWE's intended deployment is a dedicated, isolated machine, so the default grants full write + network access to every phase. Set it to `false` on a shared host to drop the flag. Precedence: this profile field → `CODEX_BYPASS_APPROVALS_AND_SANDBOX` env var → default `true`
 
 **Capabilities (Phase 4, core run only):** `mode`, `resume`, `progress_stream`.
 
@@ -192,13 +194,16 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 
 **Retryable subtypes:** `{"error", "killed"}` — Codex failure is return-value-driven (non-zero exit or `turn.failed`), not exception-driven. The runner inspects `RunResult.subtype` and retries when `AGENT_RETRY_ON_FAILURE > 0`. Override with `AGENT_RETRY_ON_SUBTYPE`.
 
-**Mode → sandbox mapping:**
-- `plan` / `read_only` → `--sandbox read-only`
-- `read_write` → `--sandbox workspace-write`
+**Sandbox / bypass policy (issue #129):** the Codex backend does **not** map `RunSpec.mode` to a `--sandbox` value. It previously did (`plan`/`read_only` → `--sandbox read-only`, `read_write` → `--sandbox workspace-write`), but that was dead weight — the `--dangerously-bypass-approvals-and-sandbox` flag was appended unconditionally and neutralized whatever `--sandbox` was set, so plan/review runs got full access regardless of the mapping. The mapping and the `--sandbox` emission have been removed; the emitted flag set now matches the documented intent. `RunSpec.mode` is still accepted (contract parity with `claude_code`) but has no effect on the Codex CLI flags.
+
+Access is instead controlled by a single explicit switch, `bypass_approvals` (profile field, **default `true`**):
+
+- **Default (`true`)** — every run (fresh and resume) emits `--dangerously-bypass-approvals-and-sandbox`: full write + network, no approvals. This is the "dedicated isolated machine" posture autoSWE targets (see [safeguards.md](safeguards.md#deployment-model-the-first-safeguard)); the Codex docs' safety tip reserves bypass for exactly that.
+- **`false`** — the flag is omitted. Codex then applies its default sandbox/approval policy (workspace-write / on-request) from `~/.codex/config.toml`. Use this on a shared host where you don't want unconditional full access.
 
 **Command mapping:**
-- Fresh run: `codex exec --json --sandbox <mode> --model <model> -C <cwd> -- <prompt>` (session persisted)
-- Resume: `codex exec resume <session_id> --json --model <model>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`)
+- Fresh run: `codex exec --json [--dangerously-bypass-approvals-and-sandbox] --model <model> -C <cwd> -- <prompt>` (session persisted; the bypass flag is present when `bypass_approvals` is on)
+- Resume: `codex exec resume <session_id> --json [--dangerously-bypass-approvals-and-sandbox] --model <model>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`; `--sandbox` is not supported by `codex exec resume` at all)
 
 **Known limitations:**
 - ``RunSpec.max_turns`` is **not honored** — Codex `exec` exposes no turn cap (the old `agent.max_turns` config key was removed; live-verified on codex-cli 0.150.1, where `-c agent.max_turns=N` is rejected under `--strict-config` and silently ignored otherwise). The effective anti-runaway guard is the wall-clock timeout (`timeout` profile field / `AGENT_TIMEOUT`).

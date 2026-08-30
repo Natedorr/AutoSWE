@@ -27,10 +27,11 @@
   },
 
   "codex-gpt56-terra": {
-    "_comment": "OpenAI Codex with GPT-5.6 Terra — requires 'codex' CLI on PATH and CODEX_API_KEY (or openai_api_key as fallback)",
+    "_comment": "OpenAI Codex with GPT-5.6 Terra — requires 'codex' CLI on PATH and CODEX_API_KEY (or openai_api_key as fallback). Codex runs target a dedicated isolated machine, so the bypass-approvals-and-sandbox flag is on by default; set bypass_approvals to false to drop it (e.g. on a shared host).",
     "backend": "codex",
     "model": "gpt-5.6-terra",
-    "codex_api_key": "${CODEX_API_KEY}"
+    "codex_api_key": "${CODEX_API_KEY}",
+    "bypass_approvals": true
   },
 
   "codex-gpt5-codex": {

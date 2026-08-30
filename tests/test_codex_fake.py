@@ -191,8 +191,12 @@ class TestCodexFakeFidelity:
         assert "What framework?" in result.text
         assert result.subtype == "success"
 
-    def test_sandbox_from_mode(self):
-        """CodexFake records sandbox flag from mode translation."""
+    def test_bypass_default_on(self):
+        """CodexFake records the bypass flag (default on), no --sandbox emitted.
+
+        Since issue #129 the backend no longer maps mode to a sandbox value;
+        the default is full bypass and ``--sandbox`` is never emitted.
+        """
         fake = CodexFake()
         fake.script_response("ok", session_id="s1")
 
@@ -219,11 +223,16 @@ class TestCodexFakeFidelity:
 
         assert len(fake.calls) == 1
         call = fake.calls[0]
-        assert call["sandbox"] == "read-only"
+        assert call["bypass"] is True
+        assert "sandbox" not in call  # --sandbox no longer emitted
         assert not call["is_resume"]
 
-    def test_read_write_sandbox(self):
-        """mode='read_write' → sandbox='workspace-write'."""
+    def test_read_write_bypass(self):
+        """mode='read_write' → bypass on by default, no --sandbox emitted.
+
+        Since issue #129 the mode no longer picks a sandbox; every mode gets
+        the (default-on) bypass flag and never a ``--sandbox`` value.
+        """
         fake = CodexFake()
         fake.script_response("ok", session_id="s1")
 
@@ -248,7 +257,8 @@ class TestCodexFakeFidelity:
 
         _run_async(_run())
 
-        assert fake.calls[0]["sandbox"] == "workspace-write"
+        assert fake.calls[0]["bypass"] is True
+        assert "sandbox" not in fake.calls[0]
 
     def test_resume_mode(self):
         """Resume mode → call recorded with session_id, no sandbox."""
@@ -271,8 +281,9 @@ class TestCodexFakeFidelity:
         assert len(fake.calls) == 1
         assert fake.calls[0]["is_resume"]
         assert fake.calls[0]["resume"] == "session-123"
-        # Resume mode should NOT have sandbox
+        # Resume mode should NOT have sandbox, but keeps default-on bypass
         assert "sandbox" not in fake.calls[0]
+        assert fake.calls[0]["bypass"] is True
 
     def test_multiple_responses(self):
         """Multiple scripted responses are consumed in order."""

@@ -28,7 +28,6 @@ from tests.scenarios.harness import (
 from tests.scenarios.transitions import (
     CODEX_TRANSITIONS,
     TRANSITIONS,
-    _permission_to_sandbox,
     build_azure_state,
     build_github_state,
     build_queue_task,
@@ -241,16 +240,19 @@ def test_transition_codex(
     if no_codex:
         assert len(hw.codex.calls) == 0, "Expected no Codex calls"
     elif "claude_permission" in expect:
-        # Translate claude_permission → expected sandbox
-        expected_sandbox = _permission_to_sandbox(expect["claude_permission"])
+        # Since issue #129 Codex no longer maps mode → --sandbox (the always-on
+        # bypass flag neutralized it). Every codex call carries the default-on
+        # bypass flag instead. (The env override is cleared above so the default
+        # applies deterministically.)
         from tests.scenarios.runner import assert_codex_calls
 
-        # Codex resume mode doesn't use --sandbox (the CLI doesn't support it).
-        # If the first call is a resume, assert is_resume=True; otherwise assert sandbox.
+        # Codex resume mode doesn't take --sandbox (the CLI doesn't support it).
+        # If the first call is a resume, assert is_resume=True; otherwise assert
+        # the fresh-exec call carries the default bypass flag.
         if hw.codex.calls and hw.codex.calls[0].get("is_resume"):
             assert_codex_calls(hw.codex, [{"is_resume": True}])
         else:
-            assert_codex_calls(hw.codex, [{"sandbox": expected_sandbox}])
+            assert_codex_calls(hw.codex, [{"bypass": True}])
 
     # Git call assertions
     if git_calls:
