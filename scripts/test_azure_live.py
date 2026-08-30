@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.p
 
 from autoswe.core.config import load_config
 from autoswe.core.slug import make_slug
-from autoswe.providers.azure.api import _ado_api_version, ado_get, ado_patch, ado_post
+from autoswe.providers.azure.api import _ado_api_version, ado_get, ado_patch, ado_patch_json, ado_post
 from autoswe.providers.azure.tracker import AzureTracker
 from autoswe.providers.azure.vcs import AzureVCS
 from autoswe.providers.factory import get_tracker
@@ -272,7 +272,7 @@ def _vcs_pr_roundtrip():
         assert found.number == pr.number
         # close the PR
         close_path = _ado_api_version(f"https://dev.azure.com/{ORG}/{PROJECT}/_apis/git/repositories/{REPO}/pullrequests/{pr.number}")
-        ado_post(close_path, PAT, body={"status": "completed", "completionOptions": {"deleteSourceBranch": False}})
+        ado_patch_json(close_path, PAT, body={"status": "completed", "completionOptions": {"deleteSourceBranch": False}})
         return pr.number
     except RuntimeError as e:
         assert "TF401398" in str(e) or "pull request" in str(e).lower()
