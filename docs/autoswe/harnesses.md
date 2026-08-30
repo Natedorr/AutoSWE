@@ -162,17 +162,25 @@ retry can roll back to it. autoSWE maps the uniform `RunSpec.fork_session` flag
 to this:
 
 - **Checkpoint.** `emit()` records the run's `session_id` into the queue's
-  `last_good_session_id` on every **non-failed** run that persists a session.
+  `last_good_session_id` on every **non-failed** run that persists a session,
+  **and** `last_good_session_backend` with the backend that produced it
+  (the resolved phase harness's `backend`, e.g. `claude_code` / `codex`).
   Unlike `session_id`, it is **never cleared on `FAILED`** (the `FAILED` path
   nulls `session_id` so we don't resume a broken session). So the most recent
-  good session always survives a failure.
+  good session — and which backend made it — always survives a failure.
 - **Fork.** `_run_retry` replays the last substantive command. For a `/fix`
-  replay it sets `fork_session=True` **iff** the fix backend advertises
-  `"session_fork"` and a checkpoint exists (`last_good_session_id` or
-  `session_id`). `coder.run_fix` then resumes from `last_good_session_id` (not
-  `session_id`, which is `None` after a failure) with `fork_session=True`, so
-  the SDK opens a **new** session whose id becomes the new `session_id` while
-  the original checkpoint stays resumable. With no checkpoint yet (first-ever
+  replay it sets `fork_session=True` **iff** all three hold: the fix backend
+  advertises `"session_fork"`, a checkpoint exists (`last_good_session_id` or
+  `session_id`), and the checkpoint's recorded backend
+  (`last_good_session_backend`) **matches the fix backend**. The last condition
+  is the provenance gate: in a mixed per-phase config (e.g. Codex
+  `plan_harness` + Claude `fix_harness`) a Codex plan's session id would
+  otherwise be handed to the Claude SDK, which cannot resolve a foreign-backend
+  session — so a mismatch (or a missing tag) falls back to a fresh session.
+  `coder.run_fix` then resumes from `last_good_session_id` (not `session_id`,
+  which is `None` after a failure) with `fork_session=True`, so the SDK opens
+  a **new** session whose id becomes the new `session_id` while the original
+  checkpoint stays resumable. With no usable checkpoint yet (first-ever
   failure) there is nothing to fork from → a fresh session.
 - **Auto-restore.** Because the fork never mutates the original and a failed
   forked retry leaves `last_good_session_id` untouched, a repeated `/retry`

@@ -1065,9 +1065,11 @@ TRANSITIONS: list[dict[str, Any]] = [
                 "attempt_count": 2,
                 "last_dispatched_command": "/fix",
                 # session_id was nulled on the FAILED path; the surviving
-                # known-good checkpoint (from the successful plan) remains.
+                # known-good checkpoint (from the successful plan) remains,
+                # tagged with the backend that produced it.
                 "session_id": None,
                 "last_good_session_id": "s-plan-good-42",
+                "last_good_session_backend": "claude_code",
                 "first_dispatched_at": None,
                 "provider": "github",
             },
@@ -1084,6 +1086,62 @@ TRANSITIONS: list[dict[str, Any]] = [
             # last_good_session_id AND request a fork so the original stays intact.
             "claude_calls": [
                 {"resume": "s-plan-good-42", "fork_session": True},
+            ],
+        },
+    },
+    {
+        "name": "retry_no_fork_when_checkpoint_backend_mismatches",
+        "description": (
+            "/retry from failed state where the checkpoint was produced by a "
+            "DIFFERENT backend than the fix backend → does NOT fork "
+            "(fork_session=False), falls back to a fresh session"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: timeout\n\nPost `/retry` to continue.\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 2,
+                "last_dispatched_command": "/fix",
+                "session_id": None,
+                # Checkpoint exists but was written by a DIFFERENT backend than
+                # the fix backend (mixed per-phase config). Forking it would
+                # hand a foreign session id to the fix backend's SDK.
+                "last_good_session_id": "s-codex-plan-42",
+                "last_good_session_backend": "codex",
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command"],
+            # Must NOT fork from a foreign-backend checkpoint: no resume, no fork.
+            "claude_calls": [
+                {"resume": None, "fork_session": False},
             ],
         },
     },

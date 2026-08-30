@@ -376,6 +376,21 @@ def emit(
         # Review is excluded: its throwaway session is not a checkpoint.
         if new_status != "failed":
             queue_patch["last_good_session_id"] = session_id
+            # Tag which backend produced this checkpoint. A /retry later only
+            # forks when the checkpoint's backend matches the phase's resolved
+            # backend, so a Codex-produced session id can never be resumed by a
+            # Claude fix (the SDK can't resolve a foreign-backend session). Best
+            # effort: if the harness can't be resolved we record None and the
+            # fork gate simply treats the checkpoint as unusable (fresh start).
+            phase = _KIND_TO_PHASE.get(kind)
+            checkpoint_backend = None
+            if phase is not None:
+                try:
+                    from autoswe.core.config import resolve_harness
+                    checkpoint_backend = resolve_harness(phase, world.repo_cfg, cfg).get("backend")
+                except Exception:
+                    checkpoint_backend = None
+            queue_patch["last_good_session_backend"] = checkpoint_backend
 
     # Merge lifecycle field mutations (last_phase, resume_phase, plan_file_path,
     # review_file_path, first_dispatched_at, _guard_blocked). Computed once up

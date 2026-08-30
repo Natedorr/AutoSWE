@@ -103,6 +103,7 @@ def _load_world(data: dict) -> World:
         last_phase=task_data.get("last_phase", "plan"),
         resume_phase=task_data.get("resume_phase"),
         last_good_session_id=task_data.get("last_good_session_id"),
+        last_good_session_backend=task_data.get("last_good_session_backend"),
         created_at=task_data.get("created_at", ""),
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
@@ -429,6 +430,11 @@ def test_fix_success_sets_last_good_session_id():
     assert patch.get("session_id") == "session-fix-789"
     assert patch.get("last_good_session_id") == "session-fix-789", (
         "non-failed run must record last_good_session_id as a fork checkpoint"
+    )
+    # ...and tag which backend produced it, so a later /retry only forks when
+    # the fix backend matches. The default (no harnesses.json) backend is Claude.
+    assert patch.get("last_good_session_backend") == "claude_code", (
+        "checkpoint must record its producing backend for the fork provenance gate"
     )
 
 

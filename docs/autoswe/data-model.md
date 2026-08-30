@@ -54,6 +54,7 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it â€
 | `autoswe_status` | `str \| None` | Run-state enum (see above). **Source of truth.** |
 | `session_id` | `str` | Agent session ID (Claude Code or Codex); used to resume the planner/coder session. **Cleared on `FAILED`** so the next dispatch does not resume a broken session |
 | `last_good_session_id` | `str \| None` | Last known-good session checkpoint. Set by `emit()` on every non-failed run that persists a `session_id`; **never cleared on `FAILED`** (unlike `session_id`). This is the session `/retry` forks from on backends that advertise the `"session_fork"` capability, so a failed retry leaves the checkpoint intact and the next `/retry` re-forks from the same good session. See [harnesses.md](harnesses.md#retry-semantics) |
+| `last_good_session_backend` | `str \| None` | The coding backend (`claude_code` / `codex`) that produced `last_good_session_id`. Written by `emit()` alongside the checkpoint; **never cleared on `FAILED`**. `_run_retry` only forks when this matches the resolved fix backend, so a mixed per-phase config (e.g. Codex `plan_harness` + Claude `fix_harness`) can't hand a foreign-backend session id to the fix backend's SDK. See [harnesses.md](harnesses.md#retry-semantics) |
 | `attempt_count` | `int` | Dispatch attempts; incremented by `decide()` on each restart; reset to 1 by `/retry` |
 | `first_dispatched_at` | `str` | ISO 8601; set on first dispatch, reset on terminal status (wall-clock guard anchor) |
 | `last_dispatched_command` | `str \| None` | The slash command string last dispatched (e.g. `/plan`) |
@@ -127,6 +128,7 @@ class TaskState:
     last_consumed_reply_id: int | None
     session_id: str | None
     last_good_session_id: str | None
+    last_good_session_backend: str | None
     pr_number: int | None
     guard_blocked: bool
     gh_closed: bool

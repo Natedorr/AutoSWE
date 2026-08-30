@@ -81,7 +81,7 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
 
 - **No handler function.** Dispatch scans comments for last substantive command (not `/pr`, `/sync`, `/retry`, `/skip`, or `/abort`), then calls `_run_handler(effective_cmd, effective_guid, task, repo_cfg, cfg)`
 - **Returns:** same as the replayed handler
-- **Fork-on-retry.** When replaying `/fix`, a failed task forks from its last known-good session on backends that advertise the `"session_fork"` capability (Claude) — leaving the original intact for rollback; Codex resumes-in-place or starts fresh. The decision is made in `orch/run.py::_run_retry` via the backend capability (never a backend-name check). See [harnesses.md — Retry semantics](harnesses.md#retry-semantics) and the queue's `last_good_session_id` checkpoint ([data-model.md](data-model.md)).
+- **Fork-on-retry.** When replaying `/fix`, a failed task forks from its last known-good session on backends that advertise the `"session_fork"` capability (Claude) — leaving the original intact for rollback; Codex resumes-in-place or starts fresh. The decision is made in `orch/run.py::_run_retry` via the backend capability **and a provenance check** that the checkpoint's producing backend (`last_good_session_backend`) matches the resolved fix backend — so a mixed per-phase config can't hand a foreign-backend session id to the fix backend (never a backend-name check). See [harnesses.md — Retry semantics](harnesses.md#retry-semantics) and the queue's `last_good_session_id` / `last_good_session_backend` checkpoint ([data-model.md](data-model.md)).
 
 ## `/skip` — inline in dispatch loop
 
