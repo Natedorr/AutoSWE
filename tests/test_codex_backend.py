@@ -1057,24 +1057,46 @@ def test_codex_no_ephemeral_resume():
     assert "--ephemeral" not in cmd
 
 
-def test_codex_max_turns_flag():
-    """Non-default max_turns adds -c agent.max_turns=N to command."""
+# `agent.max_turns` was removed from the Codex CLI config schema. Live capture on
+# the installed CLI (codex-cli 0.150.1, 2026-08-29):
+#   $ codex exec --strict-config -c agent.max_turns=5 "hi"
+#   Error loading config.toml: unknown configuration field `agent` in -c/--config
+#   override   (exit 1)
+# Without --strict-config (autoSWE does not use it) the unknown override is
+# silently ignored — a no-op runaway guard. `codex exec` exposes no turn cap at
+# all, so RunSpec.max_turns must never be translated into a config override.
+# The effective anti-runaway guard is the wall-clock timeout (spec.timeout →
+# asyncio.wait_for + process.kill in codex.py).
+_LIVE_STRICT_CONFIG_ERROR = "unknown configuration field `agent` in -c/--config override"
+
+
+def test_codex_max_turns_never_emitted():
+    """Non-default max_turns does NOT add any -c agent.max_turns override.
+
+    Fixture/proof: live run of `codex exec --strict-config -c agent.max_turns=5`
+    on codex-cli 0.150.1 fails with {_LIVE_STRICT_CONFIG_ERROR!r} — the key no
+    longer exists, so emitting it would be a silent no-op (or a hard error).
+    """
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=80)
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    assert "-c" in cmd
-    idx = cmd.index("-c")
-    assert cmd[idx + 1] == "agent.max_turns=80"
+    assert "agent.max_turns=80" not in cmd
+    assert not any("max_turns" in part for part in cmd)
 
 
 def test_codex_default_max_turns_no_flag():
-    """Default max_turns (200) does NOT add -c flag."""
+    """Default max_turns (200) does NOT add any -c override either.
+
+    max_turns is a documented no-op on the Codex backend (Codex `exec` has no
+    turn cap; the guard is the wall-clock timeout) — consistent for any value.
+    """
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=200)
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "-c" not in cmd
+    assert not any("max_turns" in part for part in cmd)
 
 
 # ---------- Config interpolation ----------
