@@ -390,7 +390,7 @@ class TestFactoryParity:
         """Factory codex backend satisfies CodingBackend."""
         from autoswe.harness.backends.factory import get_backend
 
-        backend = get_backend({"backend": "codex"})
+        backend = get_backend({"backend": "codex", "model": "gpt-5.6-terra"})
         assert isinstance(backend, CodingBackend)
 
     def test_factory_default_is_claude_code(self):
@@ -406,7 +406,10 @@ class TestFactoryParity:
         from autoswe.harness.backends.factory import get_backend
 
         for backend_name in ("claude_code", "codex"):
-            backend = get_backend({"backend": backend_name})
+            cfg = {"backend": backend_name}
+            if backend_name == "codex":
+                cfg["model"] = "gpt-5.6-terra"
+            backend = get_backend(cfg)
             spec = RunSpec(prompt="test", cwd="/tmp")
             coro = backend.run(spec)
             assert asyncio.iscoroutine(coro), (
@@ -436,7 +439,7 @@ class TestRunnerDispatcherParity:
         """backend_has_capability returns correct values for Codex."""
         from autoswe.harness.runner import backend_has_capability
 
-        harness = {"backend": "codex"}
+        harness = {"backend": "codex", "model": "gpt-5.6-terra"}
         assert backend_has_capability(harness, "mode")
         assert not backend_has_capability(harness, "mcp")
         assert not backend_has_capability(harness, "can_use_tool")

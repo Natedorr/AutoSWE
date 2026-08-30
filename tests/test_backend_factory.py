@@ -3,6 +3,7 @@ import pytest
 
 from autoswe.harness.backends.base import CodingBackend
 from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+from autoswe.harness.backends.codex import CodexBackend
 from autoswe.harness.backends.factory import get_backend
 
 
@@ -30,6 +31,23 @@ def test_unknown_backend_raises_value_error():
     """get_backend raises ValueError for unknown backends."""
     with pytest.raises(ValueError, match="Unknown coding backend"):
         get_backend({"backend": "unknown_backend"})
+
+
+def test_get_backend_codex_without_model_raises():
+    """A codex profile with no model (or empty model) fails fast."""
+    with pytest.raises(ValueError, match="missing required 'model'"):
+        get_backend({"backend": "codex"})
+    with pytest.raises(ValueError, match="missing required 'model'"):
+        get_backend({"backend": "codex", "model": ""})
+    with pytest.raises(ValueError, match="missing required 'model'"):
+        get_backend({"backend": "codex", "model": "   "})
+
+
+def test_get_backend_codex_with_model():
+    """A codex profile with a model returns a CodexBackend."""
+    backend = get_backend({"backend": "codex", "model": "gpt-5.6-terra"})
+    assert isinstance(backend, CodexBackend)
+    assert isinstance(backend, CodingBackend)
 
 
 def test_get_backend_passes_with_extra_fields():

@@ -11,7 +11,7 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | Field | Required | Default | Description |
 |-------|----------|---------|-----------|
 | `backend` | **Yes** | — | Backend implementation: `"claude_code"` or `"codex"` |
-| `model` | No | `""` | Model ID (e.g. `"claude-opus-4-8"`, `"gpt-5"`) |
+| `model` | No for `claude_code`, **required** for `codex` | `""` | Model ID (e.g. `"claude-opus-4-8"`, `"gpt-5.6-terra"`). No default for `codex` — resolution fails if missing |
 | `timeout` | No | (from env) | Backend-specific timeout in seconds |
 | `cli_path` | No | (from env) | Path to the CLI binary (e.g. `claude` or `codex`) |
 | `codex_api_key` | No | — | API key for Codex backend (sets `CODEX_API_KEY` env var) |
@@ -45,9 +45,9 @@ Code path: `config.py:resolve_harness()`.
     "backend": "claude_code",
     "model": "claude-sonnet-4-6"
   },
-  "codex-gpt5": {
+  "codex-gpt56-terra": {
     "backend": "codex",
-    "model": "gpt-5",
+    "model": "gpt-5.6-terra",
     "codex_api_key": "${CODEX_API_KEY}"
   }
 }
@@ -60,7 +60,7 @@ Referenced in `repos.json`:
     "provider": "github",
     "pat": "ghp_...",
     "plan_harness": "claude-opus",
-    "fix_harness": "codex-gpt5",
+    "fix_harness": "codex-gpt56-terra",
     "review_harness": "claude-sonnet"
   }
 }
@@ -69,7 +69,7 @@ Referenced in `repos.json`:
 Or globally in `autoswe.env`:
 ```
 PLAN_HARNESS=claude-opus
-FIX_HARNESS=codex-gpt5
+FIX_HARNESS=codex-gpt56-terra
 ```
 
 ### Mixing Backends
@@ -87,7 +87,7 @@ Different phases can use different backends. Common patterns:
     "provider": "github",
     "pat": "ghp_...",
     "plan_harness": "codex-4o",
-    "fix_harness": "codex-gpt5",
+    "fix_harness": "codex-gpt56-terra",
     "review_harness": "claude-sonnet"
   }
 }
@@ -105,6 +105,21 @@ Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuesti
 
 **Retryable subtypes:** `set()` — Claude Code retries on SDK exceptions (`_get_retryable_exceptions`), not return-value subtypes.
 
+**System prompt:** runs with the `claude_code` system-prompt preset
+(`system_prompt={"type": "preset", "preset": "claude_code"}`), set in
+`ClaudeCodeBackend`'s `options_kwargs` for every run. Without it the Agent SDK
+falls back to a minimal prompt that covers tool calling but omits the preset's
+tool-usage guidance, security/safety instructions, and working-directory /
+environment context — all of which the plan/fix/review workflow implicitly
+assumes. The **bare** preset is intentionally used (no `append`, no
+`exclude_dynamic_sections`). Cache note: the preset embeds per-worktree context
+(cwd, git status, platform) in the system prompt, so each fresh per-issue
+worktree misses the prompt-cache prefix. Setting
+`exclude_dynamic_sections: True` would make the system prompt static and let
+consecutive issues share the cache prefix, at the cost of moving that context
+into the first user message (marginally less authoritative). That lever is
+deferred to a follow-up and is not enabled here.
+
 **Repo content loading (MCP / hooks / skills).** The backend passes autoSWE's injected `mcp_servers` (the comment servers built by `autoswe/harness/mcp_config.py`) to `ClaudeAgentOptions` but leaves `strict_mcp_config` and `setting_sources` at their SDK defaults (`False` / all sources). The practical effect: inside a target repo's worktree, the SDK **also loads** the repo's `.mcp.json` servers, `.claude/settings.json` hooks, and `.claude/` skills/agents/commands — alongside autoSWE's own servers. This is by design (autoSWE runs on a dedicated, isolated machine; see [safeguards.md](safeguards.md#repo-supplied-mcp-servers-hooks-skills-and-tools-load-by-design)). autoSWE's injected servers are programmatic and therefore highest-precedence — a repo cannot shadow `autoswe_comment` / `autoswe_inline_comment`. No per-repo opt-out is currently exposed; if ever needed it would be `strict_mcp_config=True` + `setting_sources` without `"project"`.
 
 #### `codex` (Phase 4)
@@ -115,7 +130,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 
 **Profile fields:**
 - `backend`: `"codex"` (required)
-- `model`: Codex model ID (e.g. `"gpt-5"`, `"gpt-4o"`, `"qwen3.6:27b"` for Ollama)
+- `model`: **required** Codex model ID (e.g. `"gpt-5.6-sol"`, `"gpt-5.6-terra"`, `"gpt-5.6-luna"`, `"gpt-5.5"`, `"qwen3.6:27b"` for Ollama). There is no built-in default — a missing `model` fails resolution with a `ValueError`
 - `codex_api_key` or `openai_api_key`: API key for the provider (optional for local providers)
 - `timeout`: Override the default timeout (optional)
 
@@ -134,6 +149,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 - Resume: `codex exec resume <session_id> --json --model <model>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`)
 
 **Known limitations:**
+- **No system-prompt knob (asymmetry with `claude_code`):** Codex always uses its built-in system prompt; there is no equivalent of Claude Code's `claude_code` preset to select. The nearest levers (`AGENTS.md`, rules) are intentionally disabled via `--ignore-rules` / `--ignore-user-config` for reproducibility, so autoSWE cannot steer the Codex system prompt the way it can for Claude.
 - ``cost_usd`` is an **estimate** from a maintained price table (`codex_pricing.py`). Returns ``None`` for unknown models — never guesses.
 - ``plan_file_path`` is always ``None`` — Codex doesn't write to `~/.claude/plans/`.
 - ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting yet.
@@ -143,7 +159,7 @@ Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `
 
 Backend instances are created by `autoswe/harness/backends/factory.py:get_backend(harness_cfg)`. Dispatch on `harness_cfg["backend"]` field. Mirrors the provider factory pattern (`providers/factory.py`).
 
-Unknown backend names raise `ValueError`. Case-insensitive matching.
+Unknown backend names raise `ValueError`. A `codex` profile without `model` also raises `ValueError` (no default model). Case-insensitive matching.
 
 ### Backward Compatibility
 

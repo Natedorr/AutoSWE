@@ -27,6 +27,11 @@ from autoswe.tracking.labels import _validate_status
 
 _PREFIX = "autoswe:"
 
+# ADO's batch work-item GET caps the number of ids per request (undocumented).
+# Keep well under that cap — docs/azure-devops-api/list-work-items.md,
+# Common Pitfalls #3 ("split into multiple requests").
+_BATCH_CHUNK_SIZE = 100
+
 
 def _is_bot_comment(body: str) -> bool:
     """Check if a comment body was posted by autoSWE.
@@ -169,16 +174,37 @@ class AzureTracker(IssueTracker):
         if not work_items:
             return []
 
-        id_list = [w["id"] for w in work_items]
-        ids_param = ",".join(str(i) for i in id_list)
-        batch_path = _ado_api_version(
-            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems"
-            f"?ids={ids_param}&$expand=all"
-        )
-        batch_result = ado_get(batch_path, self._pat)
-        batch_items = batch_result.get("value", [])
+        # De-dup ids up front (first occurrence wins) so no chunk request
+        # carries duplicate IDs.
+        seen: set[int] = set()
+        id_list: list[int] = []
+        for w in work_items:
+            wid = w["id"]
+            if wid not in seen:
+                seen.add(wid)
+                id_list.append(wid)
 
-        return [self._to_normalized(item) for item in batch_items]
+        # ADO caps the number of ids a single batch GET can carry; split into
+        # chunks of _BATCH_CHUNK_SIZE and merge the responses.
+        merged: list[dict] = []
+        for start in range(0, len(id_list), _BATCH_CHUNK_SIZE):
+            chunk = id_list[start:start + _BATCH_CHUNK_SIZE]
+            ids_param = ",".join(str(i) for i in chunk)
+            batch_path = _ado_api_version(
+                f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems"
+                f"?ids={ids_param}&$expand=all"
+            )
+            batch_result = ado_get(batch_path, self._pat)
+            merged.extend(batch_result.get("value", []))
+
+        # De-dup merged items by id (first occurrence wins) and sort by id so
+        # output ordering is deterministic regardless of chunk boundaries.
+        merged_by_id: dict[int, dict] = {}
+        for item in merged:
+            merged_by_id.setdefault(item["id"], item)
+        merged_sorted = sorted(merged_by_id.values(), key=lambda item: item["id"])
+
+        return [self._to_normalized(item) for item in merged_sorted]
 
     def fetch_issue(self, repo_cfg: dict, issue_number: int) -> NormalizedIssue:
         """Fetch a single work item by number."""
@@ -199,11 +225,11 @@ class AzureTracker(IssueTracker):
         - User comments matching the PAT authenticated user → ``"OWNER"``
         - Everything else → raw ``uniqueName`` (email)
         """
-        preview_path = (
+        path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments?api-version=7.1-preview.4"
+            f"{issue_number}/comments"
         )
-        raw = ado_get(preview_path, self._pat)
+        raw = ado_get(path, self._pat)
         comments_raw = raw.get("comments", [])
 
         # Resolve the authenticated PAT owner for comparison
@@ -272,7 +298,7 @@ class AzureTracker(IssueTracker):
 
         # Primary: Profile API — works regardless of work item existence
         try:
-            me_path = "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1-preview.1"
+            me_path = "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1"
             raw = ado_get(me_path, self._pat)
             self._authenticated_user = (
                 raw.get("principalName", "")
@@ -308,16 +334,22 @@ class AzureTracker(IssueTracker):
         """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments?format=Markdown&api-version=7.1-preview.4"
+            f"{issue_number}/comments?format=Markdown&api-version=7.1"
         )
         result = ado_post(path, self._pat, body={"text": redact_worktree_paths(body)})
         return result.get("id") if result else None
 
     def update_comment(self, repo_cfg: dict, issue_number: int, comment_id: int, body: str) -> None:
-        """Edit a comment on a work item via PATCH."""
+        """Edit a comment on a work item via PATCH.
+
+        ``PATCH .../comments/{id}`` has no refreshed reference page in
+        docs/azure-devops-api/; its availability at stable 7.1 is covered by
+        the live round-trip test in tests/test_azure_live.py (if it ever
+        regresses, re-introduce the preview version here — tracked in issue 022).
+        """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1-preview.4"
+            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1"
         )
         ado_patch_json(path, self._pat, body={"text": redact_worktree_paths(body)})
 

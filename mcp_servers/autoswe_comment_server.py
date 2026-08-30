@@ -118,7 +118,7 @@ def _post_comment(body: str) -> str:
     elif PROVIDER == "azure":
         url = (
             f"https://dev.azure.com/{OWNER}/{REPO}/_apis/wit/workItems/"
-            f"{ISSUE_NUMBER}/comments?format=Markdown&api-version=7.1-preview.4"
+            f"{ISSUE_NUMBER}/comments?format=Markdown&api-version=7.1"
         )
         result = _ado_http("POST", url, {"text": body})
         return str(result.get("id", ""))
@@ -134,7 +134,7 @@ def _update_comment(comment_id: str, body: str) -> None:
     elif PROVIDER == "azure":
         url = (
             f"https://dev.azure.com/{OWNER}/{REPO}/_apis/wit/workItems/"
-            f"{ISSUE_NUMBER}/comments/{comment_id}?format=Markdown&api-version=7.1-preview.4"
+            f"{ISSUE_NUMBER}/comments/{comment_id}?format=Markdown&api-version=7.1"
         )
         _ado_http("PATCH", url, {"text": body})
     else:
