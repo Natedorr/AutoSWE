@@ -1,4 +1,12 @@
-claude-agent-sdk
+# Tested floor. 0.2.137 is the lowest release that bundles a Claude Code CLI
+# able to run the current generation: it clears `fork_session` (SDK >=0.2.137)
+# and the output_tokens_details / origin / ConversationResetMessage fields
+# (SDK >=0.2.136), and its bundled CLI covers Opus 5 (CLI >=v2.1.219). No upper
+# cap: the Python package is still on the 0.2.x line (the 0.2.x -> 0.3.142 jump
+# is the TypeScript package), so capping adds churn without protection.
+# Minimum CLI to run everything: v2.1.233 (CLAUDE_CODE_ENABLE_TODO_TOOLS floor;
+# also satisfies the Opus 5 floor). tests/test_sdk_version.py enforces this floor.
+claude-agent-sdk>=0.2.137
 # Pinned to the 1.x line: that is the major exercised by CI and by
 # mcp_servers/autoswe_inline_comment_server.py (unconditional v1 imports).
 # The mcp>=2.0 branch in mcp_servers/autoswe_comment_server.py is a

@@ -1,5 +1,24 @@
 # Configuration
 
+## SDK & Claude Code CLI version floor
+
+autoSWE runs the `claude_code` backend on the Python Claude Agent SDK, which bundles a
+Claude Code CLI. `requirements.txt` pins **`claude-agent-sdk >= 0.2.137`** (lower bound,
+no cap) — the lowest release whose bundled CLI can run the current model generation.
+The **tested combo** is that floor against Claude Code CLI **v2.1.251**.
+
+- Python Agent SDK floor: **`>= 0.2.137`** (clears `fork_session`, the
+  `output_tokens_details` / `origin` / `ConversationResetMessage` fields, and bundles a
+  CLI that runs the 5.x models).
+- Claude Code CLI floor: the SDK's bundled CLI is sufficient, but if you pin your own
+  `claude` binary (`CLAUDE_CLI_PATH`) use **`v2.1.233`** or later — that is the
+  `CLAUDE_CODE_ENABLE_TODO_TOOLS` floor and also satisfies the Opus 5 floor
+  (`v2.1.219`). Sonnet 5 needs `v2.1.197` or later.
+
+`tests/test_sdk_version.py` fails with an actionable message if the installed
+`claude-agent-sdk` drops below the pinned floor; it skips when the SDK is not installed
+(e.g. Codex-only deploys).
+
 ## `config/autoswe.env` (gitignored, copy from `autoswe.env.example`)
 
 Loaded by `core/config.py:load_config()`. Env vars take precedence over file values; file values override defaults.
