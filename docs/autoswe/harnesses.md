@@ -111,9 +111,14 @@ Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuesti
 falls back to a minimal prompt that covers tool calling but omits the preset's
 tool-usage guidance, security/safety instructions, and working-directory /
 environment context — all of which the plan/fix/review workflow implicitly
-assumes. The bare preset is intentionally used (no `append`, no
-`exclude_dynamic_sections`); see the PR note for issue #121 on the deferred
-cross-worktree prompt-cache evaluation.
+assumes. The **bare** preset is intentionally used (no `append`, no
+`exclude_dynamic_sections`). Cache note: the preset embeds per-worktree context
+(cwd, git status, platform) in the system prompt, so each fresh per-issue
+worktree misses the prompt-cache prefix. Setting
+`exclude_dynamic_sections: True` would make the system prompt static and let
+consecutive issues share the cache prefix, at the cost of moving that context
+into the first user message (marginally less authoritative). That lever is
+deferred to a follow-up and is not enabled here.
 
 #### `codex` (Phase 4)
 
