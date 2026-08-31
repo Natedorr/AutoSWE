@@ -13,7 +13,7 @@ from autoswe.harness.runner import HandlerResult
 from autoswe.harness.schemas import PLAN_SCHEMA, output_format_for
 from autoswe.providers.factory import get_tracker
 from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
-from autoswe.vcs.worktree import create_worktree
+from autoswe.vcs.worktree import create_worktree, ensure_worktree_unchanged
 
 dbg = get_debug_logger()
 
@@ -291,15 +291,6 @@ def _get_git_head(wt: Path) -> str | None:
     return None
 
 
-def _ensure_worktree_unchanged(wt: Path, head_before: str | None) -> None:
-    """Reset the worktree if the agent modified it during plan phase."""
-    head_after = _get_git_head(wt)
-    if head_before and head_after and head_before != head_after:
-        log(f"[WARN] Plan session modified worktree ({head_before[:8]} -> {head_after[:8]}). Resetting.")
-        subprocess.run(["git", "-C", str(wt), "reset", "--hard", head_before], timeout=10, check=False)
-        subprocess.run(["git", "-C", str(wt), "clean", "-fd"], timeout=10, check=False)
-
-
 def _plan_session(
     task: dict,
     repo_cfg: dict,
@@ -344,6 +335,14 @@ def _plan_session(
     state = {}
     cut = make_can_use_tool(task, repo_cfg, state, on_post=progress_callback, read_only=True)
 
+    # Loudly degrade when the backend cannot enforce read-only access (issue
+    # #166): the plan session may still edit the worktree, so the post-run
+    # ensure_worktree_unchanged backstop below is the real guarantee.
+    if not runner.has_read_only_enforcement(harness):
+        log(f"[WARN][PLAN] {task['id']} backend '{harness.get('backend')}' has no read-only "
+            f"enforcement (no 'mode'/'can_use_tool') — plan edits will be rolled back "
+            f"post-run (issue #166)")
+
     head_before = _get_git_head(wt)
 
     # Request a schema-validated plan payload when the resolved backend supports
@@ -377,7 +376,8 @@ def _plan_session(
         dbg.error(f"{error_prefix}: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 
-    _ensure_worktree_unchanged(wt, head_before)
+    # Backstop: roll back any worktree edits the plan session made (issue #166).
+    ensure_worktree_unchanged(wt, head_before)
 
     log(f"[PLAN] {task['id']} session={result.session_id} subtype={result.subtype} duration={result.duration_seconds:.1f}s cost=${result.cost_usd or 0:.4f}")
     dbg.debug("PLAN: sdk returned subtype=%s session=%s len=%d", result.subtype, result.session_id, len(result.text or ""))

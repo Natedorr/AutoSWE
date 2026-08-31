@@ -168,9 +168,14 @@ def _get_cmd(mock_exec: AsyncMock) -> tuple:
 
 
 def test_codex_capabilities():
-    """CodexBackend advertises mode, resume and progress_stream (Phase 4, core run only)."""
+    """CodexBackend advertises resume + progress_stream only (Phase 4, core run).
+
+    No 'mode' (issue #166): Codex accepts RunSpec.mode for contract parity
+    but performs no read-only enforcement, so it must not claim the
+    capability. Plan/review rely on the post-run worktree backstop.
+    """
     caps = CodexBackend.capabilities()
-    assert "mode" in caps
+    assert "mode" not in caps
     assert "resume" in caps
     assert "progress_stream" in caps
     # Phase 4: no mcp, no can_use_tool, no plan_permission
@@ -1837,8 +1842,9 @@ def test_backend_has_capability_codex():
     from autoswe.harness.runner import backend_has_capability
 
     harness = {"backend": "codex", "model": "gpt-5.6-terra"}
-    # Phase 4: mode, resume, and progress_stream
-    assert backend_has_capability(harness, "mode")
+    # Phase 4: resume and progress_stream. No "mode" (issue #166): Codex has
+    # no read-only enforcement, so it must not advertise the capability.
+    assert not backend_has_capability(harness, "mode")
     assert backend_has_capability(harness, "resume")
     assert backend_has_capability(harness, "progress_stream")
     assert not backend_has_capability(harness, "mcp")

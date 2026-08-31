@@ -60,6 +60,26 @@ def backend_has_capability(harness_cfg: dict, capability: str) -> bool:
     return capability in backend.capabilities()
 
 
+def has_read_only_enforcement(harness_cfg: dict) -> bool:
+    """Return True if the backend for *harness_cfg* enforces read-only phases.
+
+    A backend enforces read-only access when it advertises either:
+    - ``"mode"`` — translates ``RunSpec.mode`` ("plan"/"read_only") into
+      permission-mode / sandbox configuration, or
+    - ``"can_use_tool"`` — supports the per-tool runtime callback that blocks
+      Write/Edit/file-mutating Bash calls.
+
+    Handlers run a read-only phase (plan, review) regardless, but use this
+    check to loudly degrade (issue #166): when neither capability is
+    advertised, the handler logs a prominent warning and relies on the
+    post-run ``ensure_worktree_unchanged`` backstop to roll back any edits.
+    """
+    return (
+        backend_has_capability(harness_cfg, "mode")
+        or backend_has_capability(harness_cfg, "can_use_tool")
+    )
+
+
 # ---------- Backward-compatible shim ----------
 
 # Tests and some internal code import `_run_async` directly. Provide a
