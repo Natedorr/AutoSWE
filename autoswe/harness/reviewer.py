@@ -18,6 +18,7 @@ from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.prompts import _find_plan_in_comments, build_review_prompt
 from autoswe.harness.runner import HandlerResult
+from autoswe.harness.schemas import REVIEW_SCHEMA, output_format_for
 from autoswe.providers.factory import get_tracker
 from autoswe.vcs.worktree import create_worktree, worktree_path
 
@@ -44,6 +45,23 @@ def _truncate(text: str, max_lines: int) -> str:
     if len(lines) <= max_lines:
         return text
     return "\n".join(lines[:max_lines]) + f"\n\n... (truncated, {len(lines) - max_lines} more lines)"
+
+
+def _report_text_from_result(result) -> str:
+    """Choose the review report body, preferring structured output (issue #159).
+
+    When the run was issued with a ``REVIEW_SCHEMA`` and the SDK returned a
+    validated payload carrying a non-empty ``report_markdown``, that is the
+    source of truth.  Otherwise fall back to the raw ``result.text`` (the
+    pre-structured behavior) so a run that did not produce structured output
+    still yields a report.
+    """
+    structured = getattr(result, "structured_output", None)
+    if isinstance(structured, dict):
+        report = str(structured.get("report_markdown") or "").strip()
+        if report:
+            return report
+    return result.text or ""
 
 
 def run_review(
@@ -135,6 +153,15 @@ def run_review(
     state = {}
     cut = make_can_use_tool(task, repo_cfg, state, read_only=True)
 
+    # Request a schema-validated review report when the resolved backend
+    # supports it (issue #159). _report_text_from_result() prefers the
+    # structured payload and falls back to result.text.
+    review_output_format = (
+        output_format_for(REVIEW_SCHEMA)
+        if runner.backend_has_capability(harness, "structured_output")
+        else None
+    )
+
     try:
         result = runner.run(
             prompt,
@@ -149,6 +176,7 @@ def run_review(
             state=state,
             progress_callback=progress_callback,
             harness_cfg=harness,
+            output_format=review_output_format,
         )
     except asyncio.TimeoutError:
         return HandlerResult("FAILED: timeout during review phase")
@@ -157,16 +185,21 @@ def run_review(
 
     log(f"[REVIEW] {task['id']} session={result.session_id} cost=${result.cost_usd or 0:.4f}")
 
+    # Prefer the schema-validated report when present; fall back to the raw
+    # text otherwise (issue #159). Both the file write and the done_content
+    # use the same source of truth.
+    report_text = _report_text_from_result(result)
+
     # 6. Persist report to ~/.claude/reviews/<slug>.md
     review_path = _get_reviews_dir() / _review_filename(task["id"])
-    review_path.write_text(result.text, encoding="utf-8")
+    review_path.write_text(report_text, encoding="utf-8")
 
     # 7. Return HandlerResult with review text embedded in done_content.
     #    emit() will produce a post_comment effect → progress.finalize()
     #    patches the sticky progress comment in-place, consistent with all
     #    other handlers (plan, fix, sync, etc.).
     return HandlerResult(
-        done_content="REVIEW_READY\t" + result.text,
+        done_content="REVIEW_READY\t" + report_text,
         cost_usd=result.cost_usd,
         duration_seconds=result.duration_seconds,
         session_id=result.session_id,          # actual review session (not fix session)

@@ -10,6 +10,7 @@ from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server
 from autoswe.harness.prompts import BOT_MARKER, build_plan_prompt
 from autoswe.harness.runner import HandlerResult
+from autoswe.harness.schemas import PLAN_SCHEMA, output_format_for
 from autoswe.providers.factory import get_tracker
 from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
 from autoswe.vcs.worktree import create_worktree
@@ -17,28 +18,78 @@ from autoswe.vcs.worktree import create_worktree
 dbg = get_debug_logger()
 
 
+def _interpret_structured_plan(
+    structured: dict | None,
+) -> tuple[str, str, str | None] | None:
+    """Interpret a schema-validated plan payload (``PLAN_SCHEMA``).
+
+    Returns ``(comment_body, done_content, plan_file_path)`` when the payload is
+    usable, else ``None`` so the caller falls through to the next source in the
+    priority chain (graceful degrade, issue #159).
+
+    A payload is usable only when it carries the markdown the handler would
+    post: a non-empty ``plan_markdown`` for a ready plan, or a non-empty
+    ``question_markdown`` when questions are still pending.  A ready-but-empty
+    or question-less payload is treated as malformed and dropped to the fallback
+    chain rather than posted blank.
+    """
+    if not isinstance(structured, dict):
+        return None
+
+    if structured.get("is_plan_ready"):
+        plan_md = str(structured.get("plan_markdown") or "").strip()
+        if not plan_md:
+            return None
+        comment = f"## Plan\n\n{plan_md}\n\n_Reply with `/fix` to start coding._"
+        return comment, "PLAN_READY", None
+
+    # Not ready: the plan is waiting on clarification.
+    question_md = str(structured.get("question_markdown") or "").strip()
+    if not question_md:
+        return None
+    comment = f"## Questions\n\n{question_md}\n\n_Reply in this thread to answer._"
+    return comment, "WAITING: questions", None
+
+
 def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | None]:
     """Interpret a plan-phase RunResult, returning (done_content, plan_file_path).
 
-    Checks MCP-specific fields (plan_posted, question_posted) only when the
-    backend advertises the ``"mcp"`` capability.  Falls back to text parsing
-    (``_extract_plan_output``) when MCP is unavailable or flags are not set.
+    Source priority:
+      1. AskUserQuestion via the ``can_use_tool`` callback (already posted).
+      2. MCP-specific fields (plan_posted, question_posted) — the comment is
+         already on the thread, so these win over the not-yet-posted sources
+         below; only when the backend advertises the ``"mcp"`` capability.
+      3. Structured output (``result.structured_output``) when present and valid
+         — schema-validated but not yet posted; the handler posts it.
+      4. Text parsing (``_extract_plan_output``): tags, filesystem scan, raw.
+
+    Structured output is additive (issue #159): the MCP tools stay enabled. It
+    is checked *after* the MCP already-posted flags on purpose — when the
+    backend posts via MCP the plan comment already exists, so re-posting it from
+    the structured payload would double-post. It is checked *before* text parse
+    because, like text parse, it is a not-yet-posted source the handler must
+    post (the structured payload is the schema-validated, more reliable form of
+    the same content).
 
     Returns a tuple of (done_content, plan_file_path).  Callers should use
     these to construct the HandlerResult.
     """
-    # 1. AskUserQuestion via can_use_tool callback (always available)
+    # 1. AskUserQuestion via can_use_tool callback (already posted by the callback)
     if state.get("asked_question_md"):
         return "WAITING: questions", None
 
+    # 2. MCP already-posted flags (comment already on the thread) — only when the
+    #    backend advertises the "mcp" capability. These take precedence over the
+    #    not-yet-posted sources below because the comment already exists; posting
+    #    again would double-post (issue #159).
     has_mcp = runner.backend_has_capability(harness, "mcp")
 
     if has_mcp:
-        # 2. MCP post_question → WAITING
+        # MCP post_question → WAITING
         if result.question_posted:
             return "WAITING: questions", None
 
-        # 3. MCP post_plan → PLAN_READY
+        # MCP post_plan → PLAN_READY
         if result.plan_posted:
             plan_file_path: str | None = None
             if result.plan_file_path:
@@ -48,6 +99,14 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | Non
                     if not _plan_file_is_pending(plan_text):
                         plan_file_path = str(pf)
             return "PLAN_READY", plan_file_path
+
+    # 3. Structured output (schema-validated, NOT yet posted) — the handler posts
+    #    it. Preferred over text parse when present & usable (issue #159).
+    structured = getattr(result, "structured_output", None)
+    interpreted = _interpret_structured_plan(structured)
+    if interpreted is not None:
+        comment, done_content, plan_file_path = interpreted
+        return f"_POST:{done_content}\t{comment}", plan_file_path
 
     # 4. Text-parse fallback (always available)
     plan_file: Path | None = (
@@ -287,6 +346,15 @@ def _plan_session(
 
     head_before = _get_git_head(wt)
 
+    # Request a schema-validated plan payload when the resolved backend supports
+    # it (issue #159). Additive: the MCP comment tools below stay enabled; this
+    # simply gives the handler a preferred structured source to read.
+    plan_output_format = (
+        output_format_for(PLAN_SCHEMA)
+        if runner.backend_has_capability(harness, "structured_output")
+        else None
+    )
+
     try:
         result = runner.run(
             prompt_text,
@@ -301,6 +369,7 @@ def _plan_session(
             can_use_tool=cut,
             state=state,
             harness_cfg=harness,
+            output_format=plan_output_format,
         )
     except asyncio.TimeoutError:
         return HandlerResult(f"FAILED: {timeout_msg}")
