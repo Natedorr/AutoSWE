@@ -11,7 +11,13 @@ Batch 10 — Queue store invariants & corruption recovery:
 import json
 import threading
 
-from autoswe.core.queue_store import LockedQueue, _atomic_write, _load_json
+from autoswe.core.queue_store import (
+    LockedQueue,
+    _atomic_write,
+    _load_json,
+    load_queue,
+    save_queue,
+)
 
 # ---------------------------------------------------------------------------
 # _atomic_write / _load_json
@@ -406,6 +412,69 @@ class TestLockContention:
         # Data should be persisted despite the exception
         with LockedQueue() as lq:
             assert "saved" in lq.queue
+
+
+class TestLoadSaveQueue:
+    """load_queue / save_queue narrow the lock to read and write only (#173 F-12)."""
+
+    def test_load_returns_copy(self, isolated_autoswe_dir):
+        """load_queue reads the file and returns a fresh dict; lock is released."""
+        with LockedQueue() as lq:
+            lq.queue["gh:o_r_1"] = {"id": "gh:o_r_1"}
+
+        q = load_queue()
+        assert q == {"gh:o_r_1": {"id": "gh:o_r_1"}}
+        # The lock must be released after load: a nested acquire should not deadlock.
+        with LockedQueue() as lq:
+            assert "gh:o_r_1" in lq.queue
+
+    def test_save_merges_over_concurrent_adds(self, isolated_autoswe_dir):
+        """save_queue preserves entries a concurrent writer added between load and save.
+
+        Simulates: we load {A}, a concurrent poller writes {B} to disk, then we
+        save our patch {A}. Both A and B must be present.
+        """
+        # Initial on-disk state: entry A
+        with LockedQueue() as lq:
+            lq.queue["A"] = {"id": "A"}
+
+        # We load (get A), then do long work without holding the lock.
+        patch = load_queue()
+
+        # Meanwhile a concurrent writer adds entry B directly to disk.
+        with LockedQueue() as lq:
+            lq.queue["B"] = {"id": "B"}
+
+        # Our in-memory patch still only knows A.
+        assert set(patch) == {"A"}
+
+        # Save: our patch is merged over the current on-disk state.
+        save_queue(patch)
+
+        with LockedQueue() as lq:
+            assert "A" in lq.queue, "our entry must survive the save"
+            assert "B" in lq.queue, "concurrent writer's entry must not be clobbered"
+
+    def test_save_our_entry_wins_on_same_slug(self, isolated_autoswe_dir):
+        """For a slug both writers touched, our (later) value wins (last-writer-wins)."""
+        with LockedQueue() as lq:
+            lq.queue["A"] = {"id": "A", "autoswe_status": "pending"}
+
+        patch = load_queue()
+        patch["A"]["autoswe_status"] = "fixed"
+
+        save_queue(patch)
+
+        with LockedQueue() as lq:
+            assert lq.queue["A"]["autoswe_status"] == "fixed"
+
+    def test_save_persists_newly_added_slug(self, isolated_autoswe_dir):
+        """A slug created in-memory after load is written to disk by save_queue."""
+        patch = load_queue()
+        patch["gh:new_1"] = {"id": "gh:new_1", "autoswe_status": "pending"}
+        save_queue(patch)
+        with LockedQueue() as lq:
+            assert "gh:new_1" in lq.queue
 
 
 class TestQueuePruneEdgeCases:

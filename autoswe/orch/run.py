@@ -42,6 +42,10 @@ class DispatchResult:
     session_id: str | None = None
     plan_file_path: str | None = None
     review_file_path: str | None = None
+    # Reviewer's structured verdict (issue #173 F-18). Threaded from
+    # HandlerResult through _to_dispatch so emit() can drive the status gate
+    # off the schema-validated field instead of the markdown regex.
+    verdict: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +155,7 @@ def _to_dispatch(hr: HandlerResult, task: dict, review_file_path: str | None = N
         session_id=hr.session_id or task.get("session_id"),
         plan_file_path=hr.plan_file_path,
         review_file_path=review_file_path or hr.review_file_path,
+        verdict=hr.verdict,
     )
 
 
@@ -300,6 +305,7 @@ def _run_fix_with_sync(
     progress_callback: Callable[[str], None] | None,
     *,
     fork_session: bool = False,
+    fork_session_id: str | None = None,
 ) -> HandlerResult:
     """Pre-dispatch sync before /fix, then run the fix handler."""
     base_branch = task.get("base_branch", "main")
@@ -313,6 +319,7 @@ def _run_fix_with_sync(
     return coder.run_fix(
         task, guidance, repo_cfg, cfg, progress_callback=progress_callback, wt=wt,
         fork_session=fork_session,
+        fork_session_id=fork_session_id,
     )
 
 
@@ -379,7 +386,7 @@ def _fork_session_for_retry(
     repo_cfg: dict,
     cfg: dict,
     slug: str,
-) -> bool:
+) -> str | None:
     """Decide whether a /fix retry forks from the last known-good session.
 
     Forking is safe only when BOTH hold:
@@ -390,13 +397,16 @@ def _fork_session_for_retry(
         SDK, which cannot resolve it. A missing/foreign checkpoint backend is
         therefore treated as "no usable checkpoint" → fresh session.
 
-    Returns False (fresh/normal path) whenever either condition fails or the
-    harness cannot be resolved. Pure decision — no handler branching on backend
-    name.
+    Returns the *validated* checkpoint session id (str) when forking is safe,
+    or ``None`` (fresh/normal path) whenever a condition fails or the harness
+    cannot be resolved. Returning the id — not just a bool — lets the caller
+    hand the SDK the exact session this gate validated, so the gate and the
+    resumed value can never diverge (issue #173 F-15). Pure decision — no
+    handler branching on backend name.
     """
     checkpoint_id = task.get("last_good_session_id") or task.get("session_id")
     if not checkpoint_id:
-        return False
+        return None
 
     try:
         fix_harness = resolve_harness("fix", repo_cfg, cfg)
@@ -406,10 +416,10 @@ def _fork_session_for_retry(
         get_debug_logger().warning(
             "retry: could not resolve fix harness for %s; not forking", slug,
         )
-        return False
+        return None
 
     if not backend_has_capability(fix_harness, "session_fork"):
-        return False
+        return None
 
     # Provenance gate: only fork from a checkpoint the same backend produced.
     # ``last_good_session_backend`` is always written alongside the checkpoint,
@@ -422,16 +432,16 @@ def _fork_session_for_retry(
             "retry: checkpoint for %s has no recorded backend; "
             "not forking (fresh session)", slug,
         )
-        return False
+        return None
     if checkpoint_backend != fix_harness.get("backend"):
         get_debug_logger().warning(
             "retry: checkpoint backend %r != fix backend %r for %s; "
             "not forking (fresh session)",
             checkpoint_backend, fix_harness.get("backend"), slug,
         )
-        return False
+        return None
 
-    return True
+    return checkpoint_id
 
 
 def _run_retry(
@@ -476,8 +486,10 @@ def _run_retry(
     # they ignore the flag. Decided here via the capability so handlers never
     # branch on backend name. Only the /fix replay can fork: /plan always starts
     # a fresh session (nothing to fork from) and /review is already throwaway.
-    fork_session = _fork_session_for_retry(task, repo_cfg, cfg, world.task.slug) \
-        if last_cmd == "/fix" else False
+    # The gate returns the *validated* checkpoint id so the SDK resumes the
+    # exact session the gate checked (issue #173 F-15).
+    fork_session_id = _fork_session_for_retry(task, repo_cfg, cfg, world.task.slug) \
+        if last_cmd == "/fix" else None
 
     if last_cmd == "/plan":
         hr = _run_plan_with_sync(task, action.guidance, None, repo_cfg, cfg,
@@ -488,5 +500,6 @@ def _run_retry(
     else:
         hr = _run_fix_with_sync(task, action.guidance, repo_cfg, cfg,
                                 progress_callback=progress_callback,
-                                fork_session=fork_session)
+                                fork_session=fork_session_id is not None,
+                                fork_session_id=fork_session_id)
     return _to_dispatch(hr, task)

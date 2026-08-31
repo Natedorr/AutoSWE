@@ -467,6 +467,47 @@ class TestRecoverOrphanedWorktrees:
                 f"Status {status!r} should be reset to 'pending'"
             )
 
+    def test_azure_orphan_provider_passed_to_build_repo_cfg(self, recovery_setup, monkeypatch):
+        """An Azure orphan with a repos_cfg miss recovers with the Azure config.
+
+        Regression test for issue #173 F-16: the recovery path previously
+        called build_repo_cfg without provider=provider, so a repos_cfg
+        lookup miss silently fell back to the GitHub default.
+        """
+        cfg, repos_cfg, running_dir, tmp_path = recovery_setup
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", running_dir)
+        # repos_cfg intentionally has no entry matching the task's owner/repo.
+        assert repos_cfg == {} or all(
+            k != "o/r" or e.get("provider") != "azure" for k, e in repos_cfg.items()
+        )
+
+        (running_dir / "ado_o_r_1.pid").write_text("99999999")
+        wt_dir = tmp_path / "worktrees" / "o_r" / "issue-1"
+        wt_dir.mkdir(parents=True)
+
+        queue = {"ado:o_r_1": {
+            "id": "ado:o_r_1", "owner": "o", "repo": "r",
+            "issue_number": 1, "autoswe_status": "fixing",
+            "provider": "azure",
+        }}
+
+        build_calls = []
+
+        def _fake_build_repo_cfg(owner, repo, cfg_, repos_cfg_, provider=None):
+            build_calls.append({"owner": owner, "repo": repo, "provider": provider})
+            return {"owner": "o", "repo": "r", "token": "tok", "provider": provider or "github"}
+
+        with patch("autoswe.vcs.worktree.is_dirty", return_value=True), \
+             patch("autoswe.vcs.worktree.ensure_clone", return_value=wt_dir), \
+             patch("autoswe.vcs.worktree.commit_and_push", side_effect=lambda *a, **kw: None), \
+             patch("autoswe.orch.loop.build_repo_cfg", side_effect=_fake_build_repo_cfg), \
+             patch("autoswe.orch.loop.get_tracker", return_value=None):
+            from autoswe.orch.loop import _recover_orphaned_worktrees
+            _recover_orphaned_worktrees(cfg, queue, repos_cfg)
+
+        assert build_calls, "build_repo_cfg should have been called during recovery"
+        assert build_calls[0]["provider"] == "azure"
+
 
 # ---------------------------------------------------------------------------
 # Welcome post interleaving

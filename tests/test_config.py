@@ -14,13 +14,18 @@ def test_as_bool_true_strings():
     assert _as_bool("TRUE") is True
 
 def test_as_bool_false_strings():
-    """_as_bool treats anything other than 'true' (case-insensitive) as False."""
+    """_as_bool treats non-truthy values as False.
+
+    Truthy spellings are true/1/yes/on (case-insensitive, issue #173 F-17),
+    so "0", "off" and a blank are the falsy cases.
+    """
     from autoswe.core.config import _as_bool
 
     assert _as_bool("false") is False
     assert _as_bool("False") is False
     assert _as_bool("0") is False
-    assert _as_bool("yes") is False
+    assert _as_bool("off") is False
+    assert _as_bool("maybe") is False
     assert _as_bool("") is False
 
 def test_as_bool_none_uses_default():
@@ -29,13 +34,14 @@ def test_as_bool_none_uses_default():
 
     assert _as_bool(None) is False  # default="false"
     assert _as_bool(None, "true") is True
+    assert _as_bool(None, "1") is True
 
 def test_as_bool_non_string_coerced():
     """_as_bool coerces non-string values (e.g., int from env file)."""
     from autoswe.core.config import _as_bool
 
-    assert _as_bool(1) is False  # str(1).lower() == "1" != "true"
-    assert _as_bool(0) is False
+    assert _as_bool(1) is True  # str(1) == "1" is truthy (issue #173 F-17)
+    assert _as_bool(0) is False  # str(0) == "0" is not a truthy spelling
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +198,87 @@ def test_load_config_auto_create_pr_defaults_false(isolated_autoswe_dir):
 
     assert cfg["AUTO_CREATE_PR"] is False
     assert isinstance(cfg["AUTO_CREATE_PR"], bool)
+
+
+# ---------------------------------------------------------------------------
+# Malformed config handling (issue #173 F-17)
+# ---------------------------------------------------------------------------
+
+def test_load_config_bad_int_falls_back_to_default_with_warning(
+    isolated_autoswe_dir, caplog
+):
+    """MAX_ATTEMPTS=thre must fall back to the default (3) and log a warning."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("MAX_ATTEMPTS=thre\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    with caplog.at_level("WARNING"):
+        cfg = load_config()
+
+    assert cfg["MAX_ATTEMPTS"] == 3
+    assert isinstance(cfg["MAX_ATTEMPTS"], int)
+    assert any(
+        "MAX_ATTEMPTS" in r.getMessage() and "not a valid integer" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_load_config_bad_int_keeps_int_type(isolated_autoswe_dir):
+    """A malformed int must not linger as a string (the later TypeError cause)."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("MAX_CONCURRENT=oops\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["MAX_CONCURRENT"] == 1
+    assert isinstance(cfg["MAX_CONCURRENT"], int)
+
+
+def test_load_config_bool_accepts_one_yes_on(isolated_autoswe_dir):
+    """AUTO_CREATE_PR set to 1 / yes / on must all read as True (issue #173)."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    for val in ("1", "yes", "on"):
+        autoswe_env.write_text(f"AUTO_CREATE_PR={val}\n", encoding="utf-8")
+        from autoswe.core.config import load_config
+
+        assert load_config()["AUTO_CREATE_PR"] is True, val
+
+
+def test_load_config_bool_true_false_unchanged(isolated_autoswe_dir):
+    """Existing true/false spellings still coerce as before."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text(
+        "AUTO_CREATE_PR=true\nMINIMAL_POSTING=false\n", encoding="utf-8"
+    )
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AUTO_CREATE_PR"] is True
+    assert cfg["MINIMAL_POSTING"] is False
+
+
+def test_load_config_strips_matched_surrounding_quotes(isolated_autoswe_dir):
+    """BOT_NAME="bot" should lose its quotes; 'bot' too."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text('BOT_NAME="bot"\n', encoding="utf-8")
+    from autoswe.core.config import load_config
+
+    assert load_config()["BOT_NAME"] == "bot"
+
+    autoswe_env.write_text("BOT_NAME='bot'\n", encoding="utf-8")
+    assert load_config()["BOT_NAME"] == "bot"
+
+
+def test_load_config_unmatched_quotes_are_not_stripped(isolated_autoswe_dir):
+    """A lone leading or trailing quote must not be stripped."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("BOT_NAME=\"bot\n", encoding="utf-8")
+    from autoswe.core.config import load_config
+
+    # only one quote present → not "matched surrounding" → value kept as-is
+    assert load_config()["BOT_NAME"] == '"bot'
 
 
 def test_load_repos_config_missing_returns_empty(isolated_autoswe_dir):

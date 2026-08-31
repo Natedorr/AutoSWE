@@ -362,15 +362,15 @@ def test_run_retry_falls_back_to_fix():
 # ------ _fork_session_for_retry (fork provenance gate) ------
 
 
-def test_fork_session_true_when_backend_matches():
+def test_fork_session_returns_id_when_backend_matches():
     """A checkpoint produced by the same backend as the resolved fix backend
-    and a fork-capable fix backend → fork."""
+    and a fork-capable fix backend → the gate returns that checkpoint id."""
     from autoswe.orch.run import _fork_session_for_retry
     task = {
         "last_good_session_id": "s-good",
         "last_good_session_backend": "claude_code",
     }
-    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is True
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") == "s-good"
 
 
 def test_fork_session_false_when_checkpoint_backend_mismatches():
@@ -381,7 +381,7 @@ def test_fork_session_false_when_checkpoint_backend_mismatches():
         "last_good_session_id": "s-codex-plan",
         "last_good_session_backend": "codex",
     }
-    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is False
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is None
 
 
 def test_fork_session_false_when_checkpoint_has_no_backend():
@@ -389,13 +389,13 @@ def test_fork_session_false_when_checkpoint_has_no_backend():
     treated as unusable → fresh session, no fork."""
     from autoswe.orch.run import _fork_session_for_retry
     task = {"last_good_session_id": "s-good"}
-    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is False
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is None
 
 
 def test_fork_session_false_when_no_checkpoint():
     """Nothing to fork from → no fork."""
     from autoswe.orch.run import _fork_session_for_retry
-    assert _fork_session_for_retry({}, {"provider": "github"}, {}, "slug") is False
+    assert _fork_session_for_retry({}, {"provider": "github"}, {}, "slug") is None
 
 
 def test_fork_session_false_for_codex_fix_backend():
@@ -410,7 +410,18 @@ def test_fork_session_false_for_codex_fix_backend():
     with patch("autoswe.orch.run.resolve_harness", return_value={
         "backend": "codex", "model": "gpt-5.6-terra",
     }):
-        assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") is False
+        assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") is None
+
+
+def test_fork_session_returns_session_id_when_no_last_good():
+    """When only session_id is set (no last_good_session_id yet), the gate
+    returns that session id as the checkpoint to fork from."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "session_id": "s-session",
+        "last_good_session_backend": "claude_code",
+    }
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") == "s-session"
 
 
 # ------ Task dict builder ------

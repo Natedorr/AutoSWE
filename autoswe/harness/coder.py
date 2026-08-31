@@ -212,7 +212,7 @@ def _run_fix_session(
     )
 
 
-def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = None, cfg: dict | None = None, *, progress_callback=None, wt=None, fork_session: bool = False) -> HandlerResult:
+def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = None, cfg: dict | None = None, *, progress_callback=None, wt=None, fork_session: bool = False, fork_session_id: str | None = None) -> HandlerResult:
     """Run fix phase with bypassPermissions. Returns done-file content.
 
     Return format on success:
@@ -222,6 +222,11 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
     If *wt* is provided (pre-synced worktree path from the orchestrator),
     reuse it instead of calling create_worktree. The orchestrator may have
     already run sync_branch + conflict resolution before handing off here.
+
+    ``fork_session_id`` is the checkpoint session id validated by the retry
+    gate (``_fork_session_for_retry``). When forking, it is the authoritative
+    resume source so the gate and the resumed value can never diverge
+    (issue #173 F-15); the gate passes the exact id it checked.
     """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     base_branch = task.get("base_branch", "main")
@@ -298,13 +303,19 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
     fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
 
     # Fork-on-retry: when *fork_session* is set, branch from the surviving
-    # known-good checkpoint (last_good_session_id) — which the FAILED path
-    # preserves — instead of session_id (nulled out on failure). With no good
-    # checkpoint yet (first-ever failure) there is nothing to fork from, so we
-    # fall back to a fresh session. use_fresh_session (plan-file seeding) still
-    # wins: it always starts a new session, no fork.
+    # known-good checkpoint — which the FAILED path preserves — instead of
+    # session_id (nulled out on failure). With no good checkpoint yet
+    # (first-ever failure) there is nothing to fork from, so we fall back to a
+    # fresh session. use_fresh_session (plan-file seeding) still wins: it always
+    # starts a new session, no fork.
+    #
+    # The resumed id comes from fork_session_id — the exact checkpoint the
+    # retry gate validated — when available, so the gate and the value handed
+    # to the SDK can never diverge (issue #173 F-15). We fall back to
+    # last_good_session_id only for callers that set fork_session without
+    # threading the id.
     if fork_session and not use_fresh_session:
-        resume_source = task.get("last_good_session_id") or session_id
+        resume_source = fork_session_id or task.get("last_good_session_id") or session_id
         effective_fork = resume_source is not None
     else:
         resume_source = None if use_fresh_session else session_id

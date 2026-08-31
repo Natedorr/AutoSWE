@@ -57,3 +57,29 @@ class LockedQueue:
         _atomic_write(QUEUE_FILE, self.queue)
         portalocker.unlock(self._fh)
         self._fh.close()
+
+
+def load_queue() -> dict:
+    """Load queue.json under a brief exclusive lock, then release it.
+
+    The lock is held only long enough to read the file (issue #173 F-12): the
+    caller does its (potentially long) work *without* holding the lock and
+    persists via :func:`save_queue`.
+    """
+    with LockedQueue() as lq:
+        return lq.queue
+
+
+def save_queue(queue: dict) -> None:
+    """Re-acquire the lock, overlay *queue* onto the on-disk state, save, release.
+
+    *queue* is the caller's in-memory patch accumulated since :func:`load_queue`.
+    We overlay it onto a *fresh* read of the on-disk file so that entries a
+    concurrent writer added between our load and save are preserved; on a
+    per-slug basis our newer entries win (last-writer-wins per slug, which is
+    safe because a slug is only written by one dispatch at a time — guarded by
+    the per-repo PID lock).
+    """
+    with LockedQueue() as lq:
+        for slug, entry in queue.items():
+            lq.queue[slug] = entry
