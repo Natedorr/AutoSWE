@@ -364,6 +364,34 @@ def test_backend_has_capability_missing():
     assert not backend_has_capability(harness, "nonexistent_capability")
 
 
+# ---------- has_read_only_enforcement helper (issue #166) ----------
+
+
+def test_has_read_only_enforcement_claude_code():
+    """Claude Code enforces read-only via mode + can_use_tool → True."""
+    from autoswe.harness.runner import has_read_only_enforcement
+
+    assert has_read_only_enforcement({"backend": "claude_code"}) is True
+
+
+def test_has_read_only_enforcement_codex_is_false():
+    """Codex has neither 'mode' nor 'can_use_tool' → read-only NOT enforced.
+
+    This is the issue #166 condition: plan/review on a Codex profile must
+    loudly degrade and rely on the post-run worktree backstop.
+    """
+    from autoswe.harness.runner import has_read_only_enforcement
+
+    assert has_read_only_enforcement({"backend": "codex", "model": "gpt-5.6-terra"}) is False
+
+
+def test_has_read_only_enforcement_default_is_claude():
+    """None harness_cfg defaults to Claude → enforced."""
+    from autoswe.harness.runner import has_read_only_enforcement
+
+    assert has_read_only_enforcement(None) is True
+
+
 # ---------- Capability-aware plan interpretation ----------
 
 

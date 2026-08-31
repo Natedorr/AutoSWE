@@ -4,7 +4,12 @@ Shells out to the Codex CLI subprocess (no alpha SDK), maps a
 harness-agnostic ``RunSpec`` to CLI flags, and parses the JSONL event
 stream into a ``RunResult``.
 
-**Capabilities (Phase 4, core run only):** ``mode``, ``resume``, ``progress_stream``.
+**Capabilities (Phase 4, core run only):** ``resume``, ``progress_stream``.
+This backend does NOT advertise ``"mode"``: it accepts ``RunSpec.mode`` for
+contract parity but performs no read-only enforcement (no ``--sandbox``
+mapping, no per-tool gating) — see issue #166. Plan/review phases that run
+on a Codex profile rely on the handler's post-run worktree rollback
+(``ensure_worktree_unchanged``) as the backstop against agent edits.
 
 Progress streaming uses ``asyncio.create_subprocess_exec`` with async
 line-reading so that ``progress_callback`` fires with live plan/command
@@ -179,6 +184,12 @@ def _norm_item_type(itype: str) -> str:
 # dead weight: the bypass flag always neutralized it, so plan/review runs got
 # full access regardless. With the mapping removed, the emitted flag set now
 # matches the documented intent.
+#
+# Consequently this backend does NOT advertise the ``"mode"`` capability
+# (issue #166): advertising it would claim read-only enforcement that does
+# not exist. Handlers running a read-only phase on a backend with neither
+# ``"mode"`` enforcement nor ``"can_use_tool"`` loudly degrade (warning log)
+# and roll back any worktree edits via ``ensure_worktree_unchanged``.
 _BYPASS_APPROVALS_AND_SANDBOX = "--dangerously-bypass-approvals-and-sandbox"
 # Env override for operators who want to disable the bypass on a shared host.
 _BYPASS_ENV_VAR = "CODEX_BYPASS_APPROVALS_AND_SANDBOX"
@@ -469,7 +480,10 @@ class CodexBackend:
     guesses. Duration is tracked via ``time.monotonic()``.
     """
 
-    CAPABILITIES: set[str] = {"mode", "resume", "progress_stream"}
+    # No "mode": RunSpec.mode is accepted for contract parity but performs no
+    # read-only enforcement (see issue #166). Plan/review on a Codex profile
+    # rely on the handler's post-run worktree rollback instead.
+    CAPABILITIES: set[str] = {"resume", "progress_stream"}
     RETRYABLE_SUBTYPES: set[str] = {"error", "killed"}
 
     @classmethod

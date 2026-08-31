@@ -179,6 +179,48 @@ def reset_clean(wt: Path, branch: str) -> None:
     _run(["git", "-C", str(wt), "clean", "-fd"])
 
 
+def ensure_worktree_unchanged(wt: Path, head_before: str | None) -> bool:
+    """Roll back any worktree changes a read-only agent session made.
+
+    A plan/review phase is read-only in intent, but a backend that does not
+    enforce read-only access (e.g. the Codex backend — issue #166) can still
+    let the agent edit files. This backstop detects and reverts those edits
+    after the run so they do not leak into the next phase.
+
+    Detects changes two ways (either triggers a rollback):
+
+    - ``HEAD`` moved from *head_before* (agent committed) — catches the
+      commit case a plain ``status`` check would miss.
+    - the worktree is dirty (``git status --porcelain`` non-empty) — catches
+      uncommitted modifications, deletions, and untracked files, the normal
+      "agent edited but did not commit" case that a HEAD-only compare misses.
+
+    Rollback targets *head_before* (not ``origin/<branch>``) so legitimate
+    unpushed commits the handler itself made are preserved; worktrees are
+    synced clean by the orchestrator before a phase, so anything found here
+    is an agent edit.
+
+    Returns True if a rollback was performed, False if the worktree was clean.
+    """
+    head_after = _run(
+        ["git", "-C", str(wt), "rev-parse", "HEAD"], check=False
+    ).stdout.strip()
+
+    head_moved = bool(head_before) and bool(head_after) and head_before != head_after
+    dirty = is_dirty(wt)
+
+    if not head_moved and not dirty:
+        return False
+
+    log(f"[WORKTREE] {wt} changed during read-only phase"
+        f"{' (HEAD moved)' if head_moved else ''}"
+        f"{' (dirty worktree)' if dirty else ''} — rolling back (issue #166)")
+    if head_before:
+        _run(["git", "-C", str(wt), "reset", "--hard", head_before], check=False)
+    _run(["git", "-C", str(wt), "clean", "-fd"], check=False)
+    return True
+
+
 def get_merge_conflict_files(wt: Path) -> list[str]:
     """Return paths with conflict markers when a merge is in progress, else []."""
     result = _run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U"], check=False)

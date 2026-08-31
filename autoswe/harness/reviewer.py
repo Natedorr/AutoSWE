@@ -20,7 +20,7 @@ from autoswe.harness.prompts import _find_plan_in_comments, build_review_prompt
 from autoswe.harness.runner import HandlerResult
 from autoswe.harness.schemas import REVIEW_SCHEMA, output_format_for
 from autoswe.providers.factory import get_tracker
-from autoswe.vcs.worktree import create_worktree, worktree_path
+from autoswe.vcs.worktree import create_worktree, ensure_worktree_unchanged, worktree_path
 
 dbg = get_debug_logger()
 
@@ -153,6 +153,16 @@ def run_review(
     state = {}
     cut = make_can_use_tool(task, repo_cfg, state, read_only=True)
 
+    # Loudly degrade when the backend cannot enforce read-only access (issue
+    # #166): the review session may still edit the worktree, so the post-run
+    # ensure_worktree_unchanged backstop below is the real guarantee.
+    if not runner.has_read_only_enforcement(harness):
+        log(f"[WARN][REVIEW] {task['id']} backend '{harness.get('backend')}' has no read-only "
+            f"enforcement (no 'mode'/'can_use_tool') — review edits will be rolled back "
+            f"post-run (issue #166)")
+
+    head_before = _get_git_head(wt_path)
+
     # Request a schema-validated review report when the resolved backend
     # supports it (issue #159). _report_text_from_result() prefers the
     # structured payload and falls back to result.text.
@@ -182,6 +192,13 @@ def run_review(
         return HandlerResult("FAILED: timeout during review phase")
     except Exception as e:  # State-machine boundary -- any handler failure becomes a FAILED result for emit().
         return HandlerResult(f"FAILED: review error: {e}")
+
+    # Backstop: roll back any worktree edits the review session made (issue #166).
+    # run_review previously had no equivalent check at all — a reviewer that
+    # edited files (the normal agent case) would carry those edits into the next
+    # phase. The worktree is pre-synced clean by the orchestrator, so anything
+    # found here is an agent edit.
+    ensure_worktree_unchanged(wt_path, head_before)
 
     log(f"[REVIEW] {task['id']} session={result.session_id} cost=${result.cost_usd or 0:.4f}")
 
@@ -214,3 +231,14 @@ def _run_git(wt: Path, args: list[str]) -> str:
         capture_output=True, text=True, timeout=30, check=True,
     )
     return result.stdout.strip()
+
+
+def _get_git_head(wt: Path) -> str | None:
+    """Return git HEAD SHA of the worktree, or None on error."""
+    result = subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "HEAD"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return None

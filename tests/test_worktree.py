@@ -635,6 +635,115 @@ def test_reset_clean_issues_correct_commands(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# ensure_worktree_unchanged (issue #166 read-only backstop)
+# ---------------------------------------------------------------------------
+
+
+def _fake_run_router(calls, rev_parse_out, porcelain_out):
+    """Build a fake _run that dispatches on the git subcommand.
+
+    rev-parse HEAD → rev_parse_out; status --porcelain → porcelain_out;
+    reset/clean → empty. Records every argv in *calls*.
+    """
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        result = MagicMock()
+        result.returncode = 0
+        if "rev-parse" in args:
+            result.stdout = rev_parse_out
+        elif "status" in args and "--porcelain" in args:
+            result.stdout = porcelain_out
+        else:
+            result.stdout = ""
+        return result
+
+    return fake_run
+
+
+def test_ensure_worktree_unchanged_noop_when_clean(tmp_path):
+    """Clean worktree, HEAD unchanged → no rollback, returns False."""
+    from autoswe.vcs.worktree import ensure_worktree_unchanged
+
+    calls = []
+    fake = _fake_run_router(calls, rev_parse_out="abc123", porcelain_out="")
+    with patch("autoswe.vcs.worktree._run", side_effect=fake):
+        changed = ensure_worktree_unchanged(tmp_path, "abc123")
+
+    assert changed is False
+    # No reset / clean issued
+    assert not any("reset" in c and "--hard" in c for c in calls)
+    assert not any("clean" in c for c in calls)
+
+
+def test_ensure_worktree_unchanged_rolls_back_uncommitted_edit(tmp_path):
+    """Dirty worktree (status --porcelain non-empty), HEAD unchanged → rollback.
+
+    This is the bug the issue #166 backstop fixes: an agent that edits files
+    without committing leaves HEAD identical, so a HEAD-only compare misses it.
+    The porcelain check must catch it and reset --hard + clean -fd.
+    """
+    from autoswe.vcs.worktree import ensure_worktree_unchanged
+
+    calls = []
+    fake = _fake_run_router(calls, rev_parse_out="abc123", porcelain_out=" M foo.py\n")
+    with patch("autoswe.vcs.worktree._run", side_effect=fake):
+        changed = ensure_worktree_unchanged(tmp_path, "abc123")
+
+    assert changed is True
+    reset_cmds = [c for c in calls if "reset" in c and "--hard" in c]
+    clean_cmds = [c for c in calls if "clean" in c]
+    assert len(reset_cmds) == 1
+    # Reset targets head_before (not origin/<branch>) to preserve unpushed commits
+    assert "abc123" in reset_cmds[0]
+    assert "origin/" not in reset_cmds[0]
+    assert len(clean_cmds) == 1
+    assert "-fd" in clean_cmds[0]
+
+
+def test_ensure_worktree_unchanged_detects_untracked_file(tmp_path):
+    """Untracked file (?? entry) is dirty → rollback with clean -fd."""
+    from autoswe.vcs.worktree import ensure_worktree_unchanged
+
+    calls = []
+    fake = _fake_run_router(calls, rev_parse_out="abc123", porcelain_out="?? new_file.txt\n")
+    with patch("autoswe.vcs.worktree._run", side_effect=fake):
+        changed = ensure_worktree_unchanged(tmp_path, "abc123")
+
+    assert changed is True
+    assert any("clean" in c and "-fd" in c for c in calls)
+
+
+def test_ensure_worktree_unchanged_rolls_back_head_movement(tmp_path):
+    """HEAD moved (agent committed) with clean worktree → rollback."""
+    from autoswe.vcs.worktree import ensure_worktree_unchanged
+
+    calls = []
+    fake = _fake_run_router(calls, rev_parse_out="def456", porcelain_out="")
+    with patch("autoswe.vcs.worktree._run", side_effect=fake):
+        changed = ensure_worktree_unchanged(tmp_path, "abc123")
+
+    assert changed is True
+    reset_cmds = [c for c in calls if "reset" in c and "--hard" in c]
+    assert len(reset_cmds) == 1
+    assert "abc123" in reset_cmds[0]
+
+
+def test_ensure_worktree_unchanged_clean_without_head_before(tmp_path):
+    """Dirty worktree but head_before is None → still cleans, no reset target."""
+    from autoswe.vcs.worktree import ensure_worktree_unchanged
+
+    calls = []
+    fake = _fake_run_router(calls, rev_parse_out="def456", porcelain_out=" M foo.py\n")
+    with patch("autoswe.vcs.worktree._run", side_effect=fake):
+        changed = ensure_worktree_unchanged(tmp_path, None)
+
+    assert changed is True
+    # No reset (no target), but clean still runs to remove untracked/dirty
+    assert not any("reset" in c and "--hard" in c for c in calls)
+    assert any("clean" in c for c in calls)
+
+
+# ---------------------------------------------------------------------------
 # sync_branch
 # ---------------------------------------------------------------------------
 

@@ -279,13 +279,21 @@ class TestCapabilityHonesty:
         )
 
     def test_codex_phase4_capabilities(self):
-        """Codex (Phase 4) advertises mode, resume + progress_stream."""
+        """Codex (Phase 4) advertises resume + progress_stream only.
+
+        No "mode" (issue #166): Codex accepts RunSpec.mode for contract
+        parity but performs no read-only enforcement, so it must not claim
+        the capability. Plan/review rely on the post-run worktree backstop.
+        """
         from autoswe.harness.backends.codex import CodexBackend
 
         caps = CodexBackend.capabilities()
-        expected = {"mode", "resume", "progress_stream"}
+        expected = {"resume", "progress_stream"}
         assert caps == expected, (
             f"CodexBackend capabilities changed: got {caps}"
+        )
+        assert "mode" not in caps, (
+            "Codex must not advertise 'mode' without read-only enforcement (issue #166)"
         )
         assert caps.issubset(self.ALL_CAPABILITIES), (
             "CodexBackend advertises unknown capability"
@@ -296,9 +304,14 @@ class TestCapabilityHonesty:
         from autoswe.harness.backends.codex import CodexBackend
 
         caps = CodexBackend.capabilities()
-        # Phase 4: Codex does NOT support these (mode IS accepted; no Codex --sandbox mapping).
+        # Phase 4: Codex does NOT support these. 'mode' is Claude-exclusive
+        # (issue #166): Codex accepts RunSpec.mode for contract parity but has
+        # no read-only enforcement, so it must not claim the capability.
         # session_fork is Claude-exclusive: Codex has no fork primitive (resume in place or fresh).
-        claude_exclusives = {"mcp", "can_use_tool", "plan_permission", "plan_file", "session_fork"}
+        claude_exclusives = {
+            "mode", "mcp", "can_use_tool", "plan_permission",
+            "plan_file", "session_fork",
+        }
         overlap = caps & claude_exclusives
         assert not overlap, (
             f"Codex advertises Claude-exclusive capabilities: {overlap}. "
@@ -446,7 +459,8 @@ class TestRunnerDispatcherParity:
         from autoswe.harness.runner import backend_has_capability
 
         harness = {"backend": "codex", "model": "gpt-5.6-terra"}
-        assert backend_has_capability(harness, "mode")
+        # No "mode" (issue #166): Codex has no read-only enforcement.
+        assert not backend_has_capability(harness, "mode")
         assert not backend_has_capability(harness, "mcp")
         assert not backend_has_capability(harness, "can_use_tool")
         assert not backend_has_capability(harness, "plan_permission")

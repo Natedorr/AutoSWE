@@ -136,6 +136,43 @@ def test_run_review_is_read_only(tmp_path, mock_gh_post_comment):
     )
 
 
+def test_run_review_rolls_back_worktree_after_run(tmp_path, mock_gh_post_comment):
+    """run_review captures HEAD before the run and calls the read-only backstop
+    after it (issue #166). Previously review had no rollback at all — an agent
+    that edited files would leak those edits into the next phase."""
+    ensure_calls = []
+
+    def fake_ensure(wt, head_before):
+        ensure_calls.append((str(wt), head_before))
+        return True
+
+    def fake_head(wt):
+        return "deadbeef"
+
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.reviewer._run_git", return_value="stat"):
+            with FETCH_COMMENTS_PATCH:
+                with patch(
+                    "autoswe.harness.reviewer._get_git_head", side_effect=fake_head
+                ):
+                    with patch(
+                        "autoswe.harness.reviewer.ensure_worktree_unchanged",
+                        side_effect=fake_ensure,
+                    ):
+                        with patch("autoswe.harness.runner.run", return_value=_r("LGTM")):
+                            from autoswe.harness.reviewer import run_review
+                            run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert len(ensure_calls) == 1
+    wt_arg, head_arg = ensure_calls[0]
+    # head_before captured before the run and threaded into the backstop
+    assert head_arg == "deadbeef"
+    # The backstop ran against the review worktree
+    assert str(tmp_path) in wt_arg
+
+
 def test_run_review_includes_diff_in_prompt(tmp_path, mock_gh_post_comment):
     """run_review prompt contains the git diff."""
     diff_text = "diff --git a/file.py b/file.py\n+new line"
