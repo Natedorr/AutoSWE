@@ -47,7 +47,7 @@ A label is never a steering input (`labels.md`).
 
 ## `MAX_ATTEMPTS` Per Issue
 
-`attempt_count` is incremented by `decide()` each time it detects a restart. When `attempt_count > MAX_ATTEMPTS` (default 3), `decide()` returns `Action(kind="mark_failed_limit")` — `emit()` produces a "Max attempts reached" comment, sets `autoswe_status = "failed"`, and sets `_guard_blocked = True` so comment re-scans stop until a new command appears. `/retry` resets `attempt_count` to 1.
+`attempt_count` is carried forward by `decide()` on **every restart** — a dispatch from a terminal / review-blocking / `planned` state (slash command or plain-text reply) sets the next action's `attempt_count` to `task.attempt_count + 1` (floored at 1 so a legacy task with a stored `0` doesn't jump to 2 on its first real dispatch). Only `/retry` resets `attempt_count` to 1. Because the counter accumulates across restarts, when the stored `attempt_count` already equals `MAX_ATTEMPTS` (default 3) the next restart computes `attempt_count = MAX_ATTEMPTS + 1 > MAX_ATTEMPTS` and `decide()` returns `Action(kind="mark_failed_limit", limit_reason="attempts")` — `emit()` produces a "Max attempts reached" comment, sets `autoswe_status = "failed"`, and sets `_guard_blocked = True` so comment re-scans stop until a new command appears. The attempts guard is checked **before** the "failed/error only restart on `/retry`" gate, so it fires on both the `/fix`-again and `/retry` loops, not just `/retry`.
 
 ## `MAX_TOTAL_HOURS` Wall Clock
 

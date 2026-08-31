@@ -35,7 +35,7 @@
     "status": "fixed",
     "plan_branch": "main",
     "base_branch": "main",
-    "attempt_count": 2,
+    "attempt_count": 1,
     "first_dispatched_at": null,
     "last_dispatched_command": "/fix",
     "session_id": null,

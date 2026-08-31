@@ -170,6 +170,20 @@ def _reset_attempt(task: object, new_count: int, reason: str) -> None:  # type: 
         log(f"[DECIDE] {task.slug} attempt_count {old_attempt}->{new_count} ({reason})")
 
 
+def _next_attempt(task: object, reason: str) -> int:  # type: ignore[type-arg]
+    """Attempt count for a restart: previous + 1, floored at 1.
+
+    Every non-``/retry`` restart path (terminal / review-blocking / planned,
+    slash or plain-text) carries the counter forward so the ``MAX_ATTEMPTS``
+    guard in ``decide()`` can actually fire. The floor keeps a legacy task with
+    a stored ``0`` from jumping straight to ``2`` on its first real dispatch.
+    Only ``/retry`` resets the counter to 1 (via ``_reset_attempt``).
+    """
+    new_count = max(1, int(getattr(task, "attempt_count", 0) or 0) + 1)
+    log(f"[DECIDE] {task.slug} attempt_count {task.attempt_count}->{new_count} ({reason})")
+    return new_count
+
+
 # ---------------------------------------------------------------------------
 # Reply helpers
 # ---------------------------------------------------------------------------
@@ -236,8 +250,11 @@ def _handle_reply(
     if dispatch_slash and cmd_result and cmd_result[0] not in ("/skip",):
         reply_branch = cmd_result[2] if len(cmd_result) > 2 else None
         plan_branch = reply_branch or task.plan_branch
-        new_count = 1
-        _reset_attempt(task, new_count, f"reply cmd={cmd_result[0]}")
+        if cmd_result[0] == "/retry":
+            new_count = 1
+            _reset_attempt(task, new_count, f"reply cmd={cmd_result[0]}")
+        else:
+            new_count = _next_attempt(task, f"reply cmd={cmd_result[0]}")
         return Action(
             kind=_kind_from_command(cmd_result[0]),
             slug=task.slug,
@@ -380,12 +397,15 @@ def _check_restart_or_guard(
 
     # New user intent on a restartable command
     if has_new_user and slash_cmd not in ("/skip", "/abort"):
-        # Calculate attempt count (used for limit checks and dispatch)
-        # Slash commands reset to 1; plain-text replies keep their existing
-        # behavior (handled elsewhere, not in this block).
+        # Calculate attempt count (used for limit checks and dispatch).
+        # A restart carries the counter forward (previous + 1) so the
+        # MAX_ATTEMPTS guard below can fire; only /retry resets to 1.
         max_attempts = cfg.get("MAX_ATTEMPTS", 3)
-        attempt_count = 1
-        _reset_attempt(task, attempt_count, f"cmd={slash_cmd}, max={max_attempts}")
+        if slash_cmd == "/retry":
+            attempt_count = 1
+            _reset_attempt(task, attempt_count, f"cmd={slash_cmd}, max={max_attempts}")
+        else:
+            attempt_count = _next_attempt(task, f"restart cmd={slash_cmd}, max={max_attempts}")
 
         # Guard: max attempts (checked before failed-task gate)
         if attempt_count > max_attempts and not task.guard_blocked:
@@ -577,9 +597,8 @@ def decide(world: World) -> Action:
                 and branch != task.plan_branch
                 and (cmd_id or 0) > (task.last_dispatched_command_id or 0)
             ):
-                # Slash command resets attempt_count to 1
-                new_count = 1
-                _reset_attempt(task, new_count, f"re-plan branch={branch}")
+                # Re-plan is a restart — carry the attempt counter forward.
+                new_count = _next_attempt(task, f"re-plan branch={branch}")
                 return Action(
                     kind="plan",
                     slug=task.slug,
@@ -603,11 +622,14 @@ def decide(world: World) -> Action:
                     # Stale command — already acted on, fall through to reply detector
                     pass
                 else:
-                    # New command from planned — dispatch it
+                    # New command from planned — dispatch it. A restart carries
+                    # the attempt counter forward; /retry resets to 1.
                     plan_branch = branch or task.plan_branch
-                    # Slash command resets attempt_count to 1
-                    attempt_count = 1
-                    _reset_attempt(task, attempt_count, f"cmd={slash_cmd} from planned")
+                    if slash_cmd == "/retry":
+                        attempt_count = 1
+                        _reset_attempt(task, attempt_count, f"cmd={slash_cmd} from planned")
+                    else:
+                        attempt_count = _next_attempt(task, f"cmd={slash_cmd} from planned")
 
                     if attempt_count > cfg.get("MAX_ATTEMPTS", 3):
                         log(f"[LIMIT] {task.slug} guard fired: attempt_count={attempt_count} > MAX_ATTEMPTS={cfg.get('MAX_ATTEMPTS', 3)}")
