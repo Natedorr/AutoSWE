@@ -94,6 +94,10 @@ def test_load_config_defaults(isolated_autoswe_dir):
     assert cfg["AUTO_ASSIGN"] is True
     assert cfg["AUTO_CREATE_PR"] is False
     assert cfg["WORKTREE_DIR"] == "worktrees"
+    # GitHub Development-sidebar linkage is on by default (issue #142):
+    # the createLinkedBranch mutation runs at worktree creation so bot PRs
+    # show their issue in the Development section.
+    assert cfg["LINK_BRANCH_TO_ISSUE"] is True
 
 
 def test_load_config_env_override(isolated_autoswe_dir, monkeypatch):
@@ -109,6 +113,34 @@ def test_load_config_env_override(isolated_autoswe_dir, monkeypatch):
     assert cfg["SILENT_REPORTING"] is True
     assert cfg["AUTO_CREATE_PR"] is True
     assert "GITHUB_TOKEN" not in cfg
+
+
+def test_load_config_link_branch_default_and_env_opt_out(
+    isolated_autoswe_dir, monkeypatch
+):
+    """LINK_BRANCH_TO_ISSUE defaults True; an explicit 'false' in the env opts out."""
+    from autoswe.core.config import load_config
+
+    # Default (no env, no config file): on.
+    assert load_config()["LINK_BRANCH_TO_ISSUE"] is True
+
+    # Explicit env opt-out.
+    monkeypatch.setenv("LINK_BRANCH_TO_ISSUE", "false")
+    assert load_config()["LINK_BRANCH_TO_ISSUE"] is False
+
+    # Explicit env opt-in (covers a config file that omits the key).
+    monkeypatch.setenv("LINK_BRANCH_TO_ISSUE", "true")
+    assert load_config()["LINK_BRANCH_TO_ISSUE"] is True
+
+
+def test_load_config_link_branch_config_file_opt_out(isolated_autoswe_dir):
+    """A config file setting LINK_BRANCH_TO_ISSUE=false overrides the True default."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("LINK_BRANCH_TO_ISSUE=false\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    assert load_config()["LINK_BRANCH_TO_ISSUE"] is False
 
 
 def test_load_config_reads_autoswe_env_file(isolated_autoswe_dir):

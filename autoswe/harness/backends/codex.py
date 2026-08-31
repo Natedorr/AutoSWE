@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import tempfile
 import time
 from collections.abc import Awaitable
@@ -56,6 +57,52 @@ from autoswe.harness.backends.codex_pricing import estimate_cost
 # Linux) and unbounded memory growth when the child process produces
 # pathological output.
 _MAX_STREAM_BYTES = 16 * 1024 * 1024  # 16 MB
+
+# Whether the installed Codex CLI supports --output-last-message.
+# None = unprobed; True/False = result of _probe_output_last_message_support().
+# Cached for the process lifetime: a single `codex exec --help` probe is
+# negligible vs. the wall-clock cost of a full agent run, and re-probing
+# on every run would add a subprocess hop to the hot path.
+#
+# Why probe instead of pinning a CLI floor: autoSWE's Codex path already
+# degrades to chunk accumulation when the last-message file is absent
+# (see _read_last_message_file), so an older CLI is a graceful-degradation
+# case, not a hard error. A floor would permanently pin users to a CLI
+# version; a probe self-heals when the user upgrades.
+_OUTPUT_LAST_MESSAGE_SUPPORTED: bool | None = None
+
+
+def _probe_output_last_message_support() -> bool:
+    """Detect whether the installed codex CLI supports --output-last-message.
+
+    Runs ``codex exec --help`` once per process and inspects the output.
+    Result is cached in :data:`_OUTPUT_LAST_MESSAGE_SUPPORTED`.
+
+    On probe failure (CLI missing from PATH, timeout, OSError) we default
+    to True to preserve the current behavior — the flag is verified on
+    codex-cli 0.150.1, and a probe failure (e.g., sandboxed CI without
+    network) should not silently degrade us to chunk accumulation when
+    the flag would have worked.
+    """
+    global _OUTPUT_LAST_MESSAGE_SUPPORTED
+    if _OUTPUT_LAST_MESSAGE_SUPPORTED is not None:
+        return _OUTPUT_LAST_MESSAGE_SUPPORTED
+    try:
+        result = subprocess.run(
+            ["codex", "exec", "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # Help text is emitted on stdout; some CLIs also echo to stderr.
+        # Accept either the long or the short form.
+        text = (result.stdout or "") + (result.stderr or "")
+        _OUTPUT_LAST_MESSAGE_SUPPORTED = (
+            "--output-last-message" in text or "\n-o " in text
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        log(f"[CODEX] could not probe codex CLI for --output-last-message: "
+            f"{e}; assuming supported (default True)")
+        _OUTPUT_LAST_MESSAGE_SUPPORTED = True
+    return _OUTPUT_LAST_MESSAGE_SUPPORTED
 
 
 # ---------- Streaming accumulator ----------
@@ -529,8 +576,13 @@ class CodexBackend:
         # --output-last-message writes the assistant's final message to a file we
         # read back as the authoritative RunResult.text (issue #128).  Supported by
         # both `codex exec` and `codex exec resume` (verified on codex-cli 0.150.1).
-        # Falls back to chunk accumulation when the file is absent/empty.
-        if last_message_path:
+        # The flag is gated on a one-time CLI capability probe: on a CLI that
+        # predates it, passing the flag makes codex reject the whole command
+        # up front, which the chunk-accumulation fallback cannot recover from.
+        # When unsupported we skip the flag and the chunk fallback engages
+        # (last_message_path stays allocated but empty → _read_last_message_file
+        # returns None).
+        if last_message_path and _probe_output_last_message_support():
             cmd.extend(["--output-last-message", last_message_path])
 
         # No turn cap is emitted: `codex exec` has no max_turns key (live-verified

@@ -466,6 +466,12 @@ class ClaudeCodeBackend:
         # families (Opus 4.8, Sonnet 5, ...); CLAUDE_CODE_ENABLE_TODO_TOOLS=1
         # restores them (honor requires CLI >= v2.1.233). The sticky progress
         # comment renders from these tools, so opt in by default.
+        #
+        # Note: this 0.2.139 threshold is independent of _FORK_MIN_SDK_VERSION
+        # (0.2.137) — that is the floor for the fork_session capability, a
+        # different feature. The todo-tools default flips two patch levels
+        # later; on a 0.2.137/0.2.138 install the env var is simply inert
+        # (unknown option) and the sticky comment just doesn't render.
         env = {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"}
 
         # Anthropic credentials from the harness profile.
