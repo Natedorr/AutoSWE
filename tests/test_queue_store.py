@@ -476,6 +476,59 @@ class TestLoadSaveQueue:
         with LockedQueue() as lq:
             assert "gh:new_1" in lq.queue
 
+    def test_save_unions_concurrent_bot_comment_ids(self, isolated_autoswe_dir):
+        """The append-only bot_comment_ids list is unioned, not clobbered.
+
+        Regression for the F-12 lost-update window: the lock is released across
+        the agent run, so a concurrent same-repo poller can backfill
+        ``bot_comment_ids`` between our load and save. A plain whole-entry
+        last-writer-wins overwrite would drop the concurrent IDs; save_queue
+        must union them while still letting our dispatch/status fields win.
+        """
+        # Initial on-disk state: entry A with one bot comment ID.
+        with LockedQueue() as lq:
+            lq.queue["gh:o_r_1"] = {
+                "id": "gh:o_r_1",
+                "autoswe_status": "pending",
+                "bot_comment_ids": [100],
+            }
+
+        # We load (our snapshot sees bot_comment_ids=[100], status pending),
+        # then run our dispatch without holding the lock.
+        patch = load_queue()
+        patch["gh:o_r_1"]["autoswe_status"] = "fixed"
+
+        # Meanwhile a concurrent poller backfills a comment ID we don't know about.
+        with LockedQueue() as lq:
+            lq.queue["gh:o_r_1"]["bot_comment_ids"].append(200)
+
+        # Save our patch: our status change must win, but the concurrent
+        # comment ID must survive the union.
+        save_queue(patch)
+
+        with LockedQueue() as lq:
+            entry = lq.queue["gh:o_r_1"]
+            assert entry["autoswe_status"] == "fixed", "our status change must win"
+            assert 100 in entry["bot_comment_ids"], "our comment ID must survive"
+            assert 200 in entry["bot_comment_ids"], "concurrent comment ID must not be clobbered"
+
+    def test_save_union_dedupes_overlapping_ids(self, isolated_autoswe_dir):
+        """Unioning bot_comment_ids must not duplicate overlapping IDs."""
+        with LockedQueue() as lq:
+            lq.queue["gh:o_r_1"] = {
+                "id": "gh:o_r_1",
+                "autoswe_status": "pending",
+                "bot_comment_ids": [100, 200],
+            }
+
+        patch = load_queue()
+        patch["gh:o_r_1"]["bot_comment_ids"] = [200, 300]  # overlaps on 200
+
+        save_queue(patch)
+
+        with LockedQueue() as lq:
+            assert lq.queue["gh:o_r_1"]["bot_comment_ids"] == [200, 300, 100]
+
 
 class TestQueuePruneEdgeCases:
     """Edge cases for queue pruning."""

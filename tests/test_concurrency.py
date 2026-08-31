@@ -558,3 +558,183 @@ class TestWelcomeInterleaving:
                     task["suppress_welcome"] = True
 
         assert posted == ["gh:o_r_0", "gh:o_r_1", "gh:o_r_2", "gh:o_r_3", "gh:o_r_4"]
+
+
+# ---------------------------------------------------------------------------
+# F-12 integration: the queue lock is NOT held across the agent run
+# ---------------------------------------------------------------------------
+
+
+class TestLockReleasedDuringDispatch:
+    """Regression for issue #173 F-12 (narrow + re-lock before save).
+
+    The whole point of F-12 is that the exclusive queue lock is released before
+    the (long) agent run, so a concurrent ``queue list`` / second poller does
+    not block for hours. These tests run ``_single_poll`` with a stubbed
+    ``_dispatch_task`` and assert the lock is actually free while dispatch is
+    in flight — catching a regression that re-wraps dispatch in the lock.
+    """
+
+    def _seed(self, isolated_autoswe_dir, task_id):
+        import json
+
+        from autoswe.core.queue_store import LockedQueue
+
+        task = {
+            "id": task_id, "owner": "owner", "repo": "repo",
+            "issue_number": 1, "title": "T", "body": "Fix\n\n/fix",
+            "autoswe_status": "pending", "base_branch": "main",
+            "provider": "github", "suppress_welcome": True,
+            "pr_number": None, "session_id": "s-abc",
+            "first_dispatched_at": "2026-01-01T00:00:00Z",
+            "last_dispatched_command_id": None, "last_consumed_reply_id": None,
+            "bot_comment_ids": [], "last_synced": "2026-01-01T00:00:00Z",
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        with LockedQueue() as lq:
+            lq.queue[task_id] = dict(task)
+
+        repos_path = isolated_autoswe_dir / "config" / "repos.json"
+        repos_path.write_text(json.dumps(
+            {"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}}
+        ))
+
+    def test_lock_is_free_while_dispatch_in_flight(
+        self, isolated_autoswe_dir, monkeypatch, tmp_path,
+    ):
+        """A non-blocking exclusive acquire on the queue lock must SUCCEED
+        from inside ``_dispatch_task`` — proving the lock was released before
+        the agent run (the core F-12 guarantee)."""
+        import portalocker
+        from portalocker.exceptions import AlreadyLocked
+
+        import autoswe.orch.loop as loop_mod
+        from autoswe.core.config import AUTOSWE_DIR
+        from autoswe.orch.types import ApiState
+        from autoswe.providers.base import NormalizedIssue
+
+        task_id = "gh:owner_repo_1"
+        self._seed(isolated_autoswe_dir, task_id)
+
+        lock_result = []
+
+        def dispatch_probes_lock(*args, **kwargs):
+            pt = args[0]
+            queue_entry = args[6]
+            queue_entry[pt.slug]["autoswe_status"] = "dispatched"
+            # While "dispatching" (i.e. standing in for the agent run), try to
+            # take the exclusive queue lock non-blockingly. If F-12 held the
+            # lock across dispatch this acquire would fail; when released it
+            # must succeed promptly.
+            lock_path = AUTOSWE_DIR / "data" / ".queue.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(lock_path, "a+") as fh:
+                try:
+                    portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                    lock_result.append(True)
+                    portalocker.unlock(fh)
+                except AlreadyLocked:
+                    lock_result.append(False)
+
+        monkeypatch.setattr(loop_mod, "_dispatch_task", dispatch_probes_lock)
+
+        def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+            return {
+                1: ApiState(
+                    issue=NormalizedIssue(
+                        number=1, title="T", body="Fix\n\n/fix",
+                        owner="owner", repo="repo", state="open",
+                        is_pull_request=False, labels=[],
+                    ),
+                    comments=(),
+                ),
+            }
+
+        monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+
+        cfg = {
+            "MAX_CONCURRENT": 1, "SILENT_REPORTING": True,
+            "WORKTREE_DIR": str(tmp_path / "worktrees"),
+        }
+        loop_mod.poll(cfg, mode="full", repo_filter="owner/repo")
+
+        assert lock_result == [True], (
+            "The queue lock must be FREE while dispatch is in flight "
+            "(F-12: the lock is released before the agent run)."
+        )
+
+    def test_concurrent_queue_list_does_not_block_during_dispatch(
+        self, isolated_autoswe_dir, monkeypatch, tmp_path,
+    ):
+        """A concurrent ``queue list``-style read returns promptly while a
+        (slow) dispatch is in flight — the user-visible symptom F-12 fixes."""
+        import threading
+
+        import autoswe.orch.loop as loop_mod
+        from autoswe.orch.types import ApiState
+        from autoswe.providers.base import NormalizedIssue
+
+        task_id = "gh:owner_repo_1"
+        self._seed(isolated_autoswe_dir, task_id)
+
+        import time
+        dispatch_started = threading.Event()
+        dispatch_finished = threading.Event()
+
+        def slow_dispatch(*args, **kwargs):
+            pt = args[0]
+            queue_entry = args[6]
+            queue_entry[pt.slug]["autoswe_status"] = "dispatched"
+            dispatch_started.set()
+            # Simulate a long agent run.
+            time.sleep(0.5)
+            dispatch_finished.set()
+
+        monkeypatch.setattr(loop_mod, "_dispatch_task", slow_dispatch)
+
+        def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+            return {
+                1: ApiState(
+                    issue=NormalizedIssue(
+                        number=1, title="T", body="Fix\n\n/fix",
+                        owner="owner", repo="repo", state="open",
+                        is_pull_request=False, labels=[],
+                    ),
+                    comments=(),
+                ),
+            }
+
+        monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+
+        cfg = {
+            "MAX_CONCURRENT": 1, "SILENT_REPORTING": True,
+            "WORKTREE_DIR": str(tmp_path / "worktrees"),
+        }
+
+        from autoswe.core.queue_store import load_queue
+        read_ok = []
+
+        def run_poller():
+            loop_mod.poll(cfg, mode="full", repo_filter="owner/repo")
+
+        poller = threading.Thread(target=run_poller)
+        poller.start()
+
+        # Wait until the (slow) dispatch is in flight, then do a full queue
+        # read. With the lock free it returns promptly; with the old bug it
+        # would block until the 0.5s dispatch finished.
+        assert dispatch_started.wait(timeout=5.0), "dispatch never started"
+        t0 = time.monotonic()
+        q = load_queue()
+        elapsed = time.monotonic() - t0
+        read_ok.append((task_id in q, elapsed))
+
+        poller.join(timeout=10.0)
+        assert not poller.is_alive(), "poller did not finish"
+
+        assert read_ok[0][0], "the in-flight task should be visible to a concurrent read"
+        # The read must NOT have been held up for the duration of the dispatch.
+        assert read_ok[0][1] < 0.4, (
+            f"Concurrent queue read took {read_ok[0][1]:.2f}s — the lock was "
+            f"held across dispatch (F-12 regression)."
+        )
