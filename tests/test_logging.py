@@ -150,6 +150,63 @@ def test_mask_sensitive_idempotent():
     assert mask_sensitive(mask_sensitive(text)) == mask_sensitive(text)
 
 
+class TestMaskSensitiveUrlUserinfo:
+    """The scheme://user:secret@host pattern redacts credential-bearing URLs.
+
+    This is the F-02 pattern: clone URLs embed the credential as userinfo
+    (``https://x-access-token:*** @github.com`` for GitHub,
+    ``https://autoswe:<pat>@dev.azure.com`` for Azure) and surface in
+    ``CalledProcessError`` messages / git stderr when ``git clone`` fails.
+    """
+
+    def test_github_user_secret_redacted_host_preserved(self):
+        url = "https://x-access-token:ghp_abcDEF1234567890@github.com/o/r.git"
+        result = mask_sensitive(url)
+        assert "ghp_abcDEF1234567890" not in result
+        assert result == f"https://{MASK}@github.com/o/r.git"
+
+    def test_azure_user_secret_redacted_host_preserved(self):
+        # Azure PATs have no distinguishing prefix — the user:secret form is what
+        # the pattern must catch (previously unredacted).
+        url = "https://autoswe:AzUREpat0123456789abcdef@dev.azure.com/org/proj/_git/repo"
+        result = mask_sensitive(url)
+        assert "AzUREpat0123456789abcdef" not in result
+        assert result == f"https://{MASK}@dev.azure.com/org/proj/_git/repo"
+
+    def test_user_only_url_redacted(self):
+        # scheme://user@host — no secret, but the user is still userinfo.
+        result = mask_sensitive("https://deployer@github.com/o/r")
+        assert result == f"https://{MASK}@github.com/o/r"
+        assert "deployer" not in result
+
+    def test_no_credential_url_unchanged(self):
+        # Ordinary URLs must not be mangled.
+        for url in (
+            "https://github.com/o/r.git",
+            "https://github.com/o/r/tree/main",
+            "https://dev.azure.com/org/proj/_git/repo",
+            "https://host:8080/path?x=1",
+            "http://example.com:443/a/b?c=d",
+        ):
+            assert mask_sensitive(url) == url, url
+
+    def test_url_userinfo_idempotent(self):
+        url = "https://x-access-token:ghp_abcDEF1234567890@github.com/o/r.git"
+        once = mask_sensitive(url)
+        assert mask_sensitive(once) == once
+
+    def test_url_in_exception_message_redacted(self):
+        # Simulates a CalledProcessError message: the command line is embedded.
+        msg = (
+            "Command '['git', '-c', 'credential.helper=', 'clone', "
+            "'https://x-access-token:ghp_abcDEF1234567890@github.com/o/r.git', "
+            "path']' returned non-zero exit status 128."
+        )
+        result = mask_sensitive(msg)
+        assert "ghp_abcDEF1234567890" not in result
+        assert MASK in result
+
+
 def test_sensitive_log_filter_masks_message():
     """SensitiveLogFilter should mask tokens in the log message."""
     record = logging.LogRecord(

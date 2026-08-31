@@ -1590,3 +1590,134 @@ def test_dispatch_error_preserves_progress_comment_id(
     )
 
 
+# ---------------------------------------------------------------------------
+# F-22: credential-bearing URLs must not appear in posted comments
+# ---------------------------------------------------------------------------
+
+import subprocess as _subprocess
+
+from autoswe.core.error_utils import capture_dispatch_error, format_error_comment
+from autoswe.core.logging_utils import MASK as _MASK
+
+
+def _make_clone_called_process_error(pat: str) -> _subprocess.CalledProcessError:
+    """Build a CalledProcessError as raised by worktree._run on git clone failure.
+
+    The command list mirrors what _run actually constructs (with credential.helper=
+    prepended), so the credential URL appears exactly as it would in the real
+    exception message.
+    """
+    clone_url = f"https://x-access-token:{pat}@github.com/owner/repo.git"
+    cmd = ["git", "-c", "credential.helper=", "clone", clone_url, "/tmp/wt"]
+    return _subprocess.CalledProcessError(
+        returncode=128,
+        cmd=cmd,
+        output=None,
+        stderr=f"fatal: Authentication failed for '{clone_url}'",
+    )
+
+
+def test_f22_dispatch_error_comment_redacts_pat(monkeypatch):
+    """A credential-bearing CalledProcessError must not leak the PAT into the
+    posted error comment (dispatch-error route)."""
+    pat = "ghp_AbC12345678901234567890"
+    exc = _make_clone_called_process_error(pat)
+
+    ctx = capture_dispatch_error(exc, "gh:owner_repo_42", None)
+    body = format_error_comment(ctx)
+
+    # Precondition: the raw comment body DOES contain the secret (without
+    # redaction it would be visible).  This is the bug F-02 is fixing.
+    assert pat in body, (
+        "Test precondition failed: raw comment body does not contain the PAT; "
+        "the test does not exercise the credential-URL path"
+    )
+
+    # Patch gh_post so we capture what would actually be posted to GitHub.
+    posted: list[dict] = []
+    import autoswe.tracking.api as gh_api
+
+    def fake_gh_post(path: str, token: str, body: dict, **kw):
+        posted.append(body)
+        return {"id": 999}
+
+    monkeypatch.setattr(gh_api, "gh_post", fake_gh_post)
+
+    from autoswe.providers.github.tracker import GitHubTracker
+    tracker = GitHubTracker({"owner": "owner", "repo": "repo", "token": "tok"})
+    tracker.post_comment({"owner": "owner", "repo": "repo", "token": "tok"}, 42, body)
+
+    assert len(posted) == 1
+    posted_body = posted[0]["body"]
+    assert pat not in posted_body, f"PAT leaked into posted comment: {posted_body}"
+    assert _MASK in posted_body, "expected redaction marker in posted comment"
+
+
+def test_f22_failed_sync_comment_redacts_pat(monkeypatch):
+    """A FAILED: sync-error body (raw git stderr containing a credential URL)
+    must not leak the PAT into the posted comment (sync-error route)."""
+    pat = "ghp_SecretSync5678901234567890"
+    # Simulates what run.py builds when sync_branch's result["error"] carries
+    # git stderr with the clone URL.
+    stderr_line = (
+        f"fatal: Authentication failed for 'https://x-access-token:{pat}"
+        "@github.com/owner/repo.git'"
+    )
+    body = f"FAILED: {stderr_line}"
+
+    # Precondition
+    assert pat in body
+
+    posted: list[dict] = []
+    import autoswe.tracking.api as gh_api
+
+    def fake_gh_post(path: str, token: str, body: dict, **kw):
+        posted.append(body)
+        return {"id": 999}
+
+    monkeypatch.setattr(gh_api, "gh_post", fake_gh_post)
+
+    from autoswe.providers.github.tracker import GitHubTracker
+    tracker = GitHubTracker({"owner": "owner", "repo": "repo", "token": "tok"})
+    tracker.post_comment({"owner": "owner", "repo": "repo", "token": "tok"}, 42, body)
+
+    assert len(posted) == 1
+    assert pat not in posted[0]["body"], f"PAT leaked into FAILED: comment: {posted[0]['body']}"
+    assert _MASK in posted[0]["body"]
+
+
+def test_f22_azure_pat_redacted_in_dispatch_error(monkeypatch):
+    """Azure PAT (no distinguishing prefix) in a credential URL is also
+    redacted in the posted error comment — the specific gap F-02 calls out."""
+    azure_pat = "AzPat012345678901234567890123456789"
+    clone_url = f"https://autoswe:{azure_pat}@dev.azure.com/org/proj/_git/repo"
+    cmd = ["git", "-c", "credential.helper=", "clone", clone_url, "/tmp/wt"]
+    exc = _subprocess.CalledProcessError(
+        returncode=128,
+        cmd=cmd,
+        output=None,
+        stderr=f"fatal: Authentication failed for '{clone_url}'",
+    )
+    ctx = capture_dispatch_error(exc, "ado:org_proj_repo_70", None)
+    body = format_error_comment(ctx)
+    assert azure_pat in body
+
+    posted: list[dict] = []
+    import autoswe.providers.azure.tracker as azure_tracker_mod
+
+    def fake_ado_post(path: str, pat: str, body: dict, **kw):
+        posted.append(body)
+        return {"id": 999}
+
+    # Patch where the tracker's post_comment actually resolves it.
+    monkeypatch.setattr(azure_tracker_mod, "ado_post", fake_ado_post)
+
+    from autoswe.providers.azure.tracker import AzureTracker
+    tracker = AzureTracker({"org": "org", "project": "proj", "pat": azure_pat})
+    tracker.post_comment({"org": "org", "project": "proj", "pat": azure_pat}, 70, body)
+
+    assert len(posted) == 1
+    assert azure_pat not in posted[0]["text"], f"Azure PAT leaked: {posted[0]['text']}"
+    assert _MASK in posted[0]["text"]
+
+
