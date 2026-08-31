@@ -80,13 +80,13 @@ Both trackers populate `NormalizedIssue.state` (`"open"` / `"closed"`) so the di
 
 ## GitHub Implementation (`providers/github/`)
 
-- **`tracker.py:GitHubTracker`** — wraps `tracking/api.py` helpers. Lazily ensures labels. Normalizes `author_login` to `BOT`/`OWNER`/`AUTHOR` in `fetch_comments()`. `state` comes straight from the issue's `state` field. All outbound comment bodies (POST/PATCH) are passed through `redact_worktree_paths()` to prevent leaking host filesystem paths into comments.
+- **`tracker.py:GitHubTracker`** — wraps `tracking/api.py` helpers. Lazily ensures labels. Normalizes `author_login` to `BOT`/`OWNER`/`AUTHOR` in `fetch_comments()`. `state` comes straight from the issue's `state` field. All outbound comment bodies (POST/PATCH) are passed through `redact_outbound()` to prevent leaking host filesystem paths or credential-bearing URLs into comments.
 - **`vcs.py:GitHubVCS`** — HTTPS clone URL with `x-access-token:`, `gh pr create` with GitHub API fallback, `gh pr list` for existing PR check. PR title and body are redacted before creation. `link_branch_to_issue()` uses the GitHub GraphQL API (`createLinkedBranch` mutation) — fetches the issue `node_id` via REST, then POSTs to `/graphql`. Handles "already exists" errors as idempotent no-ops. Raises `MissingScopeError` on permission failures. `get_ci_status()` combines check-runs (`GET /commits/{sha}/check-runs`) and the legacy combined status (`GET /commits/{sha}/status`): any failure/cancelled/timed_out/action_required conclusion wins, else any non-completed run is `pending`, else `success` if at least one check passed, else `none`.
 - **`adapter.py`** — `read_api()` and `apply_effect()` bridge the tracker/VCS to the orchestrator.
 
 ## Azure Implementation (`providers/azure/`)
 
-- **`tracker.py:AzureTracker`** — WIQL for discovery, batch API for expand (chunked at 100 ids/request, then merged, de-duped, and sorted by id — `list-work-items.md` Common Pitfalls #3), tag-based label mirror (semicolons in `System.Tags`). Normalizes `author_login` same way as GitHub. `state` maps `System.State`: `Closed`/`Done`/`Removed` → `"closed"`, otherwise `"open"`. HTML stripping via `_StripHTML` parser preserves `<AUTOSWE_*>` tags. All outbound comment bodies are redacted via `redact_worktree_paths()`.
+- **`tracker.py:AzureTracker`** — WIQL for discovery, batch API for expand (chunked at 100 ids/request, then merged, de-duped, and sorted by id — `list-work-items.md` Common Pitfalls #3), tag-based label mirror (semicolons in `System.Tags`). Normalizes `author_login` same way as GitHub. `state` maps `System.State`: `Closed`/`Done`/`Removed` → `"closed"`, otherwise `"open"`. HTML stripping via `_StripHTML` parser preserves `<AUTOSWE_*>` tags. All outbound comment bodies are redacted via `redact_outbound()`.
 - **`vcs.py:AzureVCS`** — Azure Repos REST API for clone URL, PR creation, PR discovery. PAT embedded in HTTPS URL. PR title and body are redacted before creation. `link_branch_to_issue()` is a documented no-op (Azure DevOps has no equivalent feature). `get_ci_status()` queries the most recent Azure Pipelines build for the branch (`GET .../_apis/build/builds?branchName=...`); `notStarted`/`inProgress` → `pending`, `failed`/`canceled` → `failure`, `succeeded`/`partiallySucceeded` → `success`, no builds → `none`.
 - **`adapter.py`** — `read_api()` and `apply_effect()` bridge the tracker/VCS to the orchestrator. Sets `is_bot` from `bot_ids` membership and body marker fallback.
 
@@ -94,9 +94,9 @@ Both providers share `autoswe/issue-{N}` branch naming.
 
 ## Path Redaction (`core/redact.py`)
 
-All outbound content posted to external services (comments, PR titles, PR bodies) is passed through `redact_worktree_paths(text)` before the API call. This prevents host filesystem paths from leaking into platform UI:
+All outbound content posted to external services (comments, PR titles, PR bodies) is passed through `redact_outbound(text)` before the API call. This is a single chokepoint that applies **both** transforms in one pass, so no future caller can bypass either:
 
-- Masks the worktree root path so everything up to the leaf directory becomes `".../`
-- Respects `WORKTREE_DIR` (uses basename if absolute, e.g. `/tmp/my_wt` → `my_wt`)
-- Idempotent — text with no worktree paths is returned unchanged
-- Applied at every outbound boundary: `post_comment()`, `update_comment()`, `open_pull_request()`, and `gh_post_comment()`
+- `redact_worktree_paths(text)` — masks the worktree root path so everything up to the leaf directory becomes `".../`
+- `mask_sensitive(text)` — scrubs credential-bearing URLs (`scheme://user:secret@host`, including `https://user@host`) and known token patterns (GitHub tokens, Bearer/Basic, `?token=`/`?pat=`/etc.) that would otherwise leak from `CalledProcessError` messages and git stderr into the posted comment
+
+The worktree path transform runs first, then `mask_sensitive`. Both are idempotent — text with no worktree paths or credentials is returned unchanged. `redact_outbound` is applied at every outbound boundary: `post_comment()`, `update_comment()`, `open_pull_request()`, and `gh_post_comment()`.

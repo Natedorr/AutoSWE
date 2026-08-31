@@ -10,7 +10,7 @@ import html
 import re
 from html.parser import HTMLParser
 
-from autoswe.core.redact import redact_worktree_paths
+from autoswe.core.redact import redact_outbound
 from autoswe.providers.azure.api import (
     _ado_api_version,
     _encode_path_segment,
@@ -339,7 +339,7 @@ class AzureTracker(IssueTracker):
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
             f"{issue_number}/comments?format=Markdown&api-version=7.1"
         )
-        result = ado_post(path, self._pat, body={"text": redact_worktree_paths(body)})
+        result = ado_post(path, self._pat, body={"text": redact_outbound(body)})
         return result.get("id") if result else None
 
     def update_comment(self, repo_cfg: dict, issue_number: int, comment_id: int, body: str) -> None:
@@ -354,7 +354,7 @@ class AzureTracker(IssueTracker):
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
             f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1"
         )
-        ado_patch_json(path, self._pat, body={"text": redact_worktree_paths(body)})
+        ado_patch_json(path, self._pat, body={"text": redact_outbound(body)})
 
     def create_issue(self, repo_cfg: dict, title: str, body: str) -> int:
         """Create a new work item (Issue type) in Azure DevOps.

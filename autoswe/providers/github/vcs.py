@@ -5,7 +5,7 @@ import json
 import subprocess
 
 from autoswe.core.logging_utils import get_debug_logger
-from autoswe.core.redact import redact_worktree_paths
+from autoswe.core.redact import redact_outbound
 from autoswe.providers.base import CIStatus, PRResult, VCSProvider
 from autoswe.tracking.api import gh_get, gh_post
 
@@ -88,8 +88,8 @@ class GitHubVCS(VCSProvider):
         branch-to-issue linking when the remote SHA is unavailable.
         """
         # Redact worktree paths before posting
-        safe_title = redact_worktree_paths(title)
-        safe_body = redact_worktree_paths(body)
+        safe_title = redact_outbound(title)
+        safe_body = redact_outbound(body)
 
         # gh CLI
         try:

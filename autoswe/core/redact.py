@@ -44,3 +44,21 @@ def redact_worktree_paths(text: str) -> str:
         r"(" + _seg + r"(" + _seg + r")*)"
     )
     return re.sub(pat, lambda m: f".../{leaf}{m.group(1)}", text)
+
+
+def redact_outbound(text: str) -> str:
+    """Redact worktree paths AND sensitive credentials before posting outbound.
+
+    Single chokepoint for any content that leaves the process to an external
+    service (issue comments, PR titles/bodies).  Applies
+    :func:`redact_worktree_paths` first, then ``mask_sensitive`` so that
+    credential-bearing URLs (e.g. clone URLs with an embedded PAT that surface
+    in ``CalledProcessError`` messages or git stderr) are scrubbed in the same
+    pass — no future caller can bypass either transform.
+    """
+    # Lazy import: logging_utils is imported early across the codebase; keeping
+    # the mask_sensitive import inside the function avoids any module-load-time
+    # ordering concern for redact.py.
+    from autoswe.core.logging_utils import mask_sensitive
+
+    return mask_sensitive(redact_worktree_paths(text))
