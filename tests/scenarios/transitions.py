@@ -620,7 +620,7 @@ TRANSITIONS: list[dict[str, Any]] = [
     # ---- Guard transitions ----
     {
         "name": "attempt_count_resets_from_plan_ready",
-        "description": "Task at planned with high attempt_count; /fix resets to 1 and dispatches successfully",
+        "description": "Task at planned with attempt_count=1; /fix restart carries the counter to 2 and dispatches successfully",
         "start": {
             "issue": {"body": "/fix"},
             "labels": ["autoswe:planned"],
@@ -644,7 +644,7 @@ TRANSITIONS: list[dict[str, Any]] = [
                 "title": "Test issue", "body": "/fix",
                 "autoswe_status": "planned",
                 "base_branch": "main",
-                "attempt_count": 3,
+                "attempt_count": 1,
                 "first_dispatched_at": None,
                 "provider": "github",
             },
@@ -656,6 +656,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "label_after": "autoswe:fixed",
             "autoswe_status": "fixed",
+            "attempt_count": 2,
             "comment_contains": ["Completed with command", "Applied fix"],
             "claude_permission": "bypassPermissions",
         },
@@ -988,6 +989,51 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
         "expect": {
             "autoswe_status": "failed",
+            "no_claude_calls": True,
+        },
+    },
+    {
+        "name": "attempts_guard_fires_on_restart",
+        "description": (
+            "Non-guard-blocked failed task at attempt_count=3 (== MAX_ATTEMPTS); "
+            "a /fix restart carries the counter to 4 (> limit) → mark_failed_limit "
+            "(limit_reason=attempts): 'Max attempts' comment, stays failed, guard_blocked set"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/fix",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 3,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/fix",
+                "last_dispatched_command_id": 1,
+                "_guard_blocked": False,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:failed",
+            "autoswe_status": "failed",
+            "comment_contains": ["Max attempts"],
             "no_claude_calls": True,
         },
     },
@@ -1770,6 +1816,7 @@ CODEX_TRANSITIONS: list[str] = [
     "planned_then_review",           # Review phase
     "planned_then_review_blocked",   # Review verdict gating (Blocked → review_blocked)
     "retry_forks_from_last_good_session",  # /retry: Codex lacks session_fork → degrades to fresh/resume, still reaches fixed
+    "attempts_guard_fires_on_restart",     # MAX_ATTEMPTS guard fires (decide-level, backend-agnostic)
 ]
 
 
