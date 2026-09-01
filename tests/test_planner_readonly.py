@@ -8,43 +8,7 @@ This prevents the agent from implementing code during planning, even if
 the CLI exits plan mode via the native ExitPlanMode command.
 """
 
-import os
-import subprocess
 from unittest.mock import MagicMock, patch
-
-import pytest
-
-
-def _make_real_git_repo(root, file_content="hello\n"):
-    """Initialize a real git repo at *root* with one committed file.
-
-    Returns the committed HEAD SHA.
-    """
-    root.joinpath("README.md").write_text(file_content, encoding="utf-8")
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e", "GIT_EDITOR": ":"}
-
-    def git(*args):
-        subprocess.run(
-            ["git", "-C", str(root), *args],
-            check=True, capture_output=True, text=True, env=env,
-        )
-
-    git("init", "-q", "-b", "master")
-    git("add", "README.md")
-    git("commit", "-q", "-m", "init")
-    return subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-
-def _worktree_porcelain(root):
-    """Return git status --porcelain output for *root*."""
-    return subprocess.run(
-        ["git", "-C", str(root), "status", "--porcelain"],
-        capture_output=True, text=True, check=True,
-    ).stdout
 
 
 def test_git_commit_push_re_matches_commit():
@@ -920,62 +884,7 @@ def test_plan_does_not_warn_when_backend_enforces_read_only(
     )
 
 
-@pytest.mark.parametrize("backend", ["codex", "claude_code"])
-def test_plan_run_cannot_write_to_worktree(backend, tmp_path, mock_gh_post_comment):
-    """Behavioral read-only guarantee (issue #166), backend-independent.
-
-    A ``mode="plan"`` run must not be able to leave the worktree dirty. We
-    simulate an agent that edits a file WITHOUT committing (the normal case
-    a HEAD-only compare misses) by having the fake ``runner.run`` write an
-    untracked file into a REAL git worktree, then assert the real
-    ``ensure_worktree_unchanged`` backstop rolled it back.
-
-    Parametrized over both backends because the backstop is the actual
-    guarantee — it runs regardless of which backend performed the (unforced)
-    read-only phase. This is the "at minimum add it here" item; the shared
-    S6/F-21 test may reference it.
-    """
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    head = _make_real_git_repo(wt)
-
-    # Prove the worktree starts clean
-    assert _worktree_porcelain(wt) == ""
-
-    def fake_run(prompt, **kwargs):
-        # The agent edited a file but did not commit → worktree dirty, HEAD same.
-        assert kwargs["mode"] == "plan"
-        (wt / "agent_edit.py").write_text("x = 1\n", encoding="utf-8")
-        from autoswe.harness.runner import RunResult
-        return RunResult("<AUTOSWE_PLAN>\nPlan\n</AUTOSWE_PLAN>", "sess", "success")
-
-    task = {
-        "id": "o_r_1", "owner": "o", "repo": "r", "issue_number": 1,
-        "title": "Test", "body": "/plan", "base_branch": "master",
-        "session_id": None, "_token": "ghp_fake",
-    }
-    harness = (
-        {"backend": "codex", "model": "gpt-5.6-terra"}
-        if backend == "codex" else {"backend": "claude_code"}
-    )
-
-    with patch("autoswe.harness.planner.create_worktree", return_value=wt):
-        with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
-            with patch("autoswe.tracking.api._fetch_comments", return_value=[]):
-                with patch(
-                    "autoswe.harness.planner.resolve_harness", return_value=harness
-                ):
-                    with patch("autoswe.harness.runner.run", side_effect=fake_run):
-                        from autoswe.harness.planner import run_plan
-                        run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
-
-    # The agent's uncommitted edit must have been rolled back — worktree clean.
-    assert _worktree_porcelain(wt) == "", (
-        f"[{backend}] plan run left the worktree dirty; backstop should roll back"
-    )
-    assert not (wt / "agent_edit.py").exists(), "agent edit must be removed"
-    # HEAD is unchanged
-    assert subprocess.run(
-        ["git", "-C", str(wt), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip() == head
+# The behavioral read-only guarantee (a mode="plan" run cannot leave the
+# worktree dirty, asserted identically on both backends) lives in
+# tests/test_backend_parity.py::TestReadOnlyBehavioralParity — the single
+# canonical copy of that assertion (S6 / issue #169 F-21).

@@ -81,8 +81,8 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `pending_command` | `str` | The slash command to run next, derived from comments. Absent (None) ⇒ nothing to run unless `pending_user_reply` is set. |
 | `pending_guidance` | `str` | Guidance text from `/fix with <guidance>` |
 | `pending_user_reply` | `str` | The user's plain-text reply on a `waiting`/`planned` task. |
-| `plan_file_path` | `str` | Absolute path to the native `~/.claude/plans/*.md` file written by the planner. Set by `planner.run_plan()` on `PLAN_READY`; consumed (popped) by `coder.run_fix()` on first use. |
-| `review_file_path` | `str` | Absolute path to the `~/.claude/reviews/<slug>.md` file written by the reviewer. Set by `reviewer.run_review()` on `REVIEW_READY`; consumed (popped) by `build_fix_prompt()` / `build_plan_prompt()` on first use (pop-after-first-use lifecycle). |
+| `plan_file_path` | `str` | Absolute path to the native plan-file `.md` written by the planner (on Claude Code, the SDK writes it natively to `~/.claude/plans/*.md` — read via `claude_code.plan_file_dir()`). Set by `planner.run_plan()` on `PLAN_READY`; consumed (popped) by `coder.run_fix()` on first use. |
+| `review_file_path` | `str` | Absolute path to the review-report `.md` the reviewer writes to `<ARTIFACT_DIR>/reviews/<slug>.md` (a backend-neutral directory, S6 / #169 F-10). Set by `reviewer.run_review()` on `REVIEW_READY`; consumed (popped) by `build_fix_prompt()` / `build_plan_prompt()` on first use (pop-after-first-use lifecycle). |
 | `_token` | `str` | GitHub or Azure PAT; injected at dispatch time, never written to disk |
 | `_guard_blocked` | `bool` | Set when a limit guard trips; suppresses comment re-scans until a new command appears |
 | `_comment_id` | `int` | Progress comment ID for the current in-flight dispatch (runtime mirror of the persisted `progress_comment_id`, passed to the MCP comment server as `AUTOSWE_COMMENT_ID`) |

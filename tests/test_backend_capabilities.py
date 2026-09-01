@@ -576,8 +576,7 @@ def test_runner_run_accepts_disallowed_tools_override():
 
 def test_mode_config_includes_progress_tools():
     """Plan and read_only modes should include PROGRESS_TOOLS."""
-    from autoswe.harness.backends.base import PROGRESS_TOOLS
-    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG, PROGRESS_TOOLS
 
     for mode_name in ("plan", "read_only"):
         _perm, tools, _disallowed = _MODE_CONFIG[mode_name]
@@ -587,8 +586,7 @@ def test_mode_config_includes_progress_tools():
 
 def test_read_write_includes_agent_task_tools():
     """read_write mode should include all AGENT_TASK_TOOLS (includes Agent)."""
-    from autoswe.harness.backends.base import AGENT_TASK_TOOLS
-    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG, AGENT_TASK_TOOLS
 
     _perm, tools, _disallowed = _MODE_CONFIG["read_write"]
     for tool in AGENT_TASK_TOOLS:

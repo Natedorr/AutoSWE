@@ -106,6 +106,24 @@ def test_load_config_defaults(isolated_autoswe_dir):
     assert cfg["LINK_BRANCH_TO_ISSUE"] is True
 
 
+def test_artifact_dir_is_backend_neutral(isolated_autoswe_dir):
+    """ARTIFACT_DIR is a backend-neutral root, not under any vendor dir.
+
+    S6 / issue #169 F-10: handler-owned review artifacts (and any future
+    backend-neutral artifacts) live under <AUTOSWE_DIR>/artifacts — they must
+    not be hard-wired to a Claude-specific path like ~/.claude/reviews.
+    """
+    from autoswe.core import config
+
+    root = config.AUTOSWE_DIR
+    assert root / "artifacts" == config.ARTIFACT_DIR
+    # Must not live under a vendor-specific directory.
+    assert ".claude" not in config.ARTIFACT_DIR.parts
+    assert ".codex" not in config.ARTIFACT_DIR.parts
+    # And it tracks the isolated AUTOSWE_DIR (redirects with the fixture).
+    assert config.ARTIFACT_DIR.parent == root
+
+
 def test_load_config_env_override(isolated_autoswe_dir, monkeypatch):
     monkeypatch.setenv("MAX_ATTEMPTS", "5")
     monkeypatch.setenv("SILENT_REPORTING", "true")

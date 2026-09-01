@@ -44,6 +44,26 @@ FETCH_COMMENTS_PATCH = patch("autoswe.tracking.api._fetch_comments", return_valu
 
 
 # ---------------------------------------------------------------------------
+# reviews dir is backend-neutral (S6 / issue #169 F-10)
+# ---------------------------------------------------------------------------
+
+
+def test_reviews_dir_is_backend_neutral(isolated_autoswe_dir):
+    """_get_reviews_dir() writes under <ARTIFACT_DIR>/reviews, not a vendor dir.
+
+    The reviewer's artifact location must be backend-neutral so the reviews
+    survive across backends and are not tied to ~/.claude/reviews.
+    """
+    from autoswe.core import config
+    from autoswe.harness.reviewer import _get_reviews_dir
+
+    d = _get_reviews_dir()
+    assert d == config.ARTIFACT_DIR / "reviews"
+    assert ".claude" not in d.parts
+    assert d.is_dir()
+
+
+# ---------------------------------------------------------------------------
 # run_review return values
 # ---------------------------------------------------------------------------
 

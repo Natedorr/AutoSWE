@@ -12,14 +12,14 @@ from autoswe.core.logging_utils import get_debug_logger, log
 
 # Re-export everything so existing importers need zero changes.
 from autoswe.harness.backends.base import (  # noqa: F401
-    AGENT_TASK_TOOLS,
-    PROGRESS_TOOLS,
     HandlerResult,
     Mode,
     RunResult,
     RunSpec,
 )
 from autoswe.harness.backends.claude_code import (  # noqa: F401
+    AGENT_TASK_TOOLS,
+    PROGRESS_TOOLS,
     ClaudeCodeBackend,
     ProgressState,
     _extract_plan_file_path,
@@ -30,15 +30,17 @@ from autoswe.harness.backends.claude_code import (  # noqa: F401
 dbg = get_debug_logger()
 
 
-def _get_retryable_exceptions() -> tuple:
-    """Lazily build the tuple of SDK exception types to retry on.
+def _retryable_exceptions(backend) -> tuple:
+    """Return the resolved backend's retryable-exception tuple (S6 / #169 F-09).
 
-    Deferred import: avoids pulling in backend internals at module load time;
-    runner delegates, so it only loads when a handler actually calls this path.
+    The exception set is owned by the backend that will actually run — the
+    runner binds ``except`` to *this* backend's tuple, not Claude's. Falls back
+    to an empty tuple (no exception-based retry) for backends that predate the
+    ``retryable_exceptions()`` protocol method.
     """
-    from autoswe.harness.backends.claude_code import _get_retryable_exceptions as _backend_get
-
-    return _backend_get()
+    if hasattr(backend, "retryable_exceptions"):
+        return backend.retryable_exceptions()
+    return ()
 
 
 def backend_has_capability(harness_cfg: dict, capability: str) -> bool:
@@ -229,7 +231,9 @@ def run(
             timeout=timeout,
         )
 
-    retryable = _get_retryable_exceptions()
+    # Retryable exceptions are owned by the resolved backend (S6 / issue #169
+    # F-09) — no longer a Claude-specific tuple shared by every backend.
+    retryable = _retryable_exceptions(backend)
 
     # Resolve retryable subtypes: config override takes precedence over backend default.
     if raw_subtype_override:

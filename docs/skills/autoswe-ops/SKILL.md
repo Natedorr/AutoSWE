@@ -135,8 +135,8 @@ ls -lt ~/.claude/sessions/
 # Plan files (if planner wrote one)
 ls -lt ~/.claude/plans/
 
-# Review files
-ls -lt ~/.claude/reviews/
+# Review files (backend-neutral: $AUTOSWE_DIR/artifacts/reviews, defaults to <repo-root>/artifacts/reviews)
+ls -lt "${AUTOSWE_DIR:-/home/megibot/.openclaw/workspace/claudius-dev}"/artifacts/reviews/
 ```
 
 **Key log patterns:**

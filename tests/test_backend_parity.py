@@ -4,16 +4,25 @@ Mirrors the provider parity pattern (test_fake_parity.py, test_tracker_parity.py
 assert both CodingBackend implementations obey the RunSpec→RunResult contract
 and advertise honest capability sets.
 
-Three parity dimensions:
-1. **Protocol conformance** — both classes have ``capabilities()`` and ``run()``.
-2. **RunResult shape** — both backends return dataclasses with identical fields.
+Parity dimensions:
+1. **Protocol conformance** — both classes have ``capabilities()``,
+   ``retryable_subtypes()`` and ``retryable_exceptions()`` and ``run()``.
+2. **RunResult shape** — both backends return the same dataclass, incl. the
+   normalized ``ok`` flag (S6 / issue #169 F-10).
 3. **Capability honesty** — advertised capabilities match what each backend
    actually supports (Claude = full feature set, Codex = resume + progress only).
+4. **Behavioral read-only** — a ``mode="plan"`` run cannot leave the worktree
+   dirty, asserted the same way for BOTH backends (S6 / issue #169 F-21).
 """
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 from dataclasses import asdict, fields
+from unittest.mock import patch
+
+import pytest
 
 from autoswe.harness.backends.base import CodingBackend, RunResult, RunSpec
 
@@ -53,6 +62,50 @@ class TestProtocolConformance:
             assert isinstance(cls.capabilities(), set), (
                 f"{cls.__name__}.capabilities() must return a set"
             )
+
+    def test_both_have_retryable_exceptions_classmethod(self):
+        """Both backends expose retryable_exceptions() returning a tuple.
+
+        S6 / issue #169 F-09: the exception-based twin of
+        ``retryable_subtypes()``.  Each backend declares its OWN retryable
+        exception set; runner.run() must not hard-code Claude's tuple.
+        """
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+        from autoswe.harness.backends.codex import CodexBackend
+
+        for cls in (ClaudeCodeBackend, CodexBackend):
+            assert hasattr(cls, "retryable_exceptions"), (
+                f"{cls.__name__} missing retryable_exceptions()"
+            )
+            ret = cls.retryable_exceptions()
+            assert isinstance(ret, tuple), (
+                f"{cls.__name__}.retryable_exceptions() must return a tuple"
+            )
+            for exc in ret:
+                assert isinstance(exc, type) and issubclass(exc, BaseException), (
+                    f"{cls.__name__}.retryable_exceptions() yielded non-exception {exc!r}"
+                )
+
+    def test_codex_retryable_exceptions_are_its_own(self):
+        """Codex retries on asyncio.TimeoutError / OSError, not on Claude's set.
+
+        A backend-specific exception in Codex's own set should not be in
+        Claude's set (and vice-versa for Claude's SDK exception types),
+        proving the retry loop can pick the resolved backend's tuple
+        without cross-contamination.
+        """
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+        from autoswe.harness.backends.codex import CodexBackend
+
+        codex_exc = CodexBackend.retryable_exceptions()
+        claude_exc = ClaudeCodeBackend.retryable_exceptions()
+        assert asyncio.TimeoutError in codex_exc
+        assert OSError in codex_exc
+        # Claude's exception set is SDK-specific and non-empty, distinct
+        # from Codex's transport-level set (both non-empty, and they do not
+        # share every member).
+        assert len(claude_exc) > 0
+        assert set(codex_exc) != set(claude_exc)
 
     def test_both_have_run_method(self):
         """Both backends have a run(spec) method returning an awaitable."""
@@ -113,7 +166,7 @@ class TestRunResultShape:
         """RunResult has the expected set of fields."""
         expected = {
             "text", "session_id", "subtype", "cost_usd", "duration_seconds",
-            "plan_file_path", "plan_posted", "question_posted", "plan_text",
+            "ok", "plan_file_path", "plan_posted", "question_posted", "plan_text",
             "structured_output",
         }
         actual = {f.name for f in fields(RunResult)}
@@ -128,6 +181,17 @@ class TestRunResultShape:
         assert r.plan_posted is False
         assert r.question_posted is False
         assert r.structured_output is None
+
+    def test_runresult_ok_resolved_from_subtype(self):
+        """When ``ok`` is not set, it falls back to subtype == 'success'."""
+        assert RunResult(text="", session_id=None, subtype="success").ok is True
+        assert RunResult(text="", session_id=None, subtype="error_max_turns").ok is False
+        assert RunResult(text="", session_id=None, subtype=None).ok is False
+
+    def test_runresult_ok_explicit_override(self):
+        """An explicit ``ok`` wins over the subtype-derived default."""
+        r = RunResult(text="", session_id=None, subtype="error_max_turns", ok=True)
+        assert r.ok is True
 
     def test_runresult_tuple_unpacking(self):
         """RunResult supports tuple-style 3-element unpacking (back-compat)."""
@@ -519,3 +583,106 @@ class TestModeTranslationParity:
 
         assert not hasattr(codex_mod, "_MODE_SANDBOX")
         assert not hasattr(codex_mod, "_mode_to_sandbox")
+
+
+# ---------------------------------------------------------------------------
+# 8. Behavioral read-only guarantee (S6 / issue #169 F-21)
+# ---------------------------------------------------------------------------
+
+
+def _make_real_git_repo(root, file_content="hello\n"):
+    """Initialize a real git repo at *root* with one committed file.
+
+    Returns the committed HEAD SHA.
+    """
+    root.joinpath("README.md").write_text(file_content, encoding="utf-8")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e", "GIT_EDITOR": ":"}
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True, capture_output=True, text=True, env=env,
+        )
+
+    git("init", "-q", "-b", "master")
+    git("add", "README.md")
+    git("commit", "-q", "-m", "init")
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _worktree_porcelain(root):
+    """Return git status --porcelain output for *root*."""
+    return subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+
+class TestReadOnlyBehavioralParity:
+    """The behavioral read-only guarantee, asserted identically on both backends.
+
+    S6 / issue #169 F-21: no test previously asserted the *behavioral*
+    property that a ``mode="plan"`` run cannot write to the worktree.  This
+    is the single canonical copy of that assertion (previously duplicated in
+    test_planner_readonly.py); it runs against BOTH backends because the
+    backstop — ``ensure_worktree_unchanged`` — is the actual guarantee and
+    runs regardless of which backend performed the (unforced) read-only phase.
+    """
+
+    @pytest.mark.parametrize("backend", ["codex", "claude_code"])
+    def test_plan_run_cannot_write_to_worktree(self, backend, tmp_path, mock_gh_post_comment):
+        """A mode="plan" run must not leave the worktree dirty, on either backend.
+
+        We simulate an agent that edits a file WITHOUT committing (the normal
+        case a HEAD-only compare misses) by having the fake ``runner.run``
+        write an untracked file into a REAL git worktree, then assert the real
+        ``ensure_worktree_unchanged`` backstop rolled it back.
+        """
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        head = _make_real_git_repo(wt)
+
+        # Prove the worktree starts clean.
+        assert _worktree_porcelain(wt) == ""
+
+        def fake_run(prompt, **kwargs):
+            # The agent edited a file but did not commit → worktree dirty, HEAD same.
+            assert kwargs["mode"] == "plan"
+            (wt / "agent_edit.py").write_text("x = 1\n", encoding="utf-8")
+            from autoswe.harness.runner import RunResult
+            return RunResult("<AUTOSWE_PLAN>\nPlan\n</AUTOSWE_PLAN>", "sess", "success")
+
+        task = {
+            "id": "o_r_1", "owner": "o", "repo": "r", "issue_number": 1,
+            "title": "Test", "body": "/plan", "base_branch": "master",
+            "session_id": None, "_token": "ghp_fake",
+        }
+        harness = (
+            {"backend": "codex", "model": "gpt-5.6-terra"}
+            if backend == "codex" else {"backend": "claude_code"}
+        )
+
+        with patch("autoswe.harness.planner.create_worktree", return_value=wt):
+            with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+                with patch("autoswe.tracking.api._fetch_comments", return_value=[]):
+                    with patch(
+                        "autoswe.harness.planner.resolve_harness", return_value=harness
+                    ):
+                        with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                            from autoswe.harness.planner import run_plan
+                            run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+        # The agent's uncommitted edit must have been rolled back — worktree clean.
+        assert _worktree_porcelain(wt) == "", (
+            f"[{backend}] plan run left the worktree dirty; backstop should roll back"
+        )
+        assert not (wt / "agent_edit.py").exists(), "agent edit must be removed"
+        # HEAD is unchanged
+        assert subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip() == head

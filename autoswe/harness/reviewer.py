@@ -2,7 +2,8 @@
 
 Runs a fresh (non-resumable) Claude session with read-only tool access
 to review the diff between the feature branch and its base branch.
-The review report is persisted to ~/.claude/reviews/ and posted as
+The review report is persisted to the backend-neutral artifact dir
+(``<ARTIFACT_DIR>/reviews/``, S6 / issue #169 F-10) and posted as
 an issue comment. The next /fix or /plan auto-injects the report as
 prompt context, then clears it (pop-after-first-use).
 """
@@ -28,8 +29,16 @@ _REVIEW_MAX_DIFF_LINES = 2000
 
 
 def _get_reviews_dir() -> Path:
-    """Return the review reports directory."""
-    d = Path.home() / ".claude" / "reviews"
+    """Return the backend-neutral review reports directory.
+
+    Under the handler-owned artifact root (``ARTIFACT_DIR / "reviews"``) rather
+    than a Claude-specific path (S6 / issue #169 F-10). ``ARTIFACT_DIR`` is
+    read from the config module at call time so an isolated ``AUTOSWE_DIR``
+    (tests) redirects the location without patching this function.
+    """
+    from autoswe.core import config
+
+    d = config.ARTIFACT_DIR / "reviews"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -104,7 +113,7 @@ def run_review(
       3. Extract plan text from issue comments
       4. Build review prompt (issue + plan + diff)
       5. Run Claude SDK fresh session, read-only
-      6. Persist report to ~/.claude/reviews/<slug>.md
+      6. Persist report to <ARTIFACT_DIR>/reviews/<slug>.md
       7. Return HandlerResult(REVIEW_READY\t<text>, review_file_path=...)
          emit() produces a post_comment effect that patches the sticky
          progress comment in-place via progress.finalize().

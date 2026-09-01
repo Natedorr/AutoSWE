@@ -41,6 +41,14 @@ class RunResult:
     subtype: str | None
     cost_usd: float | None = None
     duration_seconds: float = 0.0
+    # Normalized success flag (S6 / issue #169 F-10). Handlers gate on this
+    # instead of comparing ``subtype`` to the literal ``"success"`` — the two
+    # backends happen to agree on that spelling today only by coincidence, not
+    # contract. Each backend sets it explicitly from its own success notion.
+    # ``None`` means "not set"; ``__post_init__`` resolves it to
+    # ``subtype == "success"`` so positional constructions that omit it stay
+    # backward-compatible.
+    ok: bool | None = None
     plan_file_path: str | None = None
     plan_posted: bool = False
     question_posted: bool = False
@@ -58,6 +66,16 @@ class RunResult:
     # ``error_max_structured_output_retries`` — handlers fall back to the
     # text-pattern path in those cases (graceful degrade, issue #159).
     structured_output: dict | None = None
+
+    def __post_init__(self):
+        """Resolve the normalized ``ok`` flag.
+
+        When a backend does not set ``ok`` explicitly (``None``), fall back to
+        the historical success notion so positional constructions that omit it
+        behave exactly as before (S6 / issue #169 F-10).
+        """
+        if self.ok is None:
+            self.ok = self.subtype == "success"
 
     def __iter__(self):
         """Allow tuple-style unpacking: text, session_id, subtype = result."""
@@ -77,13 +95,16 @@ class HandlerResult:
         (plan, fix, review, resolve) return the session_id from the SDK run.
         _to_dispatch passes it through to DispatchResult; emit() persists
         it to the queue via the queue_patch.
-    plan_file_path: absolute path to the ~/.claude/plans/<...>.md file the
-        planner wrote on PLAN_READY. Persisted to queue so the next /fix
-        dispatch can start a fresh session seeded with it instead of
+    plan_file_path: absolute path to the native plan-file .md the planner
+        wrote on PLAN_READY (e.g. ``~/.claude/plans/<...>.md`` on Claude
+        Code — where the SDK writes natively). Persisted to queue so the next
+        /fix dispatch can start a fresh session seeded with it instead of
         resuming the plan session.
-    review_file_path: absolute path to the ~/.claude/reviews/<slug>.md file
-        the reviewer wrote on REVIEW_READY. Persisted to queue so the next
-        /fix or /plan dispatch injects it as prompt context, then clears it.
+    review_file_path: absolute path to the review-report .md the reviewer
+        wrote on REVIEW_READY (``<ARTIFACT_DIR>/reviews/<slug>.md`` — a
+        backend-neutral directory owned by the handler, S6 / issue #169
+        F-10). Persisted to queue so the next /fix or /plan dispatch injects
+        it as prompt context, then clears it.
     verdict: the reviewer's structured verdict (e.g. "LGTM", "changes
         requested", "blocked") taken from the schema-validated structured
         output, when the backend produced one. The status gate
@@ -97,18 +118,6 @@ class HandlerResult:
     plan_file_path: str | None = None
     review_file_path: str | None = None
     verdict: str | None = None
-
-
-# ---------- Tool sets (module-level constants) ----------
-
-# Read-only-safe progress/orchestration tools (no repo mutation)
-PROGRESS_TOOLS = [
-    "TodoWrite",
-    "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop",
-]
-
-# Full agent toolset: includes sub-agent spawning. Only safe for fix/coder phases.
-AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]
 
 
 # ---------- RunSpec ----------
@@ -230,6 +239,19 @@ class CodingBackend(Protocol):
         empty set (the default contract) to rely solely on exception-based
         retries.  Override in backends whose failures are return-value-driven
         rather than exception-driven (e.g. Codex exit-code failures).
+        """
+        ...
+
+    @classmethod
+    def retryable_exceptions(cls) -> tuple:
+        """Return the tuple of exception types that trigger a retry.
+
+        The exception-based twin of :meth:`retryable_subtypes` (S6 / issue
+        #169 F-09). Each backend owns the exception set it can recover from —
+        the runner binds ``except`` to the *resolved* backend's tuple rather
+        than to Claude's, so a Codex subprocess failure is retried under
+        Codex's own set and a Claude SDK failure under Claude's. Return an
+        empty tuple to rely solely on subtype-based retries.
         """
         ...
 

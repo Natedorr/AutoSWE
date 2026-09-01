@@ -224,6 +224,7 @@ def isolated_autoswe_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "QUEUE_FILE", tmp_path / "data" / "queue.json")
     monkeypatch.setattr(cfg, "RUNNING_DIR", tmp_path / "running")
     monkeypatch.setattr(cfg, "LOGS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(cfg, "ARTIFACT_DIR", tmp_path / "artifacts")
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config" / "autoswe.env")
     monkeypatch.setattr(cfg, "REPOS_CONFIG_FILE", tmp_path / "config" / "repos.json")
     monkeypatch.setattr(cfg, "HARNESSES_CONFIG_FILE", tmp_path / "config" / "harnesses.json")
