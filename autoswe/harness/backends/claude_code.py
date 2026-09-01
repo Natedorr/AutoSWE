@@ -76,11 +76,20 @@ _READ_ONLY_TOOLS = [
 ]
 
 # Full read-write tools (everything the fix phase needs)
+#
+# NOTE on TaskOutput: the *deprecated* TaskOutput tool was removed in
+# issue #132 (commit 8198408) — from the shared PROGRESS_TOOLS list (which
+# feeds _READ_ONLY_TOOLS / _PLAN_TOOLS) and, because this read_write list is
+# hand-maintained and does not spread PROGRESS_TOOLS, from this list with a
+# separate edit. It is deliberately re-added here (S6 follow-up on issue
+# #169): in the fix phase the coder may spawn background sub-agents via Agent
+# and read their output directly through TaskOutput (Read remains the
+# canonical fallback). read_only/plan still omit it, matching #132.
 _READ_WRITE_TOOLS = [
     "Read", "Edit", "Write", "Bash", "Glob", "Grep",
     "AskUserQuestion", *_MCP_COMMENT_TOOLS,
     "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet",
-    "TaskList", "TaskStop", "Agent",
+    "TaskList", "TaskOutput", "TaskStop", "Agent",
 ]
 
 # Plan mode tools (read-only + AskUserQuestion + plan MCP tools, Agent excluded).

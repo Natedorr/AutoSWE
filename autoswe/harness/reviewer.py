@@ -237,7 +237,7 @@ def run_review(
     # before falling back to the markdown "## Verdict" regex.
     verdict = _verdict_from_result(result)
 
-    # 6. Persist report to ~/.claude/reviews/<slug>.md
+    # 6. Persist report to <ARTIFACT_DIR>/reviews/<slug>.md (S6 / issue #169 F-10)
     review_path = _get_reviews_dir() / _review_filename(task["id"])
     review_path.write_text(report_text, encoding="utf-8")
 
