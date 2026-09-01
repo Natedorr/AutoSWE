@@ -53,6 +53,81 @@ NO_CHANGES_RESULT = {"committed": False}
 
 
 # ---------------------------------------------------------------------------
+# Fork-on-retry session source (issue #173 F-15)
+# ---------------------------------------------------------------------------
+
+
+def test_run_fix_fork_resumes_gate_validated_id(tmp_path):
+    """The retry gate and the SDK must resume the same session id.
+
+    When the FAILED path left session_id set to a *different* value than the
+    checkpoint the retry gate validated (last_good_session_id), run_fix must
+    hand the gate-validated id (fork_session_id) to the SDK, not session_id.
+    """
+    from autoswe.harness.coder import run_fix
+
+    captured = {}
+
+    def fake_run(prompt, **kwargs):
+        captured.update(kwargs)
+        return _r("DONE: no changes detected", session_id="s-new")
+
+    task = make_task(session_id="s-stale-session")
+    task["last_good_session_id"] = "s-checkpoint"
+
+    stack = _patch_worktree(tmp_path)
+    stack.enter_context(patch("autoswe.vcs.worktree.get_merge_conflict_files", return_value=[]))
+    stack.enter_context(patch("autoswe.vcs.worktree.get_vcs", return_value=_fake_vcs()))
+    stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+    stack.enter_context(patch("autoswe.harness.coder._finalize_fix", return_value=_r("DONE: no changes detected", "s-new")))
+    try:
+        run_fix(task, None, {"provider": "github"}, {},
+                wt=tmp_path, fork_session=True, fork_session_id="s-checkpoint")
+    finally:
+        stack.close()
+
+    assert captured["resume"] == "s-checkpoint", (
+        f"run_fix must resume the gate-validated checkpoint, got {captured['resume']!r}"
+    )
+    assert captured["fork_session"] is True
+
+
+def test_run_fix_fork_without_id_falls_back_to_last_good(tmp_path):
+    """A caller that sets fork_session but not fork_session_id still resumes
+    the last_good_session_id (backward-compatible path)."""
+    from autoswe.harness.coder import run_fix
+
+    captured = {}
+
+    def fake_run(prompt, **kwargs):
+        captured.update(kwargs)
+        return _r("DONE: no changes detected", session_id="s-new")
+
+    task = make_task(session_id=None)
+    task["last_good_session_id"] = "s-checkpoint"
+
+    stack = _patch_worktree(tmp_path)
+    stack.enter_context(patch("autoswe.vcs.worktree.get_merge_conflict_files", return_value=[]))
+    stack.enter_context(patch("autoswe.vcs.worktree.get_vcs", return_value=_fake_vcs()))
+    stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+    stack.enter_context(patch("autoswe.harness.coder._finalize_fix", return_value=_r("DONE: no changes detected", "s-new")))
+    try:
+        run_fix(task, None, {"provider": "github"}, {},
+                wt=tmp_path, fork_session=True)
+    finally:
+        stack.close()
+
+    assert captured["resume"] == "s-checkpoint"
+
+
+def _fake_vcs():
+    from unittest.mock import MagicMock
+    m = MagicMock()
+    m.find_existing_pr.return_value = None
+    return m
+
+
+# ---------------------------------------------------------------------------
 # Backend awareness (harness_cfg threading)
 
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 from pathlib import Path
+
+from autoswe.core.logging_utils import get_debug_logger
 
 # Expands ${VAR} and ${VAR:-default} inside JSON string values.
 
@@ -74,12 +75,14 @@ AUTOSWE_DIR = Path(os.environ.get("AUTOSWE_DIR", _REPO_ROOT))
 
 
 def _as_bool(value: str | None, default: str = "false") -> bool:
-    """Coerce a config value to bool via the ``.lower() == "true"`` idiom.
+    """Coerce a config value to bool.
 
-    Used by both the defaults dict and the file-override loop so the coercion
-    logic lives in one place.
+    Accepts the common truthy spellings ``true`` / ``1`` / ``yes`` / ``on``
+    (case-insensitive); everything else — including a blank that falls back to
+    *default* — is falsy. Used by both the defaults dict and the file-override
+    loop so the coercion logic lives in one place.
     """
-    return str(value or default).lower() == "true"
+    return str(value or default).strip().lower() in ("true", "1", "yes", "on")
 
 
 def _load_json_config(filepath: Path) -> dict:
@@ -140,14 +143,39 @@ def load_config() -> dict:
         "WORKTREE_ORPHAN_POLICY": os.environ.get("WORKTREE_ORPHAN_POLICY", "commit"),
     }
     if CONFIG_FILE.exists():
+        # Snapshot the defaults before the file-parse loop overwrites the
+        # values — a coercion failure must fall back to these defaults.
+        int_defaults = {
+            int_key: cfg[int_key]
+            for int_key in (
+                "AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS",
+                "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES",
+            )
+        }
         for line in CONFIG_FILE.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, _, v = line.partition("=")
-                cfg[k.strip()] = v.strip()
+                v = v.strip()
+                # Strip matched surrounding quotes so BOT_NAME="bot" -> bot.
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                    v = v[1:-1]
+                cfg[k.strip()] = v
         for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES"):
-            with contextlib.suppress(ValueError, TypeError):
-                cfg[int_key] = int(cfg.get(int_key, 0))
+            raw = cfg.get(int_key)
+            if raw is None:
+                continue
+            try:
+                cfg[int_key] = int(raw)
+            except (ValueError, TypeError):
+                # Malformed value (e.g. MAX_ATTEMPTS=thre): keep the default
+                # rather than a string that would blow up later in a compare.
+                default = int_defaults[int_key]
+                cfg[int_key] = default
+                get_debug_logger().warning(
+                    "config: %s=%r is not a valid integer, using default %r",
+                    int_key, raw, default,
+                )
         cfg["SILENT_REPORTING"] = _as_bool(cfg.get("SILENT_REPORTING"))
         cfg["MINIMAL_POSTING"] = _as_bool(cfg.get("MINIMAL_POSTING"))
         cfg["AUTO_ASSIGN"] = _as_bool(cfg.get("AUTO_ASSIGN"), "true")

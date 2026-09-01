@@ -111,6 +111,38 @@ def test_parse_unknown_command_returns_none():
     assert parse_slash_command("/unknown") is None
 
 
+def test_parse_command_prefix_is_not_a_command():
+    """A slash command must be followed by a boundary (issue #173 F-14).
+
+    Without a trailing anchor, ``/fixture`` matches ``/fix``, ``/prod-notes``
+    matches ``/pr``, and ``/planning`` matches ``/plan``.
+    """
+    assert parse_slash_command("/fixture") is None
+    assert parse_slash_command("/prod-notes") is None
+    assert parse_slash_command("/planning") is None
+    assert parse_slash_command("/prerelease") is None
+    assert parse_slash_command("/synchronize") is None
+    assert parse_slash_command("/abortive") is None
+    assert parse_slash_command("/reviewer") is None
+
+
+def test_parse_command_at_end_of_line_still_matches():
+    """The trailing boundary is whitespace, end-of-line, or a backtick."""
+    assert parse_slash_command("/fix") == ("/fix", None, None)
+    assert parse_slash_command("/plan\n") == ("/plan", None, None)
+    assert parse_slash_command("/fix\nsecond line") == ("/fix", None, None)
+
+
+def test_parse_command_with_guidance_and_branch_still_match():
+    """Valid commands still parse with and without guidance/branch."""
+    assert parse_slash_command("/pr with guidance") == ("/pr", "guidance", None)
+    assert parse_slash_command("/plan --branch develop") == ("/plan", None, "develop")
+    assert parse_slash_command("/sync") == ("/sync", None, None)
+    cmd, guidance, branch = parse_slash_command("/fix with x --branch main")
+    assert cmd == "/fix"
+    assert branch == "main"
+
+
 # ---------------------------------------------------------------------------
 # _is_autoswe_bot_comment
 # ---------------------------------------------------------------------------

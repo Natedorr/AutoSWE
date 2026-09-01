@@ -173,21 +173,75 @@ def _run_safe(cwd: str, cmd: list[str], timeout: float = 5.0) -> str:
 
 
 def _get_memory_info() -> str:
-    """Read system memory from /proc/meminfo (Linux) or fall back to empty."""
-    try:
-        with open("/proc/meminfo") as f:
-            meminfo = f.readline().strip()  # MemTotal line
-        return meminfo
-    except OSError:
-        return ""
+    """Return a one-line total-memory figure for the current platform.
+
+    Populates the System section on every supported OS (issue #173 F-24):
+      * Linux   — the ``MemTotal`` line from ``/proc/meminfo``.
+      * macOS   — total RAM from ``sysctl hw.memsize``.
+      * Windows — total physical memory from ``GlobalMemoryStatusEx``.
+    Returns a clearly-labelled "unavailable" string (never "") if nothing
+    works, so the field is always populated rather than silently dropped.
+    """
+    if hasattr(os, "uname") and sys.platform.startswith("linux"):
+        try:
+            with open("/proc/meminfo") as f:
+                meminfo = f.readline().strip()  # MemTotal line
+            if meminfo:
+                return meminfo
+        except OSError:
+            pass
+    elif sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True, text=True, timeout=5,
+            )
+            total_kb = int(out.stdout.strip()) // 1024
+            if total_kb > 0:
+                return f"MemTotal: {total_kb} kB"
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    elif os.name == "nt":
+        try:
+            import ctypes
+            import ctypes.wintypes
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.wintypes.DWORD),
+                    ("dwMemoryLoad", ctypes.wintypes.DWORD),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(stat)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            if stat.ullTotalPhys > 0:
+                return f"MemTotal: {stat.ullTotalPhys // 1024} kB"
+        except (OSError, AttributeError):
+            pass
+    return "Memory: unavailable on this platform"
 
 
 def _get_disk_usage(path: str) -> str:
-    """Get disk usage string for the filesystem containing *path*."""
+    """Return a disk-usage line for the filesystem containing *path*.
+
+    Uses ``shutil.disk_usage`` — the portable API that works on Windows,
+    macOS, and Linux (``os.statvfs`` is Unix-only, so it raised and the field
+    was silently empty on the documented Windows host — issue #173 F-24).
+    """
     try:
-        st = os.statvfs(path)
-        total_gb = (st.f_blocks * st.f_frsize) / (1024 ** 3)
-        free_gb = (st.f_bfree * st.f_frsize) / (1024 ** 3)
+        import shutil
+
+        usage = shutil.disk_usage(path)
+        total_gb = usage.total / (1024 ** 3)
+        free_gb = usage.free / (1024 ** 3)
         return f"Disk: {free_gb:.1f}GB free / {total_gb:.1f}GB total"
-    except (OSError, TypeError, AttributeError):
-        return ""
+    except (OSError, TypeError, ValueError):
+        return f"Disk: unavailable for {path}"

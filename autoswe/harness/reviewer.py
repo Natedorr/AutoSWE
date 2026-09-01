@@ -64,6 +64,24 @@ def _report_text_from_result(result) -> str:
     return result.text or ""
 
 
+def _verdict_from_result(result) -> str | None:
+    """Extract the reviewer's structured verdict, if the run produced one.
+
+    Reads the ``verdict`` field off the schema-validated structured output
+    (REVIEW_SCHEMA).  Returns the stripped string, or ``None`` when the run
+    had no structured output / no verdict — in that case the status gate falls
+    back to the markdown "## Verdict" regex (issue #173 F-18).
+    """
+    structured = getattr(result, "structured_output", None)
+    if isinstance(structured, dict):
+        verdict = structured.get("verdict")
+        if verdict is not None:
+            verdict = str(verdict).strip()
+            if verdict:
+                return verdict
+    return None
+
+
 def run_review(
     task: dict,
     repo_cfg: dict,
@@ -206,6 +224,9 @@ def run_review(
     # text otherwise (issue #159). Both the file write and the done_content
     # use the same source of truth.
     report_text = _report_text_from_result(result)
+    # The structured verdict (issue #173 F-18): the status gate reads this
+    # before falling back to the markdown "## Verdict" regex.
+    verdict = _verdict_from_result(result)
 
     # 6. Persist report to ~/.claude/reviews/<slug>.md
     review_path = _get_reviews_dir() / _review_filename(task["id"])
@@ -221,6 +242,7 @@ def run_review(
         duration_seconds=result.duration_seconds,
         session_id=result.session_id,          # actual review session (not fix session)
         review_file_path=str(review_path),
+        verdict=verdict,
     )
 
 

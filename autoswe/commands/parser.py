@@ -1,8 +1,13 @@
 import re
 
-_SLASH_CMD_RE = re.compile(r"/(?:fix|plan|pr|retry|skip|sync|abort|review)", re.IGNORECASE)
+# The trailing lookahead enforces a word boundary: `/fixture` must not match
+# `/fix`, `/prod-notes` must not match `/pr`, `/planning` must not match
+# `/plan`. The backtick alternative covers `` `/fix` ``-style lines where a
+# leading backtick was stripped but a trailing one remains.
+_SLASH_CMD_RE = re.compile(
+    r"/(?:fix|plan|pr|retry|skip|sync|abort|review)(?=\s|$|`)", re.IGNORECASE
+)
 _BRANCH_RE = re.compile(r"--branch\s+([\w][\w\-./]+)")
-_MENTION_RE = re.compile(r"@" r"([\w-]+)\s+(.+)", re.IGNORECASE)
 
 
 def _parse_mention(text: str, bot_name: str) -> tuple[str, str, str] | None:

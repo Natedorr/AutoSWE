@@ -1,7 +1,7 @@
 """Tests for the dispatch return-string → label mapping and related logic."""
 
 from autoswe.orch.emit import _build_branch_url, _build_commit_url, _build_completion_comment
-from autoswe.tracking.labels import _map_done_to_status
+from autoswe.tracking.labels import _map_done_to_status, _verdict_field_to_status
 
 # ---------------------------------------------------------------------------
 # Return-string → label mapping
@@ -120,6 +120,56 @@ def test_parse_review_verdict_blocked_beats_needs_changes():
 
 def test_map_random_string():
     assert _map_done_to_label("something random") == "autoswe:fixed"
+
+
+# ---------------------------------------------------------------------------
+# Structured verdict field — primary gate (issue #173 F-18)
+# ---------------------------------------------------------------------------
+# The reviewer's schema-validated ``verdict`` field is the primary gate. The
+# markdown "## Verdict" regex is only the fallback when the field is absent.
+
+def test_structured_verdict_blocked_gates_over_lgtm_text():
+    """A blocking structured verdict gates even when the report text says LGTM.
+
+    This is the core F-18 fix: previously only the text was read, so a report
+    whose structured verdict was 'Blocked' but whose prose said LGTM would slip
+    through to ``reviewed``. The structured field now wins.
+    """
+    body = "## Summary\n\nClean.\n\n## Verdict\n\n**LGTM**"
+    assert _map_done_to_status(f"REVIEW_READY\t{body}", verdict="Blocked") == "review_blocked"
+
+
+def test_structured_verdict_needs_changes_over_lgtm_text():
+    body = "## Verdict\n\n**LGTM**"
+    assert _map_done_to_status(f"REVIEW_READY\t{body}", verdict="needs changes") == "review_failed"
+
+
+def test_structured_verdict_lgtm_maps_to_reviewed():
+    assert _map_done_to_status("REVIEW_READY\twhatever", verdict="LGTM") == "reviewed"
+
+
+def test_no_structured_verdict_falls_back_to_regex():
+    """When verdict is None the markdown regex path is used (backward compat)."""
+    body = "## Verdict\n\n**Blocked** — critical finding."
+    assert _map_done_to_status(f"REVIEW_READY\t{body}", verdict=None) == "review_blocked"
+    # Same body, but a structured LGTM verdict overrides the blocked text.
+    assert _map_done_to_status(f"REVIEW_READY\t{body}", verdict="LGTM") == "reviewed"
+
+
+def test_bare_review_ready_uses_structured_verdict():
+    """A bare REVIEW_READY (no embedded text) still honours the structured field."""
+    assert _map_done_to_status("REVIEW_READY", verdict="Blocked") == "review_blocked"
+    # ...and without it, keeps the historical default.
+    assert _map_done_to_status("REVIEW_READY", verdict=None) == "reviewed"
+
+
+def test_verdict_field_to_status_is_conservative():
+    """Unrecognised verdict values never block — they default to 'reviewed'."""
+    assert _verdict_field_to_status("Blocked") == "review_blocked"
+    assert _verdict_field_to_status("needs changes") == "review_failed"
+    assert _verdict_field_to_status("LGTM") == "reviewed"
+    assert _verdict_field_to_status("") == "reviewed"
+    assert _verdict_field_to_status("sompletely unknown") == "reviewed"
 
 
 # ---------------------------------------------------------------------------

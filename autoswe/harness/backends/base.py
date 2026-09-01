@@ -84,6 +84,11 @@ class HandlerResult:
     review_file_path: absolute path to the ~/.claude/reviews/<slug>.md file
         the reviewer wrote on REVIEW_READY. Persisted to queue so the next
         /fix or /plan dispatch injects it as prompt context, then clears it.
+    verdict: the reviewer's structured verdict (e.g. "LGTM", "changes
+        requested", "blocked") taken from the schema-validated structured
+        output, when the backend produced one. The status gate
+        (labels._map_done_to_status) reads this first and only falls back to
+        the markdown "## Verdict" regex when it is None (issue #173 F-18).
     """
     done_content: str
     cost_usd: float | None = None
@@ -91,6 +96,7 @@ class HandlerResult:
     session_id: str | None = None
     plan_file_path: str | None = None
     review_file_path: str | None = None
+    verdict: str | None = None
 
 
 # ---------- Tool sets (module-level constants) ----------

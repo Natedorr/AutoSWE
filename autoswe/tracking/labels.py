@@ -159,6 +159,23 @@ def _get_autoswe_status(labels: list):
 _VERDICT_RE = re.compile(r"#{1,6}\s*Verdict\b(.*?)(?:\n#{1,6}\s|\Z)", re.IGNORECASE | re.DOTALL)
 
 
+def _verdict_field_to_status(verdict: str) -> str:
+    """Map a reviewer's structured ``verdict`` field to an autoswe status.
+
+    This is the primary gate when the reviewer produces schema-validated
+    structured output (issue #173 F-18): it reads the one field designed for
+    the gate instead of scraping markdown. The mapping is conservative —
+    it only ever produces a *blocking* status when the verdict explicitly says
+    so; an unrecognised value falls back to the non-gating ``"reviewed"``.
+    """
+    low = (verdict or "").strip().lower()
+    if "block" in low:
+        return "review_blocked"
+    if "change" in low or "fail" in low or "request" in low:
+        return "review_failed"
+    return "reviewed"
+
+
 def parse_review_verdict(review_text: str) -> str:
     """Map a review report's verdict to an autoswe status.
 
@@ -186,21 +203,34 @@ def parse_review_verdict(review_text: str) -> str:
     return "reviewed"
 
 
-def _map_done_to_status(done_content: str, kind: str = "fix") -> str:
+def _map_done_to_status(done_content: str, kind: str = "fix", verdict: str | None = None) -> str:
     """Map handler return string to autoswe status (no prefix).
 
     The *kind* parameter determines which completed status to use for DONE*
     returns (e.g., "fixed" for fix, "synced" for sync_branch).
+
+    For REVIEW_READY, the structured ``verdict`` field (from the reviewer's
+    schema-validated output, issue #173 F-18) is the primary gate; the markdown
+    "## Verdict" regex (``parse_review_verdict``) is only the fallback when the
+    structured field is absent.
     """
     if done_content == "PLAN_READY":
         return "planned"
     elif done_content.startswith("REVIEW_READY\t"):
-        # Gate on the verdict embedded in the review text. A blocking verdict
-        # transitions to a non-terminal review_failed/review_blocked state so
-        # decide() can refuse /pr until a /fix addresses the findings.
-        return parse_review_verdict(done_content[len("REVIEW_READY\t"):])
+        review_text = done_content[len("REVIEW_READY\t"):]
+        # Primary gate: the structured verdict, when present. A blocking
+        # verdict transitions to a non-terminal review_failed/review_blocked
+        # state so decide() can refuse /pr until a /fix addresses the findings.
+        if verdict:
+            return _verdict_field_to_status(verdict)
+        # Fallback: no structured verdict (e.g. Codex/text path) — scrape the
+        # markdown "## Verdict" section as before.
+        return parse_review_verdict(review_text)
     elif done_content == "REVIEW_READY":
-        # Bare REVIEW_READY (no embedded text) — treat as approved.
+        # Bare REVIEW_READY (no embedded text). Still prefer the structured
+        # verdict over the historical "approved" default.
+        if verdict:
+            return _verdict_field_to_status(verdict)
         return "reviewed"
     elif done_content.startswith("WAITING:"):
         return "waiting"

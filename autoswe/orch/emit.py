@@ -340,7 +340,10 @@ def emit(
         return ()
 
     done = result.done_content
-    new_status = _map_done_to_status(done, kind)
+    # The reviewer's structured verdict (issue #173 F-18) drives the status
+    # gate first; _map_done_to_status falls back to the markdown regex only
+    # when verdict is None.
+    new_status = _map_done_to_status(done, kind, verdict=result.verdict)
     session_id = result.session_id or task.session_id
 
     # --- Common queue patch for all Claude actions ---
