@@ -162,7 +162,9 @@ validated data (e.g. `error_max_structured_output_retries`), they fall back to
 the text-pattern path. On a known-old SDK the option is skipped so the run
 degrades to plain text output.
 
-**Retryable subtypes:** `set()` — Claude Code retries on SDK exceptions (`_get_retryable_exceptions`), not return-value subtypes.
+**Retryable subtypes:** `set()` — Claude Code retries on SDK exceptions (`retryable_exceptions()`, backed by the module's `_get_retryable_exceptions()`), not return-value subtypes.
+
+**Retryable exceptions:** `retryable_exceptions()` returns the SDK exception tuple (`asyncio.TimeoutError`, `ProcessError`, `CLIConnectionError`, `ClaudeSDKError` — or just `asyncio.TimeoutError` when the SDK import fails). The runner uses the *resolved backend's* tuple, not a hard-coded one (S6 / issue #169 F-09).
 
 <a id="retry-semantics"></a>
 **Retry semantics (fork-on-retry).** The Claude Agent SDK supports
@@ -255,7 +257,7 @@ not advertise `"session_fork"`, so `_run_retry`'s capability gate leaves
 [harnesses.md#retry-semantics](#retry-semantics) for the Claude fork-on-retry
 contrast.
 
-**Retryable subtypes:** `{"error", "killed"}` — Codex failure is return-value-driven (non-zero exit or `turn.failed`), not exception-driven. The runner inspects `RunResult.subtype` and retries when `AGENT_RETRY_ON_FAILURE > 0`. Override with `AGENT_RETRY_ON_SUBTYPE`.
+**Retryable subtypes:** `{"error", "killed"}` — Codex failure is mostly return-value-driven (non-zero exit or `turn.failed`). The runner inspects `RunResult.subtype` and retries when `AGENT_RETRY_ON_FAILURE > 0`. Override with `AGENT_RETRY_ON_SUBTYPE`. **Retryable exceptions:** `retryable_exceptions()` returns `(asyncio.TimeoutError, OSError)` — transport-level failures that surface as exceptions rather than a `subtype`.
 
 **Sandbox / bypass policy (issue #129):** the Codex backend does **not** map `RunSpec.mode` to a `--sandbox` value. It previously did (`plan`/`read_only` → `--sandbox read-only`, `read_write` → `--sandbox workspace-write`), but that was dead weight — the `--dangerously-bypass-approvals-and-sandbox` flag was appended unconditionally and neutralized whatever `--sandbox` was set, so plan/review runs got full access regardless of the mapping. The mapping and the `--sandbox` emission have been removed; the emitted flag set now matches the documented intent. `RunSpec.mode` is still accepted (contract parity with `claude_code`) but has no effect on the Codex CLI flags.
 
@@ -275,11 +277,29 @@ Access is instead controlled by a single explicit switch, `bypass_approvals` (pr
 - **No system-prompt knob (asymmetry with `claude_code`):** Codex always uses its built-in system prompt; there is no equivalent of Claude Code's `claude_code` preset to select. The nearest levers (`AGENTS.md`, rules) are intentionally disabled via `--ignore-rules` / `--ignore-user-config` for reproducibility, so autoSWE cannot steer the Codex system prompt the way it can for Claude.
 - **No read-only enforcement for plan/review (issue #166):** because Codex does not advertise `mode` (and has no `can_use_tool`), a plan or review phase running on a Codex profile has no sandbox/allowlist/Bash guard. The planner and reviewer detect this via `has_read_only_enforcement`, log a prominent warning, and then call `ensure_worktree_unchanged` after the run, which reverts any worktree changes the agent made (`git status --porcelain` dirty check + `git reset --hard <head_before>` + `git clean -fd`). This backstop catches the "agent edited but did not commit" case that the old HEAD-only compare missed. It does not prevent the agent from writing mid-run — it only guarantees the worktree is clean when the next phase starts.
 - ``cost_usd`` is an **estimate** from a maintained price table (`codex_pricing.py`). Returns ``None`` for unknown models — never guesses.
-- ``plan_file_path`` is always ``None`` — Codex doesn't write to `~/.claude/plans/`.
+- ``plan_file_path`` is always ``None`` — Codex doesn't write a native plan file (Claude Code's `~/.claude/plans/` is reached via `claude_code.plan_file_dir()`; Codex has no equivalent).
 - ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting yet.
 - Duration is tracked via ``time.monotonic()`` locally.
 
-### Factory
+### Shared RunSpec → RunResult contract (backends/base.py)
+
+Both backends implement the `CodingBackend` protocol and share two cross-cutting
+behaviors, exercised identically in the runner's retry loop:
+
+- **`retryable_subtypes()`** — the set of return-value `subtype` strings that
+  trigger a retry (empty for `claude_code`; `{"error", "killed"}` for `codex`).
+- **`retryable_exceptions()`** — the tuple of exception types that trigger a
+  retry (S6 / issue #169 F-09). The runner uses the *resolved backend's* tuple,
+  so each backend retries on its own failure modes: `claude_code` on its SDK
+  exceptions, `codex` on `asyncio.TimeoutError`/`OSError`. A backend missing the
+  method gets an empty tuple (no exception-based retry) — `runner.run()` never
+  hard-codes Claude's set.
+
+`RunResult` carries a **normalized `ok: bool`** (S6 / issue #169 F-10) so
+handlers gate success on a backend-neutral flag instead of comparing
+`subtype == "success"` to a literal. When `ok` is omitted it resolves to
+`subtype == "success"` in `RunResult.__post_init__` (positional back-compat);
+an explicit `ok=` wins.
 
 Backend instances are created by `autoswe/harness/backends/factory.py:get_backend(harness_cfg)`. Dispatch on `harness_cfg["backend"]` field. Mirrors the provider factory pattern (`providers/factory.py`).
 

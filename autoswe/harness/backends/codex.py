@@ -494,6 +494,16 @@ class CodexBackend:
     def retryable_subtypes(cls) -> set[str]:
         return cls.RETRYABLE_SUBTYPES.copy()
 
+    @classmethod
+    def retryable_exceptions(cls) -> tuple:
+        # Codex has no SDK; its failure surface is the subprocess boundary.
+        # asyncio.TimeoutError is the runner's wall-clock timeout (wait_for);
+        # OSError covers spawn-time failures from create_subprocess_exec
+        # (PermissionError, a missing/incompatible executable, etc.). A
+        # FileNotFoundError is an OSError subclass, so both are covered.
+        # (S6 / issue #169 F-09: previously Codex inherited Claude's SDK tuple.)
+        return (asyncio.TimeoutError, OSError)
+
     def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec via Codex CLI.
 
@@ -765,6 +775,7 @@ class CodexBackend:
             text=text,
             session_id=acc.session_id,
             subtype=subtype,
+            ok=(subtype == "success"),
             cost_usd=estimated_cost,
             duration_seconds=duration,
             plan_file_path=None,

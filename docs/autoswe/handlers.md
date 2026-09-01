@@ -102,7 +102,7 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
 - **Model resolution:** `resolve_harness("review", …).model` → `repo_cfg.review_model` → `cfg.REVIEW_MODEL` → backend default
 - **Worktree:** accessed via `worktree_path()` on the feature branch. Does not create a new worktree — uses the existing one from `/plan` or `/fix`.
 - **Session:** fresh one-off session (`resume=None`). Not resumable.
-- **Flow:** Computes `git diff` between feature branch and base branch. Extracts plan text from bot comments (if any). Runs Claude in read-only mode with the review prompt. Parses response for required sections (Summary, Correctness, Security, Tests, Style, Suggestions, Verdict). Posts review as a comment prefixed with `## Review`. Persists review report to `~/.claude/reviews/<slug>.md`.
+- **Flow:** Computes `git diff` between feature branch and base branch. Extracts plan text from bot comments (if any). Runs the backend in read-only mode with the review prompt. Parses response for required sections (Summary, Correctness, Security, Tests, Style, Suggestions, Verdict). Posts review as a comment prefixed with `## Review`. Persists review report to `<ARTIFACT_DIR>/reviews/<slug>.md` (a backend-neutral directory, S6 / #169 F-10).
 - **Returns:** `"REVIEW_READY\t<full review text>"` (review completed; posts review comment, writes file) or `"FAILED: …"` (timeout or SDK error).
 - **Verdict gating:** `_map_done_to_status()` runs `parse_review_verdict()` over the review text's `## Verdict` section and maps the outcome to a status:
   - **LGTM / approved** (or no recognizable verdict) → `reviewed` (terminal; `/pr` allowed).

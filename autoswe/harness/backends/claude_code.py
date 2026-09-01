@@ -16,13 +16,29 @@ from collections.abc import Awaitable
 from pathlib import Path
 
 from autoswe.core.logging_utils import get_debug_logger, log
-from autoswe.harness.backends.base import PROGRESS_TOOLS, RunResult, RunSpec
+from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.prompts import BOT_MARKER
 
 _dbg = get_debug_logger()
 
 _RETRYABLE_SDK_EXCEPTIONS: tuple = ()
 _PLANS_DIR = Path.home() / ".claude" / "plans"
+
+# ---------- Claude Code tool sets ----------
+#
+# These are Claude-Code-specific tool names and therefore live here — in the
+# backend that actually consumes them — not in the harness-agnostic base
+# (S6 / issue #169 F-10). runner.py and backends/__init__.py re-export them
+# for back-compat so existing importers need no changes.
+
+# Read-only-safe progress/orchestration tools (no repo mutation)
+PROGRESS_TOOLS = [
+    "TodoWrite",
+    "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop",
+]
+
+# Full agent toolset: includes sub-agent spawning. Only safe for fix/coder phases.
+AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]
 
 # Claude Code's default system-prompt preset. When system_prompt is unset the
 # SDK falls back to a minimal prompt that covers tool calling but omits the
@@ -60,11 +76,20 @@ _READ_ONLY_TOOLS = [
 ]
 
 # Full read-write tools (everything the fix phase needs)
+#
+# NOTE on TaskOutput: the *deprecated* TaskOutput tool was removed in
+# issue #132 (commit 8198408) — from the shared PROGRESS_TOOLS list (which
+# feeds _READ_ONLY_TOOLS / _PLAN_TOOLS) and, because this read_write list is
+# hand-maintained and does not spread PROGRESS_TOOLS, from this list with a
+# separate edit. It is deliberately re-added here (S6 follow-up on issue
+# #169): in the fix phase the coder may spawn background sub-agents via Agent
+# and read their output directly through TaskOutput (Read remains the
+# canonical fallback). read_only/plan still omit it, matching #132.
 _READ_WRITE_TOOLS = [
     "Read", "Edit", "Write", "Bash", "Glob", "Grep",
     "AskUserQuestion", *_MCP_COMMENT_TOOLS,
     "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet",
-    "TaskList", "TaskStop", "Agent",
+    "TaskList", "TaskOutput", "TaskStop", "Agent",
 ]
 
 # Plan mode tools (read-only + AskUserQuestion + plan MCP tools, Agent excluded).
@@ -189,6 +214,18 @@ def _format_tool_progress(block) -> str | None:
     elif isinstance(block, ServerToolUseBlock):
         return f"Server tool: {block.name}"
     return None
+
+
+def plan_file_dir() -> Path:
+    """Return the native plan-file directory the Claude Code SDK writes to.
+
+    The plan-file path is a Claude-Code-SDK concern (the SDK writes plan
+    files to ``~/.claude/plans/`` natively), so this accessor lives here — the
+    backend that owns the path — rather than in the harness-agnostic planner
+    (S6 / issue #169 F-10). The planner reads it through this accessor, gated
+    on the ``plan_file`` capability.
+    """
+    return _PLANS_DIR
 
 
 def _extract_plan_file_path(block) -> str | None:
@@ -427,8 +464,14 @@ class ClaudeCodeBackend:
 
     @classmethod
     def retryable_subtypes(cls) -> set[str]:
-        # Claude retries via SDK exceptions (_get_retryable_exceptions), not subtypes.
+        # Claude retries via SDK exceptions (retryable_exceptions), not subtypes.
         return set()
+
+    @classmethod
+    def retryable_exceptions(cls) -> tuple:
+        # Claude retries on SDK exception types: TimeoutError + the Agent SDK
+        # error classes, degrading to bare TimeoutError when the SDK is absent.
+        return _get_retryable_exceptions()
 
     def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec via Claude Agent SDK.
@@ -677,6 +720,7 @@ class ClaudeCodeBackend:
             text="\n".join(text_chunks),
             session_id=session_id,
             subtype=subtype,
+            ok=(subtype == "success"),
             cost_usd=cost_usd,
             duration_seconds=duration_ms / 1000,
             plan_file_path=captured_plan_file,

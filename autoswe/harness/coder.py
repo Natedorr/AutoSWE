@@ -9,7 +9,7 @@ from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
 from autoswe.harness.mcp_config import build_mcp_comment_server, build_mcp_inline_comment_server
 from autoswe.harness.prompts import build_conflict_resolution_prompt, build_fix_prompt
-from autoswe.harness.runner import AGENT_TASK_TOOLS, HandlerResult
+from autoswe.harness.runner import HandlerResult
 from autoswe.providers.factory import get_vcs
 from autoswe.vcs.worktree import (
     commit_and_push,
@@ -140,7 +140,7 @@ def _run_fix_session(
     rc: dict,
     *,
     resume_id: str | None,
-    allowed_tools: list[str],
+    extra_tools: list[str],
     mcp_servers: dict,
     fix_model: str | None,
     timeout_msg: str,
@@ -152,6 +152,9 @@ def _run_fix_session(
 
     Resolves the harness, runs the agent, checks post-run state, and
     finalises (commit/push) on success.
+
+    *extra_tools* holds only the genuinely-extra tools (e.g. the inline-comment
+    tool) — the base read-write tool set comes from ``mode="read_write"``.
     """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     base_branch = task.get("base_branch", "main")
@@ -174,7 +177,7 @@ def _run_fix_session(
             fork_session=fork_session,
             model=fix_model,
             mode="read_write",
-            extra_tools=allowed_tools,
+            extra_tools=extra_tools,
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -199,7 +202,7 @@ def _run_fix_session(
             session_id=run_result.session_id,
         )
 
-    if run_result.subtype != "success":
+    if not run_result.ok:
         return HandlerResult(
             f"FAILED: agent ended with subtype={run_result.subtype}",
             session_id=run_result.session_id,
@@ -254,7 +257,13 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
     # Build MCP server config: comment server (always) + inline comment server (if PR exists)
     rc = repo_cfg or {}
     mcp_servers = build_mcp_comment_server(task, rc) or {}
-    allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
+    # The fix phase runs in mode="read_write": the backend supplies the full
+    # read-write tool set (Read/Edit/Write/Bash/Glob/Grep/AskUserQuestion, the
+    # MCP comment tools, and the agent/progress tools). The ONLY genuinely
+    # extra tool is the inline-comment tool, appended here when a PR exists
+    # (S6 / issue #169 F-10 — the handler no longer re-builds the base tool
+    # list on top of mode="read_write").
+    extra_tools: list[str] = []
 
     # Register inline comment server if an existing PR exists for this branch
     pr_number = task.get("pr_number")
@@ -273,7 +282,7 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
             inline_cfg = build_mcp_inline_comment_server(task, rc, head_sha, pr_number)
             if inline_cfg:
                 mcp_servers.update(inline_cfg)
-                allowed_tools.extend(_MCP_INLINE_COMMENT_TOOLS)
+                extra_tools.extend(_MCP_INLINE_COMMENT_TOOLS)
                 dbg.debug("FIX: inline comment server registered (pr=%d sha=%s)", pr_number, head_sha[:8])
 
     plan_file_path = task.pop("plan_file_path", None)
@@ -333,7 +342,7 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
     return _run_fix_session(
         task, prompt, wt, cfg, rc,
         resume_id=resume_source,
-        allowed_tools=allowed_tools,
+        extra_tools=extra_tools,
         mcp_servers=mcp_servers,
         fix_model=fix_model,
         timeout_msg="timeout during fix phase",
@@ -378,7 +387,9 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
 
     rc = repo_cfg or {}
     mcp_servers = build_mcp_comment_server(task, rc) or {}
-    allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
+    # No genuinely-extra tools on a resume (no PR inline-comment server here) —
+    # the full read-write tool set comes from mode="read_write" (S6 / #169 F-10).
+    extra_tools: list[str] = []
 
     fix_model = rc.get("fix_model") or cfg.get("FIX_MODEL") or None
     log(f"[FIX] {task['id']} session=RESUME from={session_id} user_reply_chars={len(user_text)}")
@@ -386,7 +397,7 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
     return _run_fix_session(
         task, resume_prompt, wt, cfg, rc,
         resume_id=session_id,
-        allowed_tools=allowed_tools,
+        extra_tools=extra_tools,
         mcp_servers=mcp_servers,
         fix_model=fix_model,
         timeout_msg="timeout during fix resume",
@@ -508,9 +519,11 @@ def resolve_sync_conflicts(
         task, conflict_files, plan_text=plan_text, base_branch=base_branch, repo_cfg=rc,
     )
 
-    # Focused tool set — no AskUserQuestion (keep autonomous), no inline comments
+    # No genuinely-extra tools — the full read-write set comes from
+    # mode="read_write"; AskUserQuestion is held via disallowed_tools_override
+    # to keep conflict resolution autonomous (S6 / #169 F-10).
     mcp_servers = build_mcp_comment_server(task, rc) or {}
-    allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
+    extra_tools: list[str] = []
 
     log(
         f"[RESOLVE] {task['id']} session={'RESUME' if session_id else 'NEW'} "
@@ -535,7 +548,7 @@ def resolve_sync_conflicts(
             resume=session_id,  # None if first conflict with no prior session
             model=fix_model,
             mode="read_write",
-            extra_tools=allowed_tools,
+            extra_tools=extra_tools,
             disallowed_tools_override=["AskUserQuestion"],
             mcp_servers=mcp_servers,
             progress_callback=progress_callback,
@@ -554,7 +567,7 @@ def resolve_sync_conflicts(
         f"session={run_result.session_id} duration={run_result.duration_seconds:.1f}s"
     )
 
-    if run_result.subtype != "success":
+    if not run_result.ok:
         return HandlerResult(
             f"FAILED: conflict resolution ended subtype={run_result.subtype}",
             cost_usd=run_result.cost_usd,

@@ -128,8 +128,18 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | Non
 
 
 def _get_plans_dir() -> Path:
-    """Return the Claude Code plan file directory."""
-    return Path.home() / ".claude" / "plans"
+    """Return the plan-file directory, delegated to the backend that owns it.
+
+    The plan-file path is a Claude-Code-SDK concern (the SDK writes native
+    plan files to ``~/.claude/plans/``), so the planner no longer hard-codes
+    it — it asks the Claude Code backend for the directory (S6 / issue #169
+    F-10). This path is only consulted when the resolved backend advertises the
+    ``plan_file`` capability (see ``_extract_plan_output``'s ``allow_fs_scan``
+    gate), so the Claude accessor is the correct source.
+    """
+    from autoswe.harness.backends.claude_code import plan_file_dir
+
+    return plan_file_dir()
 
 
 def _find_latest_plan_file() -> Path | None:

@@ -128,6 +128,107 @@ def _fake_vcs():
 
 
 # ---------------------------------------------------------------------------
+# F-10: handler no longer re-builds the base tool list / keys off normalized ok
+# ---------------------------------------------------------------------------
+
+
+def test_run_fix_passes_extra_tools_not_allowed_tools(tmp_path):
+    """run_fix passes extra_tools (a list) and never the legacy allowed_tools.
+
+    S6 / issue #169 F-10: the base read-write tool set comes from
+    mode="read_write"; the handler forwards only genuinely-extra tools.
+    """
+    from autoswe.harness.coder import run_fix
+
+    captured = {}
+
+    def fake_run(prompt, **kwargs):
+        captured.update(kwargs)
+        return _r("DONE: no changes detected")
+
+    stack = _patch_worktree(tmp_path)
+    stack.enter_context(patch("autoswe.vcs.worktree.get_merge_conflict_files", return_value=[]))
+    stack.enter_context(patch("autoswe.vcs.worktree.get_vcs", return_value=_fake_vcs()))
+    stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+    stack.enter_context(patch("autoswe.harness.coder._finalize_fix", return_value=_r("DONE: no changes detected")))
+    try:
+        run_fix(make_task(), cfg={})
+    finally:
+        stack.close()
+
+    assert "extra_tools" in captured, "run_fix must forward extra_tools to runner.run"
+    assert isinstance(captured["extra_tools"], list)
+    assert "allowed_tools" not in captured, (
+        "run_fix must not re-build a base tool list as allowed_tools"
+    )
+    assert captured["mode"] == "read_write"
+
+
+def test_run_fix_success_gate_uses_normalized_ok(tmp_path):
+    """The success gate keys off RunResult.ok, not a literal subtype string.
+
+    S6 / issue #169 F-10: ``_run_fix_session`` returns FAILED when
+    ``not run_result.ok`` — so a result with ok=False must fail even when the
+    subtype is a value that used to be compared to the literal "success".
+    """
+    from autoswe.harness.coder import run_fix
+
+    # Subtype that is NOT "success" but ok=True → must proceed to finalize.
+    finalize_calls = []
+
+    def fake_run(prompt, **kwargs):
+        return RunResult("done", "s1", "custom_ok", ok=True)
+
+    def fake_finalize(*a, **k):
+        finalize_calls.append(1)
+        return "DONE: no changes detected"
+
+    stack = _patch_worktree(tmp_path)
+    stack.enter_context(_fetch_comments_patch())
+    stack.enter_context(patch("autoswe.vcs.worktree.get_merge_conflict_files", return_value=[]))
+    stack.enter_context(patch("autoswe.vcs.worktree.get_vcs", return_value=_fake_vcs()))
+    stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+    stack.enter_context(patch("autoswe.harness.coder._finalize_fix", side_effect=fake_finalize))
+    try:
+        res = run_fix(make_task(), cfg={})
+    finally:
+        stack.close()
+
+    content = res.done_content if hasattr(res, "done_content") else str(res)
+    assert not content.startswith("FAILED"), f"ok=True must not be treated as failure: {content}"
+    assert finalize_calls, "ok=True result must reach _finalize_fix"
+
+
+def test_run_fix_ok_false_is_failed_even_if_subtype_says_success(tmp_path):
+    """A result with ok=False is FAILED even if subtype reads like success."""
+    from autoswe.harness.coder import run_fix
+
+    def fake_run(prompt, **kwargs):
+        return RunResult("looks fine", "s1", "success", ok=False)
+
+    finalize_calls = []
+
+    def fake_finalize(*a, **k):
+        finalize_calls.append(1)
+        return _r("DONE: no changes detected")
+
+    stack = _patch_worktree(tmp_path)
+    stack.enter_context(_fetch_comments_patch())
+    stack.enter_context(patch("autoswe.vcs.worktree.get_merge_conflict_files", return_value=[]))
+    stack.enter_context(patch("autoswe.vcs.worktree.get_vcs", return_value=_fake_vcs()))
+    stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+    stack.enter_context(patch("autoswe.harness.coder._finalize_fix", side_effect=fake_finalize))
+    try:
+        res = run_fix(make_task(), cfg={})
+    finally:
+        stack.close()
+
+    content = res.done_content if hasattr(res, "done_content") else str(res)
+    assert content.startswith("FAILED"), f"ok=False must be FAILED, got: {content}"
+    assert not finalize_calls, "ok=False must not reach _finalize_fix"
+
+
+# ---------------------------------------------------------------------------
 # Backend awareness (harness_cfg threading)
 
 

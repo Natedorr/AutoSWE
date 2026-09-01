@@ -4,11 +4,11 @@
 
 autoSWE runs the coding agent with full read/write/`Bash` access for `/fix` (and `/sync` conflict resolution) **on purpose**. The expectation is that it runs on a **dedicated, isolated machine** that does nothing else: it can clone repos, write to `autoswe/issue-*` branches, and push them — and that's the whole blast radius. Don't run autoSWE on a shared workstation, a build box with secrets for other systems, or anywhere a compromised agent run could do damage beyond "messed up a feature branch." The free-permissions choice is only safe under that assumption — treat the isolation as a hard requirement, not a nice-to-have.
 
-The orchestrator's own privilege split still holds inside that machine. Handlers express intent as a generic **`mode`** (see [harnesses.md](harnesses.md)); each backend translates it:
+The orchestrator's own privilege split still holds inside that machine. Handlers express intent as a generic **`mode`** (see [harnesses.md](harnesses.md)) plus *genuinely-extra* `extra_tools`; the backend translates `mode` into its own tool sets. The tool lists below describe the **Claude Code backend's** translation (these constants live in `backends/claude_code.py`, not the harness-agnostic base — S6 / issue #169 F-10):
 
 - `/plan` and `resume_plan` → `mode="plan"`, tools `["Read", "Glob", "Grep"]` + `PROGRESS_TOOLS` — read-only. Claude Code: plan permission mode (native plan files in `~/.claude/plans/`), with `Write`/`Edit` blocked by the `can_use_tool` callback and `Agent` excluded so sub-agents can't bypass containment.
-- `/fix` → `mode="read_write"`, tools `["Read", "Edit", "Write", "Bash", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — full access. Claude Code: `bypassPermissions`.
-- `/sync` conflict resolution → same as `/fix` (minus `AskUserQuestion`, kept autonomous).
+- `/fix` → `mode="read_write"` — full access (the backend supplies `["Read", "Edit", "Write", "Bash", "Glob", "Grep"]` + the agent/progress tools; the handler adds only the inline-comment tool when a PR exists). Claude Code: `bypassPermissions`.
+- `/sync` conflict resolution → same as `/fix` (minus `AskUserQuestion`, kept autonomous via `disallowed_tools_override`).
 - `/review` → `mode="read_only"`, tools `["Read", "Glob", "Grep"]` + `AGENT_TASK_TOOLS` — read-only.
 
 **Claude Code** translates `mode` into a permission mode + tool sets, so the read-only guarantee for `/plan` and `/review` is enforced by gating each tool call via `can_use_tool`.
@@ -29,7 +29,7 @@ This is **intentional, not accidental**. autoSWE's deployment model (above) is a
 
 **Opting a repo out (not wired up yet).** Loading a repo's MCP/hook/skill content is the default and there is currently no autoSWE config switch for it. If that is ever needed, the one-line SDK change to make a single run ignore all filesystem MCP/settings for that repo is to pass `strict_mcp_config=True` **and** `setting_sources` without `"project"` to `ClaudeAgentOptions` in `autoswe/harness/backends/claude_code.py` (see `docs/claude-agent-sdk/agent-sdk/mcp.md` and `docs/claude-agent-sdk/agent-sdk/claude-code-features.md`). That would drop the repo's `.mcp.json` servers and `.claude/settings.json` hooks while keeping autoSWE's injected servers.
 
-`PROGRESS_TOOLS` (`TodoWrite`, `TaskCreate`, `TaskUpdate`, `TaskGet`, `TaskList`, `TaskStop`) are available in every phase. `AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]` is used only for `/fix`, `/sync` conflict resolution, and `/review` — phases where sub-agent spawning is needed and safe. Plan phase uses `PROGRESS_TOOLS` directly to prevent `Agent` sub-agent escapes.
+On the **Claude Code backend**, `PROGRESS_TOOLS` (`TodoWrite`, `TaskCreate`, `TaskUpdate`, `TaskGet`, `TaskList`, `TaskStop`) are available in every phase. `AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]` is used only for `/fix`, `/sync` conflict resolution, and `/review` — phases where sub-agent spawning is needed and safe. Plan phase uses `PROGRESS_TOOLS` directly to prevent `Agent` sub-agent escapes. Both constants live in `backends/claude_code.py` (Claude-specific tool names) and are re-exported from the `backends` package for importers that reach for them there; the harness-agnostic base no longer defines them (S6 / issue #169 F-10).
 
 ## Who Can Steer
 

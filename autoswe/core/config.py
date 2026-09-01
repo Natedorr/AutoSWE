@@ -102,6 +102,11 @@ WELCOME_FILE = AUTOSWE_DIR / "config" / "welcome_comment.txt"
 QUEUE_FILE = AUTOSWE_DIR / "data" / "queue.json"
 RUNNING_DIR = AUTOSWE_DIR / "running"
 LOGS_DIR = AUTOSWE_DIR / "logs"
+# Backend-neutral root for handler-owned artifacts (S6 / issue #169 F-10).
+# The reviewer persists its report under ARTIFACT_DIR / "reviews"; native
+# Claude-SDK plan files still live in the SDK's own ~/.claude/plans/ (owned by
+# the backend, not the handler).
+ARTIFACT_DIR = AUTOSWE_DIR / "artifacts"
 PLAN_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "plan.txt"
 FIX_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "fix.txt"
 REVIEW_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "review.txt"

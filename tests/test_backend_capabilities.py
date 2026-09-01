@@ -576,8 +576,7 @@ def test_runner_run_accepts_disallowed_tools_override():
 
 def test_mode_config_includes_progress_tools():
     """Plan and read_only modes should include PROGRESS_TOOLS."""
-    from autoswe.harness.backends.base import PROGRESS_TOOLS
-    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG, PROGRESS_TOOLS
 
     for mode_name in ("plan", "read_only"):
         _perm, tools, _disallowed = _MODE_CONFIG[mode_name]
@@ -587,12 +586,43 @@ def test_mode_config_includes_progress_tools():
 
 def test_read_write_includes_agent_task_tools():
     """read_write mode should include all AGENT_TASK_TOOLS (includes Agent)."""
-    from autoswe.harness.backends.base import AGENT_TASK_TOOLS
-    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG, AGENT_TASK_TOOLS
 
     _perm, tools, _disallowed = _MODE_CONFIG["read_write"]
     for tool in AGENT_TASK_TOOLS:
         assert tool in tools, f"read_write should include {tool}"
+
+
+def test_read_write_tool_set_is_exact():
+    """read_write mode exposes exactly the documented tool set — no more, no
+    fewer. This pins the fix-phase allow-list so a silently dropped (or added)
+    tool fails the build.
+
+    Issue #169 S6 follow-up: TaskOutput was silently dropped from this list and
+    the change went unnoticed precisely because no test asserted the exact set.
+    This test makes the read_write composition auditable. TaskOutput is
+    intentionally part of the fix-phase set (see the note on _READ_WRITE_TOOLS
+    in claude_code.py) even though issue #132 removed it from the shared
+    PROGRESS_TOOLS list used by read_only/plan.
+
+    The expected set is built from the core tools plus the shared MCP comment
+    tools (themselves asserted by test_mode_includes_mcp_comment_tools), so it
+    stays a maintenance-free snapshot of intent.
+    """
+    from autoswe.harness.backends.claude_code import _MCP_COMMENT_TOOLS, _MODE_CONFIG
+
+    _perm, tools, _disallowed = _MODE_CONFIG["read_write"]
+    expected = {
+        "Read", "Edit", "Write", "Bash", "Glob", "Grep",
+        "AskUserQuestion",
+        "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet",
+        "TaskList", "TaskOutput", "TaskStop", "Agent",
+        *set(_MCP_COMMENT_TOOLS),
+    }
+    assert set(tools) == expected, (
+        "read_write tool set drifted from the documented set; "
+        "update _READ_WRITE_TOOLS deliberately and adjust this expectation"
+    )
 
 
 def test_plan_includes_ask_user_question():
