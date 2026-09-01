@@ -95,7 +95,10 @@ class AzureTracker:
 
     def __init__(self, repo_cfg: dict):
         self._repo_cfg = repo_cfg
-        self._pat = repo_cfg.get("pat", "")
+        # Accept the PAT under either key so hand-built repo_cfg dicts (e.g. the
+        # MCP comment server, which keys it "token") authenticate correctly —
+        # mirrors AzureVCS. (issue #168 F-06 regression)
+        self._pat = repo_cfg.get("pat") or repo_cfg.get("token", "")
         self._authenticated_user: str | None = None
         self._resolved_repo_id: str | None = None
         # Single source of org/project/repo partition (issue #168 F-08):

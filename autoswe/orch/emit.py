@@ -116,7 +116,7 @@ def _format_metrics(cost_usd: float | None, duration_seconds: float | None, sess
     return ""
 
 
-def _vcs_commit_url(provider: str, repo_cfg: dict | None, commit_sha: str) -> str | None:
+def _vcs_commit_url(repo_cfg: dict | None, commit_sha: str) -> str | None:
     """Return a provider-specific commit URL via the VCS provider, or None."""
     if not repo_cfg:
         return None
@@ -127,7 +127,7 @@ def _vcs_commit_url(provider: str, repo_cfg: dict | None, commit_sha: str) -> st
         return None
 
 
-def _vcs_branch_url(provider: str, repo_cfg: dict | None, branch: str) -> str | None:
+def _vcs_branch_url(repo_cfg: dict | None, branch: str) -> str | None:
     """Return a provider-specific branch URL via the VCS provider, or None."""
     if not repo_cfg:
         return None
@@ -185,13 +185,13 @@ def _build_completion_comment(
         lines = [f"Completed with command `{pending_command}`."]
 
         if commit_sha:
-            commit_url = _vcs_commit_url(provider, repo_cfg, commit_sha)
+            commit_url = _vcs_commit_url(repo_cfg, commit_sha)
             if commit_url:
                 lines.append(f"[Commit]({commit_url})")
             else:
                 lines.append(f"Commit: {commit_sha}")
 
-            branch_url = _vcs_branch_url(provider, repo_cfg, branch)
+            branch_url = _vcs_branch_url(repo_cfg, branch)
             if branch_url:
                 lines.append(f"[View branch]({branch_url})")
             else:

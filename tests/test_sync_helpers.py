@@ -77,7 +77,7 @@ def test_single_poll_prev_updated_populated_from_queue_github(
 
     captured_args = {}
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         captured_args["prev_updated"] = prev_updated or {}
         captured_args["force_fetch"] = force_fetch or set()
         return {
@@ -155,7 +155,7 @@ def test_single_poll_force_fetch_for_pending_tasks(
 
     captured_args = {}
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         captured_args["prev_updated"] = prev_updated or {}
         captured_args["force_fetch"] = force_fetch or set()
         return {
@@ -245,7 +245,7 @@ def test_single_poll_label_mirror_idempotent(
     monkeypatch.setattr(loop_mod, "get_tracker", lambda r: FakeTracker())
     monkeypatch.setattr(factory_mod, "get_tracker", lambda r: FakeTracker())
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(

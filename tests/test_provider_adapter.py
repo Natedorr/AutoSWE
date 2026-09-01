@@ -76,10 +76,10 @@ def _make_tracker(provider: str, comments: list[NormalizedComment]) -> MagicMock
     return mock
 
 
-def _run_read(tracker, provider: str, **kwargs) -> dict:
-    """Run the single shared read_api. create_pr is the only effect that
-    resolves a VCS, and read_api never does, so this needs no patching."""
-    return read_api(tracker, _repo_cfg(provider), {}, **kwargs)
+def _run_read(tracker, **kwargs) -> dict:
+    """Run the single shared read_api. read_api never resolves a VCS, so this
+    needs no patching."""
+    return read_api(tracker, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ def test_azure_div_wrapped_comment_unwrapped():
     slash-command parsing sees clean text.
     """
     comments = [_make_comment(_AZURE_DIV_WRAPPED)]
-    api_states = _run_read(_make_tracker("azure", comments), "azure")
+    api_states = _run_read(_make_tracker("azure", comments))
     body = api_states[42].comments[0].body
     assert "/plan --branch dev" in body
     assert "<div>" not in body
@@ -102,7 +102,7 @@ def test_azure_div_wrapped_comment_unwrapped():
 def test_azure_html_entities_decoded():
     """ADO rich-text may encode characters as HTML entities."""
     comments = [_make_comment(_AZURE_ENTITIES)]
-    api_states = _run_read(_make_tracker("azure", comments), "azure")
+    api_states = _run_read(_make_tracker("azure", comments))
     body = api_states[42].comments[0].body
     assert "/fix with --focus" in body
     assert "&#45;" not in body
@@ -113,7 +113,7 @@ def test_azure_bot_marker_preserved():
     """Bot comments should keep the autoswe-bot marker after HTML strip."""
     bot_body = "<div>## Plan\n\nSome plan text\n</div>\n" + BOT_MARKER
     comments = [_make_comment(bot_body, author_login="BOT")]
-    api_states = _run_read(_make_tracker("azure", comments), "azure")
+    api_states = _run_read(_make_tracker("azure", comments))
     body = api_states[42].comments[0].body
     assert BOT_MARKER in body
     assert "<div>" not in body
@@ -124,7 +124,7 @@ def test_clean_comment_passthrough(provider):
     """A comment that is already clean text should come out unchanged."""
     clean = "/plan --branch main"
     comments = [_make_comment(clean)]
-    api_states = _run_read(_make_tracker(provider, comments), provider)
+    api_states = _run_read(_make_tracker(provider, comments))
     assert api_states[42].comments[0].body == clean
 
 
@@ -144,7 +144,7 @@ def _single_issue_tracker(provider: str, last_updated: str | None,
 def test_read_api_skip_unchanged_issue(provider):
     """When prev_updated matches, comments should be skipped."""
     t = _single_issue_tracker(provider, "2026-01-01T00:00:00Z")
-    api_states = _run_read(t, provider, prev_updated={42: "2026-01-01T00:00:00Z"})
+    api_states = _run_read(t, prev_updated={42: "2026-01-01T00:00:00Z"})
     assert api_states[42].comments_fetched is False
     assert api_states[42].comments == ()
     t.fetch_comments.assert_not_called()
@@ -154,7 +154,7 @@ def test_read_api_skip_unchanged_issue(provider):
 def test_read_api_fetch_when_timestamp_changed(provider):
     """When prev_updated differs from issue.last_updated, fetch comments."""
     t = _single_issue_tracker(provider, "2026-01-02T00:00:00Z")
-    api_states = _run_read(t, provider, prev_updated={42: "2026-01-01T00:00:00Z"})
+    api_states = _run_read(t, prev_updated={42: "2026-01-01T00:00:00Z"})
     assert api_states[42].comments_fetched is True
     t.fetch_comments.assert_called_once()
 
@@ -163,7 +163,7 @@ def test_read_api_fetch_when_timestamp_changed(provider):
 def test_read_api_force_fetch_overrides_skip(provider):
     """force_fetch set overrides a matching timestamp."""
     t = _single_issue_tracker(provider, "2026-01-01T00:00:00Z")
-    api_states = _run_read(t, provider,
+    api_states = _run_read(t,
                            prev_updated={42: "2026-01-01T00:00:00Z"},
                            force_fetch={42})
     assert api_states[42].comments_fetched is True
@@ -174,7 +174,7 @@ def test_read_api_force_fetch_overrides_skip(provider):
 def test_read_api_new_issue_always_fetched(provider):
     """An issue not in prev_updated should always be fetched."""
     t = _single_issue_tracker(provider, "2026-01-01T00:00:00Z")
-    api_states = _run_read(t, provider, prev_updated={})
+    api_states = _run_read(t, prev_updated={})
     assert api_states[42].comments_fetched is True
     t.fetch_comments.assert_called_once()
 
@@ -183,7 +183,7 @@ def test_read_api_new_issue_always_fetched(provider):
 def test_read_api_no_last_updated_always_fetched(provider):
     """When issue has no last_updated, always fetch comments."""
     t = _single_issue_tracker(provider, None)
-    api_states = _run_read(t, provider, prev_updated={42: "2026-01-01T00:00:00Z"})
+    api_states = _run_read(t, prev_updated={42: "2026-01-01T00:00:00Z"})
     assert api_states[42].comments_fetched is True
     t.fetch_comments.assert_called_once()
 
@@ -192,7 +192,7 @@ def test_read_api_no_last_updated_always_fetched(provider):
 def test_read_api_backward_compat_no_prev_updated(provider):
     """Without prev_updated, all issues are fetched (backward compat)."""
     t = _single_issue_tracker(provider, "2026-01-01T00:00:00Z")
-    api_states = _run_read(t, provider)
+    api_states = _run_read(t)
     assert api_states[42].comments_fetched is True
     t.fetch_comments.assert_called_once()
 

@@ -65,6 +65,38 @@ def tracker(ado_repo_cfg):
     return AzureTracker(ado_repo_cfg)
 
 
+# -- token key acceptance (issue #168 F-06 regression guard) --
+#
+# The MCP comment server (and other hand-built repo_cfg dicts) key the PAT as
+# "token" rather than "pat". AzureTracker must accept either, matching
+# AzureVCS, or Azure MCP comment posting 401s with an empty Basic-auth PAT.
+
+def test_azure_tracker_accepts_pat_under_pat_key():
+    tracker = AzureTracker({
+        "provider": "azure", "org": "o", "project": "p", "repo": "r",
+        "pat": "fake_pat",
+    })
+    assert tracker._pat == "fake_pat"
+
+
+def test_azure_tracker_accepts_pat_under_token_key():
+    """Guard for the F-06 MCP regression: a repo_cfg that keys the PAT as
+    "token" must still populate a non-empty PAT on AzureTracker."""
+    tracker = AzureTracker({
+        "provider": "azure", "org": "o", "project": "p", "repo": "r",
+        "token": "fake_pat",
+    })
+    assert tracker._pat == "fake_pat"
+
+
+def test_azure_tracker_pat_key_preferred_over_token():
+    tracker = AzureTracker({
+        "provider": "azure", "org": "o", "project": "p", "repo": "r",
+        "pat": "pat_wins", "token": "token_loses",
+    })
+    assert tracker._pat == "pat_wins"
+
+
 # -- list_open_issues --
 
 def test_list_open_issues_empty(tracker, mock_ado_request, ado_route_table):

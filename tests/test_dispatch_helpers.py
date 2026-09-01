@@ -750,7 +750,7 @@ def test_dispatch_failure_transitions_to_error(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -859,7 +859,7 @@ def test_dispatch_failure_sets_error_label(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -958,7 +958,7 @@ def test_dispatch_error_label_is_best_effort(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1045,7 +1045,7 @@ def test_dispatch_error_task_not_redispatched_on_next_poll(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1147,7 +1147,7 @@ def test_dispatch_error_posts_comment(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1244,7 +1244,7 @@ def test_dispatch_error_clears_session_id(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1339,7 +1339,7 @@ def test_dispatch_error_clears_first_dispatched_at(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1567,7 +1567,7 @@ def test_dispatch_error_preserves_progress_comment_id(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(

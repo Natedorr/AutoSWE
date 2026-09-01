@@ -808,7 +808,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                             force_fetch.add(_inum)
 
             api_states = read_api(
-                tracker, repo_cfg, cfg,
+                tracker,
                 bot_ids=all_bot_ids,
                 prev_updated=prev_updated,
                 force_fetch=force_fetch,

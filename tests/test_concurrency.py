@@ -638,7 +638,7 @@ class TestLockReleasedDuringDispatch:
 
         monkeypatch.setattr(loop_mod, "_dispatch_task", dispatch_probes_lock)
 
-        def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+        def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
             return {
                 1: ApiState(
                     issue=NormalizedIssue(
@@ -692,7 +692,7 @@ class TestLockReleasedDuringDispatch:
 
         monkeypatch.setattr(loop_mod, "_dispatch_task", slow_dispatch)
 
-        def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+        def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
             return {
                 1: ApiState(
                     issue=NormalizedIssue(

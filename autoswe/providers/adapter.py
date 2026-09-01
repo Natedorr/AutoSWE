@@ -26,8 +26,6 @@ dbg = get_debug_logger()
 
 def read_api(
     tracker: IssueTracker,
-    repo_cfg: dict,
-    cfg: dict,
     bot_ids: set[int] | None = None,
     prev_updated: dict[int, str | None] | None = None,
     force_fetch: set[int] | None = None,
