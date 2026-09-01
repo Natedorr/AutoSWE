@@ -92,7 +92,7 @@ def test_single_poll_prev_updated_populated_from_queue_github(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -170,7 +170,7 @@ def test_single_poll_force_fetch_for_pending_tasks(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -231,12 +231,14 @@ def test_single_poll_label_mirror_idempotent(
     set_status_calls = []
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             set_status_calls.append((issue_num, label))
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             pass
         def fetch_comments(self, *a, **kw):
             return []
+        def slug_prefix(self):
+            return "gh"
 
     import autoswe.providers.factory as factory_mod
 
@@ -258,7 +260,7 @@ def test_single_poll_label_mirror_idempotent(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,

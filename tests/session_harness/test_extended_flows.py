@@ -53,7 +53,6 @@ def _build_world(
     api = ApiState(
         issue=issue,
         comments=comments or [],
-        open_pr_numbers=[],
     )
     task = TaskState(
         slug=f"gh:owner_repo_{issue_num}",

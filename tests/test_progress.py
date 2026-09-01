@@ -43,10 +43,10 @@ def test_progress_update_applies_immediately(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append({"id": comment_id, "body": body})
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -66,10 +66,10 @@ def test_progress_update_throttles(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -94,10 +94,10 @@ def test_progress_drain_applies_pending(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -119,10 +119,10 @@ def test_progress_finalize_no_throttle(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -142,7 +142,7 @@ def test_progress_update_noop_without_comment_id(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.progress import ProgressComment
@@ -162,10 +162,10 @@ def test_progress_update_throttle_releases_after_interval(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -190,10 +190,10 @@ def test_progress_update_throttle_releases_after_interval(monkeypatch):
 def test_progress_create_gracefully_on_error(monkeypatch):
     """create() should return None and not raise when tracker fails."""
     class BrokenTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             raise RuntimeError("API down")
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             pass
 
     from autoswe.tracking.progress import ProgressComment
@@ -209,10 +209,10 @@ def test_progress_create_gracefully_on_error(monkeypatch):
 def test_progress_update_comment_gracefully_on_error(monkeypatch):
     """update() should not raise when tracker fails."""
     class BrokenTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 42
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             raise RuntimeError("API down")
 
     from autoswe.tracking.progress import ProgressComment
@@ -241,13 +241,13 @@ def test_progress_flush_fallback_updates_comment_id():
             self.updates = []
             self._next_post_id = 100
 
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             cid = self._next_post_id
             self._next_post_id += 1
             self.posts.append({"id": cid, "body": body})
             return cid
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             self.updates.append({"id": comment_id, "body": body})
 
     tracker = FallingBackTracker()
@@ -287,10 +287,10 @@ def test_progress_flush_fallback_no_new_id():
     from autoswe.tracking.progress import ProgressComment
 
     class BrokenPostTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return None  # post succeeds but returns no ID
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             raise RuntimeError("API down")  # trigger fallback
 
     tracker = BrokenPostTracker()
@@ -312,11 +312,11 @@ def test_progress_flush_fallback_both_fail():
             self.posts = []
             self.updates = []
 
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             self.posts.append(body)
             raise RuntimeError("API down")
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             self.updates.append(body)
 
     tracker = TotallyBrokenTracker()
@@ -344,11 +344,11 @@ def test_progress_adopt_reuses_existing_comment():
     updated = []
 
     class AdoptTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted.append(body)
             return 111
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updated.append({"id": comment_id, "body": body})
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -368,11 +368,11 @@ def test_progress_adopt_falls_back_to_create_when_edit_fails():
     posted = []
 
     class GoneTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted.append(body)
             return 222
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             raise RuntimeError("404 comment deleted")
 
     from autoswe.tracking.progress import ProgressComment
@@ -406,7 +406,7 @@ def test_github_tracker_update_comment():
     api_mod.gh_patch = fake_patch
 
     try:
-        tracker.update_comment({"owner": "o", "repo": "r"}, 42, 123, "Updated body")
+        tracker.update_comment(42, 123, "Updated body")
     finally:
         api_mod.gh_patch = original_patch
 
@@ -432,7 +432,7 @@ def test_azure_tracker_update_comment_patches():
         tracker = AzureTracker({
             "org": "org", "project": "proj", "pat": "tok",
         })
-        tracker.update_comment({}, 42, 999, "Updated body")
+        tracker.update_comment(42, 999, "Updated body")
     finally:
         tracker_mod.ado_patch_json = original
 
@@ -452,11 +452,11 @@ def test_progress_azure_no_duplicate_post_on_update():
     updated = []
 
     class AzureLikeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted.append(body)
             return len(posted)
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updated.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -526,7 +526,7 @@ def test_github_tracker_post_comment_returns_id():
     api_mod.gh_post = fake_post
 
     try:
-        result = tracker.post_comment({"owner": "o", "repo": "r"}, 1, "Hello")
+        result = tracker.post_comment(1, "Hello")
     finally:
         api_mod.gh_post = original_post
 
@@ -548,11 +548,11 @@ def test_progress_finalize_does_not_post_duplicate():
     updated_bodies = []
 
     class NoDuplicateTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted_bodies.append(body)
             return 999  # comment ID
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updated_bodies.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -603,11 +603,11 @@ class _FakeTracker:
         self.posts = []
         self.updates = []
 
-    def post_comment(self, repo_cfg, issue_num, body):
+    def post_comment(self, issue_num, body):
         self.posts.append(body)
         return len(self.posts)  # incrementing fake comment ID
 
-    def update_comment(self, repo_cfg, issue_num, comment_id, body):
+    def update_comment(self, issue_num, comment_id, body):
         self.updates.append(body)
 
 
@@ -682,10 +682,10 @@ def test_progress_create_tags_with_bot_marker():
     from autoswe.tracking.comments import BOT_MARKER
 
     class TagTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return self.posts.append(body) or 1
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             pass
 
         posts = []
@@ -705,10 +705,10 @@ def test_progress_update_tags_with_bot_marker():
     from autoswe.tracking.comments import BOT_MARKER
 
     class TagTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 1
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             self.updates.append(body)
 
         updates = []
@@ -729,11 +729,11 @@ def test_progress_bot_marker_idempotent():
     from autoswe.tracking.comments import BOT_MARKER
 
     class TagTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             self.posts.append(body)
             return 1
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             pass
 
         posts = []

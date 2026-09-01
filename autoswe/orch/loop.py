@@ -32,12 +32,8 @@ from autoswe.orch.decide import decide
 from autoswe.orch.emit import emit
 from autoswe.orch.run import DispatchResult, run
 from autoswe.orch.types import ApiState, TaskState, World
-from autoswe.providers.azure.adapter import apply_effect as azure_apply_effect
-from autoswe.providers.azure.adapter import read_api as azure_read_api
-from autoswe.providers.azure.tracker import AzureTracker
-from autoswe.providers.factory import build_repo_cfg, get_tracker
-from autoswe.providers.github.adapter import apply_effect as gh_apply_effect
-from autoswe.providers.github.adapter import read_api as gh_read_api
+from autoswe.providers.adapter import apply_effect, read_api
+from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
 from autoswe.tracking.labels import (
     REVIEW_BLOCKING_STATUSES,
     RUNNING_STATUSES,
@@ -216,6 +212,18 @@ def _is_task_running(slug: str) -> bool:
         return False
 
 
+def _repo_stem_prefix(owner: str, repo: str, provider: str) -> str:
+    """The underscore-joined prefix shared by a repo's PID-file stems and
+    worktree directories.
+
+    Derived from the provider (``pid_prefix`` + ``worktree_path_parts``) rather
+    than a hardcoded provider map, so a third provider's layout works here
+    without an edit in this module (issue #168, seam table).
+    """
+    vcs = get_vcs({"owner": owner, "repo": repo, "provider": provider})
+    return f"{vcs.pid_prefix()}{'_'.join(vcs.worktree_path_parts())}_"
+
+
 def _is_repo_locked(owner: str, repo: str, provider: str) -> str | None:
     """Check if any other issue in this repo is currently running.
 
@@ -223,12 +231,7 @@ def _is_repo_locked(owner: str, repo: str, provider: str) -> str | None:
     """
     if not RUNNING_DIR.exists():
         return None
-    prefix = {"github": "gh_", "azure": "ado_"}.get(provider.lower(), "gh_")
-    if provider.lower() == "azure" and "/" in owner:
-        org, _, proj = owner.partition("/")
-        stem_prefix = f"{prefix}{org}_{proj}_{repo}_"
-    else:
-        stem_prefix = f"{prefix}{owner}_{repo}_"
+    stem_prefix = _repo_stem_prefix(owner, repo, provider)
     for pid_path in RUNNING_DIR.iterdir():
         if pid_path.name.endswith(".pid") and pid_path.stem.startswith(stem_prefix):
             try:
@@ -241,22 +244,6 @@ def _is_repo_locked(owner: str, repo: str, provider: str) -> str | None:
                 # Corrupt/gone — clean up
                 pid_path.unlink(missing_ok=True)
     return None
-
-
-# ---------------------------------------------------------------------------
-# Provider adapter selectors
-# ---------------------------------------------------------------------------
-
-def _get_read_api(provider: str):
-    if provider.lower() == "azure":
-        return azure_read_api
-    return gh_read_api
-
-
-def _get_apply_effect(provider: str):
-    if provider.lower() == "azure":
-        return azure_apply_effect
-    return gh_apply_effect
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +291,7 @@ def _dispatch_task(
             task_entry.get("resume_phase") or task_entry.get("last_phase"),
         )
         try:
-            tracker.set_status(repo_cfg, issue_num, f"autoswe:{running}")
+            tracker.set_status(issue_num, f"autoswe:{running}")
         except RuntimeError as e:
             log(f"[WARN] could not set running label: {e}")
 
@@ -346,14 +333,13 @@ def _dispatch_task(
         # --- Apply effects ---
         # post_comment effects from emit() are used to finalize the sticky
         # progress comment in-place (not posted as a separate comment).
-        apply_fn = _get_apply_effect(provider)
         for effect in effects:
             if effect.kind == "post_comment":
                 progress.finalize(effect.body or "")
                 log("[DISPATCH] Finalized sticky progress comment")
             else:
                 try:
-                    apply_fn(tracker, effect, repo_cfg, issue_num, queue, slug, cfg)
+                    apply_effect(tracker, effect, repo_cfg, issue_num, queue, slug, cfg)
                 except RuntimeError as e:
                     log(f"[WARN] failed to apply effect {effect.kind!r}: {e}")
 
@@ -499,7 +485,7 @@ def _handle_dispatch_error(
     # 2. Post structured error comment (best effort)
     try:
         comment_body = format_error_comment(ctx)
-        tracker.post_comment(repo_cfg, issue_num, comment_body)
+        tracker.post_comment(issue_num, comment_body)
         log(f"[ERROR] {slug}: posted error comment")
     except Exception as post_err:  # Post is best-effort; log and continue if the provider API fails
         dbg.error("dispatch error: failed to post comment for %s: %s", slug, post_err, exc_info=True)
@@ -548,7 +534,7 @@ def _post_pending_welcomes(
         try:
             repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg, provider=provider)
             tracker = get_tracker(repo_cfg)
-            comments = tracker.fetch_comments(repo_cfg, issue_num)
+            comments = tracker.fetch_comments(issue_num)
 
             slash_result = None
             for comment in sorted(comments, key=lambda c: c.created_at, reverse=True):
@@ -560,7 +546,7 @@ def _post_pending_welcomes(
 
             slash_cmd, guidance, _branch = slash_result if slash_result else (None, None, None)
             body = _build_welcome_comment(slash_cmd or "", guidance or "", task["id"], bot_name=bot_name)
-            welcome_id = tracker.post_comment(repo_cfg, issue_num, body)
+            welcome_id = tracker.post_comment(issue_num, body)
             task["suppress_welcome"] = True
             if welcome_id:
                 task["welcome_comment_id"] = welcome_id
@@ -693,10 +679,11 @@ def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None
         # Best-effort recovery comment
         try:
             tracker = get_tracker(repo_cfg)
+            branch = get_vcs(repo_cfg).branch_name(issue_num)
             tracker.post_comment(
-                repo_cfg, issue_num,
+                issue_num,
                 f"**autoSWE recovery**: found orphaned changes from an interrupted run "
-                f"— committed and pushed them to `autoswe/issue-{issue_num}`."
+                f"— committed and pushed them to `{branch}`."
                 f"{AUTOSWE_BOT_FOOTER}",
             )
         except Exception as e:
@@ -773,14 +760,14 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
         tracker = get_tracker(repo_cfg)
         provider = repo_cfg.get("provider", "github")
 
-        # Resolve repo UUID for Azure — web URLs require UUID, not display name
-        if provider == "azure" and isinstance(tracker, AzureTracker):
-            try:
-                repo_id = tracker.resolve_repo_id()
-                if repo_id:
-                    repo_cfg["repo_id"] = repo_id
-            except Exception as e:  # Azure repo_id resolution is optional — fallback to repo name
-                log(f"[WARN] {owner}/{repo}: failed to resolve repo_id ({type(e).__name__}: {e}), falling back to name")
+        # Resolve a platform-specific repo identifier (Azure: Git repo UUID —
+        # web URLs require UUID, not display name; GitHub: no-op).
+        try:
+            repo_id = get_vcs(repo_cfg).resolve_repo_id()
+            if repo_id:
+                repo_cfg["repo_id"] = repo_id
+        except Exception as e:  # repo_id resolution is optional — fallback to repo name
+            log(f"[WARN] {owner}/{repo}: failed to resolve repo_id ({type(e).__name__}: {e}), falling back to name")
 
         repo_override = repos_cfg.get(repo_path, {})
         base_branch = repo_override.get("base_branch", "main")
@@ -790,23 +777,23 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
         # First poll after queue wipe relies on fallback (author_login == "BOT",
         # body marker check) — the backfill below self-heals after apply.
         try:
-            read_api_fn = _get_read_api(provider)
             all_bot_ids = {
                 cid
                 for t in queue.values()
                 for cid in t.get("bot_comment_ids", [])
             }
 
-            # Build skip-rule inputs from queue entries for this repo
-            # Slugs in queue keys use colons (gh: / ado:) — see make_slug().
-            # Do NOT confuse with PID-file stems which use underscores (gh_ / ado_)
-            # via slug_to_filename() — that's what _is_repo_locked() uses.
-            slug_prefix = {"github": "gh:", "azure": "ado:"}.get(provider.lower(), "gh:")
-            if provider.lower() == "azure" and "/" in owner:
-                org, _, proj = owner.partition("/")
-                stem_prefix = f"{slug_prefix}{org}_{proj}_{repo}_"
-            else:
-                stem_prefix = f"{slug_prefix}{owner}_{repo}_"
+            # Build skip-rule inputs from queue entries for this repo.
+            # Queue keys are ``make_slug(provider, (owner, repo), n)`` =
+            # ``{slug_prefix}:{owner}_{repo}_{n}`` — so the scan prefix must be
+            # that same shape. The slug prefix comes from the provider object
+            # (``VCSProvider.slug_prefix``) rather than a hardcoded map
+            # (issue #168, seam table); ``owner``/``repo`` are the same values
+            # make_slug is called with just below.
+            # Do NOT confuse with PID-file stems which use underscores
+            # (``gh_``/``ado_``) via slug_to_filename() — that's what
+            # _is_repo_locked() uses.
+            stem_prefix = f"{get_vcs(repo_cfg).slug_prefix()}:{owner}_{repo}_"
 
             prev_updated: dict[int, str | None] = {}
             force_fetch: set[int] = set()
@@ -820,7 +807,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                         if _status == "pending" or _status in RUNNING_STATUSES:
                             force_fetch.add(_inum)
 
-            api_states = read_api_fn(
+            api_states = read_api(
                 tracker, repo_cfg, cfg,
                 bot_ids=all_bot_ids,
                 prev_updated=prev_updated,
@@ -986,7 +973,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                     )
                     task_entry["autoswe_status"] = closed_status
                     with contextlib.suppress(RuntimeError):
-                        tracker.set_status(repo_cfg, task_entry["issue_number"], f"autoswe:{closed_status}")
+                        tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
                     log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
                 continue
             if task_entry.get("gh_closed", False):
@@ -1010,7 +997,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                 if api_state is not None and api_state.issue.status != qs:
                     with contextlib.suppress(RuntimeError):
                         tracker.set_status(
-                            repo_cfg, task_entry["issue_number"], f"autoswe:{qs}"
+                            task_entry["issue_number"], f"autoswe:{qs}"
                         )
 
     # Persist all in-memory queue mutations accumulated during this cycle.

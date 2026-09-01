@@ -273,7 +273,7 @@ def _post_and_return(task: dict, comment_body: str, done_content: str, repo_cfg:
     rc.setdefault("pat", task.get("_token", ""))
     tracker = get_tracker(rc)
     try:
-        tracker.post_comment(rc, task["issue_number"], comment_body + BOT_MARKER)
+        tracker.post_comment(task["issue_number"], comment_body + BOT_MARKER)
     except Exception as e:  # Provider call failure is non-fatal; proceed without posting comment.
         dbg.error("planner: comment failed: %s", e)
 

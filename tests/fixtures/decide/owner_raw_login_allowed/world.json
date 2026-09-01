@@ -19,8 +19,7 @@
         "id": 2,
         "is_bot": false
       }
-    ],
-    "open_pr_numbers": []
+    ]
   },
   "task": {
     "slug": "gh:Natedorr_autoswe_42",

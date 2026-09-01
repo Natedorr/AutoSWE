@@ -1,616 +1,357 @@
-"""Provider adapter tests — read_api normalization and apply_effect translation.
+"""Provider adapter tests -- the single read_api / apply_effect pair.
 
-Tests the two adapter functions per provider. Each assertion is one property
-of the read/write boundary:
+issue #168 (F-04): there is now one autoswe/providers/adapter.py with a single
+read_api and apply_effect for every provider. The only provider-specific
+behaviour is comment-body normalisation, delegated to
+tracker.normalize_comment_body (GitHub: identity; Azure: HTML/entity stripping
++ content-based bot detection). These tests exercise that real hook while
+mocking only list_open_issues / fetch_comments, and are parametrised over both
+providers so the shared read/write path stays covered.
 
+Coverage:
   read_api (input shape lockdown)
-    - azure_div_wrapped_comment_unwrapped  — Bug 1 regression
-    - azure_html_entities_decoded           — &#45;&#45;branch → --branch
-    - azure_bot_marker_preserved            — bot comments keep marker after strip
-    - github_comment_passthrough            — GH comments arrive clean, stay clean
+    - azure_div_wrapped_comment_unwrapped  - Bug 1 regression
+    - azure_html_entities_decoded          - entity-encoded text decoded
+    - azure_bot_marker_preserved           - bot comments keep marker after strip
+    - clean_comment_passthrough            - clean text passes through unchanged
+    - fetch policy (skip/changed/force/new/no-timestamp) - both providers
 
   apply_effect (output shape lockdown)
-    - set_status_github → PUT /issues/N/labels
-    - set_status_azure  → PATCH work item System.Tags
-    - post_comment_github → POST /issues/N/comments
-    - post_comment_azure  → POST /comments?format=Markdown
-    - patch_queue → queue mutation
+    - set_status / post_comment / patch_queue - both providers
+    - create_pr idempotency (existing -> skip) - both providers
+    - create_pr CI gate (defer on pending/failing, pass on success/none,
+      gate disabled, no-cfg) - both providers
 """
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from autoswe.orch.types import Effect
+from autoswe.providers.adapter import apply_effect, read_api
+from autoswe.providers.azure.tracker import AzureTracker
 from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue, PRResult
+from autoswe.providers.github.tracker import GitHubTracker
 from autoswe.tracking.comments import BOT_MARKER
 
-# ---------------------------------------------------------------------------
-# read_api — input shape lockdown
-# ---------------------------------------------------------------------------
+PROVIDERS = ["github", "azure"]
 
 # Simulated raw comment body from Azure DevOps rich-text comment editor.
 # ADO wraps the text in <div> tags when the user posts from the rich editor.
 _AZURE_DIV_WRAPPED = "<div>/plan --branch dev</div>"
-
-# Simulated comment with HTML entities (ADO rich-text encoding)
+# Simulated comment with HTML entities (ADO rich-text encoding).
 _AZURE_ENTITIES = "&#47;fix with &#45;&#45;focus"
 
 
-def _make_issue(number: int, title: str = "Test issue") -> NormalizedIssue:
+def _repo_cfg(provider: str) -> dict:
+    """Minimal repo_cfg for the named provider."""
+    if provider == "azure":
+        return {"provider": "azure", "org": "natedorr", "project": "testProject",
+                "repo": "testProject", "pat": "fake"}
+    return {"provider": "github", "owner": "owner", "repo": "repo", "pat": "fake"}
+
+
+def _make_issue(number: int, last_updated: str | None = None) -> NormalizedIssue:
+    owner, repo = ("natedorr", "testProject") if last_updated is None else ("o", "r")
     return NormalizedIssue(
-        number=number, title=title, body="Body",
-        owner="natedorr", repo="testProject",
+        number=number, title="Test issue", body="Body",
+        owner=owner, repo=repo, last_updated=last_updated,
     )
 
 
-class TestReadApiAzure:
-    """Azure adapter read_api tests — comment body normalization."""
-
-    def _make_tracker(self, comments: list[NormalizedComment]) -> MagicMock:
-        t = MagicMock()
-        t.list_open_issues.return_value = [_make_issue(42)]
-        t.fetch_comments.return_value = comments
-        return t
-
-    def test_div_wrapped_comment_unwrapped(self):
-        """Bug 1 regression: ADO rich-text wraps user comments in <div>.
-
-        After read_api, the comment body should have the <div> stripped
-        so slash-command parsing sees clean text.
-        """
-        comments = [NormalizedComment(body=_AZURE_DIV_WRAPPED, created_at="2026-01-01T00:00:00Z", author_login="AUTHOR")]
-        tracker = self._make_tracker(comments)
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "testProject", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(tracker, repo_cfg, {})
-
-        body = api_states[42].comments[0].body
-        assert "/plan --branch dev" in body
-        assert "<div>" not in body
-
-    def test_html_entities_decoded(self):
-        """ADO rich-text may encode characters as HTML entities."""
-        comments = [NormalizedComment(body=_AZURE_ENTITIES, created_at="2026-01-01T00:00:00Z", author_login="AUTHOR")]
-        tracker = self._make_tracker(comments)
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "testProject", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(tracker, repo_cfg, {})
-
-        body = api_states[42].comments[0].body
-        assert "/fix with --focus" in body
-        assert "&#45;" not in body
-        assert "&#47;" not in body
-
-    def test_bot_marker_preserved(self):
-        """Bot comments should keep the autoswe-bot marker after HTML strip."""
-        bot_body = "<div>## Plan\n\nSome plan text\n</div>\n<!-- autoswe-bot -->"
-        comments = [NormalizedComment(body=bot_body, created_at="2026-01-01T00:00:00Z", author_login="BOT")]
-        tracker = self._make_tracker(comments)
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "testProject", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(tracker, repo_cfg, {})
-
-        body = api_states[42].comments[0].body
-        assert BOT_MARKER in body
-        assert "<div>" not in body
-
-    def test_clean_comment_passthrough(self):
-        """A comment that's already clean text should come out unchanged."""
-        clean = "/plan --branch main"
-        comments = [NormalizedComment(body=clean, created_at="2026-01-01T00:00:00Z", author_login="AUTHOR")]
-        tracker = self._make_tracker(comments)
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "testProject", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(tracker, repo_cfg, {})
-
-        assert api_states[42].comments[0].body == clean
-
-    def test_skip_unchanged_issue(self):
-        """When prev_updated matches, comments should be skipped."""
-        issue = NormalizedIssue(
-            number=42, title="T", body="B",
-            owner="o", repo="r",
-            last_updated="2026-01-01T00:00:00Z",
-        )
-        t = MagicMock()
-        t.list_open_issues.return_value = [issue]
-
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "r", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(
-                t, repo_cfg, {},
-                prev_updated={42: "2026-01-01T00:00:00Z"},
-            )
-
-        assert api_states[42].comments_fetched is False
-        assert api_states[42].comments == ()
-        t.fetch_comments.assert_not_called()
-
-    def test_fetch_when_timestamp_changed(self):
-        """When prev_updated differs from issue.last_updated, fetch comments."""
-        issue = NormalizedIssue(
-            number=42, title="T", body="B",
-            owner="o", repo="r",
-            last_updated="2026-01-02T00:00:00Z",
-        )
-        t = MagicMock()
-        t.list_open_issues.return_value = [issue]
-        t.fetch_comments.return_value = []
-
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "r", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(
-                t, repo_cfg, {},
-                prev_updated={42: "2026-01-01T00:00:00Z"},
-            )
-
-        assert api_states[42].comments_fetched is True
-        t.fetch_comments.assert_called_once()
-
-    def test_force_fetch_overrides_skip(self):
-        """force_fetch set overrides a matching timestamp."""
-        issue = NormalizedIssue(
-            number=42, title="T", body="B",
-            owner="o", repo="r",
-            last_updated="2026-01-01T00:00:00Z",
-        )
-        t = MagicMock()
-        t.list_open_issues.return_value = [issue]
-        t.fetch_comments.return_value = []
-
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "r", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(
-                t, repo_cfg, {},
-                prev_updated={42: "2026-01-01T00:00:00Z"},
-                force_fetch={42},
-            )
-
-        assert api_states[42].comments_fetched is True
-        t.fetch_comments.assert_called_once()
-
-    def test_new_issue_always_fetched(self):
-        """An issue not in prev_updated should always be fetched."""
-        issue = NormalizedIssue(
-            number=42, title="T", body="B",
-            owner="o", repo="r",
-            last_updated="2026-01-01T00:00:00Z",
-        )
-        t = MagicMock()
-        t.list_open_issues.return_value = [issue]
-        t.fetch_comments.return_value = []
-
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "r", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(t, repo_cfg, {}, prev_updated={})
-
-        assert api_states[42].comments_fetched is True
-        t.fetch_comments.assert_called_once()
-
-    def test_no_last_updated_always_fetched(self):
-        """When issue has no last_updated, always fetch comments."""
-        issue = NormalizedIssue(
-            number=42, title="T", body="B",
-            owner="o", repo="r",
-            last_updated=None,
-        )
-        t = MagicMock()
-        t.list_open_issues.return_value = [issue]
-        t.fetch_comments.return_value = []
-
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "r", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(
-                t, repo_cfg, {},
-                prev_updated={42: "2026-01-01T00:00:00Z"},
-            )
-
-        assert api_states[42].comments_fetched is True
-        t.fetch_comments.assert_called_once()
-
-    def test_backward_compat_no_prev_updated(self):
-        """Without prev_updated param, all issues are fetched (backward compat)."""
-        issue = NormalizedIssue(
-            number=42, title="T", body="B",
-            owner="o", repo="r",
-            last_updated="2026-01-01T00:00:00Z",
-        )
-        t = MagicMock()
-        t.list_open_issues.return_value = [issue]
-        t.fetch_comments.return_value = []
-
-        repo_cfg = {"provider": "azure", "org": "natedorr", "project": "testProject", "repo": "r", "pat": "fake"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs"):
-            from autoswe.providers.azure.adapter import read_api
-            api_states = read_api(t, repo_cfg, {})
-
-        assert api_states[42].comments_fetched is True
-        t.fetch_comments.assert_called_once()
+def _make_comment(body: str, author_login: str = "AUTHOR") -> NormalizedComment:
+    return NormalizedComment(body=body, created_at="2026-01-01T00:00:00Z",
+                             author_login=author_login)
 
 
-class TestReadApiGitHub:
-    """GitHub adapter read_api tests — comments already clean."""
+def _make_tracker(provider: str, comments: list[NormalizedComment]) -> MagicMock:
+    """A real tracker whose read side returns canned data; its real
+    normalize_comment_body hook is what we want to exercise."""
+    repo_cfg = _repo_cfg(provider)
+    tracker = (AzureTracker if provider == "azure" else GitHubTracker)(repo_cfg)
+    mock = MagicMock(wraps=tracker)
+    mock.list_open_issues = MagicMock(return_value=[_make_issue(42)])
+    mock.fetch_comments = MagicMock(return_value=comments)
+    return mock
 
-    def test_github_clean_passthrough(self):
-        """GitHub comments are plain text; adapter should pass through."""
-        t = MagicMock()
-        issue = _make_issue(7, title="Test")
-        t.list_open_issues.return_value = [issue]
-        t.fetch_comments.return_value = [
-            NormalizedComment(body="/plan --branch dev", created_at="2026-01-01T00:00:00Z", author_login="AUTHOR"),
-        ]
-        repo_cfg = {"provider": "github", "owner": "owner", "repo": "repo", "pat": "fake"}
 
-        with patch("autoswe.providers.github.adapter.get_vcs"):
-            from autoswe.providers.github.adapter import read_api
-            api_states = read_api(t, repo_cfg, {})
-
-        assert api_states[7].comments[0].body == "/plan --branch dev"
-
-    def test_github_skip_unchanged_issue(self):
-        """When prev_updated matches, GitHub adapter should skip fetching."""
-        issue = NormalizedIssue(
-            number=7, title="T", body="B",
-            owner="o", repo="r",
-            last_updated="2026-01-01T00:00:00Z",
-        )
-        t = MagicMock()
-        t.list_open_issues.return_value = [issue]
-
-        repo_cfg = {"provider": "github", "owner": "o", "repo": "r", "pat": "fake"}
-
-        with patch("autoswe.providers.github.adapter.get_vcs"):
-            from autoswe.providers.github.adapter import read_api
-            api_states = read_api(
-                t, repo_cfg, {},
-                prev_updated={7: "2026-01-01T00:00:00Z"},
-            )
-
-        assert api_states[7].comments_fetched is False
-        assert api_states[7].comments == ()
-        t.fetch_comments.assert_not_called()
-
-    def test_github_fetch_when_changed(self):
-        """When timestamp changed, GitHub adapter should fetch."""
-        issue = NormalizedIssue(
-            number=7, title="T", body="B",
-            owner="o", repo="r",
-            last_updated="2026-01-02T00:00:00Z",
-        )
-        t = MagicMock()
-        t.list_open_issues.return_value = [issue]
-        t.fetch_comments.return_value = []
-
-        repo_cfg = {"provider": "github", "owner": "o", "repo": "r", "pat": "fake"}
-
-        with patch("autoswe.providers.github.adapter.get_vcs"):
-            from autoswe.providers.github.adapter import read_api
-            api_states = read_api(
-                t, repo_cfg, {},
-                prev_updated={7: "2026-01-01T00:00:00Z"},
-            )
-
-        assert api_states[7].comments_fetched is True
-        t.fetch_comments.assert_called_once()
+def _run_read(tracker, provider: str, **kwargs) -> dict:
+    """Run the single shared read_api. create_pr is the only effect that
+    resolves a VCS, and read_api never does, so this needs no patching."""
+    return read_api(tracker, _repo_cfg(provider), {}, **kwargs)
 
 
 # ---------------------------------------------------------------------------
-# apply_effect — output shape lockdown
+# read_api -- comment body normalisation (the one provider-specific hook)
 # ---------------------------------------------------------------------------
 
-class TestApplyEffectGitHub:
-    """GitHub adapter apply_effect tests."""
+def test_azure_div_wrapped_comment_unwrapped():
+    """Bug 1 regression: ADO rich-text wraps user comments in <div>.
 
-    def test_set_status(self):
-        """Effect(set_status='planned') → tracker.set_status called with 'autoswe:planned'."""
-        tracker = MagicMock()
-        queue = {"gh__owner_repo_7": {"autoswe_status": None}}
-        effect = Effect(kind="set_status", status="planned")
-
-        from autoswe.providers.github.adapter import apply_effect
-        apply_effect(tracker, effect, {"provider": "github"}, 7, queue, "gh__owner_repo_7")
-
-        tracker.set_status.assert_called_once_with({"provider": "github"}, 7, "autoswe:planned")
-
-    def test_post_comment(self):
-        """Effect(post_comment) → tracker.post_comment called."""
-        tracker = MagicMock()
-        queue = {}
-        effect = Effect(kind="post_comment", body="Plan posted.\n<!-- autoswe-bot -->")
-
-        from autoswe.providers.github.adapter import apply_effect
-        apply_effect(tracker, effect, {"provider": "github"}, 7, queue, "gh__owner_repo_7")
-
-        tracker.post_comment.assert_called_once_with({"provider": "github"}, 7, "Plan posted.\n<!-- autoswe-bot -->")
-
-    def test_patch_queue(self):
-        """Effect(patch_queue) → queue[slug] updated."""
-        tracker = MagicMock()
-        queue = {"gh__owner_repo_7": {"autoswe_status": "pending", "last_consumed_reply_ts": ""}}
-        effect = Effect(
-            kind="patch_queue",
-            queue_patch={"autoswe_status": "planned", "last_consumed_reply_ts": "2026-01-01T00:00:00Z"},
-        )
-
-        from autoswe.providers.github.adapter import apply_effect
-        apply_effect(tracker, effect, {"provider": "github"}, 7, queue, "gh__owner_repo_7")
-
-        assert queue["gh__owner_repo_7"]["autoswe_status"] == "planned"
-        assert queue["gh__owner_repo_7"]["last_consumed_reply_ts"] == "2026-01-01T00:00:00Z"
+    After read_api, the comment body should have the <div> stripped so
+    slash-command parsing sees clean text.
+    """
+    comments = [_make_comment(_AZURE_DIV_WRAPPED)]
+    api_states = _run_read(_make_tracker("azure", comments), "azure")
+    body = api_states[42].comments[0].body
+    assert "/plan --branch dev" in body
+    assert "<div>" not in body
 
 
-class TestApplyEffectAzure:
-    """Azure adapter apply_effect tests."""
-
-    def test_set_status(self):
-        """Effect(set_status) → tracker.set_status called with autoswe: prefix."""
-        tracker = MagicMock()
-        queue = {}
-        effect = Effect(kind="set_status", status="failed")
-
-        from autoswe.providers.azure.adapter import apply_effect
-        apply_effect(tracker, effect, {"provider": "azure"}, 42, queue, "ado__owner_repo_42")
-
-        tracker.set_status.assert_called_once_with({"provider": "azure"}, 42, "autoswe:failed")
-
-    def test_post_comment(self):
-        """Effect(post_comment) → tracker.post_comment called."""
-        tracker = MagicMock()
-        queue = {}
-        effect = Effect(kind="post_comment", body="Max attempts reached.\n<!-- autoswe-bot -->")
-
-        from autoswe.providers.azure.adapter import apply_effect
-        apply_effect(tracker, effect, {"provider": "azure"}, 42, queue, "ado__owner_repo_42")
-
-        tracker.post_comment.assert_called_once_with(
-            {"provider": "azure"}, 42, "Max attempts reached.\n<!-- autoswe-bot -->"
-        )
+def test_azure_html_entities_decoded():
+    """ADO rich-text may encode characters as HTML entities."""
+    comments = [_make_comment(_AZURE_ENTITIES)]
+    api_states = _run_read(_make_tracker("azure", comments), "azure")
+    body = api_states[42].comments[0].body
+    assert "/fix with --focus" in body
+    assert "&#45;" not in body
+    assert "&#47;" not in body
 
 
-class TestApplyEffectCreatePr:
-    """Provider-agnostic create_pr effect idempotency tests."""
-
-    def test_github_create_pr_no_existing(self):
-        """When no PR exists, GitHub adapter calls open_pull_request."""
-        tracker = MagicMock()
-        queue = {}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = None
-        repo_cfg = {"provider": "github"}
-
-        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.github.adapter import apply_effect
-            effect = Effect(
-                kind="create_pr",
-                pr_title="Fixes #1: Test",
-                pr_body="Fixes #1",
-                pr_head="autoswe/issue-1",
-                pr_base="main",
-            )
-            apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
-
-        vcs.find_existing_pr.assert_called_once()
-        vcs.open_pull_request.assert_called_once()
-
-    def test_github_create_pr_existing_skipped(self):
-        """When PR exists, GitHub adapter skips open_pull_request."""
-        tracker = MagicMock()
-        queue = {}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = PRResult(
-            url="https://github.com/o/r/pull/15",
-            number=15,
-        )
-        repo_cfg = {"provider": "github"}
-
-        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.github.adapter import apply_effect
-            effect = Effect(
-                kind="create_pr",
-                pr_title="Fixes #1: Test",
-                pr_body="Fixes #1",
-                pr_head="autoswe/issue-1",
-                pr_base="main",
-            )
-            apply_effect(tracker, effect, repo_cfg, 1, queue, "gh__owner_repo_1")
-
-        vcs.find_existing_pr.assert_called_once()
-        # open_pull_request must NOT be called when PR exists
-        vcs.open_pull_request.assert_not_called()
-
-    def test_azure_create_pr_no_existing(self):
-        """When no PR exists, Azure adapter calls open_pull_request."""
-        tracker = MagicMock()
-        queue = {}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = None
-        repo_cfg = {"provider": "azure"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.azure.adapter import apply_effect
-            effect = Effect(
-                kind="create_pr",
-                pr_title="Fixes #1: Test",
-                pr_body="Fixes #1",
-                pr_head="autoswe/issue-1",
-                pr_base="main",
-            )
-            apply_effect(tracker, effect, repo_cfg, 1, queue, "ado__owner_repo_1")
-
-        vcs.find_existing_pr.assert_called_once()
-        vcs.open_pull_request.assert_called_once()
-
-    def test_azure_create_pr_existing_skipped(self):
-        """When PR exists, Azure adapter skips open_pull_request."""
-        tracker = MagicMock()
-        queue = {}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = PRResult(
-            url="https://dev.azure.com/o/p/_git/r/pr/15",
-            number=15,
-        )
-        repo_cfg = {"provider": "azure"}
-
-        with patch("autoswe.providers.azure.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.azure.adapter import apply_effect
-            effect = Effect(
-                kind="create_pr",
-                pr_title="Fixes #1: Test",
-                pr_body="Fixes #1",
-                pr_head="autoswe/issue-1",
-                pr_base="main",
-            )
-            apply_effect(tracker, effect, repo_cfg, 1, queue, "ado__owner_repo_1")
-
-        vcs.find_existing_pr.assert_called_once()
-        # open_pull_request must NOT be called when PR exists
-        vcs.open_pull_request.assert_not_called()
+def test_azure_bot_marker_preserved():
+    """Bot comments should keep the autoswe-bot marker after HTML strip."""
+    bot_body = "<div>## Plan\n\nSome plan text\n</div>\n" + BOT_MARKER
+    comments = [_make_comment(bot_body, author_login="BOT")]
+    api_states = _run_read(_make_tracker("azure", comments), "azure")
+    body = api_states[42].comments[0].body
+    assert BOT_MARKER in body
+    assert "<div>" not in body
 
 
-class TestApplyEffectCreatePrCiGate:
-    """Auto-PR-after-/fix: create_pr is CI-gated (no sync gate — already synced)."""
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_clean_comment_passthrough(provider):
+    """A comment that is already clean text should come out unchanged."""
+    clean = "/plan --branch main"
+    comments = [_make_comment(clean)]
+    api_states = _run_read(_make_tracker(provider, comments), provider)
+    assert api_states[42].comments[0].body == clean
 
-    def _effect(self):
-        return Effect(
-            kind="create_pr",
-            pr_title="Fixes #1: Test",
-            pr_body="Fixes #1",
-            pr_head="autoswe/issue-1",
-            pr_base="main",
-        )
 
-    def test_github_create_pr_deferred_when_ci_pending(self):
-        """CI pending → PR creation deferred, deferral comment posted instead."""
-        tracker = MagicMock()
-        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = None
-        vcs.get_ci_status.return_value = CIStatus(state="pending", pending_count=1)
-        repo_cfg = {"provider": "github"}
-        cfg = {"PR_REQUIRE_CI": True}
+# ---------------------------------------------------------------------------
+# read_api -- fetch policy (provider-agnostic, run on both)
+# ---------------------------------------------------------------------------
 
-        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.github.adapter import apply_effect
-            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
+def _single_issue_tracker(provider: str, last_updated: str | None,
+                          comments: list | None = None) -> MagicMock:
+    issue = _make_issue(42, last_updated=last_updated)
+    tracker = _make_tracker(provider, comments or [])
+    tracker.list_open_issues = MagicMock(return_value=[issue])
+    return tracker
 
-        vcs.open_pull_request.assert_not_called()
-        tracker.post_comment.assert_called_once()
-        assert "deferred" in tracker.post_comment.call_args[0][2].lower()
 
-    def test_github_create_pr_deferred_when_ci_failing(self):
-        """CI failing → PR creation deferred."""
-        tracker = MagicMock()
-        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = None
-        vcs.get_ci_status.return_value = CIStatus(state="failure", failing=["build"])
-        repo_cfg = {"provider": "github"}
-        cfg = {"PR_REQUIRE_CI": True}
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_read_api_skip_unchanged_issue(provider):
+    """When prev_updated matches, comments should be skipped."""
+    t = _single_issue_tracker(provider, "2026-01-01T00:00:00Z")
+    api_states = _run_read(t, provider, prev_updated={42: "2026-01-01T00:00:00Z"})
+    assert api_states[42].comments_fetched is False
+    assert api_states[42].comments == ()
+    t.fetch_comments.assert_not_called()
 
-        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.github.adapter import apply_effect
-            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
 
-        vcs.open_pull_request.assert_not_called()
-        tracker.post_comment.assert_called_once()
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_read_api_fetch_when_timestamp_changed(provider):
+    """When prev_updated differs from issue.last_updated, fetch comments."""
+    t = _single_issue_tracker(provider, "2026-01-02T00:00:00Z")
+    api_states = _run_read(t, provider, prev_updated={42: "2026-01-01T00:00:00Z"})
+    assert api_states[42].comments_fetched is True
+    t.fetch_comments.assert_called_once()
 
-    def test_github_create_pr_proceeds_when_ci_success(self):
-        """CI success → PR created as normal."""
-        tracker = MagicMock()
-        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = None
-        vcs.get_ci_status.return_value = CIStatus(state="success")
-        repo_cfg = {"provider": "github"}
-        cfg = {"PR_REQUIRE_CI": True}
 
-        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.github.adapter import apply_effect
-            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_read_api_force_fetch_overrides_skip(provider):
+    """force_fetch set overrides a matching timestamp."""
+    t = _single_issue_tracker(provider, "2026-01-01T00:00:00Z")
+    api_states = _run_read(t, provider,
+                           prev_updated={42: "2026-01-01T00:00:00Z"},
+                           force_fetch={42})
+    assert api_states[42].comments_fetched is True
+    t.fetch_comments.assert_called_once()
 
-        vcs.open_pull_request.assert_called_once()
-        tracker.post_comment.assert_not_called()
 
-    def test_github_create_pr_proceeds_when_no_ci_configured(self):
-        """CI state 'none' (no checks configured) → treated as pass, PR created."""
-        tracker = MagicMock()
-        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = None
-        vcs.get_ci_status.return_value = CIStatus(state="none")
-        repo_cfg = {"provider": "github"}
-        cfg = {"PR_REQUIRE_CI": True}
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_read_api_new_issue_always_fetched(provider):
+    """An issue not in prev_updated should always be fetched."""
+    t = _single_issue_tracker(provider, "2026-01-01T00:00:00Z")
+    api_states = _run_read(t, provider, prev_updated={})
+    assert api_states[42].comments_fetched is True
+    t.fetch_comments.assert_called_once()
 
-        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.github.adapter import apply_effect
-            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
 
-        vcs.open_pull_request.assert_called_once()
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_read_api_no_last_updated_always_fetched(provider):
+    """When issue has no last_updated, always fetch comments."""
+    t = _single_issue_tracker(provider, None)
+    api_states = _run_read(t, provider, prev_updated={42: "2026-01-01T00:00:00Z"})
+    assert api_states[42].comments_fetched is True
+    t.fetch_comments.assert_called_once()
 
-    def test_github_create_pr_ci_gate_disabled_ignores_failure(self):
-        """PR_REQUIRE_CI=False → CI failure does not block PR creation."""
-        tracker = MagicMock()
-        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = None
-        vcs.get_ci_status.return_value = CIStatus(state="failure", failing=["build"])
-        repo_cfg = {"provider": "github"}
-        cfg = {"PR_REQUIRE_CI": False}
 
-        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.github.adapter import apply_effect
-            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1", cfg)
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_read_api_backward_compat_no_prev_updated(provider):
+    """Without prev_updated, all issues are fetched (backward compat)."""
+    t = _single_issue_tracker(provider, "2026-01-01T00:00:00Z")
+    api_states = _run_read(t, provider)
+    assert api_states[42].comments_fetched is True
+    t.fetch_comments.assert_called_once()
 
-        vcs.open_pull_request.assert_called_once()
 
-    def test_github_create_pr_no_gate_without_cfg(self):
-        """cfg=None (legacy call signature) skips gating entirely — backward compatible."""
-        tracker = MagicMock()
-        queue = {"gh__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = None
-        vcs.get_ci_status.return_value = CIStatus(state="failure", failing=["build"])
-        repo_cfg = {"provider": "github"}
+# ---------------------------------------------------------------------------
+# apply_effect -- output shape lockdown (provider-agnostic, run on both)
+# ---------------------------------------------------------------------------
 
-        with patch("autoswe.providers.github.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.github.adapter import apply_effect
-            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "gh__owner_repo_1")
+def _run_apply(provider: str, tracker, effect, queue, issue_num, slug, cfg=None):
+    """Run the single shared apply_effect. set_status/post_comment/patch_queue
+    never resolve a VCS; only create_pr does (patched by the CI-gate tests)."""
+    apply_effect(tracker, effect, _repo_cfg(provider), issue_num, queue, slug, cfg)
 
-        vcs.get_ci_status.assert_not_called()
-        vcs.open_pull_request.assert_called_once()
 
-    def test_azure_create_pr_deferred_when_ci_failing(self):
-        """Azure adapter applies the same CI gate."""
-        tracker = MagicMock()
-        queue = {"ado__owner_repo_1": {"owner": "o", "repo": "r", "issue_number": 1}}
-        vcs = MagicMock()
-        vcs.find_existing_pr.return_value = None
-        vcs.get_ci_status.return_value = CIStatus(state="failure", failing=["build"])
-        repo_cfg = {"provider": "azure"}
-        cfg = {"PR_REQUIRE_CI": True}
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_set_status(provider):
+    """Effect(set_status) -> tracker.set_status with autoswe: prefix."""
+    tracker = MagicMock()
+    queue = {}
+    effect = Effect(kind="set_status", status="planned")
+    _run_apply(provider, tracker, effect, queue, 7, "gh__owner_repo_7")
+    tracker.set_status.assert_called_once_with(7, "autoswe:planned")
 
-        with patch("autoswe.providers.azure.adapter.get_vcs", return_value=vcs):
-            from autoswe.providers.azure.adapter import apply_effect
-            apply_effect(tracker, self._effect(), repo_cfg, 1, queue, "ado__owner_repo_1", cfg)
 
-        vcs.open_pull_request.assert_not_called()
-        tracker.post_comment.assert_called_once()
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_post_comment(provider):
+    """Effect(post_comment) -> tracker.post_comment called with the body."""
+    tracker = MagicMock()
+    queue = {}
+    effect = Effect(kind="post_comment", body="Plan posted.\n" + BOT_MARKER)
+    _run_apply(provider, tracker, effect, queue, 7, "gh__owner_repo_7")
+    tracker.post_comment.assert_called_once_with(7, "Plan posted.\n" + BOT_MARKER)
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_patch_queue(provider):
+    """Effect(patch_queue) -> queue[slug] updated in place."""
+    tracker = MagicMock()
+    queue = {"gh__owner_repo_7": {"autoswe_status": "pending", "last_consumed_reply_ts": ""}}
+    effect = Effect(
+        kind="patch_queue",
+        queue_patch={"autoswe_status": "planned",
+                     "last_consumed_reply_ts": "2026-01-01T00:00:00Z"},
+    )
+    _run_apply(provider, tracker, effect, queue, 7, "gh__owner_repo_7")
+    assert queue["gh__owner_repo_7"]["autoswe_status"] == "planned"
+    assert queue["gh__owner_repo_7"]["last_consumed_reply_ts"] == "2026-01-01T00:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# apply_effect -- create_pr idempotency (existing PR -> skip)
+# ---------------------------------------------------------------------------
+
+def _create_pr_effect():
+    return Effect(
+        kind="create_pr",
+        pr_title="Fixes #1: Test",
+        pr_body="Fixes #1",
+        pr_head="autoswe/issue-1",
+        pr_base="main",
+    )
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_no_existing(provider):
+    """When no PR exists, apply_effect calls open_pull_request."""
+    tracker = MagicMock()
+    vcs = MagicMock()
+    vcs.find_existing_pr.return_value = None
+    with patch("autoswe.providers.adapter.get_vcs", return_value=vcs):
+        _run_apply(provider, tracker, _create_pr_effect(), {}, 1, "gh__owner_repo_1")
+    vcs.find_existing_pr.assert_called_once()
+    vcs.open_pull_request.assert_called_once()
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_existing_skipped(provider):
+    """When a PR exists, apply_effect skips open_pull_request."""
+    tracker = MagicMock()
+    vcs = MagicMock()
+    vcs.find_existing_pr.return_value = PRResult(
+        url="https://github.com/o/r/pull/15", number=15,
+    )
+    with patch("autoswe.providers.adapter.get_vcs", return_value=vcs):
+        _run_apply(provider, tracker, _create_pr_effect(), {}, 1, "gh__owner_repo_1")
+    vcs.find_existing_pr.assert_called_once()
+    vcs.open_pull_request.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# apply_effect -- create_pr CI gate (no sync gate; already synced)
+# ---------------------------------------------------------------------------
+
+def _queue_with_entry(provider: str, slug: str) -> dict:
+    return {slug: {"owner": "o", "repo": "r", "issue_number": 1}}
+
+
+def _run_create_pr_ci(provider: str, ci_state, cfg):
+    """Drive a create_pr through the CI gate; returns (vcs, tracker)."""
+    tracker = MagicMock()
+    vcs = MagicMock()
+    vcs.find_existing_pr.return_value = None
+    vcs.get_ci_status.return_value = CIStatus(state=ci_state)
+    slug = "gh__owner_repo_1"
+    queue = _queue_with_entry(provider, slug)
+    with patch("autoswe.providers.adapter.get_vcs", return_value=vcs):
+        _run_apply(provider, tracker, _create_pr_effect(), queue, 1, slug, cfg)
+    return vcs, tracker
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_deferred_when_ci_pending(provider):
+    """CI pending -> PR creation deferred, deferral comment posted instead."""
+    vcs, tracker = _run_create_pr_ci(provider, "pending", {"PR_REQUIRE_CI": True})
+    vcs.open_pull_request.assert_not_called()
+    tracker.post_comment.assert_called_once()
+    assert "deferred" in tracker.post_comment.call_args[0][1].lower()
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_deferred_when_ci_failing(provider):
+    """CI failing -> PR creation deferred."""
+    vcs, tracker = _run_create_pr_ci(provider, "failure", {"PR_REQUIRE_CI": True})
+    vcs.open_pull_request.assert_not_called()
+    tracker.post_comment.assert_called_once()
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_proceeds_when_ci_success(provider):
+    """CI success -> PR created as normal."""
+    vcs, tracker = _run_create_pr_ci(provider, "success", {"PR_REQUIRE_CI": True})
+    vcs.open_pull_request.assert_called_once()
+    tracker.post_comment.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_proceeds_when_no_ci_configured(provider):
+    """CI state 'none' (no checks configured) -> treated as pass, PR created."""
+    vcs, tracker = _run_create_pr_ci(provider, "none", {"PR_REQUIRE_CI": True})
+    vcs.open_pull_request.assert_called_once()
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_ci_gate_disabled_ignores_failure(provider):
+    """PR_REQUIRE_CI=False -> CI failure does not block PR creation."""
+    vcs, tracker = _run_create_pr_ci(provider, "failure", {"PR_REQUIRE_CI": False})
+    vcs.open_pull_request.assert_called_once()
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_no_gate_without_cfg(provider):
+    """cfg=None skips gating entirely (legacy call signature) -- backward compatible."""
+    tracker = MagicMock()
+    vcs = MagicMock()
+    vcs.find_existing_pr.return_value = None
+    vcs.get_ci_status.return_value = CIStatus(state="failure")
+    slug = "gh__owner_repo_1"
+    queue = _queue_with_entry(provider, slug)
+    with patch("autoswe.providers.adapter.get_vcs", return_value=vcs):
+        _run_apply(provider, tracker, _create_pr_effect(), queue, 1, slug)
+    vcs.get_ci_status.assert_not_called()
+    vcs.open_pull_request.assert_called_once()

@@ -6,7 +6,7 @@ import subprocess
 
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.base import CIStatus, PRResult, VCSProvider
+from autoswe.providers.base import CIStatus, PRResult
 from autoswe.tracking.api import gh_get, gh_post
 
 dbg = get_debug_logger()
@@ -20,7 +20,7 @@ class MissingScopeError(RuntimeError):
     """Raised when a GitHub API call fails due to missing PAT scopes."""
 
 
-class GitHubVCS(VCSProvider):
+class GitHubVCS:
     """GitHub-backed VCS provider."""
 
     def __init__(self, repo_cfg: dict):
@@ -31,7 +31,7 @@ class GitHubVCS(VCSProvider):
 
     # ---- Protocol: VCSProvider ----
 
-    def clone_url(self, repo_cfg: dict) -> str:
+    def clone_url(self) -> str:
         """Return the full HTTPS clone URL with embedded token."""
         return f"https://x-access-token:{self._token}@github.com/{self._owner}/{self._repo}.git"
 
@@ -39,7 +39,7 @@ class GitHubVCS(VCSProvider):
         """Return the branch name for an issue."""
         return f"autoswe/issue-{issue_number}"
 
-    def find_existing_pr(self, repo_cfg: dict, branch: str) -> PRResult | None:
+    def find_existing_pr(self, branch: str) -> PRResult | None:
         """Check if a PR for the branch already exists."""
         try:
             result = subprocess.run(
@@ -76,7 +76,6 @@ class GitHubVCS(VCSProvider):
 
     def open_pull_request(
         self,
-        repo_cfg: dict,
         branch: str,
         base: str,
         title: str,
@@ -229,7 +228,7 @@ class GitHubVCS(VCSProvider):
             f"{[e.get('message', str(e)) for e in errors]}"
         )
 
-    def get_ci_status(self, repo_cfg: dict, branch: str, ref_sha: str | None = None) -> CIStatus:
+    def get_ci_status(self, branch: str, ref_sha: str | None = None) -> CIStatus:
         """Combine check-runs and legacy commit status into one CIStatus.
 
         Priority: any failure -> failure; else any queued/in_progress/pending
@@ -301,3 +300,29 @@ class GitHubVCS(VCSProvider):
         if success_count:
             return CIStatus(state="success", total=total, summary=f"{success_count} check(s) passed")
         return CIStatus(state="none", total=total, summary="no checks found")
+
+    def commit_url(self, commit_sha: str) -> str | None:
+        """Clickable GitHub commit URL, or None when owner/repo are unset."""
+        if self._owner and self._repo:
+            return f"https://github.com/{self._owner}/{self._repo}/commit/{commit_sha}"
+        return None
+
+    def branch_url(self, branch: str) -> str | None:
+        """Clickable GitHub compare URL, or None when owner/repo are unset."""
+        if self._owner and self._repo:
+            return f"https://github.com/{self._owner}/{self._repo}/compare/{branch}"
+        return None
+
+    def worktree_path_parts(self) -> tuple[str, ...]:
+        return (self._owner, self._repo)
+
+    def resolve_repo_id(self) -> str | None:
+        """GitHub needs no numeric repo identifier in URLs — no-op."""
+        return None
+
+    def slug_prefix(self) -> str:
+        return "gh"
+
+    def pid_prefix(self) -> str:
+        return "gh_"
+

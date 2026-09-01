@@ -20,7 +20,7 @@ Full diff (feature branch vs origin/{{BASE_BRANCH}}):
 
 {{GUIDANCE_BLOCK}}
 
-This is a read-only review. The repo is checked out at the current working directory on branch autoswe/issue-{{ISSUE_NUMBER}}.
+This is a read-only review. The repo is checked out at the current working directory on branch {{BRANCH}}.
 
 Output contract: Produce findings only. Do NOT call AskUserQuestion — this is a
 one-shot, non-resumable session, so any question you ask will dead-end. Do NOT

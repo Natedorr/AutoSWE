@@ -88,7 +88,7 @@ class GitWorld:
         # (patched properly after init_remote, but set up a stub here)
         from autoswe.providers.github import vcs as gh_vcs
 
-        def _fake_clone_url(_self, _repo_cfg: dict) -> str:
+        def _fake_clone_url(_self) -> str:
             return self.remote_url()
 
         self.mp.setattr(gh_vcs.GitHubVCS, "clone_url", _fake_clone_url)

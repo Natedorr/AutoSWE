@@ -5,9 +5,18 @@ Azure DevOps REST API.
 """
 from __future__ import annotations
 
+from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.azure.api import _ado_api_version, _encode_path_segment, ado_get, ado_post
-from autoswe.providers.base import CIStatus, PRResult, VCSProvider
+from autoswe.providers.azure.api import (
+    _ado_api_version,
+    _encode_path_segment,
+    _normalize_azure_parts,
+    ado_get,
+    ado_post,
+)
+from autoswe.providers.base import CIStatus, PRResult
+
+dbg = get_debug_logger()
 
 # Azure Pipelines build statuses/results
 _PENDING_STATUSES = {"notStarted", "inProgress", "postponed", "cancelling"}
@@ -15,7 +24,7 @@ _FAILURE_RESULTS = {"failed", "canceled"}
 _SUCCESS_RESULTS = {"succeeded", "partiallySucceeded"}
 
 
-class AzureVCS(VCSProvider):
+class AzureVCS:
     """Azure DevOps-backed VCS provider.
 
     ``repo_cfg`` must contain::
@@ -31,40 +40,110 @@ class AzureVCS(VCSProvider):
 
     def __init__(self, repo_cfg: dict):
         self._repo_cfg = repo_cfg
-        self._org = repo_cfg.get("org", "")
-        self._project = repo_cfg.get("project", "")
-        self._repo = repo_cfg.get("repo", "")
         self._pat = repo_cfg.get("pat") or repo_cfg.get("token", "")
-
-        # Defensive fallback: when caller passes owner/repo instead of
-        # org/project/repo (e.g. worktree.py inline repo_cfg dicts or
-        # build_repo_cfg with 3-part Azure keys), parse from those fields.
-        if not self._org or not self._project:
-            owner = repo_cfg.get("owner", "")
-            repo = repo_cfg.get("repo", "")
-            # owner might be "org/proj" and repo might be the repo name
-            if "/" in owner and "/" not in repo:
-                org_part, _, proj_part = owner.partition("/")
-                if org_part and proj_part:
-                    self._org = org_part
-                    self._project = proj_part
-                    self._repo = repo
-            # owner might be "org" and repo might be "project/repo"
-            elif "/" in repo:
-                proj_part, _, repo_part = repo.partition("/")
-                if proj_part and repo_part:
-                    self._org = owner
-                    self._project = proj_part
-                    self._repo = repo_part
+        # Single source of org/project/repo partition (issue #168 F-08):
+        # build_repo_cfg normalises the main path; _normalize_azure_parts
+        # covers inline throwaway repo_cfg dicts that skip build_repo_cfg.
+        self._org, self._project, self._repo = _normalize_azure_parts(repo_cfg)
+        # Raw owner, kept only for the filesystem worktree layout when the
+        # config is a degenerate 2-part shape (owner="o", repo="r") that
+        # _normalize_azure_parts cannot split into org/project/repo.
+        self._owner = repo_cfg.get("owner", "")
 
         # URL-encode for safe use in REST API request URLs
         self._org_enc = _encode_path_segment(self._org)
         self._project_enc = _encode_path_segment(self._project)
         self._repo_enc = _encode_path_segment(self._repo)
 
+    # ---- Repo ID resolution (moved from AzureTracker; VCS-side since it
+    # feeds web-URL construction) ----
+
+    def resolve_repo_id(self) -> str | None:
+        """Resolve the Git repository UUID for this repo.
+
+        Azure DevOps web URLs require the repo UUID (not the display name)
+        in the `_git/{repo-id}/...` path segment. This method queries the
+        repos API, finds the repo matching self._repo by name, and returns
+        its UUID. Result is cached on first successful call.
+
+        Returns the UUID string, or None if lookup fails.
+        """
+        # The poll loop resolves the UUID once per repo and writes it back onto
+        # repo_cfg["repo_id"] (loop.py) so every downstream URL builder reuses
+        # it without a fresh API call. Prefer that shared value; it is also how
+        # offline tests seed the UUID without hitting the network.
+        seeded = self._repo_cfg.get("repo_id")
+        if seeded:
+            self._resolved_repo_id = seeded
+            return seeded
+        if getattr(self, "_resolved_repo_id", None) is not None:
+            return self._resolved_repo_id
+        try:
+            repos_path = _ado_api_version(
+                f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories"
+            )
+            result = ado_get(repos_path, self._pat)
+            for repo_entry in result.get("value", []):
+                if repo_entry.get("name", "").lower() == self._repo.lower():
+                    self._resolved_repo_id = repo_entry.get("id", "")
+                    return self._resolved_repo_id
+        except RuntimeError as e:  # ADO API raises RuntimeError on HTTP error.
+            dbg.warning(
+                "resolve_repo_id: failed to resolve UUID for %s/%s: %s: %s",
+                self._org, self._project, type(e).__name__, e,
+            )
+        return None
+
+    def slug_prefix(self) -> str:
+        return "ado"
+
+    def pid_prefix(self) -> str:
+        return "ado_"
+
+    def worktree_path_parts(self) -> tuple[str, ...]:
+        """Path parts for worktree/clone directories: (org, project, repo).
+
+        For a fully-normalised config (from ``build_repo_cfg``) this is the
+        three-part (org, project, repo). For a degenerate 2-part throwaway
+        config (owner="o", repo="r") that never reached normalisation, fall
+        back to (owner, repo) so the on-disk layout matches the pre-seam
+        convention rather than collapsing to ``_repo``.
+        """
+        if not self._org and not self._project and self._owner:
+            return (self._owner, self._repo)
+        return (self._org, self._project, self._repo)
+
+    def commit_url(self, commit_sha: str) -> str | None:
+        """Clickable Azure DevOps commit URL, or None when parts are unset.
+
+        Uses the resolved repo UUID when available, else the repo name.
+        """
+        org, project, repo = self._org, self._project, self._repo
+        if org and project and repo:
+            repo_id = self.resolve_repo_id()
+            repo_e = _encode_path_segment(repo_id or repo)
+            return (
+                f"https://dev.azure.com/{_encode_path_segment(org)}/"
+                f"{_encode_path_segment(project)}/_git/{repo_e}/commit/{commit_sha}"
+            )
+        return None
+
+    def branch_url(self, branch: str) -> str | None:
+        """Clickable Azure DevOps branch-view URL, or None when parts are unset."""
+        org, project, repo = self._org, self._project, self._repo
+        if org and project and repo:
+            repo_id = self.resolve_repo_id()
+            repo_e = _encode_path_segment(repo_id or repo)
+            branch_e = _encode_path_segment(branch)
+            return (
+                f"https://dev.azure.com/{_encode_path_segment(org)}/"
+                f"{_encode_path_segment(project)}/_git/{repo_e}?version=GB{branch_e}"
+            )
+        return None
+
     # ---- Protocol: VCSProvider ----
 
-    def clone_url(self, repo_cfg: dict) -> str:
+    def clone_url(self) -> str:
         """Return the full HTTPS clone URL with embedded PAT."""
         return (
             f"https://autoswe:{self._pat}@"
@@ -75,7 +154,7 @@ class AzureVCS(VCSProvider):
         """Return the branch name for an issue."""
         return f"autoswe/issue-{issue_number}"
 
-    def find_existing_pr(self, repo_cfg: dict, branch: str) -> PRResult | None:
+    def find_existing_pr(self, branch: str) -> PRResult | None:
         """Check if an active PR for the branch already exists."""
         path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories/"
@@ -95,7 +174,6 @@ class AzureVCS(VCSProvider):
 
     def open_pull_request(
         self,
-        repo_cfg: dict,
         branch: str,
         base: str,
         title: str,
@@ -128,7 +206,7 @@ class AzureVCS(VCSProvider):
     ) -> None:
         """Azure DevOps does not have an equivalent feature — no-op."""
 
-    def get_ci_status(self, repo_cfg: dict, branch: str, ref_sha: str | None = None) -> CIStatus:
+    def get_ci_status(self, branch: str, ref_sha: str | None = None) -> CIStatus:
         """Return CI status from the most recent Azure Pipelines build for *branch*.
 
         ``ref_sha`` is unused — Azure Pipelines builds are queried by branch,

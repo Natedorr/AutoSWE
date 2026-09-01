@@ -650,7 +650,7 @@ class TestLockReleasedDuringDispatch:
                 ),
             }
 
-        monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+        monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
         cfg = {
             "MAX_CONCURRENT": 1, "SILENT_REPORTING": True,
@@ -704,7 +704,7 @@ class TestLockReleasedDuringDispatch:
                 ),
             }
 
-        monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+        monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
         cfg = {
             "MAX_CONCURRENT": 1, "SILENT_REPORTING": True,

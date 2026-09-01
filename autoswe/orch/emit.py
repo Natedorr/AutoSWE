@@ -9,7 +9,6 @@ Tests live in tests/test_emit.py, parametrized over fixture JSON files.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from urllib.parse import quote as _url_quote
 
 from autoswe.core.logging_utils import log
 from autoswe.orch.types import Action, Effect, World
@@ -117,70 +116,40 @@ def _format_metrics(cost_usd: float | None, duration_seconds: float | None, sess
     return ""
 
 
-def _resolve_azure_parts(repo_cfg: dict) -> tuple[str, str, str]:
-    """Return (org, project, repo) for Azure, with fallback from owner/repo.
-
-    When repos_cfg lookup succeeds, org/project/repo are explicit keys.
-    When it misses, owner=org and repo="project/repo_name". Mirrors
-    AzureTracker.__init__ fallback logic.
-    """
-    org = repo_cfg.get("org", "")
-    project = repo_cfg.get("project", "")
-    repo = repo_cfg.get("repo", "")
-
-    if not org or not project:
-        owner = repo_cfg.get("owner", "")
-        repo_val = repo_cfg.get("repo", "")
-        if "/" in repo_val:
-            proj_part, _, _repo_part = repo_val.partition("/")
-            if proj_part:
-                org = owner
-                project = proj_part
-                if _repo_part:
-                    repo = _repo_part
-
-    return org, project, repo
-
-
-def _build_commit_url(provider: str, repo_cfg: dict | None, commit_sha: str) -> str | None:
-    """Return a provider-specific commit URL, or None if unavailable."""
+def _vcs_commit_url(provider: str, repo_cfg: dict | None, commit_sha: str) -> str | None:
+    """Return a provider-specific commit URL via the VCS provider, or None."""
     if not repo_cfg:
         return None
-    if provider == "github":
-        owner = repo_cfg.get("owner", "")
-        repo = repo_cfg.get("repo", "")
-        if owner and repo:
-            return f"https://github.com/{owner}/{repo}/commit/{commit_sha}"
-    elif provider == "azure":
-        org, project, repo = _resolve_azure_parts(repo_cfg)
-        if org and project and repo:
-            org_e = _url_quote(org, safe="")
-            proj_e = _url_quote(project, safe="")
-            repo_id = repo_cfg.get("repo_id")
-            repo_e = _url_quote(repo_id, safe="") if repo_id else _url_quote(repo, safe="")
-            return f"https://dev.azure.com/{org_e}/{proj_e}/_git/{repo_e}/commit/{commit_sha}"
-    return None
+    from autoswe.providers.factory import get_vcs
+    try:
+        return get_vcs(repo_cfg).commit_url(commit_sha)
+    except Exception:
+        return None
 
 
-def _build_branch_url(provider: str, repo_cfg: dict | None, branch: str) -> str | None:
-    """Return a provider-specific branch URL, or None if unavailable."""
+def _vcs_branch_url(provider: str, repo_cfg: dict | None, branch: str) -> str | None:
+    """Return a provider-specific branch URL via the VCS provider, or None."""
     if not repo_cfg:
         return None
-    if provider == "github":
-        owner = repo_cfg.get("owner", "")
-        repo = repo_cfg.get("repo", "")
-        if owner and repo:
-            return f"https://github.com/{owner}/{repo}/compare/{branch}"
-    elif provider == "azure":
-        org, project, repo = _resolve_azure_parts(repo_cfg)
-        if org and project and repo:
-            org_e = _url_quote(org, safe="")
-            proj_e = _url_quote(project, safe="")
-            repo_id = repo_cfg.get("repo_id")
-            repo_e = _url_quote(repo_id, safe="") if repo_id else _url_quote(repo, safe="")
-            branch_e = _url_quote(branch, safe="")
-            return f"https://dev.azure.com/{org_e}/{proj_e}/_git/{repo_e}?version=GB{branch_e}"
-    return None
+    from autoswe.providers.factory import get_vcs
+    try:
+        return get_vcs(repo_cfg).branch_url(branch)
+    except Exception:
+        return None
+
+
+def _resolve_branch(owner: str, repo: str, issue_num: int, plan_branch: str | None, provider: str) -> str:
+    """The branch a fix landed on: plan_branch when set, else the provider's
+    per-issue branch name (``VCSProvider.branch_name`` is the single source)."""
+    if plan_branch:
+        return plan_branch
+    from autoswe.providers.factory import get_vcs
+    try:
+        return get_vcs({"owner": owner, "repo": repo, "provider": provider}).branch_name(issue_num)
+    except Exception:
+        # Unknown/unregistered provider: fall back to the conventional
+        # autoSWE branch name so a completion comment still renders.
+        return f"autoswe/issue-{issue_num}"
 
 
 def _build_completion_comment(
@@ -201,7 +170,7 @@ def _build_completion_comment(
     For DONE_SUMMARY produces a rich comment with commit link, branch link,
     and Claude's summary. For other DONE variants falls back to simpler format.
     """
-    branch = plan_branch or f"autoswe/issue-{issue_num}"
+    branch = _resolve_branch(task_owner, task_repo, issue_num, plan_branch, provider)
 
     if done_content.startswith("DONE_SUMMARY\t"):
         rest = done_content[len("DONE_SUMMARY\t") :]
@@ -216,13 +185,13 @@ def _build_completion_comment(
         lines = [f"Completed with command `{pending_command}`."]
 
         if commit_sha:
-            commit_url = _build_commit_url(provider, repo_cfg, commit_sha)
+            commit_url = _vcs_commit_url(provider, repo_cfg, commit_sha)
             if commit_url:
                 lines.append(f"[Commit]({commit_url})")
             else:
                 lines.append(f"Commit: {commit_sha}")
 
-            branch_url = _build_branch_url(provider, repo_cfg, branch)
+            branch_url = _vcs_branch_url(provider, repo_cfg, branch)
             if branch_url:
                 lines.append(f"[View branch]({branch_url})")
             else:
@@ -492,7 +461,7 @@ def emit(
         # Auto-create PR if fix completed and configured (but never when a
         # re-review is pending — the gating verdict has not cleared yet).
         if kind in ("fix", "retry") and cfg.get("AUTO_CREATE_PR") and task.pr_number is None and not rereview_pending:
-            pr_head = f"autoswe/issue-{task.issue_number}"
+            pr_head = _resolve_branch(task.owner, task.repo, task.issue_number, None, task.provider)
             pr_base = task.plan_branch or task.base_branch
             # Build PR body from task data for context
             body_parts = [f"Fixes #{task.issue_number}"]

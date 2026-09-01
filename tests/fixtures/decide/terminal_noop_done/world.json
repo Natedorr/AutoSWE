@@ -16,8 +16,7 @@
         "id": 1,
         "is_bot": true
       }
-    ],
-    "open_pr_numbers": []
+    ]
   },
   "task": {
     "slug": "gh:owner_repo_11",

@@ -58,7 +58,7 @@ def preflight_pr(
             return False, reason
 
     if _flag("PR_REQUIRE_CI", cfg, repo_cfg):
-        ci = resolved_vcs.get_ci_status(repo_cfg, branch)
+        ci = resolved_vcs.get_ci_status(branch)
         if ci.state == "failure":
             return False, f"CI failing: {ci.summary}"
         if ci.state == "pending":

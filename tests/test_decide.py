@@ -64,7 +64,6 @@ def _load_world(data: dict) -> World:
     api = ApiState(
         issue=issue,
         comments=comments,
-        open_pr_numbers=tuple(api_data.get("open_pr_numbers", [])),
     )
 
     task = TaskState(
@@ -268,7 +267,6 @@ def _review_world(status: str, comments: list[dict], *, rereview_after_fix: bool
             )
             for c in comments
         ),
-        open_pr_numbers=(),
     )
     task = TaskState(
         slug="gh:owner_repo_42", owner="owner", repo="repo", issue_number=42,

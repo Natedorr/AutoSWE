@@ -240,7 +240,7 @@ def make_can_use_tool(
                 rc.setdefault("repo", task.get("repo", ""))
                 rc.setdefault("pat", task.get("_token", ""))
                 tracker = get_tracker(rc)
-                tracker.post_comment(rc, task["issue_number"], full_body)
+                tracker.post_comment(task["issue_number"], full_body)
         except Exception:  # Post failure is non-fatal; session still pauses via PermissionResultDeny.
             pass
 

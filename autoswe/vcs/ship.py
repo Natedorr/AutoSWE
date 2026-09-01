@@ -48,7 +48,6 @@ def open_pr(
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     token = task["_token"]
     base_branch = task.get("plan_branch") or task.get("base_branch", "main")
-    branch = f"autoswe/issue-{issue_num}"
     title = task.get("title", f"Fix issue #{issue_num}")
 
     rcfg = repo_cfg or {"owner": owner, "repo": repo, "token": token}
@@ -58,6 +57,10 @@ def open_pr(
         rcfg["owner"] = owner
     if "repo" not in rcfg:
         rcfg["repo"] = repo
+    # The branch convention is owned by the provider (single source: F-05).
+    # Note: ship.open_pr now agrees with pr_gate.preflight_pr — both derive
+    # the branch from the same VCSProvider.branch_name().
+    branch = get_vcs(rcfg).branch_name(issue_num)
     vcs = get_vcs(rcfg)
     tracker = get_tracker(rcfg)
 
@@ -80,20 +83,19 @@ def open_pr(
     pr_body = "\n\n".join(body_parts)
 
     # Idempotency: check if a PR already exists for this branch
-    existing = vcs.find_existing_pr(rcfg, branch)
+    existing = vcs.find_existing_pr(branch)
     if existing is not None:
         pr_url = existing.url or f"#{existing.number}"
         pr_ref = _pr_ref(pr_url)
         dbg.debug("SHIP: pr_url=%s", pr_url)
         log(f"[SHIP] PR already exists: {pr_ref} base={base_branch} head={branch}")
         with contextlib.suppress(Exception):
-            tracker.post_comment(rcfg, issue_num,
+            tracker.post_comment(issue_num,
                 f"Pull request already exists: {pr_url}{AUTOSWE_BOT_FOOTER}")
         return f"DONE: PR {pr_url}"
 
     try:
         pr_result: PRResult = vcs.open_pull_request(
-            rcfg,
             branch=branch,
             base=base_branch,
             title=f"Fixes #{issue_num}: {title}",
@@ -104,7 +106,7 @@ def open_pr(
         dbg.debug("SHIP: pr_url=%s", pr_url)
         log(f"[SHIP] PR created: {pr_ref} base={base_branch} head={branch}")
         with contextlib.suppress(Exception):
-            tracker.post_comment(rcfg, issue_num,
+            tracker.post_comment(issue_num,
                "Pull request opened: " + pr_url + AUTOSWE_BOT_FOOTER)
         return f"DONE: PR {pr_url}"
     except Exception as e:  # Poller resilience — any PR creation failure is caught and reported

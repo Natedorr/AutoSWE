@@ -407,7 +407,7 @@ class TestFullIntegration:
         tracker.set_issue_author(issue_author)
 
         # Tracker returns normalized comments
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # Restart logic with normalized comments
         eligible = _check_restart_eligible(normalized, "done")
@@ -449,7 +449,7 @@ class TestFullIntegration:
         )
 
         # Tracker returns normalized comments
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # Azure normalization: BOT, OWNER, BOT pass through.
         # jane.doe@example.com is the issue author but Azure doesn't
@@ -506,7 +506,7 @@ class TestFullIntegration:
         tracker = gt_mod.GitHubTracker(repo_cfg)
         tracker.set_issue_author(issue_author)
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         eligible = _check_restart_eligible(normalized, "done")
         assert eligible is False, (

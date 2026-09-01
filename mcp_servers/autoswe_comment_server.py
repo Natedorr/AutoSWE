@@ -19,23 +19,20 @@ Registered tool names (Claude SDK prefix):
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
-from urllib import error as url_error
-from urllib import request
 
 from mcp.types import TextContent
 
 # The MCP servers run as separate `python -m` processes. Make the repo root
-# importable so autoswe.core.constants (the GH API-version pin) resolves even
-# when the server is launched from a non-repo cwd.
+# importable so the provider stack resolves even when the server is launched
+# from a non-repo cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from autoswe.core.constants import GH_API_VERSION  # noqa: E402
+from autoswe.providers.factory import get_tracker  # noqa: E402
 
 # mcp SDK version tolerance:
 #   mcp >= 2.0 exposes the high-level MCPServer (.tool() decorator, run_stdio_async)
@@ -75,81 +72,34 @@ COMMENT_ID = os.environ.get("AUTOSWE_COMMENT_ID", "")
 SUPPRESS_POSTING = os.environ.get("AUTOSWE_SUPPRESS_POSTING", "0") == "1"
 
 
-# ---- HTTP helpers (no external deps) ----
-
-def _http(method: str, url: str, body: dict | None) -> dict:
-    """Minimal HTTP request with provider-specific auth headers."""
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": GH_API_VERSION,
-        "Content-Type": "application/json",
+def _repo_cfg() -> dict:
+    """Build the repo_cfg the provider tracker is constructed from."""
+    return {
+        "provider": PROVIDER,
+        "owner": OWNER,
+        "repo": REPO,
+        "token": TOKEN,
     }
-
-    if PROVIDER == "github":
-        headers["Authorization"] = f"Bearer {TOKEN}"
-
-    data = json.dumps(body).encode() if body else None
-    req = request.Request(url, data=data, method=method, headers=headers)
-    try:
-        with request.urlopen(req, timeout=30) as resp:
-            raw = resp.read()
-            return json.loads(raw) if raw else {}
-    except url_error.HTTPError as e:
-        content = e.read().decode() if hasattr(e, "read") else ""
-        raise RuntimeError(f"HTTP {e.code}: {content}") from e
-
-
-def _ado_http(method: str, url: str, body: dict | None) -> dict:
-    """HTTP request with Azure DevOps Basic auth (empty username, PAT as password)."""
-    auth = ("", TOKEN)
-    b64 = __import__("base64").b64encode(
-        ":".join(auth).encode()
-    ).decode()
-    headers = {
-        "Authorization": f"Basic {b64}",
-        "Content-Type": "application/json",
-    }
-    data = json.dumps(body).encode() if body else None
-    req = request.Request(url, data=data, method=method, headers=headers)
-    try:
-        with request.urlopen(req, timeout=30) as resp:
-            raw = resp.read()
-            return json.loads(raw) if raw else {}
-    except url_error.HTTPError as e:
-        content = e.read().decode() if hasattr(e, "read") else ""
-        raise RuntimeError(f"HTTP {e.code}: {content}") from e
 
 
 def _post_comment(body: str) -> str:
-    """Post a comment. Returns the comment ID as string."""
-    if PROVIDER == "github":
-        url = f"https://api.github.com/repos/{OWNER}/{REPO}/issues/{ISSUE_NUMBER}/comments"
-        result = _http("POST", url, {"body": _tag(body)})
-        return str(result.get("id", ""))
-    elif PROVIDER == "azure":
-        url = (
-            f"https://dev.azure.com/{OWNER}/{REPO}/_apis/wit/workItems/"
-            f"{ISSUE_NUMBER}/comments?format=Markdown&api-version=7.1"
-        )
-        result = _ado_http("POST", url, {"text": body})
-        return str(result.get("id", ""))
-    else:
-        raise RuntimeError(f"Unsupported provider: {PROVIDER}")
+    """Post a comment. Returns the comment ID as string.
+
+    Routed through the provider tracker so the MCP path shares the same
+    redaction, retry, and auth handling as the rest of the poller
+    (issue #168 F-06).
+    """
+    tracker = get_tracker(_repo_cfg())
+    comment_id = tracker.post_comment(ISSUE_NUMBER, _tag(body))
+    return str(comment_id) if comment_id is not None else ""
 
 
 def _update_comment(comment_id: str, body: str) -> None:
-    """Edit an existing comment."""
-    if PROVIDER == "github":
-        url = f"https://api.github.com/repos/{OWNER}/{REPO}/issues/comments/{comment_id}"
-        _http("PATCH", url, {"body": _tag(body)})
-    elif PROVIDER == "azure":
-        url = (
-            f"https://dev.azure.com/{OWNER}/{REPO}/_apis/wit/workItems/"
-            f"{ISSUE_NUMBER}/comments/{comment_id}?format=Markdown&api-version=7.1"
-        )
-        _ado_http("PATCH", url, {"text": body})
-    else:
-        raise RuntimeError(f"Unsupported provider: {PROVIDER}")
+    """Edit an existing comment via the provider tracker (F-06)."""
+    if not comment_id:
+        return
+    tracker = get_tracker(_repo_cfg())
+    tracker.update_comment(ISSUE_NUMBER, int(comment_id), _tag(body))
 
 
 # ---- MCP Tools (registered on the version-specific `server` from the header) ----

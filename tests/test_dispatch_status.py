@@ -1,6 +1,7 @@
 """Tests for the dispatch return-string → label mapping and related logic."""
 
-from autoswe.orch.emit import _build_branch_url, _build_commit_url, _build_completion_comment
+from autoswe.orch.emit import _build_completion_comment
+from autoswe.providers.factory import get_vcs
 from autoswe.tracking.labels import _map_done_to_status, _verdict_field_to_status
 
 # ---------------------------------------------------------------------------
@@ -301,7 +302,7 @@ def test_build_completion_comment_azure_branch_url():
         task_owner="my-org", task_repo="my-project/my-repo", issue_num=5,
         plan_branch=None, provider="azure",
         cost_usd=None, duration_seconds=None, session_id=None,
-        repo_cfg={"org": "my-org", "project": "my-project", "repo": "my-repo"},
+        repo_cfg={"org": "my-org", "project": "my-project", "repo": "my-repo", "provider": "azure"},
     )
     assert "[Commit](https://dev.azure.com/my-org/my-project/_git/my-repo/commit/abc1234)" in msg
     assert "[View branch](https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBautoswe%2Fissue-5)" in msg
@@ -347,7 +348,7 @@ def test_build_completion_comment_azure_special_chars():
         task_owner="my org", task_repo="my project/my#repo", issue_num=9,
         plan_branch=None, provider="azure",
         cost_usd=None, duration_seconds=None, session_id=None,
-        repo_cfg={"org": "my org", "project": "my project", "repo": "my#repo"},
+        repo_cfg={"org": "my org", "project": "my project", "repo": "my#repo", "provider": "azure"},
     )
     assert "dev.azure.com/my%20org/my%20project/_git/my%23repo" in msg
     # Branch name in query param is also URL-encoded
@@ -372,69 +373,51 @@ def test_build_completion_comment_github_no_repo_cfg():
 
 
 # ---------------------------------------------------------------------------
-# _build_branch_url — provider URL construction
+# Provider URL construction — VCSProvider.commit_url / branch_url (issue #168)
 # ---------------------------------------------------------------------------
 
-def test_build_branch_url_azure_with_org_project_repo():
-    """Direct test: Azure with explicit org/project/repo keys."""
-    url = _build_branch_url("azure", {
+def test_vcs_branch_url_azure_with_org_project_repo():
+    """Azure with explicit org/project/repo keys."""
+    url = get_vcs({
+        "provider": "azure",
         "org": "my-org", "project": "my-project", "repo": "my-repo",
-    }, "feature/branch")
+    }).branch_url("feature/branch")
     assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBfeature%2Fbranch"
 
 
-def test_build_branch_url_azure_fallback_from_owner_repo():
-    """Direct test: Azure fallback when only owner/repo are set (repos_cfg miss).
+def test_vcs_branch_url_azure_fallback_from_owner_repo():
+    """Azure partition when only owner/repo are set (repos_cfg miss).
 
     This is the production path when build_repo_cfg's repos_cfg lookup misses.
     owner=org, repo="project/repo_name" → parsed into org/project/repo.
     """
-    url = _build_branch_url("azure", {
+    url = get_vcs({
         "owner": "my-org", "repo": "my-project/my-repo", "provider": "azure",
-    }, "autoswe/issue-1")
+    }).branch_url("autoswe/issue-1")
     assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBautoswe%2Fissue-1"
 
 
-def test_build_branch_url_azure_no_fallback_returns_none():
-    """When repo_cfg has no usable Azure keys, returns None."""
-    assert _build_branch_url("azure", {"owner": "x"}, "branch") is None
-    assert _build_branch_url("azure", {}, "branch") is None
-
-
-# ---------------------------------------------------------------------------
-# _build_commit_url — provider URL construction
-# ---------------------------------------------------------------------------
-
-def test_build_commit_url_github():
-    url = _build_commit_url("github", {
-        "owner": "alice", "repo": "demo",
-    }, "abc1234")
+def test_vcs_commit_url_github():
+    url = get_vcs({
+        "provider": "github", "owner": "alice", "repo": "demo",
+    }).commit_url("abc1234")
     assert url == "https://github.com/alice/demo/commit/abc1234"
 
 
-def test_build_commit_url_github_no_repo_cfg():
-    assert _build_commit_url("github", None, "abc1234") is None
-
-
-def test_build_commit_url_azure_with_org_project_repo():
-    url = _build_commit_url("azure", {
+def test_vcs_commit_url_azure_with_org_project_repo():
+    url = get_vcs({
+        "provider": "azure",
         "org": "my-org", "project": "my-project", "repo": "my-repo",
-    }, "abc1234")
+    }).commit_url("abc1234")
     assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo/commit/abc1234"
 
 
-def test_build_commit_url_azure_fallback_from_owner_repo():
-    """Azure commit URL fallback when only owner/repo are set."""
-    url = _build_commit_url("azure", {
+def test_vcs_commit_url_azure_fallback_from_owner_repo():
+    """Azure commit URL partition when only owner/repo are set."""
+    url = get_vcs({
         "owner": "my-org", "repo": "my-project/my-repo", "provider": "azure",
-    }, "deadbeef")
+    }).commit_url("deadbeef")
     assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo/commit/deadbeef"
-
-
-def test_build_commit_url_azure_no_fallback_returns_none():
-    assert _build_commit_url("azure", {"owner": "x"}, "abc") is None
-    assert _build_commit_url("azure", {}, "abc") is None
-    assert _build_commit_url("azure", None, "abc") is None
 
 
 # ---------------------------------------------------------------------------
@@ -538,44 +521,30 @@ def test_bot_content_patterns_ignore_user_text():
 # Azure repo_id (UUID) in URLs — issue #52
 # ---------------------------------------------------------------------------
 
-def test_build_commit_url_azure_with_repo_id():
+def test_vcs_commit_url_azure_with_repo_id():
     """Azure commit URL uses repo UUID when repo_id is set (issue #52)."""
-    url = _build_commit_url("azure", {
+    url = get_vcs({
+        "provider": "azure",
         "org": "natedorr", "project": "testProject",
         "repo": "testProject",
         "repo_id": "d512de06-9118-4a61-97f1-34938c662c41",
-    }, "8a9a1bdb8d4ada31ba4c4b26d636a4dd3170d5a7")
+    }).commit_url("8a9a1bdb8d4ada31ba4c4b26d636a4dd3170d5a7")
     # UUID replaces repo display name in the _git/ path segment
     assert "_git/d512de06-9118-4a61-97f1-34938c662c41/commit/" in url
     assert url == "https://dev.azure.com/natedorr/testProject/_git/d512de06-9118-4a61-97f1-34938c662c41/commit/8a9a1bdb8d4ada31ba4c4b26d636a4dd3170d5a7"
 
 
-def test_build_branch_url_azure_with_repo_id():
+def test_vcs_branch_url_azure_with_repo_id():
     """Azure branch URL uses repo UUID when repo_id is set (issue #52)."""
-    url = _build_branch_url("azure", {
+    url = get_vcs({
+        "provider": "azure",
         "org": "natedorr", "project": "testProject",
         "repo": "testProject",
         "repo_id": "d512de06-9118-4a61-97f1-34938c662c41",
-    }, "autoswe/issue-151")
+    }).branch_url("autoswe/issue-151")
     # UUID replaces repo display name in the _git/ path segment
     assert "_git/d512de06-9118-4a61-97f1-34938c662c41?version=" in url
     assert url == "https://dev.azure.com/natedorr/testProject/_git/d512de06-9118-4a61-97f1-34938c662c41?version=GBautoswe%2Fissue-151"
-
-
-def test_build_commit_url_azure_fallback_without_repo_id():
-    """Azure commit URL falls back to display name when repo_id is absent."""
-    url = _build_commit_url("azure", {
-        "org": "my-org", "project": "my-project", "repo": "my-repo",
-    }, "abc1234")
-    assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo/commit/abc1234"
-
-
-def test_build_branch_url_azure_fallback_without_repo_id():
-    """Azure branch URL falls back to display name when repo_id is absent."""
-    url = _build_branch_url("azure", {
-        "org": "my-org", "project": "my-project", "repo": "my-repo",
-    }, "feature/branch")
-    assert url == "https://dev.azure.com/my-org/my-project/_git/my-repo?version=GBfeature%2Fbranch"
 
 
 def test_build_completion_comment_azure_with_repo_id():
@@ -589,6 +558,7 @@ def test_build_completion_comment_azure_with_repo_id():
         repo_cfg={
             "org": "natedorr", "project": "testProject", "repo": "testProject",
             "repo_id": "d512de06-9118-4a61-97f1-34938c662c41",
+            "provider": "azure",
         },
     )
     assert "d512de06-9118-4a61-97f1-34938c662c41" in msg

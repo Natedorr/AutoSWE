@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.base import IssueTracker, NormalizedComment, NormalizedIssue
+from autoswe.providers.base import NormalizedComment, NormalizedIssue
 from autoswe.tracking import api as gh_api
 from autoswe.tracking.assignment import _auto_assign_issue, _get_authenticated_user
 from autoswe.tracking.comments import BOT_MARKER
@@ -18,7 +18,7 @@ dbg = get_debug_logger()
 _PREFIX = "autoswe:"
 
 
-class GitHubTracker(IssueTracker):
+class GitHubTracker:
     """GitHub-backed issue tracker.
 
     Resolves token from ``repo_cfg.get("token")``, falling back to
@@ -51,7 +51,7 @@ class GitHubTracker(IssueTracker):
 
     # ---- Protocol: IssueTracker ----
 
-    def list_open_issues(self, repo_cfg: dict) -> list[NormalizedIssue]:
+    def list_open_issues(self) -> list[NormalizedIssue]:
         """Return open issues from GitHub API."""
         raw = gh_api.gh_get_all(
             f"/repos/{self._owner}/{self._repo}/issues?state=open",
@@ -66,7 +66,7 @@ class GitHubTracker(IssueTracker):
             issues.append(self._to_normalized(issue))
         return issues
 
-    def fetch_issue(self, repo_cfg: dict, issue_number: int) -> NormalizedIssue:
+    def fetch_issue(self, issue_number: int) -> NormalizedIssue:
         """Fetch a single issue by number."""
         raw = gh_api.gh_get(
             f"/repos/{self._owner}/{self._repo}/issues/{issue_number}",
@@ -79,7 +79,7 @@ class GitHubTracker(IssueTracker):
             self._issue_authors[issue_number] = issue_author
         return self._to_normalized(raw)
 
-    def fetch_comments(self, repo_cfg: dict, issue_number: int) -> list[NormalizedComment]:
+    def fetch_comments(self, issue_number: int) -> list[NormalizedComment]:
         """Fetch all comments on an issue.
 
         Normalizes ``author_login`` for each comment so that orchestrator code
@@ -141,7 +141,7 @@ class GitHubTracker(IssueTracker):
             self._authenticated_login = None
         return self._authenticated_login
 
-    def post_comment(self, repo_cfg: dict, issue_number: int, body: str) -> int | None:
+    def post_comment(self, issue_number: int, body: str) -> int | None:
         """Post a comment on a GitHub issue. Returns comment ID or None."""
         raw = gh_api.gh_post(
             f"/repos/{self._owner}/{self._repo}/issues/{issue_number}/comments",
@@ -150,7 +150,7 @@ class GitHubTracker(IssueTracker):
         )
         return raw.get("id") if raw else None
 
-    def update_comment(self, repo_cfg: dict, issue_number: int, comment_id: int, body: str) -> None:
+    def update_comment(self, issue_number: int, comment_id: int, body: str) -> None:
         """Edit an existing comment on a GitHub issue."""
         gh_api.gh_patch(
             f"/repos/{self._owner}/{self._repo}/issues/comments/{comment_id}",
@@ -158,7 +158,7 @@ class GitHubTracker(IssueTracker):
             body={"body": redact_outbound(body)},
         )
 
-    def create_issue(self, repo_cfg: dict, title: str, body: str) -> int:
+    def create_issue(self, title: str, body: str) -> int:
         """Create a new GitHub issue. Returns the issue number."""
         raw = gh_api.gh_post(
             f"/repos/{self._owner}/{self._repo}/issues",
@@ -167,7 +167,7 @@ class GitHubTracker(IssueTracker):
         )
         return raw["number"]
 
-    def set_status(self, repo_cfg: dict, issue_number: int, status: str) -> None:
+    def set_status(self, issue_number: int, status: str) -> None:
         """Set autoSWE status label, ensuring labels exist first."""
         self._ensure_labels()
         _set_autoswe_status(self._owner, self._repo, issue_number, status, self._token)
@@ -176,14 +176,28 @@ class GitHubTracker(IssueTracker):
         """Return current status from labels, or None."""
         return _get_autoswe_status(issue.labels)
 
-    def assign_to_user(self, repo_cfg: dict, issue_number: int, login: str | None) -> None:
+    def assign_to_user(self, issue_number: int, login: str | None) -> None:
         """Assign the issue to a user (idempotent)."""
         _auto_assign_issue(self._owner, self._repo, issue_number, self._token, username=login)
 
-    def authenticated_user(self, repo_cfg: dict) -> str:
+    def normalize_comment_body(self, comment: NormalizedComment) -> tuple[str, bool]:
+        """Return ``(body, is_bot)`` after provider-specific normalisation.
+
+        GitHub comments arrive as clean text, so this is the identity — the
+        body passes through and no extra bot signal is added.
+        """
+        return comment.body, False
+
+    def authenticated_user(self) -> str:
         """Return the GitHub login of the authenticated user."""
         user = _get_authenticated_user(self._token)
         return user or ""
+
+    def slug_prefix(self) -> str:
+        return "gh"
+
+    def pid_prefix(self) -> str:
+        return "gh_"
 
     # ---- Internal helpers ----
 

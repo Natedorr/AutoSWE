@@ -55,7 +55,7 @@ class ProgressComment:
         """Post the initial progress comment. Returns comment ID or None."""
         try:
             self._comment_id = self._tracker.post_comment(
-                self._repo_cfg, self._issue_num, _tag(initial_body),
+                self._issue_num, _tag(initial_body),
             )
             log(f"[PROGRESS] POST comment={self._comment_id}")
             return self._comment_id
@@ -75,7 +75,7 @@ class ProgressComment:
         log(f"[PROGRESS] ADOPT comment={comment_id}")
         try:
             self._tracker.update_comment(
-                self._repo_cfg, self._issue_num, comment_id, _tag(resume_body),
+                self._issue_num, comment_id, _tag(resume_body),
             )
             self._last_update = time.monotonic()
             return comment_id
@@ -112,13 +112,13 @@ class ProgressComment:
         tagged = _tag(body)
         log(f"[PROGRESS] PATCH comment={self._comment_id} body_len={len(tagged)} preview={tagged[:100]!r}")
         try:
-            self._tracker.update_comment(self._repo_cfg, self._issue_num, self._comment_id, tagged)
+            self._tracker.update_comment(self._issue_num, self._comment_id, tagged)
             self._last_update = time.monotonic()
             self._pending_body = None
         except Exception:  # Provider doesn't support comment editing; post a new comment instead
             _dbg.warning("progress: update_comment failed, falling back to post_comment", exc_info=True)
             try:
-                new_id = self._tracker.post_comment(self._repo_cfg, self._issue_num, tagged)
+                new_id = self._tracker.post_comment(self._issue_num, tagged)
                 if new_id is not None:
                     self._comment_id = new_id
                     log(f"[PROGRESS] Switched to fallback comment={new_id}")
