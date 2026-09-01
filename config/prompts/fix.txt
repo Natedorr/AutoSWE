@@ -11,7 +11,7 @@ Discussion and plan:
 {{PLAN}}
 
 {{REVIEW_BLOCK}}
-The repo is checked out at the current working directory on branch autoswe/issue-{{ISSUE_NUMBER}}.
+The repo is checked out at the current working directory on branch {{BRANCH}}.
 IMPORTANT: Use relative paths for ALL file operations (Read, Edit, Write, Bash). Never use absolute paths — the working directory IS the repo root.
 
 As you work, periodically call `mcp__autoswe_comment__update_progress` to update the sticky progress comment with what you're doing (e.g., "Reading files...", "Editing foo.py", "Running tests. ..").

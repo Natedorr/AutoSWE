@@ -115,7 +115,7 @@ def load_fix_prompt(repo_cfg: dict | None = None) -> str:
         "Fix GitHub issue {{OWNER}}/{{REPO}}#{{ISSUE_NUMBER}}: {{TITLE}}\n\n"
         "Issue body:\n{{BODY}}\n\nDiscussion and plan:\n{{COMMENTS}}\n\n"
         "{{GUIDANCE_BLOCK}}\n\n{{PLAN}}\n\n{{REVIEW_BLOCK}}\n"
-        "The repo is checked out at the current working directory on branch autoswe/issue-{{ISSUE_NUMBER}}.\n"
+        "The repo is checked out at the current working directory on branch {{BRANCH}}.\n"
         "Read the relevant code, make the necessary changes to fix the issue, and verify your changes are correct.\n"
         "The `AskUserQuestion` tool is available mid-fix if you need clarification.\n"
         "Do NOT open a pull request — that will be handled separately.\n"
@@ -139,7 +139,7 @@ def build_plan_prompt(
     if comments is None:
         rcfg = repo_cfg or {"owner": owner, "repo": repo, "token": task.get("_token", "")}
         tracker = get_tracker(rcfg)
-        comments = tracker.fetch_comments(rcfg, issue_num)
+        comments = tracker.fetch_comments(issue_num)
 
     guidance_block = f"Guidance from the issue author:\n{guidance}\n" if guidance else ""
 
@@ -205,16 +205,20 @@ def build_fix_prompt(
 ) -> str:
     """Build the fix prompt from template + task data."""
     # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
-    from autoswe.providers.factory import get_tracker
+    from autoswe.providers.factory import get_tracker, get_vcs
 
     owner, repo = task["owner"], task["repo"]
     issue_num = task["issue_number"]
     guidance_block = f"Guidance: {guidance}" if guidance else ""
+    branch = get_vcs(
+        {"owner": owner, "repo": repo, "token": task.get("_token", ""),
+         "provider": (repo_cfg or {}).get("provider", "github")}
+    ).branch_name(issue_num)
 
     if comments is None:
         rcfg = repo_cfg or {"owner": owner, "repo": repo, "token": task.get("_token", "")}
         tracker = get_tracker(rcfg)
-        comments = tracker.fetch_comments(rcfg, issue_num)
+        comments = tracker.fetch_comments(issue_num)
 
     if not plan_text:
         plan_text = _find_plan_in_comments(comments)
@@ -237,6 +241,7 @@ def build_fix_prompt(
         "{{GUIDANCE_BLOCK}}": guidance_block,
         "{{PLAN}}": plan_block,
         "{{REVIEW_BLOCK}}": review_block,
+        "{{BRANCH}}": branch,
     }
     prompt = template
     for k, v in replacements.items():
@@ -370,9 +375,16 @@ def build_review_prompt(
     guidance: str | None = None,
 ) -> str:
     """Build the review prompt from template + task data."""
+    # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
+    from autoswe.providers.factory import get_vcs
+
     owner, repo = task["owner"], task["repo"]
     issue_num = task["issue_number"]
     base_branch = task.get("base_branch", "main")
+    branch = get_vcs(
+        {"owner": owner, "repo": repo,
+         "provider": (repo_cfg or {}).get("provider", "github")}
+    ).branch_name(issue_num)
     template = load_review_prompt(repo_cfg=repo_cfg)
 
     guidance_block = f"Reviewer guidance: {guidance}\n" if guidance else ""
@@ -390,6 +402,7 @@ def build_review_prompt(
         "{{DIFF}}": diff_text or "(empty)",
         "{{GUIDANCE_BLOCK}}": guidance_block,
         "{{BASE_BRANCH}}": base_branch,
+        "{{BRANCH}}": branch,
     }
     prompt = template
     for k, v in replacements.items():

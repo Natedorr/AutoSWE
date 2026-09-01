@@ -556,7 +556,7 @@ def test_build_poll_task_includes_review_file_path():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
 
     pt = _build_poll_task(queue, slug, api, {}, {})
 
@@ -578,7 +578,7 @@ def test_build_task_dict_includes_review_file_path_from_task_state():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_1",
         owner="owner",
@@ -659,7 +659,9 @@ def test_full_review_injection_flow(tmp_path):
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
+
+    api = ApiState(issue=issue, comments=())
 
     # 3. Build TaskState via _build_poll_task (loop layer)
     pt = _build_poll_task(queue, slug, api, {}, {"pat": "tok"})

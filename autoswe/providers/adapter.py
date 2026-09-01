@@ -1,7 +1,14 @@
-"""GitHub provider adapter for the orchestrator.
+"""Provider adapter — the single ``read_api`` / ``apply_effect`` pair.
 
-Provides ``read_api`` (raw API -> ApiState) and ``apply_effect`` (Effect -> API call)
-so the orchestrator can stay provider-agnostic.
+The write path is provider-agnostic: an ``Effect`` only ever calls
+``tracker.*`` and ``vcs.*`` protocol methods, so there is one
+``apply_effect`` for every provider. ``read_api`` is likewise shared; its only
+provider-specific behaviour is comment-body normalisation, which is delegated
+to ``tracker.normalize_comment_body`` (GitHub: identity; Azure: HTML/entity
+stripping + content-based bot detection).
+
+Adding a third provider therefore costs one tracker/vcs pair (each providing
+the ``normalize_comment_body`` hook) plus one registry entry — nothing else.
 """
 from __future__ import annotations
 
@@ -19,19 +26,17 @@ dbg = get_debug_logger()
 
 def read_api(
     tracker: IssueTracker,
-    repo_cfg: dict,
-    cfg: dict,
     bot_ids: set[int] | None = None,
     prev_updated: dict[int, str | None] | None = None,
     force_fetch: set[int] | None = None,
 ) -> dict[int, ApiState]:
-    """Fetch all open issues and their comments, returning an ApiState per issue number.
+    """Fetch all open issues and their comments, returning an ApiState per issue.
 
-    Comments are already normalized by the GitHub tracker (no HTML wrapping,
-    plain text bodies). The tracker returns clean text directly.
+    Provider-specific comment normalisation is delegated to
+    ``tracker.normalize_comment_body`` so the read path stays single-sourced.
 
-    ``bot_ids`` is the set of comment IDs we've posted (from queue bot_comment_ids).
-    Used to set the is_bot flag on comments.
+    ``bot_ids`` is the set of comment IDs we've posted (from queue
+    bot_comment_ids). Used to set the is_bot flag on comments.
 
     ``prev_updated`` maps issue_number -> stored ``last_updated`` timestamp from
     the queue.  ``force_fetch`` is a set of issue numbers that must always fetch
@@ -44,8 +49,7 @@ def read_api(
     prev_updated = prev_updated or {}
     force_fetch = force_fetch or set()
 
-    issues = tracker.list_open_issues(repo_cfg)
-    open_prs = get_vcs(repo_cfg).find_existing_pr(repo_cfg, "") or None
+    issues = tracker.list_open_issues()
 
     result: dict[int, ApiState] = {}
     for issue in issues:
@@ -67,13 +71,22 @@ def read_api(
         )
 
         if should_fetch:
-            raw_comments = tracker.fetch_comments(repo_cfg, num)
+            raw_comments = tracker.fetch_comments(num)
             comments: list[NormalizedComment] = []
             for c in raw_comments:
                 is_bot = c.id in bot_ids or c.author_login == "BOT"
+                body, provider_is_bot = tracker.normalize_comment_body(c)
+                is_bot = is_bot or provider_is_bot
+
+                # Ensure the marker is present on bot comments so downstream
+                # marker-based detection keeps working after normalisation
+                # (Azure DevOps strips HTML comments from rendered bodies).
+                if is_bot and not body.endswith(BOT_MARKER):
+                    body = body.rstrip() + BOT_MARKER
+
                 comments.append(
                     NormalizedComment(
-                        body=c.body,
+                        body=body,
                         created_at=c.created_at,
                         author_login=c.author_login,
                         raw_author_login=c.raw_author_login,
@@ -84,14 +97,9 @@ def read_api(
         else:
             comments = []
 
-        pr_numbers: tuple[int, ...] = ()
-        if open_prs:
-            pr_numbers = (open_prs.number,) if open_prs.number else ()
-
         result[num] = ApiState(
             issue=issue,
             comments=tuple(comments),
-            open_pr_numbers=pr_numbers,
             comments_fetched=should_fetch,
         )
     return result
@@ -106,18 +114,24 @@ def apply_effect(
     slug: str,
     cfg: dict | None = None,
 ) -> None:
-    """Translate a single Effect into GitHub API calls."""
+    """Translate a single Effect into provider API calls.
+
+    Provider-agnostic: only ``tracker.*`` / ``vcs.*`` protocol methods are
+    called. Azure DevOps has no Development-section equivalent —
+    ``AzureVCS.link_branch_to_issue()`` is a documented no-op, so nothing here
+    branches on provider.
+    """
     if effect.kind == "post_comment":
-        comment_id = tracker.post_comment(repo_cfg, issue_num, effect.body or "")
+        comment_id = tracker.post_comment(issue_num, effect.body or "")
         if comment_id:
             task = queue.get(slug)
             if task:
                 task.setdefault("bot_comment_ids", []).append(comment_id)
     elif effect.kind == "update_comment":
         if effect.comment_id:
-            tracker.update_comment(repo_cfg, issue_num, effect.comment_id, effect.body or "")
+            tracker.update_comment(issue_num, effect.comment_id, effect.body or "")
     elif effect.kind == "set_status":
-        tracker.set_status(repo_cfg, issue_num, f"autoswe:{effect.status}")
+        tracker.set_status(issue_num, f"autoswe:{effect.status}")
     elif effect.kind == "patch_queue":
         if effect.queue_patch:
             task = queue.get(slug)
@@ -126,7 +140,7 @@ def apply_effect(
     elif effect.kind == "assign":
         login = effect.body
         if login:
-            tracker.assign_to_user(repo_cfg, issue_num, login)
+            tracker.assign_to_user(issue_num, login)
     elif effect.kind == "create_pr":
         vcs = get_vcs(repo_cfg)
         branch = effect.pr_head or ""
@@ -136,13 +150,13 @@ def apply_effect(
             if not ok:
                 with contextlib.suppress(Exception):
                     comment_id = tracker.post_comment(
-                        repo_cfg, issue_num,
+                        issue_num,
                         f"PR deferred — {reason}. Post `/pr` when ready.{BOT_MARKER}",
                     )
                     if comment_id:
                         task_entry.setdefault("bot_comment_ids", []).append(comment_id)
                 return
-        existing = vcs.find_existing_pr(repo_cfg, branch)
+        existing = vcs.find_existing_pr(branch)
         if existing is None:
             # Enrich PR body if it only contains the bare "Fixes #N" text
             body = effect.pr_body or ""
@@ -161,7 +175,6 @@ def apply_effect(
                 body_parts.append("\nOpened by autoSWE.")
                 body = "\n\n".join(body_parts)
             vcs.open_pull_request(
-                repo_cfg,
                 branch=branch,
                 base=effect.pr_base or "main",
                 title=effect.pr_title or "",

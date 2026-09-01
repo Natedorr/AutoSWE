@@ -155,7 +155,7 @@ def test_make_can_use_tool_denies_ask_and_sets_state():
         assert "asked_question_md" in state
         assert "Which approach?" in state["asked_question_md"]
         mock_tracker.post_comment.assert_called_once()
-        body = mock_tracker.post_comment.call_args[0][2]
+        body = mock_tracker.post_comment.call_args[0][1]
         assert "<!-- autoswe-bot -->" in body
 
 

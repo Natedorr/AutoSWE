@@ -35,6 +35,9 @@ def _mock_vcs(pr_url=None, pr_num=None, raise_exc=None, existing_pr=None):
     """Build a mock VCS provider for open_pr tests."""
     mock = MagicMock()
     mock.find_existing_pr.return_value = existing_pr
+    # branch_name is now provider-owned (issue #168 F-05); ship.py derives the
+    # head branch from it, so the mock must return a real string.
+    mock.branch_name.side_effect = lambda n: f"autoswe/issue-{n}"
     if raise_exc is not None:
         mock.open_pull_request.side_effect = raise_exc
     else:
@@ -161,7 +164,7 @@ def test_open_pr_comment_includes_footer(mock_gh_post_comment):
         open_pr(task, {"GITHUB_TOKEN": "tok"})
 
     call_args = mock_get_tracker.return_value.post_comment.call_args
-    body = call_args[0][2]
+    body = call_args[0][1]
     assert "<!-- autoswe-bot -->" in body
 
 
@@ -192,7 +195,7 @@ def test_open_pr_existing_pr_returns_done(mock_gh_post_comment):
     mock_get_vcs.return_value.find_existing_pr.assert_called_once()
     # Comment posted about existing PR
     mock_get_tracker.return_value.post_comment.assert_called_once()
-    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][2]
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
     assert "Pull request already exists" in comment_body
     assert "pull/15" in comment_body
 
@@ -356,7 +359,7 @@ def test_open_pr_comment_includes_full_url():
         from autoswe.vcs.ship import open_pr
         open_pr(task, {"GITHUB_TOKEN": "tok"})
 
-    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][2]
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
     assert "https://github.com/o/r/pull/42" in comment_body
 
 

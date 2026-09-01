@@ -145,7 +145,7 @@ def run_review(
     rc.setdefault("pat", token)
     tracker = get_tracker(rc)
     try:
-        comments = tracker.fetch_comments(rc, issue_num)
+        comments = tracker.fetch_comments(issue_num)
         plan_text = _find_plan_in_comments(comments)
     except Exception as e:  # Provider resilience -- fetch_comments may fail (network, auth); proceed with empty plan.
         dbg.debug("REVIEW: fetch_comments failed: %s", e)

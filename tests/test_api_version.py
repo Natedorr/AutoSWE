@@ -26,10 +26,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _PIN = "2022-11-28"
 
 # Python source files that must use the constant (no bare literal).
+#
+# ``autoswe_comment_server.py`` is NOT here: since issue #168 (F-06) it routes
+# issue-comment post/update through ``get_tracker(...).post_comment/update_comment``,
+# so it makes no HTTP calls of its own — the API-version header is set centrally
+# in ``autoswe/tracking/api.py``. The *inline* comment server still makes its own
+# calls (PR review-comment endpoints have no tracker equivalent) and stays.
 _CALL_SITE_SOURCES = [
     REPO_ROOT / "autoswe" / "tracking" / "api.py",
     REPO_ROOT / "autoswe" / "commands" / "setup.py",
-    REPO_ROOT / "mcp_servers" / "autoswe_comment_server.py",
     REPO_ROOT / "mcp_servers" / "autoswe_inline_comment_server.py",
 ]
 

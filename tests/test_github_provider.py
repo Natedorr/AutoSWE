@@ -44,7 +44,7 @@ class TestGitHubTracker:
         raw = load_fixture("issues_list.json")
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues?state=open")] = raw
 
-        issues = tracker.list_open_issues({})
+        issues = tracker.list_open_issues()
 
         assert len(issues) == len(raw)
         for issue in issues:
@@ -58,7 +58,7 @@ class TestGitHubTracker:
         raw = load_fixture("issue_42.json")
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42")] = raw
 
-        issue = tracker.fetch_issue({}, 42)
+        issue = tracker.fetch_issue(42)
 
         assert issue.number == 42
         assert issue.title == raw["title"]
@@ -69,7 +69,7 @@ class TestGitHubTracker:
         issue_data["labels"] = [{"name": "autoswe:fixed"}, {"name": "bug"}]
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42")] = issue_data
 
-        issue = tracker.fetch_issue({}, 42)
+        issue = tracker.fetch_issue(42)
 
         assert issue.status == "fixed"
         assert "bug" in issue.labels
@@ -80,7 +80,7 @@ class TestGitHubTracker:
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42/comments")] = raw
         gh_route_table[("GET", "/user")] = {"login": "Natedorr"}
 
-        comments = tracker.fetch_comments({}, 42)
+        comments = tracker.fetch_comments(42)
 
         assert len(comments) == len(raw)
         for c in comments:
@@ -90,7 +90,7 @@ class TestGitHubTracker:
 
     def test_fetch_comments_on_empty_list(self, tracker, fake_token, mock_gh_request, gh_route_table):
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/1/comments")] = []
-        comments = tracker.fetch_comments({}, 1)
+        comments = tracker.fetch_comments(1)
         assert comments == []
 
     def test_fetch_comments_normalizes_bot_comments(self, tracker, fake_token, mock_gh_request, gh_route_table):
@@ -105,7 +105,7 @@ class TestGitHubTracker:
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42/comments")] = raw
         gh_route_table[("GET", "/user")] = {"login": "Natedorr"}
 
-        comments = tracker.fetch_comments({}, 42)
+        comments = tracker.fetch_comments(42)
 
         assert len(comments) == 1
         assert comments[0].author_login == "BOT"
@@ -123,7 +123,7 @@ class TestGitHubTracker:
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42/comments")] = raw
         gh_route_table[("GET", "/user")] = {"login": "Natedorr"}
 
-        comments = tracker.fetch_comments({}, 42)
+        comments = tracker.fetch_comments(42)
 
         assert len(comments) == 1
         assert comments[0].author_login == "OWNER"
@@ -141,7 +141,7 @@ class TestGitHubTracker:
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42/comments")] = raw
         gh_route_table[("GET", "/user")] = {"login": "Natedorr"}
 
-        comments = tracker.fetch_comments({}, 42)
+        comments = tracker.fetch_comments(42)
 
         assert len(comments) == 1
         assert comments[0].author_login == "some-contributor"
@@ -159,7 +159,7 @@ class TestGitHubTracker:
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42/comments")] = raw
         gh_route_table[("GET", "/user")] = {"login": "Natedorr"}
 
-        comments = tracker.fetch_comments({}, 42)
+        comments = tracker.fetch_comments(42)
 
         assert len(comments) == 1
         assert comments[0].author_login == "BOT"
@@ -181,7 +181,7 @@ class TestGitHubTracker:
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42/comments")] = raw
         # Do NOT register /user route → authenticated_user will fail
 
-        comments = tracker.fetch_comments({}, 42)
+        comments = tracker.fetch_comments(42)
 
         assert len(comments) == 2
         # Bot comment still detected via marker
@@ -216,7 +216,7 @@ class TestGitHubTracker:
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42/comments")] = raw
         gh_route_table[("GET", "/user")] = {"login": "Natedorr"}
 
-        comments = tracker.fetch_comments({}, 42)
+        comments = tracker.fetch_comments(42)
 
         assert len(comments) == 4
         assert comments[0].author_login == "BOT"        # bot comment by owner
@@ -229,7 +229,7 @@ class TestGitHubTracker:
         assert comments[3].raw_author_login == "Natedorr"
 
     def test_post_comment(self, tracker, mock_gh_post_comment):
-        tracker.post_comment({}, 42, "Hello from autoSWE" + "<!-- autoswe-bot -->")
+        tracker.post_comment(42, "Hello from autoSWE" + "<!-- autoswe-bot -->")
         assert len(mock_gh_post_comment.posted) == 1
         assert mock_gh_post_comment.posted[0]["issue_number"] == 42
 
@@ -245,7 +245,7 @@ class TestGitHubTracker:
 
         gh_route_table[("PUT", "/repos/natedorr/autoswe/issues/42/labels")] = capture_put
 
-        tracker.set_status({}, 42, "autoswe:pending")
+        tracker.set_status(42, "autoswe:pending")
 
         assert len(put_calls) == 1
         assert "autoswe:pending" in put_calls[0]["labels"]
@@ -270,8 +270,8 @@ class TestGitHubTracker:
 
         gh_route_table[("POST", "/repos/natedorr/autoswe/labels")] = capture_post_label
 
-        tracker.set_status({}, 42, "autoswe:pending")
-        tracker.set_status({}, 42, "autoswe:fixed")
+        tracker.set_status(42, "autoswe:pending")
+        tracker.set_status(42, "autoswe:fixed")
 
         assert len(post_label_calls) == 0, "Labels were already ensured on first call"
 
@@ -301,13 +301,13 @@ class TestGitHubTracker:
 
         gh_route_table[("POST", "/repos/natedorr/autoswe/issues/42/assignees")] = capture_assign
 
-        tracker.assign_to_user({}, 42, login="testuser")
+        tracker.assign_to_user(42, login="testuser")
         assert len(assign_calls) == 1
         assert assign_calls[0]["assignees"] == ["testuser"]
 
     def test_authenticated_user(self, tracker, fake_token, mock_gh_request, gh_route_table):
         gh_route_table[("GET", "/user")] = {"login": "testuser"}
-        assert tracker.authenticated_user({}) == "testuser"
+        assert tracker.authenticated_user() == "testuser"
 
     def test_tracker_token_uses_pat_key(self, tracker_with_github_token, fake_token):
         assert tracker_with_github_token._token == fake_token
@@ -329,7 +329,7 @@ class TestGitHubVCS:
         return GitHubVCS(repo_cfg)
 
     def test_clone_url(self, vcs):
-        url = vcs.clone_url({})
+        url = vcs.clone_url()
         assert "x-access-token:" in url
         assert "natedorr/autoswe" in url
         assert url.endswith(".git")
@@ -347,7 +347,7 @@ class TestGitHubVCS:
             return result
 
         monkeypatch.setattr("autoswe.providers.github.vcs.subprocess.run", fake_subprocess_run)
-        result = vcs.find_existing_pr({}, "autoswe/issue-42")
+        result = vcs.find_existing_pr("autoswe/issue-42")
         assert result is None
 
     def test_find_existing_pr_found(self, vcs, monkeypatch):
@@ -359,7 +359,7 @@ class TestGitHubVCS:
             return result
 
         monkeypatch.setattr("autoswe.providers.github.vcs.subprocess.run", fake_subprocess_run)
-        result = vcs.find_existing_pr({}, "autoswe/issue-42")
+        result = vcs.find_existing_pr("autoswe/issue-42")
         assert result is not None
         assert result.number == 15
         assert "pull/15" in result.url
@@ -370,7 +370,7 @@ class TestGitHubVCS:
             raise FileNotFoundError("gh not found")
 
         monkeypatch.setattr("autoswe.providers.github.vcs.subprocess.run", fake_subprocess_run)
-        result = vcs.find_existing_pr({}, "autoswe/issue-42")
+        result = vcs.find_existing_pr("autoswe/issue-42")
         assert result is None
 
     def test_find_existing_pr_timeout(self, vcs, monkeypatch):
@@ -379,7 +379,7 @@ class TestGitHubVCS:
             raise subprocess.TimeoutExpired("gh", 30)
 
         monkeypatch.setattr("autoswe.providers.github.vcs.subprocess.run", fake_subprocess_run)
-        result = vcs.find_existing_pr({}, "autoswe/issue-42")
+        result = vcs.find_existing_pr("autoswe/issue-42")
         assert result is None
 
     def test_open_pr_uses_api_fallback(self, vcs, fake_token, mock_gh_request, gh_route_table):
@@ -388,7 +388,7 @@ class TestGitHubVCS:
             "html_url": "https://github.com/natedorr/autoswe/pull/15",
         }
         result = vcs.open_pull_request(
-            {}, "autoswe/issue-42", "master",
+            "autoswe/issue-42", "master",
             "Fixes #42: title", "body",
         )
         assert result.number == 15
@@ -528,7 +528,7 @@ class TestGitHubVCS:
         }
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
 
-        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+        ci = vcs.get_ci_status("autoswe/issue-42")
 
         assert ci.state == "success"
         assert ci.total == 1
@@ -541,7 +541,7 @@ class TestGitHubVCS:
         }
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
 
-        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+        ci = vcs.get_ci_status("autoswe/issue-42")
 
         assert ci.state == "pending"
         assert ci.pending_count == 1
@@ -558,7 +558,7 @@ class TestGitHubVCS:
         }
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
 
-        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+        ci = vcs.get_ci_status("autoswe/issue-42")
 
         assert ci.state == "failure"
         assert ci.failing == ["build"]
@@ -571,7 +571,7 @@ class TestGitHubVCS:
             "statuses": [{"context": "ci/circleci", "state": "failure"}],
         }
 
-        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+        ci = vcs.get_ci_status("autoswe/issue-42")
 
         assert ci.state == "failure"
         assert ci.failing == ["ci/circleci"]
@@ -581,13 +581,13 @@ class TestGitHubVCS:
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {"check_runs": []}
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
 
-        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+        ci = vcs.get_ci_status("autoswe/issue-42")
 
         assert ci.state == "none"
 
     def test_get_ci_status_unresolvable_sha_is_none(self, vcs, fake_token, mock_gh_request, gh_route_table):
         """Branch head can't be resolved (unstubbed request raises) → treated as none, not a crash."""
-        ci = vcs.get_ci_status({}, "autoswe/issue-42")
+        ci = vcs.get_ci_status("autoswe/issue-42")
 
         assert ci.state == "none"
 
@@ -598,7 +598,7 @@ class TestGitHubVCS:
         }
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/cafebabe/status")] = {"statuses": []}
 
-        ci = vcs.get_ci_status({}, "autoswe/issue-42", ref_sha="cafebabe")
+        ci = vcs.get_ci_status("autoswe/issue-42", ref_sha="cafebabe")
 
         assert ci.state == "success"
         # No call should have been made to resolve the branch head sha

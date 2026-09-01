@@ -750,7 +750,7 @@ def test_dispatch_failure_transitions_to_error(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -762,7 +762,7 @@ def test_dispatch_failure_transitions_to_error(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -839,9 +839,11 @@ def test_dispatch_failure_sets_error_label(
     posted_comments = []
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def slug_prefix(self):
+            return "gh"
+        def set_status(self, issue_num, label):
             set_status_calls.append((issue_num, label))
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted_comments.append((issue_num, body))
         def fetch_comments(self, *a, **kw):
             return []
@@ -857,7 +859,7 @@ def test_dispatch_failure_sets_error_label(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -869,7 +871,7 @@ def test_dispatch_failure_sets_error_label(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -938,9 +940,9 @@ def test_dispatch_error_label_is_best_effort(
 
     # Tracker that raises RuntimeError on set_status
     class FailingTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             raise RuntimeError("API is down")
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             raise RuntimeError("API is down")
         def fetch_comments(self, *a, **kw):
             return []
@@ -956,7 +958,7 @@ def test_dispatch_error_label_is_best_effort(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -968,7 +970,7 @@ def test_dispatch_error_label_is_best_effort(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1043,7 +1045,7 @@ def test_dispatch_error_task_not_redispatched_on_next_poll(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1055,7 +1057,7 @@ def test_dispatch_error_task_not_redispatched_on_next_poll(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1127,9 +1129,9 @@ def test_dispatch_error_posts_comment(
     posted_comments = []
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             pass
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted_comments.append((issue_num, body))
         def fetch_comments(self, *a, **kw):
             return []
@@ -1145,7 +1147,7 @@ def test_dispatch_error_posts_comment(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1157,7 +1159,7 @@ def test_dispatch_error_posts_comment(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1224,9 +1226,9 @@ def test_dispatch_error_clears_session_id(
     monkeypatch.setattr(loop_mod, "_dispatch_task", failing_dispatch)
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             pass
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             pass
         def fetch_comments(self, *a, **kw):
             return []
@@ -1242,7 +1244,7 @@ def test_dispatch_error_clears_session_id(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1254,7 +1256,7 @@ def test_dispatch_error_clears_session_id(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1319,9 +1321,9 @@ def test_dispatch_error_clears_first_dispatched_at(
     monkeypatch.setattr(loop_mod, "_dispatch_task", failing_dispatch)
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             pass
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             pass
         def fetch_comments(self, *a, **kw):
             return []
@@ -1337,7 +1339,7 @@ def test_dispatch_error_clears_first_dispatched_at(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1349,7 +1351,7 @@ def test_dispatch_error_clears_first_dispatched_at(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1383,16 +1385,16 @@ class _CapturingTracker:
         self.updates = []
         self._next_id = 900
 
-    def set_status(self, repo_cfg, issue_num, label):
+    def set_status(self, issue_num, label):
         pass
 
-    def post_comment(self, repo_cfg, issue_num, body):
+    def post_comment(self, issue_num, body):
         cid = self._next_id
         self._next_id += 1
         self.posts.append({"id": cid, "body": body})
         return cid
 
-    def update_comment(self, repo_cfg, issue_num, comment_id, body):
+    def update_comment(self, issue_num, comment_id, body):
         self.updates.append({"id": comment_id, "body": body})
 
 
@@ -1551,9 +1553,9 @@ def test_dispatch_error_preserves_progress_comment_id(
     monkeypatch.setattr(loop_mod, "_dispatch_task", failing_dispatch)
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             pass
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             pass
         def fetch_comments(self, *a, **kw):
             return []
@@ -1565,7 +1567,7 @@ def test_dispatch_error_preserves_progress_comment_id(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1577,7 +1579,7 @@ def test_dispatch_error_preserves_progress_comment_id(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {"MAX_CONCURRENT": 1, "SILENT_REPORTING": True, "WORKTREE_DIR": str(tmp_path / "worktrees")}
     loop_mod.poll(cfg, mode="full", repo_filter="owner/repo")
@@ -1645,7 +1647,7 @@ def test_f22_dispatch_error_comment_redacts_pat(monkeypatch):
 
     from autoswe.providers.github.tracker import GitHubTracker
     tracker = GitHubTracker({"owner": "owner", "repo": "repo", "token": "tok"})
-    tracker.post_comment({"owner": "owner", "repo": "repo", "token": "tok"}, 42, body)
+    tracker.post_comment(42, body)
 
     assert len(posted) == 1
     posted_body = posted[0]["body"]
@@ -1679,7 +1681,7 @@ def test_f22_failed_sync_comment_redacts_pat(monkeypatch):
 
     from autoswe.providers.github.tracker import GitHubTracker
     tracker = GitHubTracker({"owner": "owner", "repo": "repo", "token": "tok"})
-    tracker.post_comment({"owner": "owner", "repo": "repo", "token": "tok"}, 42, body)
+    tracker.post_comment(42, body)
 
     assert len(posted) == 1
     assert pat not in posted[0]["body"], f"PAT leaked into FAILED: comment: {posted[0]['body']}"
@@ -1714,7 +1716,7 @@ def test_f22_azure_pat_redacted_in_dispatch_error(monkeypatch):
 
     from autoswe.providers.azure.tracker import AzureTracker
     tracker = AzureTracker({"org": "org", "project": "proj", "pat": azure_pat})
-    tracker.post_comment({"org": "org", "project": "proj", "pat": azure_pat}, 70, body)
+    tracker.post_comment(70, body)
 
     assert len(posted) == 1
     assert azure_pat not in posted[0]["text"], f"Azure PAT leaked: {posted[0]['text']}"

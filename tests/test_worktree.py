@@ -217,6 +217,9 @@ def _link_fake_run():
 def _mock_vcs(link_calls):
     vcs = MagicMock()
     vcs.branch_name.side_effect = lambda n: f"autoswe/issue-{n}"
+    vcs.worktree_path_parts.return_value = ("o", "r")
+    # worktree path layout (issue #168 seam table): GitHub → (owner, repo).
+    vcs.worktree_path_parts.return_value = ("o", "r")
 
     def _record_link(issue_num, commit_sha, branch):
         link_calls.append((issue_num, commit_sha, branch))

@@ -9,8 +9,7 @@
       "state": "open",
       "base_branch": "main"
     },
-    "comments": [],
-    "open_pr_numbers": []
+    "comments": []
   },
   "task": {
     "slug": "gh:owner_repo_42",

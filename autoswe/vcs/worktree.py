@@ -23,7 +23,7 @@ def get_remote_branch_sha(
     """
     repo_cfg = {"owner": owner, "repo": repo, "token": token, "provider": provider}
     try:
-        clone_url = get_vcs(repo_cfg).clone_url(repo_cfg)
+        clone_url = get_vcs(repo_cfg).clone_url()
     except Exception as e:  # VCS provider clone_url() can fail for missing token, bad provider, etc.
         dbg.debug("get_remote_branch_sha: clone_url failed: %s", e)
         return None
@@ -52,23 +52,18 @@ def _repo_dir(owner: str, repo: str, cfg: dict, provider: str = "github") -> Pat
     Paths are provider-prefixed: ``gh-owner_repo`` for GitHub,
     ``ado-org_proj_repo`` for Azure DevOps.
     """
-    parts = _provider_parts(provider, owner, repo)
+    parts = _worktree_parts(owner, repo, provider)
     joined = "_".join(parts)
     return _worktrees_root(cfg) / joined
 
 
-def _provider_parts(provider: str, owner: str, repo: str) -> tuple[str, ...]:
-    """Return slug parts for the given provider.
+def _worktree_parts(owner: str, repo: str, provider: str) -> tuple[str, ...]:
+    """Return worktree path parts via the provider (``worktree_path_parts``).
 
-    GitHub: (owner, repo)
-    Azure:  (org, proj, repo) — owner is "org/proj"
+    GitHub: (owner, repo); Azure: (org, project, repo) — resolved by the
+    provider itself, so a new provider supplies its own layout.
     """
-    if provider == "azure":
-        if "/" in owner:
-            org, _, proj = owner.partition("/")
-            return (org, proj, repo)
-        return (owner, repo)
-    return (owner, repo)
+    return get_vcs({"owner": owner, "repo": repo, "provider": provider}).worktree_path_parts()
 
 
 def main_clone_path(owner: str, repo: str, cfg: dict, provider: str = "github") -> Path:
@@ -128,7 +123,7 @@ def ensure_clone(
     """Ensure _main/ clone exists and is up to date."""
     main = main_clone_path(owner, repo, cfg, provider)
     repo_cfg = {"owner": owner, "repo": repo, "token": token, "provider": provider}
-    clone_url = get_vcs(repo_cfg).clone_url(repo_cfg)
+    clone_url = get_vcs(repo_cfg).clone_url()
     if not main.exists():
         main.parent.mkdir(parents=True, exist_ok=True)
         log(f"[WORKTREE] Cloning {owner}/{repo} -> {main}")

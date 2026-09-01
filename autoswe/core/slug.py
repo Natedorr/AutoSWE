@@ -11,10 +11,29 @@ def make_slug(provider: str, parts: tuple[str, ...], issue_number: int) -> str:
 
         make_slug("azure", ("my-org", "my-proj", "my-repo"), 7)
         → "ado:my-org_my-proj_my-repo_7"
+
+    The prefix comes from the provider object (``VCSProvider.slug_prefix``),
+    not a hardcoded map here, so a new provider supplies its own slug prefix
+    (issue #168, seam table).
     """
-    prefix = {"github": "gh", "azure": "ado"}.get(provider.lower(), provider.lower()[:3])
+    prefix = _slug_prefix(provider)
     joined = "_".join(parts)
     return f"{prefix}:{joined}_{issue_number}"
+
+
+def _slug_prefix(provider: str) -> str:
+    """The queue-slug prefix for *provider*, read off the provider object.
+
+    Lazy-imports the factory so this module stays import-light and free of any
+    core → provider → core cycle. Falls back to the conventional first-three
+    characters for a provider that is not registered yet.
+    """
+    from autoswe.providers.factory import get_vcs
+
+    try:
+        return get_vcs({"provider": provider.lower()}).slug_prefix()
+    except ValueError:
+        return provider.lower()[:3]
 
 
 def slug_to_filename(slug: str) -> str:

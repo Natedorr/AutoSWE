@@ -72,7 +72,6 @@ def _load_world(data: dict) -> World:
     api = ApiState(
         issue=issue,
         comments=comments,
-        open_pr_numbers=tuple(api_data.get("open_pr_numbers", [])),
     )
 
     task = TaskState(
@@ -623,7 +622,7 @@ def test_review_preserves_status_only_emits_queue_patch():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -697,7 +696,7 @@ def test_review_preserves_status_includes_review_comment():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -771,7 +770,7 @@ def test_review_on_done_includes_findings():
         repo="autoswe",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:natedorr_autoswe_245",
         owner="natedorr",
@@ -861,7 +860,7 @@ def test_review_on_failed_transitions_to_reviewed_and_shows_findings():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_99",
         owner="owner",
@@ -927,7 +926,7 @@ def test_review_does_not_overwrite_queue_session_id():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -998,7 +997,7 @@ def _review_emit_world(status: str = "planned", *, pr_number=None):
     issue = NormalizedIssue(
         number=42, title="Test", body="Body", owner="owner", repo="repo", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42", owner="owner", repo="repo", issue_number=42,
         title="Test", body="Body", status=status, plan_branch="autoswe/issue-42",
@@ -1096,7 +1095,7 @@ def test_fix_still_overwrites_queue_session_id():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -1167,7 +1166,7 @@ def test_review_on_done_resets_first_dispatched_at():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_247",
         owner="owner",
@@ -1236,7 +1235,7 @@ def test_mark_failed_limit_resets_first_dispatched_at():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -1299,7 +1298,7 @@ def test_plan_emit_sets_resume_phase():
     from autoswe.providers.base import NormalizedIssue
 
     issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
         status="waiting", plan_branch=None, base_branch="main", attempt_count=1,
@@ -1329,7 +1328,7 @@ def test_fix_emit_sets_resume_phase():
     from autoswe.providers.base import NormalizedIssue
 
     issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
         status="planned", plan_branch="autoswe/issue-42", base_branch="main",
@@ -1361,7 +1360,7 @@ def test_plan_waiting_emit_sets_resume_phase():
     from autoswe.providers.base import NormalizedIssue
 
     issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
         status="waiting", plan_branch=None, base_branch="main", attempt_count=1,
@@ -1398,7 +1397,7 @@ def test_fix_waiting_emit_preserves_resume_phase_fix():
     from autoswe.providers.base import NormalizedIssue
 
     issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
         status="fixing", plan_branch="autoswe/issue-42", base_branch="main",
@@ -1442,7 +1441,7 @@ def test_fix_completed_persists_fix_summary():
         number=43, title="PR merge issue", body="The PR body is uninformative",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="The PR body is uninformative",
@@ -1479,7 +1478,7 @@ def test_fix_summary_not_set_on_failed():
         number=43, title="PR merge issue", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="Body",
@@ -1516,7 +1515,7 @@ def test_retry_fix_persists_fix_summary():
         number=43, title="PR merge issue", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="Body",
@@ -1554,7 +1553,7 @@ def test_auto_create_pr_uses_plan_branch():
         number=43, title="PR merge issue", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="Body",
@@ -1603,7 +1602,7 @@ def test_auto_create_pr_body_includes_issue_body():
         number=43, title="PR merge issue", body="The original issue description here",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="The original issue description here",
@@ -1647,7 +1646,7 @@ def test_fix_summary_preserves_tabs_in_summary():
         number=43, title="Tab issue", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="Tab issue", body="Body",
@@ -1690,7 +1689,7 @@ def test_plan_branch_persisted_in_queue_patch():
         number=42, title="Bug", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     # Task does NOT have plan_branch yet (first dispatch with --branch)
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42,
@@ -1735,7 +1734,7 @@ def test_plan_branch_used_for_auto_create_pr_base():
         number=42, title="Bug", body="Issue body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42,
         title="Bug", body="Issue body",

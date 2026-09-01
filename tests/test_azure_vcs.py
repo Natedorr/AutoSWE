@@ -27,12 +27,12 @@ def vcs(ado_vcs_repo_cfg):
 # -- clone_url --
 
 def test_clone_url(vcs):
-    url = vcs.clone_url({})
+    url = vcs.clone_url()
     assert url == "https://autoswe:fake_pat_123@dev.azure.com/my-org/my-project/_git/my-repo"
 
 
 def test_clone_url_contains_pat(vcs):
-    url = vcs.clone_url({})
+    url = vcs.clone_url()
     assert urlparse(url).password == "fake_pat_123"
     assert urlparse(url).hostname.endswith("dev.azure.com")
 
@@ -51,7 +51,7 @@ def test_find_existing_pr_found(vcs, mock_ado_request, ado_route_table):
     fixture = load_ado_fixture("pullrequest_active.json")
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = fixture
 
-    result = vcs.find_existing_pr({}, "autoswe/issue-100")
+    result = vcs.find_existing_pr("autoswe/issue-100")
 
     assert result is not None
     assert result.number == 42
@@ -70,7 +70,7 @@ def test_find_existing_pr_none(vcs, mock_ado_request, ado_route_table):
         "value": []
     }
 
-    result = vcs.find_existing_pr({}, "autoswe/issue-999")
+    result = vcs.find_existing_pr("autoswe/issue-999")
     assert result is None
 
 
@@ -82,7 +82,6 @@ def test_open_pull_request(vcs, mock_ado_request, ado_route_table):
     ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = fixture
 
     result = vcs.open_pull_request(
-        {},
         branch="autoswe/issue-101",
         base="main",
         title="Bug: fix crash on empty input",
@@ -108,7 +107,6 @@ def test_open_pull_request_refs_prefix(vcs, mock_ado_request, ado_route_table):
     ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = fixture
 
     vcs.open_pull_request(
-        {},
         branch="autoswe/issue-101",
         base="develop",
         title="Fix",
@@ -130,7 +128,7 @@ def test_clone_url_fallback_owner_slash_repo():
         "token": "fallback_pat",
         "provider": "azure",
     })
-    url = vcs.clone_url({})
+    url = vcs.clone_url()
     assert url == "https://autoswe:fallback_pat@dev.azure.com/natedorr/testProject/_git/testProject"
 
 
@@ -142,7 +140,7 @@ def test_clone_url_fallback_repo_slash_pattern():
         "token": "fallback_pat",
         "provider": "azure",
     })
-    url = vcs.clone_url({})
+    url = vcs.clone_url()
     assert url == "https://autoswe:fallback_pat@dev.azure.com/natedorr/testProject/_git/testProject"
 
 
@@ -157,7 +155,7 @@ def test_clone_url_explicit_fields_take_precedence():
     }
     cfg["repo"] = "my-repo"
     vcs = AzureVCS(cfg)
-    url = vcs.clone_url({})
+    url = vcs.clone_url()
     assert url == "https://autoswe:explicit_pat@dev.azure.com/my-org/my-project/_git/my-repo"
 
 
@@ -169,7 +167,7 @@ def test_clone_url_pat_falls_back_to_token():
         "token": "token_pat",
         "provider": "azure",
     })
-    url = vcs.clone_url({})
+    url = vcs.clone_url()
     assert urlparse(url).password == "token_pat"
     assert url == "https://autoswe:token_pat@dev.azure.com/org/proj/_git/repo"
 
@@ -187,7 +185,7 @@ def test_find_existing_pr_query_filters_by_branch(vcs, mock_ado_request, ado_rou
     fixture = load_ado_fixture("pullrequest_active.json")
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = fixture
 
-    vcs.find_existing_pr({}, "autoswe/issue-100")
+    vcs.find_existing_pr("autoswe/issue-100")
 
     call = mock_ado_request.calls[0]
     assert "sourceRefName=refs/heads/autoswe/issue-100" in call["path"]
@@ -216,7 +214,7 @@ def test_find_existing_pr_returns_first_active(vcs, mock_ado_request, ado_route_
     }
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = multi_pr
 
-    result = vcs.find_existing_pr({}, "autoswe/issue-100")
+    result = vcs.find_existing_pr("autoswe/issue-100")
 
     assert result is not None
     assert result.number == 42  # Returns first from filtered result
@@ -236,7 +234,7 @@ def test_clone_url_uses_raw_org_project():
         "repo": "repo",
         "pat": "fake_pat",
     })
-    url = vcs.clone_url({})
+    url = vcs.clone_url()
     # clone_url uses raw values, not encoded
     assert "/my org/" in urlparse(url).path
     assert "/my project/" in urlparse(url).path
@@ -264,7 +262,6 @@ def test_open_pull_request_develop_base(vcs, mock_ado_request, ado_route_table):
     ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = fixture
 
     vcs.open_pull_request(
-        {},
         branch="autoswe/issue-101",
         base="develop",
         title="Fix",
@@ -295,7 +292,6 @@ def test_close_pull_request_uses_patch_not_post(vcs, mock_ado_request, ado_route
 
     # 1. Open the PR (POST create — correct).
     pr = vcs.open_pull_request(
-        {},
         branch="autoswe/issue-126",
         base="main",
         title="Live test PR",
@@ -333,7 +329,7 @@ def test_get_ci_status_success(vcs, mock_ado_request, ado_route_table):
         "value": [{"status": "completed", "result": "succeeded", "definition": {"name": "CI"}}],
     }
 
-    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+    ci = vcs.get_ci_status("autoswe/issue-100")
 
     assert ci.state == "success"
 
@@ -344,7 +340,7 @@ def test_get_ci_status_pending(vcs, mock_ado_request, ado_route_table):
         "value": [{"status": "inProgress", "result": None, "definition": {"name": "CI"}}],
     }
 
-    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+    ci = vcs.get_ci_status("autoswe/issue-100")
 
     assert ci.state == "pending"
     assert ci.pending_count == 1
@@ -356,7 +352,7 @@ def test_get_ci_status_failure(vcs, mock_ado_request, ado_route_table):
         "value": [{"status": "completed", "result": "failed", "definition": {"name": "CI"}}],
     }
 
-    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+    ci = vcs.get_ci_status("autoswe/issue-100")
 
     assert ci.state == "failure"
     assert ci.failing == ["CI"]
@@ -368,7 +364,7 @@ def test_get_ci_status_canceled_is_failure(vcs, mock_ado_request, ado_route_tabl
         "value": [{"status": "completed", "result": "canceled", "definition": {"name": "CI"}}],
     }
 
-    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+    ci = vcs.get_ci_status("autoswe/issue-100")
 
     assert ci.state == "failure"
 
@@ -376,13 +372,13 @@ def test_get_ci_status_canceled_is_failure(vcs, mock_ado_request, ado_route_tabl
 def test_get_ci_status_no_builds_is_none(vcs, mock_ado_request, ado_route_table):
     ado_route_table[("GET", _BUILDS_PREFIX)] = {"count": 0, "value": []}
 
-    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+    ci = vcs.get_ci_status("autoswe/issue-100")
 
     assert ci.state == "none"
 
 
 def test_get_ci_status_request_error_is_none(vcs, mock_ado_request, ado_route_table):
     """No route stubbed → request raises → treated as none, not a crash."""
-    ci = vcs.get_ci_status({}, "autoswe/issue-100")
+    ci = vcs.get_ci_status("autoswe/issue-100")
 
     assert ci.state == "none"

@@ -246,7 +246,9 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
         dbg.debug("FIX: worktree=%s", wt)
 
     # Check for merge conflicts produced by pull_strategy="merge"
-    branch = f"autoswe/issue-{issue_num}"
+    branch = get_vcs(
+        {"owner": owner, "repo": repo, "token": token, "provider": provider}
+    ).branch_name(issue_num)
     conflict_files = get_merge_conflict_files(wt)
 
     # Build MCP server config: comment server (always) + inline comment server (if PR exists)
@@ -255,12 +257,11 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
     allowed_tools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "AskUserQuestion", *_MCP_COMMENT_TOOLS, *AGENT_TASK_TOOLS]
 
     # Register inline comment server if an existing PR exists for this branch
-    branch = f"autoswe/issue-{issue_num}"
     pr_number = task.get("pr_number")
     if not pr_number:
         try:
             _link_rc = dict(rc, token=token)
-            existing_pr = get_vcs(_link_rc).find_existing_pr(rc, branch)
+            existing_pr = get_vcs(_link_rc).find_existing_pr(branch)
             if existing_pr and existing_pr.number:
                 pr_number = existing_pr.number
         except Exception as e:  # Best-effort PR lookup — missing inline comment server is non-fatal.
@@ -293,7 +294,7 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
         files_block = "\n".join(f"  - {f}" for f in conflict_files)
         prompt += (
             "\n\n## Merge conflicts to resolve first\n\n"
-            f"Pulling `origin/autoswe/issue-{issue_num}` produced conflicts in:\n{files_block}\n\n"
+            f"Pulling `origin/{branch}` produced conflicts in:\n{files_block}\n\n"
             "Before doing anything else, read each conflicted file, reconcile the changes "
             "(remove all `<<<<<<<` / `=======` / `>>>>>>>` markers), then run:\n\n"
             "    git add -A && git commit --no-edit\n\n"
@@ -363,7 +364,9 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
     dbg.debug("FIX_RESUME: worktree=%s session=%s", wt, session_id)
 
     # Fast-forward worktree to origin/branch so the session operates on current state
-    ff_branch = f"autoswe/issue-{issue_num}"
+    ff_branch = get_vcs(
+        {"owner": owner, "repo": repo, "token": "", "provider": provider}
+    ).branch_name(issue_num)
     fast_forward_worktree(wt, ff_branch)
 
     resume_prompt = (

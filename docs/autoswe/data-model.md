@@ -99,7 +99,6 @@ All orchestrator types are **frozen dataclasses** — immutable snapshots at eac
 class ApiState:
     issue: NormalizedIssue
     comments: tuple[NormalizedComment, ...]
-    open_pr_numbers: tuple[int, ...] = ()
     comments_fetched: bool = True
 ```
 

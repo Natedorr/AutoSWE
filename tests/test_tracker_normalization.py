@@ -81,7 +81,7 @@ class TestGitHubTrackerNormalization:
         # Set issue author so AUTHOR normalization works
         tracker.set_issue_author(fixture["__meta"]["issue_author_login"])
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # Bot comments (with <!-- autoswe-bot -->) → "BOT"
         bot_comments = [c for c in normalized if "autoswe-bot" in c.body]
@@ -115,7 +115,7 @@ class TestGitHubTrackerNormalization:
         tracker = gt_mod.GitHubTracker(repo_cfg)
         tracker.set_issue_author(fixture["__meta"]["issue_author_login"])
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # Non-bot comments by token owner → "OWNER"
         # The "/fix with focus on session handling" comment is by Natedorr (OWNER)
@@ -148,7 +148,7 @@ class TestGitHubTrackerNormalization:
         tracker = gt_mod.GitHubTracker(repo_cfg)
         tracker.set_issue_author(issue_author)
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # The "/pr" comment is by CollaboratorJane (issue author) → "AUTHOR"
         author_comments = [c for c in normalized if c.author_login == "AUTHOR"]
@@ -180,7 +180,7 @@ class TestGitHubTrackerNormalization:
         tracker = gt_mod.GitHubTracker(repo_cfg)
         tracker.set_issue_author(fixture["__meta"]["issue_author_login"])
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # RandomContributor's comment should pass through as raw login
         contrib_comments = [
@@ -215,7 +215,7 @@ class TestGitHubTrackerNormalization:
         tracker = gt_mod.GitHubTracker(repo_cfg)
         tracker.set_issue_author(fixture["__meta"]["issue_author_login"])
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # Expected: BOT, OWNER, BOT, RandomContributor, AUTHOR
         expected = ["BOT", "OWNER", "BOT", "RandomContributor", "AUTHOR"]
@@ -255,7 +255,7 @@ class TestGitHubTrackerNormalization:
             "provider": "github",
         }
         tracker = gt_mod.GitHubTracker(repo_cfg)
-        issues = tracker.list_open_issues(repo_cfg)
+        issues = tracker.list_open_issues()
 
         assert len(issues) == 1
         assert tracker._issue_authors[issues[0].number] == "CollaboratorJane"
@@ -278,7 +278,7 @@ class TestGitHubTrackerNormalization:
             "provider": "github",
         }
         tracker = gt_mod.GitHubTracker(repo_cfg)
-        tracker.fetch_issue(repo_cfg, 42)
+        tracker.fetch_issue(42)
 
         assert tracker._issue_authors[42] == "CollaboratorJane"
         assert tracker._issue_author_login == "CollaboratorJane"
@@ -301,7 +301,7 @@ class TestGitHubTrackerNormalization:
             "provider": "github",
         }
         tracker = gt_mod.GitHubTracker(repo_cfg)
-        issues = tracker.list_open_issues(repo_cfg)
+        issues = tracker.list_open_issues()
 
         assert len(issues) == 1
         assert issues[0].last_updated == "2026-05-01T03:10:05Z"
@@ -324,7 +324,7 @@ class TestGitHubTrackerNormalization:
             "provider": "github",
         }
         tracker = gt_mod.GitHubTracker(repo_cfg)
-        issue = tracker.fetch_issue(repo_cfg, 42)
+        issue = tracker.fetch_issue(42)
 
         assert issue.last_updated == "2026-05-01T03:10:05Z"
 
@@ -365,7 +365,7 @@ class TestAzureTrackerNormalization:
             lambda *a: fixture["__meta"]["pat_owner_uniqueName"]
         )
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # Bot comments (with <!-- autoswe-bot -->) → "BOT"
         bot_comments = [c for c in normalized if "autoswe-bot" in c.body]
@@ -401,7 +401,7 @@ class TestAzureTrackerNormalization:
             lambda *a: pat_owner
         )
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # PAT owner's non-bot comments → "OWNER"
         assert any(
@@ -436,7 +436,7 @@ class TestAzureTrackerNormalization:
             lambda *a: fixture["__meta"]["pat_owner_uniqueName"]
         )
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # contributor@example.com is neither PAT owner nor issue author
         # Azure doesn't do AUTHOR normalization (no issue author context)
@@ -476,7 +476,7 @@ class TestAzureTrackerNormalization:
             lambda *a: pat_owner
         )
 
-        normalized = tracker.fetch_comments(repo_cfg, 42)
+        normalized = tracker.fetch_comments(42)
 
         # Expected: BOT, OWNER, BOT, contributor@example.com, jane.doe@example.com
         expected_logins = [
@@ -541,7 +541,7 @@ class TestAzureTrackerNormalization:
             "provider": "azure",
         }
         tracker = at_mod.AzureTracker(repo_cfg)
-        normalized = tracker.fetch_issue(repo_cfg, 42)
+        normalized = tracker.fetch_issue(42)
 
         assert normalized.last_updated == "2026-05-01T03:10:05.000Z"
 
@@ -572,7 +572,7 @@ class TestCrossProviderContract:
         gh_tracker = gt_mod.GitHubTracker({
             "owner": "Natedorr", "repo": "test", "token": "ghp_test",
         })
-        gh_normalized = gh_tracker.fetch_comments({}, 1)
+        gh_normalized = gh_tracker.fetch_comments(1)
         assert gh_normalized[0].author_login == "BOT"
 
         # Azure
@@ -595,7 +595,7 @@ class TestCrossProviderContract:
             az_tracker, "authenticated_user",
             lambda *a: "natedorr@example.com"
         )
-        az_normalized = az_tracker.fetch_comments({}, 1)
+        az_normalized = az_tracker.fetch_comments(1)
         assert az_normalized[0].author_login == "BOT"
 
     def test_both_providers_normalize_owner_comments(self, monkeypatch, gh_route_table, ado_route_table):
@@ -617,7 +617,7 @@ class TestCrossProviderContract:
         gh_tracker = gt_mod.GitHubTracker({
             "owner": "Natedorr", "repo": "test", "token": "ghp_test",
         })
-        gh_normalized = gh_tracker.fetch_comments({}, 1)
+        gh_normalized = gh_tracker.fetch_comments(1)
         assert gh_normalized[0].author_login == "OWNER"
 
         # Azure
@@ -640,5 +640,5 @@ class TestCrossProviderContract:
             az_tracker, "authenticated_user",
             lambda *a: "natedorr@example.com"
         )
-        az_normalized = az_tracker.fetch_comments({}, 1)
+        az_normalized = az_tracker.fetch_comments(1)
         assert az_normalized[0].author_login == "OWNER"
