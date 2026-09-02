@@ -2302,3 +2302,288 @@ def test_sync_branch_fetch_failure_does_not_raise(tmp_path, monkeypatch):
             result = sync_branch(wt_dir, "o", "r", 1, "main")
 
     assert isinstance(result, dict), "sync_branch must return a dict even when fetch fails"
+
+
+# ---------------------------------------------------------------------------
+# Auto-purge of gone remote branches (issue #177)
+# ---------------------------------------------------------------------------
+
+def _purge_vcs():
+    """A minimal VCS mock: branch_name + worktree_path_parts (GitHub layout)."""
+    vcs = MagicMock()
+    vcs.branch_name.side_effect = lambda n: f"autoswe/issue-{n}"
+    vcs.worktree_path_parts.return_value = ("o", "r")
+    return vcs
+
+
+def _purge_fake_run(present_branches, dirty_issue_dirs=frozenset(), fetch_ok=True):
+    """Build a fake _run routing for purge_gone_branches.
+
+    present_branches: set of branch names whose origin ref exists (show-ref ok).
+    dirty_issue_dirs: set of issue dir names (e.g. "issue-5") that report dirty.
+    fetch_ok: False makes `fetch --prune` raise (network failure).
+
+    Returns (fake_run, calls).
+    """
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        cmd = " ".join(str(a) for a in args)
+        if "fetch" in cmd and "--prune" in cmd:
+            if not fetch_ok:
+                raise RuntimeError("fatal: unable to connect to origin")
+            return result
+        if "show-ref" in cmd and "--verify" in cmd:
+            ref = next(a for a in args if a.startswith("refs/remotes/origin/"))
+            branch = ref.replace("refs/remotes/origin/", "")
+            result.returncode = 0 if branch in present_branches else 1
+        elif "status" in cmd and "--porcelain" in cmd:
+            idx = args.index("-C")
+            name = Path(args[idx + 1]).name
+            result.stdout = " M dirty.py\n" if name in dirty_issue_dirs else ""
+        return result
+
+    return fake_run, calls
+
+
+def _purge_layout(tmp_path, issue_nums):
+    """Create _main/ + issue-<N>/ dirs for a github o/r repo under tmp_path."""
+    main = tmp_path / "worktrees" / "o_r" / "_main"
+    main.mkdir(parents=True, exist_ok=True)
+    for n in issue_nums:
+        (tmp_path / "worktrees" / "o_r" / f"issue-{n}").mkdir(parents=True, exist_ok=True)
+    return main
+
+
+def test_fetch_prune_issues_prune(tmp_path, monkeypatch):
+    """fetch_prune runs `git fetch --prune origin` against the main clone."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import fetch_prune
+        fetch_prune(tmp_path / "_main")
+
+    assert len(calls) == 1
+    cmd = " ".join(calls[0])
+    assert "fetch" in cmd and "--prune" in cmd and "origin" in cmd
+
+
+def test_remote_branch_exists_true(tmp_path, monkeypatch):
+    """remote_branch_exists returns True when show-ref --verify succeeds."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import remote_branch_exists
+        assert remote_branch_exists(tmp_path / "_main", "autoswe/issue-5") is True
+
+    # The probe must target the remote-tracking ref, not the local branch.
+    assert "refs/remotes/origin/autoswe/issue-5" in " ".join(calls[0])
+
+
+def test_remote_branch_exists_false(tmp_path, monkeypatch):
+    """remote_branch_exists returns False when show-ref --verify is non-zero."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    def fake_run(args, cwd=None, check=True):
+        return MagicMock(returncode=1, stdout="", stderr="")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import remote_branch_exists
+        assert remote_branch_exists(tmp_path / "_main", "autoswe/issue-5") is False
+
+
+def test_remove_worktree_removes_dir_and_branch(tmp_path, monkeypatch):
+    """remove_worktree removes the dir and force-deletes the local branch."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import remove_worktree
+        ok = remove_worktree(tmp_path / "_main", wt_dir, "autoswe/issue-5")
+
+    assert ok is True
+    assert not wt_dir.exists()
+    joined = " || ".join(" ".join(c) for c in calls)
+    assert any("worktree" in c and "remove" in c for c in calls)
+    assert any(c and c[0] == "git" and "branch" in c and "-D" in c for c in calls)
+    assert "autoswe/issue-5" in joined
+
+
+def test_purge_gone_branches_purges_when_remote_missing(tmp_path, monkeypatch):
+    """A worktree whose remote branch is gone is removed (clean, not in-flight)."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    _purge_layout(tmp_path, [5])
+    wt_dir = tmp_path / "worktrees" / "o_r" / "issue-5"
+    fake_run, calls = _purge_fake_run(present_branches=set())  # remote branch gone
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run), \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_purge_vcs()):
+        from autoswe.vcs.worktree import purge_gone_branches
+        purged = purge_gone_branches("o", "r", _cfg())
+
+    assert purged == ["autoswe/issue-5"]
+    assert not wt_dir.exists()
+
+
+def test_purge_gone_branches_keeps_when_remote_present(tmp_path, monkeypatch):
+    """A worktree whose remote branch still exists is left untouched."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    _purge_layout(tmp_path, [5])
+    wt_dir = tmp_path / "worktrees" / "o_r" / "issue-5"
+    fake_run, calls = _purge_fake_run(present_branches={"autoswe/issue-5"})
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run), \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_purge_vcs()):
+        from autoswe.vcs.worktree import purge_gone_branches
+        purged = purge_gone_branches("o", "r", _cfg())
+
+    assert purged == []
+    assert wt_dir.exists()
+    # No worktree-remove / branch-delete issued for a still-present remote branch.
+    assert not any("worktree" in c and "remove" in c for c in calls)
+
+
+def test_purge_gone_branches_noop_without_main(tmp_path, monkeypatch):
+    """No _main clone → nothing to purge, no git commands issued."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run), \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_purge_vcs()):
+        from autoswe.vcs.worktree import purge_gone_branches
+        purged = purge_gone_branches("o", "r", _cfg())
+
+    assert purged == []
+    assert calls == []
+
+
+def test_purge_gone_branches_skips_in_flight(tmp_path, monkeypatch):
+    """Issue numbers in skip_issue_numbers are never purged, even when gone remotely."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    _purge_layout(tmp_path, [5])
+    wt_dir = tmp_path / "worktrees" / "o_r" / "issue-5"
+    fake_run, calls = _purge_fake_run(present_branches=set())
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run), \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_purge_vcs()):
+        from autoswe.vcs.worktree import purge_gone_branches
+        purged = purge_gone_branches("o", "r", _cfg(), skip_issue_numbers={5})
+
+    assert purged == []
+    assert wt_dir.exists()
+    assert not any("worktree" in c and "remove" in c for c in calls)
+
+
+def test_purge_gone_branches_skips_dirty(tmp_path, monkeypatch):
+    """A dirty worktree with a gone remote branch is left in place (not destroyed)."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    _purge_layout(tmp_path, [5])
+    wt_dir = tmp_path / "worktrees" / "o_r" / "issue-5"
+    fake_run, calls = _purge_fake_run(present_branches=set(), dirty_issue_dirs={"issue-5"})
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run), \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_purge_vcs()):
+        from autoswe.vcs.worktree import purge_gone_branches
+        purged = purge_gone_branches("o", "r", _cfg())
+
+    assert purged == []
+    assert wt_dir.exists()
+    assert not any("worktree" in c and "remove" in c for c in calls)
+
+
+def test_purge_gone_branches_noop_on_fetch_failure(tmp_path, monkeypatch):
+    """A failed `fetch --prune` means refs are untrusted → nothing is purged."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    _purge_layout(tmp_path, [5])
+    wt_dir = tmp_path / "worktrees" / "o_r" / "issue-5"
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        cmd = " ".join(str(a) for a in args)
+        if "fetch" in cmd and "--prune" in cmd:
+            raise RuntimeError("fatal: unable to connect to origin")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run), \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_purge_vcs()):
+        from autoswe.vcs.worktree import purge_gone_branches
+        purged = purge_gone_branches("o", "r", _cfg())
+
+    assert purged == []
+    assert wt_dir.exists()
+    # The worktree-remove path was never reached (fetch raised first).
+    assert not any("worktree" in c and "remove" in c for c in calls)
+
+
+def test_purge_gone_branches_purges_multiple_but_ignores_main_dir(tmp_path, monkeypatch):
+    """Multiple gone worktrees are all purged; the _main dir is never treated as one."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    _purge_layout(tmp_path, [3, 9])
+    main = tmp_path / "worktrees" / "o_r" / "_main"
+    fake_run, calls = _purge_fake_run(present_branches=set())
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run), \
+         patch("autoswe.vcs.worktree.get_vcs", return_value=_purge_vcs()):
+        from autoswe.vcs.worktree import purge_gone_branches
+        purged = purge_gone_branches("o", "r", _cfg())
+
+    assert sorted(purged) == ["autoswe/issue-3", "autoswe/issue-9"]
+    assert main.exists(), "_main must survive the purge"

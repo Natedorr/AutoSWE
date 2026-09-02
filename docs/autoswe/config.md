@@ -84,10 +84,11 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | `SYNC_STRATEGY` | `merge` | Strategy for `/sync`: `"merge"` (append-only merge commit) or `"rebase"` (linear history, force-pushes) |
 | `PR_REQUIRE_SYNC` | `true` | Gate `/pr` (and auto-PR) on the feature branch being in sync with its base. When behind, `pr_gate.preflight_pr()` runs the same sync used by `/sync`, resolving merge conflicts via `coder.resolve_sync_conflicts()`; if sync can't complete cleanly, the PR is blocked with `FAILED: <reason>`. Set `false` to skip this check entirely. |
 | `PR_REQUIRE_CI` | `true` | Gate `/pr` (and auto-PR) on CI status via `VCSProvider.get_ci_status()`. `pending` or `failure` blocks the PR; `success` or `none` (no CI configured on the repo) passes. Set `false` to skip this check entirely. |
+| `AUTO_PURGE_BRANCHES` | `false` | Opt-in heartbeat cleanup of worktrees whose remote `autoswe/issue-{N}` branch no longer exists. When `true`, each poll cycle prunes a repo's remote-tracking refs (`git fetch --prune`) and removes any `issue-{N}/` worktree dir + local branch whose remote branch is gone — e.g. a merged-and-auto-deleted PR. In-flight tasks (live PID) and dirty worktrees are always skipped; a failed `fetch --prune` makes the whole step a no-op. Only the worktree dir + local branch are removed — `queue.json` is left to the separate `queue prune` job. See [git-worktrees.md](git-worktrees.md). |
 
 **Integer keys re-parsed:** After loading the file, `AGENT_TIMEOUT`, `AGENT_RETRY_ON_FAILURE`, `MAX_ATTEMPTS`, `MAX_TOTAL_HOURS`, `MAX_CONCURRENT`, and `MAX_DRAIN_CYCLES` are cast to `int` (`config.py:51-55`).
 
-**Boolean keys re-parsed:** `SILENT_REPORTING`, `MINIMAL_POSTING`, `AUTO_ASSIGN`, `AUTO_CREATE_PR`, `LINK_BRANCH_TO_ISSUE`, `PR_REQUIRE_SYNC`, and `PR_REQUIRE_CI` are compared to `"true"` (case-insensitive) after file load.
+**Boolean keys re-parsed:** `SILENT_REPORTING`, `MINIMAL_POSTING`, `AUTO_ASSIGN`, `AUTO_CREATE_PR`, `LINK_BRANCH_TO_ISSUE`, `PR_REQUIRE_SYNC`, `PR_REQUIRE_CI`, and `AUTO_PURGE_BRANCHES` are compared to `"true"` (case-insensitive) after file load.
 
 **Per-repo overrides:** `pr_gate._flag()` checks `repo_cfg` first — a lowercase `pr_require_sync` / `pr_require_ci` key in a `repos.json` entry overrides the global `autoswe.env` value for that repo only (same pattern as `plan_model`/`fix_model` overrides).
 

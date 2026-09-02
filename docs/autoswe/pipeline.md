@@ -28,6 +28,7 @@ CRON (e.g. every 10 min)
                f. release PID file
             4. Backfill bot_comment_ids              # self-heal first poll after wipe
             5. gh_closed detection & label mirror
+            5b. auto-purge gone remote branches      # opt-in: AUTO_PURGE_BRANCHES
             6. _post_pending_welcomes()             # first-time welcome (no Claude)
 ```
 
@@ -160,4 +161,6 @@ After all dispatches in a cycle:
 
 3. **Label mirror** — Terminal statuses (`fixed`, `synced`, `shipped`, `reviewed`, `failed`, `skipped`, `aborted`, `planned`, `waiting`, `error`) have their `autoswe:*` label synced on the issue. The mirror is idempotent: `set_status` is only called when the issue's current status (from labels/tags refreshed by `list_open_issues`) differs from the queue status. This avoids a write that would bump the provider's `updated_at` timestamp and defeat the comment-fetch skip optimization.
 
-4. **Welcome comments** — `_post_pending_welcomes()` posts the welcome message to newly discovered issues, capturing the returned comment ID in `welcome_comment_id` and `bot_comment_ids`.
+4. **Auto-purge of gone remote branches** (opt-in, `AUTO_PURGE_BRANCHES=true`) — The heartbeat's "loose" cleanup for issue #177. Per repo, the loop builds the set of in-flight issue numbers (tasks holding a live PID file) and calls `purge_gone_branches()`, which runs one `git fetch --prune` on the `_main/` clone and then removes any `issue-{N}/` worktree dir + local `autoswe/issue-{N}` branch whose `origin/autoswe/issue-{N}` no longer exists on the remote (e.g. a merged-and-auto-deleted PR). Two integrity guards are always applied: in-flight tasks are skipped, and dirty worktrees are left in place. A failed `fetch --prune` makes the step a no-op, and any per-repo failure is logged without aborting the cycle. Only the worktree dir + local branch are removed; `queue.json` is left to the separate `queue prune` job. See [git-worktrees.md](git-worktrees.md).
+
+5. **Welcome comments** — `_post_pending_welcomes()` posts the welcome message to newly discovered issues, capturing the returned comment ID in `welcome_comment_id` and `bot_comment_ids`.
