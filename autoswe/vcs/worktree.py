@@ -1,3 +1,5 @@
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -166,6 +168,127 @@ def is_dirty(wt: Path) -> bool:
     """Return True if the worktree has uncommitted changes or untracked files."""
     result = _run(["git", "-C", str(wt), "status", "--porcelain"], check=False)
     return bool(result.stdout.strip())
+
+
+def fetch_prune(main: Path) -> None:
+    """Prune the main clone's remote-tracking refs to match the remote.
+
+    After this call, ``refs/remotes/origin/<branch>`` exists iff the branch
+    still exists on the remote. This is what makes :func:`remote_branch_exists`
+    a cheap local check instead of a round-trip per branch.
+    """
+    _run(["git", "-C", str(main), "fetch", "--prune", "origin"], check=False)
+
+
+def remote_branch_exists(main: Path, branch: str) -> bool:
+    """Return True if ``origin/<branch>`` exists in the main clone.
+
+    Call :func:`fetch_prune` first so the local remote-tracking ref reflects
+    the remote's current branch set.
+    """
+    result = _run(
+        ["git", "-C", str(main), "show-ref", "--verify", "--quiet",
+         f"refs/remotes/origin/{branch}"],
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def remove_worktree(main: Path, wt: Path, branch: str) -> bool:
+    """Remove a worktree directory and its local branch.
+
+    Best-effort: every step uses ``check=False`` so a partial failure
+    (e.g. the worktree is already gone) does not raise. The local branch is
+    force-deleted even if unmerged, because the caller has already confirmed
+    the remote branch no longer exists.
+
+    Returns True if the worktree directory was removed.
+    """
+    _run(["git", "-C", str(main), "worktree", "remove", "--force", str(wt)], check=False)
+    _run(["git", "-C", str(main), "worktree", "prune"], check=False)
+    if wt.exists():
+        # ``worktree remove`` failed (stale metadata, locked files, etc.) —
+        # the directory is ours, so clear it directly.
+        shutil.rmtree(wt, ignore_errors=True)
+    _run(["git", "-C", str(main), "branch", "-D", branch], check=False)
+    return not wt.exists()
+
+
+def _worktree_issue_numbers(repo_dir: Path) -> list[int]:
+    """Issue numbers of the ``issue-<N>`` worktree directories under *repo_dir*."""
+    numbers: list[int] = []
+    for entry in repo_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        m = re.fullmatch(r"issue-(\d+)", entry.name)
+        if m:
+            numbers.append(int(m.group(1)))
+    return numbers
+
+
+def purge_gone_branches(
+    owner: str,
+    repo: str,
+    cfg: dict,
+    provider: str = "github",
+    skip_issue_numbers: set[int] | None = None,
+) -> list[str]:
+    """Remove local worktrees + branches whose remote branch no longer exists.
+
+    Returns the list of branch names that were removed. The caller decides
+    whether to log/report.
+
+    Safety model (loose — see the plan for issue #177):
+
+    - The **primary gate** is pure remote-branch absence: after a single
+      ``fetch --prune``, any ``issue-<N>`` worktree whose
+      ``origin/autoswe/issue-<N>`` no longer exists is a candidate.
+    - Two **non-configurable integrity guards** are always applied on top:
+      - skip if the issue number is in *skip_issue_numbers* (in-flight tasks —
+        live PID / running status — detected by the caller, which owns the
+        PID/lifecycle knowledge);
+      - skip if the worktree is dirty (uncommitted work we must not destroy).
+
+    A failure to ``fetch --prune`` means we cannot trust the remote-tracking
+    refs, so nothing is purged (no-op on stale refs).
+    """
+    main = main_clone_path(owner, repo, cfg, provider)
+    repo_dir = _repo_dir(owner, repo, cfg, provider)
+    if not main.exists() or not repo_dir.exists():
+        return []
+
+    skip = skip_issue_numbers or set()
+    try:
+        fetch_prune(main)
+    except Exception as e:  # fetch can raise (network, credentials) — treat as "no purge"
+        dbg.debug("purge_gone_branches: fetch --prune failed for %s/%s: %s", owner, repo, e)
+        return []
+
+    vcs = get_vcs({"owner": owner, "repo": repo, "provider": provider})
+    purged: list[str] = []
+    for issue_num in _worktree_issue_numbers(repo_dir):
+        branch = vcs.branch_name(issue_num)
+        if remote_branch_exists(main, branch):
+            continue
+        if issue_num in skip:
+            continue
+        wt = worktree_path(owner, repo, issue_num, cfg, provider)
+        try:
+            if is_dirty(wt):
+                dbg.debug(
+                    "purge_gone_branches: skipping dirty worktree %s/%s issue-%d",
+                    owner, repo, issue_num,
+                )
+                continue
+        except Exception as e:
+            dbg.debug("purge_gone_branches: is_dirty failed for %s: %s", wt, e)
+            continue
+        if remove_worktree(main, wt, branch):
+            purged.append(branch)
+            log(f"[PURGE] {owner}/{repo}: removed gone worktree+branch {branch}")
+        else:
+            dbg.debug("purge_gone_branches: failed to remove %s/%s issue-%d", owner, repo, issue_num)
+    return purged
 
 
 def reset_clean(wt: Path, branch: str) -> None:

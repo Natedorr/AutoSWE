@@ -1000,6 +1000,40 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                             task_entry["issue_number"], f"autoswe:{qs}"
                         )
 
+        # --- Phase 4: Auto-purge worktrees for gone remote branches ---
+        # When a remote autoswe/issue-N branch is deleted (PR merged +
+        # auto-deleted, or removed manually), the local worktree dir and branch
+        # become orphaned. This is opt-in (AUTO_PURGE_BRANCHES, default off) and
+        # best-effort: a purge failure must never abort the poll cycle. The
+        # in-flight set is built here — this module owns the PID/lifecycle
+        # knowledge — and passed to purge_gone_branches so worktree.py stays
+        # free of loop imports.
+        if run_actions and cfg.get("AUTO_PURGE_BRANCHES"):
+            try:
+                from autoswe.vcs.worktree import purge_gone_branches
+
+                in_flight: set[int] = set()
+                for slug in queue:
+                    te = queue[slug]
+                    if te["owner"] != owner or te["repo"] != repo:
+                        continue
+                    if _is_task_running(slug):
+                        in_flight.add(te["issue_number"])
+                purged = purge_gone_branches(
+                    owner, repo, cfg, provider=provider,
+                    skip_issue_numbers=in_flight,
+                )
+                if purged:
+                    log(
+                        f"[PURGE] {owner}/{repo}: auto-removed "
+                        f"{len(purged)} gone branch(es): {purged}"
+                    )
+            except Exception as e:
+                dbg.error(
+                    "purge_gone_branches failed for %s/%s: %s", owner, repo, e,
+                    exc_info=True,
+                )
+
     # Persist all in-memory queue mutations accumulated during this cycle.
     # Re-takes the exclusive lock and merges the patch over the on-disk state
     # (issue #173 F-12): the lock was released before dispatch so agent runs

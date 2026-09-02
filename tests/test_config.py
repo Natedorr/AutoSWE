@@ -502,6 +502,36 @@ def test_load_config_minimal_posting_file_true(isolated_autoswe_dir):
     assert cfg["MINIMAL_POSTING"] is True
 
 
+def test_load_config_auto_purge_default_false(isolated_autoswe_dir):
+    """AUTO_PURGE_BRANCHES defaults to False when not set (opt-in)."""
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AUTO_PURGE_BRANCHES"] is False
+
+
+def test_load_config_auto_purge_env_true(isolated_autoswe_dir, monkeypatch):
+    """AUTO_PURGE_BRANCHES=true env var is parsed as True boolean."""
+    monkeypatch.setenv("AUTO_PURGE_BRANCHES", "true")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AUTO_PURGE_BRANCHES"] is True
+
+
+def test_load_config_auto_purge_file_true(isolated_autoswe_dir):
+    """AUTO_PURGE_BRANCHES=true in autoswe.env is parsed as True boolean."""
+    from autoswe.core import config as config_mod
+
+    config_mod.CONFIG_FILE.write_text("AUTO_PURGE_BRANCHES=true\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AUTO_PURGE_BRANCHES"] is True
+
+
 # ---------------------------------------------------------------------------
 # Harness config keys in load_config
 # ---------------------------------------------------------------------------
