@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 from collections.abc import Awaitable
+from contextlib import contextmanager
 from pathlib import Path
 
 from autoswe.core.logging_utils import get_debug_logger, log
@@ -163,6 +165,38 @@ def _sdk_supports_session_fork() -> bool:
     if ver is None:
         return True
     return ver >= _FORK_MIN_SDK_VERSION
+
+
+@contextmanager
+def _can_use_tool_shadowing_suppressed(enabled: bool):
+    """Suppress the SDK's ``CanUseToolShadowedWarning`` advisory (issue #190).
+
+    The SDK emits this advisory whenever ``can_use_tool`` is registered
+    alongside options that *statically* shadow it (``permission_mode``
+    ``"bypassPermissions"``, or whole-tool ``allowed_tools`` entries).  For
+    every autoSWE configuration that shadowing is intentional: each phase's
+    tool set is pre-approved by design, and the CLI still routes
+    user-interaction tools (``AskUserQuestion``) to the callback regardless
+    of allow rules or permission mode — so the AskUserQuestion → pause →
+    ``autoswe:waiting`` path works even under ``bypassPermissions``
+    (verified against CLI 2.1.252; see
+    docs/claude-agent-sdk/agent-sdk/permissions.md, "Ask rules").  Filtering
+    the false-positive advisory here keeps one line out of ``poller.log``
+    per dispatch; the SDK's own warning docstring recommends exactly this
+    filter.
+    """
+    if not enabled:
+        yield
+        return
+    try:
+        from claude_agent_sdk import CanUseToolShadowedWarning  # deferred import: SDK may not be installed
+    except ImportError:
+        # An SDK build predating the advisory has nothing to suppress.
+        yield
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", CanUseToolShadowedWarning)
+        yield
 
 
 def _get_retryable_exceptions() -> tuple:
@@ -614,6 +648,18 @@ class ClaudeCodeBackend:
         if spec.can_use_tool is not None:
             from claude_agent_sdk import HookMatcher  # deferred import: SDK may not be installed
 
+            # Issue #190: the mode-derived tool list pre-approves every tool
+            # this phase uses, so the SDK's CanUseToolShadowedWarning is a
+            # false positive here — the CLI still routes user-interaction
+            # tools (AskUserQuestion) to the callback even under
+            # bypassPermissions. Log the real semantics once instead of the
+            # per-dispatch warning line (the warning is filtered around the
+            # query loop below).
+            _dbg.debug(
+                "[CLAUDE] can_use_tool registered — auto-approved tools are intentionally "
+                "shadowed; AskUserQuestion still reaches the callback (issue #190)"
+            )
+
             async def dummy_hook(input_data, tool_use_id, ctx):
                 return {"continue_": True}
 
@@ -645,68 +691,69 @@ class ClaudeCodeBackend:
             return bool(spec.state and spec.state.get("asked_question_md"))
 
         try:
-            async for msg in query(prompt=prompt_source, options=options):
-                if isinstance(msg, AssistantMessage):
-                    if session_id is None and msg.session_id:
-                        session_id = msg.session_id
-                    for block in msg.content:
-                        if isinstance(block, TextBlock):
-                            text_chunks.append(block.text)
-                        elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
-                            if spec.progress_callback and not _question_asked() and progress_state.note_tool_use(block):
-                                body = progress_state.render()
-                                if body:
-                                    spec.progress_callback(body)
-                            if isinstance(block, ToolUseBlock):
-                                if block.name == "mcp__autoswe_comment__post_plan":
-                                    if (block.input or {}).get("body", "").strip():
-                                        plan_posted = True
-                                elif block.name == "mcp__autoswe_comment__post_question":
-                                    if (block.input or {}).get("body", "").strip():
-                                        question_posted = True
-                                elif block.name == "ExitPlanMode":
-                                    # ExitPlanMode is disallowed in plan mode, but the
-                                    # tool-use block (with the plan markdown) still
-                                    # appears in the stream. Capture it so the planner
-                                    # can post the plan instead of "Tool: ExitPlanMode".
-                                    exit_plan = (block.input or {}).get("plan", "").strip()
-                                    if exit_plan:
-                                        captured_plan_text = exit_plan
-                                plan_path = _extract_plan_file_path(block)
-                                if plan_path is not None:
-                                    captured_plan_file = plan_path
-                elif isinstance(msg, UserMessage):
-                    if spec.progress_callback and not _question_asked():
+            with _can_use_tool_shadowing_suppressed(spec.can_use_tool is not None):
+                async for msg in query(prompt=prompt_source, options=options):
+                    if isinstance(msg, AssistantMessage):
+                        if session_id is None and msg.session_id:
+                            session_id = msg.session_id
                         for block in msg.content:
-                            if isinstance(block, ToolResultBlock):
-                                if progress_state.note_tool_result(block):
+                            if isinstance(block, TextBlock):
+                                text_chunks.append(block.text)
+                            elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
+                                if spec.progress_callback and not _question_asked() and progress_state.note_tool_use(block):
                                     body = progress_state.render()
                                     if body:
                                         spec.progress_callback(body)
-                elif isinstance(msg, ResultMessage):
-                    if session_id is None:
-                        session_id = msg.session_id
-                    subtype = msg.subtype
-                    cost_usd = msg.total_cost_usd
-                    duration_ms = msg.duration_ms
-                    # Structured output (issue #159): the validated payload is
-                    # only ever on the final result message. ``getattr`` guards
-                    # against an SDK build predating the field (reads None).
-                    # On ``error_max_structured_output_retries`` (or any
-                    # success-without-structured-output) this is None, so the
-                    # handler falls back to the text-pattern path.
-                    so = getattr(msg, "structured_output", None)
-                    if isinstance(so, dict):
-                        structured_output = so
-                    elif subtype == "error_max_structured_output_retries":
-                        log(f"[CLAUDE] structured-output retries exhausted "
-                            f"(session={session_id}); falling back to text-pattern path")
-                    log(f"[CLAUDE] session={session_id} subtype={subtype} cost=${cost_usd or 0:.4f} duration={duration_ms/1000:.1f}s")
+                                if isinstance(block, ToolUseBlock):
+                                    if block.name == "mcp__autoswe_comment__post_plan":
+                                        if (block.input or {}).get("body", "").strip():
+                                            plan_posted = True
+                                    elif block.name == "mcp__autoswe_comment__post_question":
+                                        if (block.input or {}).get("body", "").strip():
+                                            question_posted = True
+                                    elif block.name == "ExitPlanMode":
+                                        # ExitPlanMode is disallowed in plan mode, but the
+                                        # tool-use block (with the plan markdown) still
+                                        # appears in the stream. Capture it so the planner
+                                        # can post the plan instead of "Tool: ExitPlanMode".
+                                        exit_plan = (block.input or {}).get("plan", "").strip()
+                                        if exit_plan:
+                                            captured_plan_text = exit_plan
+                                    plan_path = _extract_plan_file_path(block)
+                                    if plan_path is not None:
+                                        captured_plan_file = plan_path
+                    elif isinstance(msg, UserMessage):
+                        if spec.progress_callback and not _question_asked():
+                            for block in msg.content:
+                                if isinstance(block, ToolResultBlock):
+                                    if progress_state.note_tool_result(block):
+                                        body = progress_state.render()
+                                        if body:
+                                            spec.progress_callback(body)
+                    elif isinstance(msg, ResultMessage):
+                        if session_id is None:
+                            session_id = msg.session_id
+                        subtype = msg.subtype
+                        cost_usd = msg.total_cost_usd
+                        duration_ms = msg.duration_ms
+                        # Structured output (issue #159): the validated payload is
+                        # only ever on the final result message. ``getattr`` guards
+                        # against an SDK build predating the field (reads None).
+                        # On ``error_max_structured_output_retries`` (or any
+                        # success-without-structured-output) this is None, so the
+                        # handler falls back to the text-pattern path.
+                        so = getattr(msg, "structured_output", None)
+                        if isinstance(so, dict):
+                            structured_output = so
+                        elif subtype == "error_max_structured_output_retries":
+                            log(f"[CLAUDE] structured-output retries exhausted "
+                                f"(session={session_id}); falling back to text-pattern path")
+                        log(f"[CLAUDE] session={session_id} subtype={subtype} cost=${cost_usd or 0:.4f} duration={duration_ms/1000:.1f}s")
 
-                # Break early when AskUserQuestion fired — prevents the agent from
-                # running more tools after posting a question.
-                if spec.state and spec.state.get("asked_question_md"):
-                    break
+                    # Break early when AskUserQuestion fired — prevents the agent from
+                    # running more tools after posting a question.
+                    if spec.state and spec.state.get("asked_question_md"):
+                        break
         except (RuntimeError, Exception) as e:
             error_msg = str(e).lower()
             # Async generator crashes and "Claude Code returned an error result:

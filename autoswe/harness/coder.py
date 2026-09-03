@@ -228,6 +228,11 @@ def _run_fix_session(
 def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = None, cfg: dict | None = None, *, progress_callback=None, wt=None, fork_session: bool = False, fork_session_id: str | None = None) -> HandlerResult:
     """Run fix phase with bypassPermissions. Returns done-file content.
 
+    AskUserQuestion interception still applies: the CLI routes
+    user-interaction tools to the ``can_use_tool`` callback even under
+    bypassPermissions (issue #190), so a fixer that asks the user a
+    question pauses via ``WAITING: questions`` like the planner does.
+
     Return format on success:
       - "DONE: no changes detected"  (no staged changes)
       - "DONE_SUMMARY\t<claude_summary_lines>\t<commit_sha>"  (committed changes)

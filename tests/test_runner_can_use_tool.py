@@ -4,6 +4,8 @@ import asyncio
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from autoswe.harness.runner import RunResult
 
 
@@ -217,3 +219,152 @@ def test_run_result_back_compat():
     assert text == "hello"
     assert session_id == "s1"
     assert subtype == "success"
+
+
+# ---------------------------------------------------------------------------
+# SDK CanUseToolShadowedWarning suppression (issue #190)
+#
+# The SDK emits an advisory warning whenever can_use_tool is registered
+# alongside options that *statically* shadow it (bypassPermissions /
+# whole-tool allow entries). That advisory is a false positive for autoSWE's
+# configurations: the tool sets are pre-approved by design, and the CLI
+# still routes user-interaction tools (AskUserQuestion) to the callback
+# even under bypassPermissions — so the fixer's AskUserQuestion →
+# autoswe:waiting path works. The backend filters the advisory instead of
+# letting one warning line into poller.log per dispatch (verified live
+# against CLI 2.1.252).
+# ---------------------------------------------------------------------------
+
+
+def _shadows_warning_leaked(rec) -> list:
+    """Return the CanUseToolShadowedWarning entries in a recwarn-style list."""
+    from claude_agent_sdk import CanUseToolShadowedWarning
+
+    return [w for w in rec if issubclass(w.category, CanUseToolShadowedWarning)]
+
+
+def test_shadow_suppressor_filters_advisory_when_enabled():
+    """_can_use_tool_shadowing_suppressed(True) swallows the advisory."""
+    import warnings
+
+    from claude_agent_sdk import CanUseToolShadowedWarning
+
+    from autoswe.harness.backends.claude_code import (
+        _can_use_tool_shadowing_suppressed,
+    )
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        with _can_use_tool_shadowing_suppressed(True):
+            warnings.warn("shadowed", CanUseToolShadowedWarning, stacklevel=2)
+    assert not _shadows_warning_leaked(rec)
+
+
+def test_shadow_suppressor_is_noop_when_disabled():
+    """_can_use_tool_shadowing_suppressed(False) must not filter anything —
+    guards against a process-wide ignore that would also swallow the
+    advisory on legitimate (non-autoSWE) configurations."""
+    import warnings
+
+    from claude_agent_sdk import CanUseToolShadowedWarning
+
+    from autoswe.harness.backends.claude_code import (
+        _can_use_tool_shadowing_suppressed,
+    )
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        with _can_use_tool_shadowing_suppressed(False):
+            warnings.warn("shadowed", CanUseToolShadowedWarning, stacklevel=2)
+    assert _shadows_warning_leaked(rec)
+
+
+@pytest.mark.parametrize("mode", ["plan", "read_write"])
+def test_run_with_callback_does_not_leak_shadow_warning(mode):
+    """issue #190: a backend run that registers can_use_tool must not let
+    the SDK's CanUseToolShadowedWarning advisory escape into the log.
+
+    The fake query emits the advisory the way the real client does (at
+    connect / first iteration, computed from the options). The backend's
+    filter must swallow it for every phase that registers a callback
+    (plan, read_only, and read_write all do — planner/coder/reviewer).
+    """
+    import warnings
+
+    from claude_agent_sdk import AssistantMessage, CanUseToolShadowedWarning, TextBlock
+
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+    from autoswe.harness.runner import RunSpec
+
+    async def fake_callback(name, inp, ctx):
+        from claude_agent_sdk import PermissionResultAllow
+        return PermissionResultAllow(updated_input=inp)
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        # Mimic the real client: the advisory fires lazily at connect,
+        # before any message is yielded.
+        if options.can_use_tool is not None:
+            warnings.warn(
+                "can_use_tool will not be invoked (fake advisory)",
+                CanUseToolShadowedWarning,
+                stacklevel=2,
+            )
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    spec = RunSpec(
+        prompt="test", cwd="/tmp", mode=mode, can_use_tool=fake_callback, state={},
+    )
+    sdk = sys.modules["claude_agent_sdk"]
+
+    def run_it():
+        with patch.object(sdk, "query", fake_query):
+            with warnings.catch_warnings(record=True) as rec:
+                warnings.simplefilter("always")
+                asyncio.run(ClaudeCodeBackend()._run_async(spec))
+            return rec
+
+    rec = run_it()
+
+    assert "options" in captured, "fake_query was not called"
+    # The callback still reaches the SDK options unchanged — the filter
+    # only silences the advisory, it does not drop the capability.
+    assert captured["options"].can_use_tool is fake_callback
+    leaked = _shadows_warning_leaked(rec)
+    assert not leaked, f"mode={mode!r}: advisory escaped the backend: {leaked}"
+
+
+def test_shadow_warning_still_surfaces_without_callback():
+    """The suppression is scoped to callback-registered runs: without
+    can_use_tool the helper is a no-op and the advisory passes through
+    (guards against a blanket process-wide ignore)."""
+    import warnings
+
+    from claude_agent_sdk import AssistantMessage, CanUseToolShadowedWarning, TextBlock
+
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+    from autoswe.harness.runner import RunSpec
+
+    async def fake_query(prompt, options):
+        warnings.warn(
+            "can_use_tool will not be invoked (fake advisory)",
+            CanUseToolShadowedWarning,
+            stacklevel=2,
+        )
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    spec = RunSpec(prompt="test", cwd="/tmp", mode="read_write", state={})
+    sdk = sys.modules["claude_agent_sdk"]
+
+    def run_it():
+        with patch.object(sdk, "query", fake_query):
+            with warnings.catch_warnings(record=True) as rec:
+                warnings.simplefilter("always")
+                asyncio.run(ClaudeCodeBackend()._run_async(spec))
+            return rec
+
+    rec = run_it()
+    assert _shadows_warning_leaked(rec), "advisory should surface without a callback"
+

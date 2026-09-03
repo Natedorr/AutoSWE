@@ -166,6 +166,8 @@ degrades to plain text output.
 
 **Retryable exceptions:** `retryable_exceptions()` returns the SDK exception tuple (`asyncio.TimeoutError`, `ProcessError`, `CLIConnectionError`, `ClaudeSDKError` — or just `asyncio.TimeoutError` when the SDK import fails). The runner uses the *resolved backend's* tuple, not a hard-coded one (S6 / issue #169 F-09).
 
+**CanUseToolShadowedWarning suppression (issue #190).** When a run registers a `can_use_tool` callback, the SDK emits an advisory `CanUseToolShadowedWarning` because the mode-derived tool lists statically shadow it (the fixer's `bypassPermissions` mode auto-approves every tool, and plan/review list whole-tool allow entries). The shadowing is intentional and the advisory is a false positive for the capability autoSWE relies on: the CLI routes user-interaction tools (`AskUserQuestion`) to the callback regardless of allow rules or permission mode, so the AskUserQuestion → pause → `autoswe:waiting` path works even under `bypassPermissions` (verified against CLI 2.1.252; docs/claude-agent-sdk/agent-sdk/permissions.md, "Ask rules"). The backend therefore filters the advisory around the query loop (`_can_use_tool_shadowing_suppressed`, active only when a callback is registered) instead of letting one warning line into `poller.log` per dispatch.
+
 <a id="retry-semantics"></a>
 **Retry semantics (fork-on-retry).** The Claude Agent SDK supports
 `fork_session` / `resume_session_at` — a `/retry` can *branch* from the last
