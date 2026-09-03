@@ -214,6 +214,57 @@ def test_run_review_includes_diff_in_prompt(tmp_path, mock_gh_post_comment):
     assert "new line" in run_calls[0]
 
 
+def test_run_review_diffs_against_plan_branch(tmp_path, mock_gh_post_comment):
+    """With /plan --branch docs pinned, the review diff must be computed
+    against origin/docs (the branch the work was forked from), not
+    origin/master — the repo default — or the prompt carries the whole
+    docs↔master divergence (issue #187)."""
+    run_calls = []
+    git_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(prompt)
+        return _r("LGTM")
+
+    task = make_task()
+    task["plan_branch"] = "docs"
+
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.reviewer._run_git",
+                   side_effect=lambda wt, args: git_calls.append(args) or "stat"):
+            with FETCH_COMMENTS_PATCH:
+                with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                    from autoswe.harness.reviewer import run_review
+                    run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    diff_args = [a for a in git_calls if "diff" in a]
+    assert len(diff_args) == 2
+    assert all("origin/docs...HEAD" in a for a in diff_args), \
+        f"diff must be against origin/docs, got: {diff_args}"
+    # The prompt's base-branch reference must match the diff base too.
+    assert "origin/docs" in run_calls[0]
+    assert "origin/master" not in run_calls[0]
+
+
+def test_run_review_diffs_against_base_branch_without_plan_branch(tmp_path, mock_gh_post_comment):
+    """No pinned --branch → the review diff falls back to the repo default
+    base branch (issue #187)."""
+    git_calls = []
+    task = make_task()  # base_branch=master, no plan_branch
+
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.reviewer._run_git",
+                   side_effect=lambda wt, args: git_calls.append(args) or "stat"):
+            with FETCH_COMMENTS_PATCH:
+                with patch("autoswe.harness.runner.run", return_value=_r("LGTM")):
+                    from autoswe.harness.reviewer import run_review
+                    run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    diff_args = [a for a in git_calls if "diff" in a]
+    assert len(diff_args) == 2
+    assert all("origin/master...HEAD" in a for a in diff_args)
+
+
 def test_run_review_includes_plan_from_comments(tmp_path, mock_gh_post_comment):
     """run_review extracts plan from comments and includes it in prompt."""
     run_calls = []

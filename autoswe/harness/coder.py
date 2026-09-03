@@ -502,6 +502,9 @@ def resolve_sync_conflicts(
     """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     base_branch = task.get("base_branch", "main")
+    # The branch that was actually merged into this one (issue #187):
+    # plan_branch when /plan --branch pinned it, else the repo default.
+    sync_base = task.get("plan_branch") or base_branch
     session_id = task.get("session_id")
     provider = (repo_cfg or {}).get("provider", "github")
     rc = repo_cfg or {}
@@ -524,7 +527,7 @@ def resolve_sync_conflicts(
             dbg.warning("RESOLVE: plan file %s unreadable (%s)", plan_file_path, e)
 
     prompt = build_conflict_resolution_prompt(
-        task, conflict_files, plan_text=plan_text, base_branch=base_branch, repo_cfg=rc,
+        task, conflict_files, plan_text=plan_text, base_branch=sync_base, repo_cfg=rc,
     )
 
     # No genuinely-extra tools — the full read-write set comes from
@@ -622,7 +625,7 @@ def resolve_sync_conflicts(
 
     try:
         ahead_result = subprocess.run(
-            ["git", "-C", str(wt), "log", f"origin/{base_branch}..HEAD", "--oneline"],
+            ["git", "-C", str(wt), "log", f"origin/{sync_base}..HEAD", "--oneline"],
             capture_output=True, text=True, timeout=10, check=False,
         )
         ahead_count = len(ahead_result.stdout.strip().split("\n")) if ahead_result.stdout.strip() else 0
@@ -631,7 +634,7 @@ def resolve_sync_conflicts(
 
     summary = (
         f"Resolved merge conflicts in {len(conflict_files)} file(s) "
-        f"and merged origin/{base_branch} into {branch}. "
+        f"and merged origin/{sync_base} into {branch}. "
         f"{ahead_count} commits ahead."
     )
 

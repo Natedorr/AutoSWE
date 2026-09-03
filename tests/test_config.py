@@ -225,14 +225,28 @@ def test_load_config_auto_create_pr_defaults_false(isolated_autoswe_dir):
 def test_load_config_bad_int_falls_back_to_default_with_warning(
     isolated_autoswe_dir, caplog
 ):
-    """MAX_ATTEMPTS=thre must fall back to the default (3) and log a warning."""
+    """MAX_ATTEMPTS=thre must fall back to the default (3) and log a warning.
+
+    The ``autoswe.debug`` logger is deliberately set to ``propagate=False``
+    (init_debug_logger avoids double-emitting through root handlers), so
+    caplog's root-level handler never sees its records. Re-enable
+    propagation for the duration of the capture and restore it after.
+    """
+    import logging
+
     autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
     autoswe_env.write_text("MAX_ATTEMPTS=thre\n", encoding="utf-8")
 
     from autoswe.core.config import load_config
 
-    with caplog.at_level("WARNING"):
-        cfg = load_config()
+    dbg = logging.getLogger("autoswe.debug")
+    prev_propagate = dbg.propagate
+    dbg.propagate = True
+    try:
+        with caplog.at_level("WARNING"):
+            cfg = load_config()
+    finally:
+        dbg.propagate = prev_propagate
 
     assert cfg["MAX_ATTEMPTS"] == 3
     assert isinstance(cfg["MAX_ATTEMPTS"], int)

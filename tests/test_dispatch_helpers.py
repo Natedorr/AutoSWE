@@ -339,6 +339,138 @@ def test_sync_returns_done_summary_format(tmp_path, monkeypatch):
     assert "Merging" in progress_calls[0]
 
 
+def test_sync_uses_plan_branch_as_sync_target(tmp_path, monkeypatch):
+    """/plan --branch docs locks plan_branch=docs: /sync must merge
+    origin/docs into the work branch, not origin/<repo default> (issue #187)."""
+    from autoswe.orch.run import run
+    from autoswe.orch.types import Action, ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+    from autoswe.vcs import worktree as worktree_mod
+
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    monkeypatch.setattr(worktree_mod, "worktree_path",
+                        lambda o, r, n, c, p="github": wt_dir)
+    sync_args = []
+    monkeypatch.setattr(worktree_mod, "sync_branch",
+        lambda wt, o, r, n, b, p="github", cfg=None: sync_args.append(b) or {
+            "synced": True, "conflict": False, "branch": "autoswe/issue-1",
+            "ahead": 2, "commit_sha": "abc1234", "changed": True,
+        })
+
+    api = ApiState(
+        issue=NormalizedIssue(number=1, title="t", body="b", owner="o", repo="r"),
+        comments=(),
+    )
+    task = TaskState(
+        slug="gh:o_r_1", owner="o", repo="r", issue_number=1, title="t", body="b",
+        status=None, plan_branch="docs", base_branch="master", attempt_count=0,
+        first_dispatched_at=None, last_dispatched_command=None,
+        last_dispatched_command_id=None, last_consumed_reply_id=None,
+        session_id=None, pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+        provider="github",
+    )
+    world = World(api=api, task=task, cfg={"WORKTREE_DIR": str(tmp_path)},
+                  repo_cfg={"provider": "github"})
+    progress_calls = []
+    result = run(Action(kind="sync_branch", slug="gh:o_r_1"), world,
+                 progress_callback=progress_calls.append)
+
+    assert sync_args == ["docs"], \
+        f"sync must target origin/docs, got {sync_args}"
+    assert any("origin/docs" in c for c in progress_calls)
+    assert "origin/master" not in result.done_content
+
+
+def test_sync_falls_back_to_base_branch_without_plan_branch(tmp_path, monkeypatch):
+    """No --branch given → /sync targets the repo default base branch."""
+    from autoswe.orch.run import run
+    from autoswe.orch.types import Action, ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+    from autoswe.vcs import worktree as worktree_mod
+
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    monkeypatch.setattr(worktree_mod, "worktree_path",
+                        lambda o, r, n, c, p="github": wt_dir)
+    sync_args = []
+    monkeypatch.setattr(worktree_mod, "sync_branch",
+        lambda wt, o, r, n, b, p="github", cfg=None: sync_args.append(b) or {
+            "synced": True, "conflict": False, "branch": "autoswe/issue-1",
+            "ahead": 2, "commit_sha": "abc1234", "changed": True,
+        })
+
+    api = ApiState(
+        issue=NormalizedIssue(number=1, title="t", body="b", owner="o", repo="r"),
+        comments=(),
+    )
+    task = TaskState(
+        slug="gh:o_r_1", owner="o", repo="r", issue_number=1, title="t", body="b",
+        status=None, plan_branch=None, base_branch="master", attempt_count=0,
+        first_dispatched_at=None, last_dispatched_command=None,
+        last_dispatched_command_id=None, last_consumed_reply_id=None,
+        session_id=None, pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+        provider="github",
+    )
+    world = World(api=api, task=task, cfg={"WORKTREE_DIR": str(tmp_path)},
+                  repo_cfg={"provider": "github"})
+    run(Action(kind="sync_branch", slug="gh:o_r_1"), world)
+
+    assert sync_args == ["master"]
+
+
+def test_run_fix_pre_dispatch_sync_uses_plan_branch(tmp_path, monkeypatch):
+    """Pre-fix sync on a --branch docs task must merge origin/docs, not
+    origin/master — otherwise every /fix pollutes the work branch with
+    default-branch history (issue #187)."""
+    from autoswe.harness.runner import HandlerResult
+    from autoswe.orch.run import run
+    from autoswe.orch.types import Action, ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+    from autoswe.vcs import worktree as worktree_mod
+
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    monkeypatch.setattr(worktree_mod, "worktree_path",
+                        lambda o, r, n, c, p="github": wt_dir)
+    sync_args = []
+    monkeypatch.setattr(worktree_mod, "sync_branch",
+        lambda wt, o, r, n, b, p="github", cfg=None: sync_args.append(b) or {
+            "synced": True, "conflict": False, "branch": "autoswe/issue-1",
+            "ahead": 2, "commit_sha": "def5678", "changed": True,
+        })
+
+    import autoswe.harness.coder as coder_mod
+    fix_called = []
+    monkeypatch.setattr(coder_mod, "run_fix",
+        lambda *a, **kw: fix_called.append(True) or HandlerResult("DONE_SUMMARY\tfixed\tabc"))
+
+    api = ApiState(
+        issue=NormalizedIssue(number=1, title="t", body="b", owner="o", repo="r"),
+        comments=(),
+    )
+    task = TaskState(
+        slug="gh:o_r_1", owner="o", repo="r", issue_number=1, title="t", body="b",
+        status=None, plan_branch="docs", base_branch="master", attempt_count=0,
+        first_dispatched_at=None, last_dispatched_command=None,
+        last_dispatched_command_id=None, last_consumed_reply_id=None,
+        session_id=None, pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+        provider="github",
+    )
+    world = World(api=api, task=task, cfg={"WORKTREE_DIR": str(tmp_path)},
+                  repo_cfg={"provider": "github", "pat": "fake"})
+    result = run(Action(kind="fix", slug="gh:o_r_1"), world)
+
+    assert result is not None
+    assert result.done_content.startswith("DONE_SUMMARY")
+    assert sync_args == ["docs"], \
+        f"pre-fix sync must target origin/docs, got {sync_args}"
+    assert len(fix_called) == 1
+
+
 # ---------------------------------------------------------------------------
 # Batch 4 — Safeguard negative paths (roadmap hole-closing)
 # ---------------------------------------------------------------------------

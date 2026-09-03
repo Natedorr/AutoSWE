@@ -1,0 +1,55 @@
+[
+  {
+    "wi": 155,
+    "title": "\ud83e\uddea E2E: Add greet(name) to hello.py",
+    "steps": {
+      "plan": {
+        "ok": true,
+        "status": "planned",
+        "error": null
+      }
+    }
+  },
+  {
+    "wi": 156,
+    "title": "\ud83e\uddea E2E: Create math_ops.py with add/subtract",
+    "steps": {
+      "plan": {
+        "ok": true,
+        "status": "planned",
+        "error": null
+      },
+      "fix": {
+        "ok": true,
+        "status": "fixed",
+        "error": null
+      }
+    }
+  },
+  {
+    "wi": 157,
+    "title": "\ud83e\uddea E2E: Create clamp.py utility",
+    "steps": {
+      "plan": {
+        "ok": true,
+        "status": "planned",
+        "error": null
+      },
+      "fix": {
+        "ok": true,
+        "status": "fixed",
+        "error": null
+      },
+      "review": {
+        "ok": true,
+        "status": "reviewed",
+        "error": null
+      },
+      "pr": {
+        "ok": true,
+        "status": "shipped",
+        "error": null
+      }
+    }
+  }
+]

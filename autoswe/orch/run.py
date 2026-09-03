@@ -172,21 +172,27 @@ def _run_sync(
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     provider = repo_cfg.get("provider", "github")
     base_branch = task.get("base_branch", "main")
+    # Sync target: the branch this task's work was actually forked from.
+    # With /plan --branch <b> that's <b> (plan_branch), not the repo default —
+    # merging origin/<default> would pollute the branch and bloat every
+    # subsequent diff (issue #187). Falls back to the repo default when no
+    # explicit base was given.
+    sync_base = task.get("plan_branch") or base_branch
     token = task["_token"]
     wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
     if not wt.exists():
         wt = worktree_mod.create_worktree(
-            owner, repo, issue_num, base_branch, token, cfg, provider,
+            owner, repo, issue_num, sync_base, token, cfg, provider,
             default_branch=base_branch, pull_strategy="reset", push_new=True,
         )
     try:
         if progress_callback:
             progress_callback(
-                f"Merging `origin/{base_branch}` into "
+                f"Merging `origin/{sync_base}` into "
                 f"`{worktree_mod.get_vcs({'owner': owner, 'repo': repo, 'token': '', 'provider': provider}).branch_name(issue_num)}`"
                 f"&hellip;{BOT_MARKER}"
             )
-        result = worktree_mod.sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)
+        result = worktree_mod.sync_branch(wt, owner, repo, issue_num, sync_base, provider, cfg)
         log(f"[SYNC] {task['id']} synced={result.get('synced')} conflict={result.get('conflict')} ahead={result.get('ahead', 0)}")
         if result.get("synced"):
             branch = result["branch"]
@@ -195,11 +201,11 @@ def _run_sync(
             ahead = result.get("ahead", 0)
             if changed:
                 summary = (
-                    f"Merged `origin/{base_branch}` into `{branch}`.\n\n"
-                    f"{ahead} commits ahead of `{base_branch}` after sync."
+                    f"Merged `origin/{sync_base}` into `{branch}`.\n\n"
+                    f"{ahead} commits ahead of `{sync_base}` after sync."
                 )
             else:
-                summary = f"Already up to date with `origin/{base_branch}`."
+                summary = f"Already up to date with `origin/{sync_base}`."
             return DispatchResult(
                 done_content=f"DONE_SUMMARY\t{summary}\t{commit_sha}",
             )
@@ -251,6 +257,11 @@ def _sync_before_dispatch(
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     provider = repo_cfg.get("provider", "github")
     base_branch = task.get("base_branch", "main")
+    # The work branch was forked from plan_branch when /plan --branch <b> was
+    # given, so pre-dispatch syncs must merge origin/plan_branch — never
+    # origin/<repo default> — or every dispatch pollutes the branch with
+    # unrelated default-branch history (issue #187).
+    sync_base = task.get("plan_branch") or base_branch
     token = task["_token"]
 
     wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
@@ -260,7 +271,7 @@ def _sync_before_dispatch(
             default_branch=base_branch, pull_strategy="reset", push_new=True,
         )
 
-    sync_result = worktree_mod.sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)
+    sync_result = worktree_mod.sync_branch(wt, owner, repo, issue_num, sync_base, provider, cfg)
     log(f"[SYNC] {task['id']} pre-{phase} synced={sync_result.get('synced')} conflict={sync_result.get('conflict')}")
 
     if sync_result.get("conflict") and sync_result.get("rebase"):

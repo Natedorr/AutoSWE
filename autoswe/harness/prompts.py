@@ -380,7 +380,9 @@ def build_review_prompt(
 
     owner, repo = task["owner"], task["repo"]
     issue_num = task["issue_number"]
-    base_branch = task.get("base_branch", "main")
+    # Same base the diff was computed against: the --branch base when pinned
+    # (issue #187), else the repo default.
+    base_branch = task.get("plan_branch") or task.get("base_branch", "main")
     branch = get_vcs(
         {"owner": owner, "repo": repo,
          "provider": (repo_cfg or {}).get("provider", "github")}

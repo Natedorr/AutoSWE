@@ -120,6 +120,11 @@ def run_review(
     """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     base_branch = task.get("base_branch", "main")
+    # The branch this task's work was forked from: plan_branch when the user
+    # pinned /plan --branch <b>, else the repo default. The review diff must
+    # be against that base — diffing origin/<default> would surface the
+    # default↔plan_branch divergence and burn agent context (issue #187).
+    diff_base = task.get("plan_branch") or base_branch
     token = task["_token"]
     provider = repo_cfg.get("provider", "github")
 
@@ -133,14 +138,14 @@ def run_review(
             log(f"[REVIEW] Reusing worktree {wt_path}")
         else:
             wt_path = create_worktree(
-                owner, repo, issue_num, base_branch, token, cfg or {}, provider,
+                owner, repo, issue_num, diff_base, token, cfg or {}, provider,
                 default_branch=base_branch, pull_strategy="reset", push_new=False,
             )
 
     # 2. Compute diff
     try:
-        diff_stat = _run_git(wt_path, ["diff", "--stat", f"origin/{base_branch}...HEAD"])
-        diff_text = _run_git(wt_path, ["diff", f"origin/{base_branch}...HEAD"])
+        diff_stat = _run_git(wt_path, ["diff", "--stat", f"origin/{diff_base}...HEAD"])
+        diff_text = _run_git(wt_path, ["diff", f"origin/{diff_base}...HEAD"])
         diff_text = _truncate(diff_text, _REVIEW_MAX_DIFF_LINES)
     except subprocess.CalledProcessError as e:
         diff_stat = "(no diff)"
