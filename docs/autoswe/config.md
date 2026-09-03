@@ -55,7 +55,7 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | Key | Default | Description |
 |-----|---------|-------------|
 | `MAX_CONCURRENT` | `1` | Max simultaneous agent jobs |
-| `MAX_ATTEMPTS` | `3` | Max restart attempts per issue before failing |
+| `MAX_ATTEMPTS` | `3` | Retry budget per issue: consecutive re-runs of failing work (from `failed`/`error`/`skipped`/`aborted` or `planned` restarts) before failing. Restarting from a successful rest (`fixed`/`synced`/`shipped`/`reviewed`, `review_failed`/`review_blocked`) starts a fresh budget |
 | `MAX_TOTAL_HOURS` | `2` | Max total time per issue in hours |
 | `AGENT_TIMEOUT` | `7200` | Max Claude session runtime in seconds (2 hours) |
 | `AGENT_RETRY_ON_FAILURE` | `0` | Auto-retry failed handler runs (0 = disabled) |

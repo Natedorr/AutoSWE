@@ -47,7 +47,13 @@ A label is never a steering input (`labels.md`).
 
 ## `MAX_ATTEMPTS` Per Issue
 
-`attempt_count` is carried forward by `decide()` on **every restart** — a dispatch from a terminal / review-blocking / `planned` state (slash command or plain-text reply) sets the next action's `attempt_count` to `task.attempt_count + 1` (floored at 1 so a legacy task with a stored `0` doesn't jump to 2 on its first real dispatch). Only `/retry` resets `attempt_count` to 1. Because the counter accumulates across restarts, when the stored `attempt_count` already equals `MAX_ATTEMPTS` (default 3) the next restart computes `attempt_count = MAX_ATTEMPTS + 1 > MAX_ATTEMPTS` and `decide()` returns `Action(kind="mark_failed_limit", limit_reason="attempts")` — `emit()` produces a "Max attempts reached" comment, sets `autoswe_status = "failed"`, and sets `_guard_blocked = True` so comment re-scans stop until a new command appears. The attempts guard is checked **before** the "failed/error only restart on `/retry`" gate, so it fires on both the `/fix`-again and `/retry` loops, not just `/retry`.
+`attempt_count` is a **retry budget**: it bounds how many times work that keeps failing gets re-run, not how many phases an issue goes through. `decide()` computes it per restart as follows:
+
+- **Fresh budget (→ 1)**: restarting from a *successful* rest — any completed status (`fixed`/`synced`/`shipped`/`reviewed`) or a review verdict resting state (`review_failed`/`review_blocked`). The previous phase finished, so the follow-up work (`/fix` after `review_failed`, `/pr` after `fixed`, …) starts at 1. This is what keeps the ordinary plan→fix→review→fix lifecycle from burning the budget (issue #186: the old carry-forward saturated the default of 3 on a healthy cycle and blocked the very `/fix` that addresses the review finding).
+- **Carry forward (previous + 1, floored at 1)**: restarting from a *failing or neutral* rest (`failed`/`error`/`skipped`/`aborted`) or from `planned` (re-plan churn). This is the path the guard actually fires on.
+- **`/retry` (→ 1)**: explicit reset.
+
+Because the counter carries forward only across failing/neutral rests, when it already equals `MAX_ATTEMPTS` (default 3) the next *carry-forward* restart computes `attempt_count = MAX_ATTEMPTS + 1 > MAX_ATTEMPTS` and `decide()` returns `Action(kind="mark_failed_limit", limit_reason="attempts")` — `emit()` produces a "Max attempts reached" comment, sets `autoswe_status = "failed"`, and sets `_guard_blocked = True` so comment re-scans stop until a new command appears. The attempts guard is checked **before** the "failed/error only restart on `/retry`" gate, so it fires on both the `/fix`-again and `/retry` loops, not just `/retry`.
 
 ## `MAX_TOTAL_HOURS` Wall Clock
 

@@ -55,3 +55,5 @@ When `/retry` action is run (`orch/run.py:_run_retry()`):
 1. `decide()` sets `attempt_count = 1` (resets the counter)
 2. `run()` looks at `last_dispatched_command` for the last substantive command (not `/pr`, `/sync`, `/retry`, `/skip`, or `/abort`)
 3. Replays that command via the appropriate planner/coder/ship handler
+
+Note: `MAX_ATTEMPTS` is a **retry budget** — it bounds re-runs of work that keeps failing, not the number of phases an issue goes through. Restarting from a *successful* rest (`fixed`/`synced`/`shipped`/`reviewed`, or `review_failed`/`review_blocked`) starts a fresh budget, so the follow-up `/fix` after a review verdict, or `/pr` after a `fixed` task, never burns attempts even after a long healthy lifecycle. `/retry` remains the explicit reset when a task is stuck in `failed`/`error` (see `safeguards.md`).

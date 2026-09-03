@@ -1038,6 +1038,59 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "review_failed_then_fix_fresh_budget",
+        "description": (
+            "Task at review_failed with attempt_count=3 (== MAX_ATTEMPTS); the follow-up "
+            "/fix that addresses the review finding starts a fresh budget (attempt 1) "
+            "instead of tripping the MAX_ATTEMPTS guard (issue #186: a successful "
+            "plan→fix→review cycle must not burn the retry budget — the old carry "
+            "forward computed 4 > 3 and marked the task failed with 'Post /retry')"
+        ),
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:review_failed"],
+            "comments": [
+                {
+                    "body": "## Review\n\n[Medium] planned-path time guard untested.\n\n## Verdict\n\nNeeds changes\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/fix",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "review_failed",
+                "base_branch": "main",
+                "session_id": "s-fix-42",
+                "attempt_count": 3,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/review",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tAddressed review finding\tdef5678", "session_id": "s-fix-42b", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "attempt_count": 1,
+            "comment_contains": ["Completed with command", "Addressed review finding"],
+            "claude_permission": "bypassPermissions",
+        },
+    },
+    {
         "name": "retry_resets_attempt_count",
         "description": "/retry from failed state resets attempt count and re-dispatches",
         "start": {

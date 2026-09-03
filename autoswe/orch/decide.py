@@ -173,9 +173,14 @@ def _reset_attempt(task: object, new_count: int, reason: str) -> None:  # type: 
 def _next_attempt(task: object, reason: str) -> int:  # type: ignore[type-arg]
     """Attempt count for a restart: previous + 1, floored at 1.
 
-    Every non-``/retry`` restart path (terminal / review-blocking / planned,
-    slash or plain-text) carries the counter forward so the ``MAX_ATTEMPTS``
-    guard in ``decide()`` can actually fire. The floor keeps a legacy task with
+    Carries the counter forward so the ``MAX_ATTEMPTS`` guard in
+    ``decide()`` can actually fire — used for restarts from *failing or
+    neutral* rests (failed / error / skipped / aborted, slash or
+    plain-text) and from ``planned`` (re-plan churn). Restarting from a
+    *successful* rest (completed statuses, review-blocking states) instead
+    starts a fresh budget — see ``_check_restart_or_guard`` (issue #186:
+    a healthy plan→fix→review cycle must not burn the retry budget).
+    The floor keeps a legacy task with
     a stored ``0`` from jumping straight to ``2`` on its first real dispatch.
     Only ``/retry`` resets the counter to 1 (via ``_reset_attempt``).
     """
@@ -398,12 +403,22 @@ def _check_restart_or_guard(
     # New user intent on a restartable command
     if has_new_user and slash_cmd not in ("/skip", "/abort"):
         # Calculate attempt count (used for limit checks and dispatch).
-        # A restart carries the counter forward (previous + 1) so the
-        # MAX_ATTEMPTS guard below can fire; only /retry resets to 1.
+        # Restarting from a *successful* rest (a completed status, or a
+        # review verdict) starts a fresh MAX_ATTEMPTS budget: the previous
+        # phase finished, so follow-up work — /fix after review_failed,
+        # /pr after fixed, /sync after fixed, ... — must not burn the retry
+        # budget (issue #186: a healthy plan→fix→review→fix cycle was
+        # saturating the budget and blocking the very follow-up /fix that
+        # addresses the review finding). Restarting from a failing/neutral
+        # rest (failed / error / skipped / aborted) carries the counter
+        # forward so the guard below can fire; /retry resets to 1.
         max_attempts = cfg.get("MAX_ATTEMPTS", 3)
         if slash_cmd == "/retry":
             attempt_count = 1
             _reset_attempt(task, attempt_count, f"cmd={slash_cmd}, max={max_attempts}")
+        elif status in COMPLETED_STATUSES or status in REVIEW_BLOCKING_STATUSES:
+            attempt_count = 1
+            _reset_attempt(task, attempt_count, f"fresh budget from {status}, cmd={slash_cmd}, max={max_attempts}")
         else:
             attempt_count = _next_attempt(task, f"restart cmd={slash_cmd}, max={max_attempts}")
 

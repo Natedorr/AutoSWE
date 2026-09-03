@@ -476,6 +476,7 @@ Additional transition rows in `tests/scenarios/transitions.py` cover:
 | Scenario | Description |
 |----------|-------------|
 | `attempt_limit_hit` | Task exceeds MAX_ATTEMPTS → failed status |
+| `review_failed_then_fix_fresh_budget` | `/fix` after `review_failed` at the budget cap starts a fresh budget instead of tripping the guard (issue #186) |
 | `retry_resets_attempt_count` | `/retry` command resets attempt counter |
 | `running_command_noop` | New command during RUNNING status → noop |
 | `stale_command_suppressed` | Command ID below watermark → noop |

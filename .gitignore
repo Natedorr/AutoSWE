@@ -11,6 +11,13 @@
 /config/repos.json
 /config/harnesses.json
 
+# Local timestamped backups (*.bak-YYYYMMDD[-suffix]) — never commit; they
+# routinely contain live PATs/tokens from config files.
+*.bak-*
+
+# Review-phase run artifacts (local outputs, like /logs/ and /data/)
+/artifacts/
+
 # Coverage output
 .coverage
 
