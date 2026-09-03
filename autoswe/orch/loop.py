@@ -325,7 +325,11 @@ def _dispatch_task(
                 bot_ids.append(progress.comment_id)
 
         # --- Run the action (Layer B) ---
-        result = run(action, world, progress_callback=progress.update)
+        # Pass the ProgressComment object (not just its .update bound method):
+        # it is callable (see __call__) for plain progress updates, and the
+        # AskUserQuestion callback can additionally freeze() it on a posted
+        # question so no later tool event clobbers it (issue #184).
+        result = run(action, world, progress_callback=progress)
 
         # --- Emit effects (Layer C) ---
         effects = emit(action, result, world)

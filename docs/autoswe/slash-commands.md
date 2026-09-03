@@ -25,14 +25,14 @@ Returns `(command, guidance, branch)` or `None`.
 
 | Modifier | Example | Effect |
 |----------|---------|--------|
-| `--branch <name>` | `/plan --branch develop` | Sets `plan_branch` on task (only if not already set — subsequent `--branch` flags are ignored) |
+| `--branch <name>` | `/plan --branch develop` | Sets `plan_branch` on task. The token is the full whitespace-delimited word and is validated against git's ref-name rules (approximation of `git check-ref-format --branch`); the trailing-period typo is repaired (`docs.` → `docs`). An invalid token that can't be repaired is ignored (default branch) — issue #184 |
 | `with <guidance>` | `/fix with performance focus` | Appends guidance to fix prompt via `{{GUIDANCE_BLOCK}}` |
 | Both | `/fix --branch main with hotfix` | Branch + guidance combined |
 
 ### Regex Patterns
 
 - Command: `r"/(?:fix|plan|pr|retry|skip|sync|abort|review)"` (case-insensitive, at line start)
-- Branch: `r"--branch\s+([\w][\w\-./]+)"`
+- Branch: `r"--branch\s+(\S+)"` followed by `_sanitize_branch_token()` validation (git ref-name rules, trailing-period repair)
 
 ## Multi-Command-Last-Wins Rule
 

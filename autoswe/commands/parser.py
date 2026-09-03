@@ -7,7 +7,59 @@ import re
 _SLASH_CMD_RE = re.compile(
     r"/(?:fix|plan|pr|retry|skip|sync|abort|review)(?=\s|$|`)", re.IGNORECASE
 )
-_BRANCH_RE = re.compile(r"--branch\s+([\w][\w\-./]+)")
+_BRANCH_RE = re.compile(r"--branch\s+(\S+)")
+
+
+# Characters git's ref-name rules reject anywhere in a branch name
+# (approximation of `git check-ref-format --branch`). Quotes are rejected on
+# top of git's rules: a `--branch` token containing one is almost certainly a
+# shell/sentence artifact, and the pre-#184 character-class capture rejected
+# them too.
+_BRANCH_BAD_CHARS_RE = re.compile(r"[\x00-\x1f\x7f ~^\?:*\"'\\]")
+
+
+def _is_valid_branch_name(name: str) -> bool:
+    """Validate a branch token against git's ref-name rules.
+
+    Approximates `git check-ref-format --branch` plus quotes (see the
+    character class above): rejects empty names, names with control
+    characters or space, `~`, `^`, `:`, `?`, `*`, `[`, backslash, quotes,
+    `..`, `//`, `@{`, a leading `-` or `.`, a trailing `.`, and names ending
+    in `.lock`. (git additionally rejects leading `/` and `@{` sequences;
+    those are rare enough in user-typed `--branch` values to skip.)
+    """
+    if not name or name.startswith(("-", ".")) or name.endswith("."):
+        return False
+    if ".." in name or "//" in name or "@{" in name:
+        return False
+    if name.endswith(".lock"):
+        return False
+    return _BRANCH_BAD_CHARS_RE.search(name) is None
+
+
+def _sanitize_branch_token(raw: str) -> str | None:
+    """Validate a `--branch` token, repairing the trailing-period typo.
+
+    The token is the full whitespace-delimited word after `--branch`, so
+    sentence punctuation sticks to it: `/plan --branch docs.  what was the
+    question` yields the token `docs.` (issue #184). Git rejects branch names
+    with a trailing dot, so the common repair is to strip it (`docs.` ->
+    `docs`). Surrounding quotes are also stripped (`"docs"` -> `docs`,
+    matching the previous character-class capture). Returns None when the
+    token is (or stays) invalid — the caller then falls back to the default
+    branch.
+    """
+    if _is_valid_branch_name(raw):
+        return raw
+    candidate = raw
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in "\"'":
+        candidate = candidate[1:-1]
+        if _is_valid_branch_name(candidate):
+            return candidate
+    repaired = candidate.rstrip(".")
+    if repaired and _is_valid_branch_name(repaired):
+        return repaired
+    return None
 
 
 def _parse_mention(text: str, bot_name: str) -> tuple[str, str, str] | None:
@@ -62,7 +114,7 @@ def parse_slash_command(text: str, bot_name: str = "autoswe"):
             if rest:
                 branch_m = _BRANCH_RE.search(rest)
                 if branch_m:
-                    branch = branch_m.group(1)
+                    branch = _sanitize_branch_token(branch_m.group(1))
                     after_branch = rest[branch_m.end():].strip()
                     if after_branch.lower().startswith("with "):
                         after_branch = after_branch[5:].strip()

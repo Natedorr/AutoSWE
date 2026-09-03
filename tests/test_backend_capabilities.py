@@ -431,6 +431,71 @@ def test_interpret_plan_result_state_question(tmp_path):
     assert done == "WAITING: questions"
 
 
+def test_interpret_plan_result_posted_question_trusts_callback(tmp_path):
+    """asked_question_posted=True means the standalone post landed — no
+    fallback re-post (issue #184)."""
+    from unittest.mock import patch
+
+    from autoswe.harness.planner import _interpret_plan_result
+    from autoswe.harness.runner import RunResult
+
+    result = RunResult("", "s", "success")
+    state = {"asked_question_md": "## Question", "asked_question_posted": True}
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+
+    with patch("autoswe.harness.planner.post_question_fallback") as mock_fb:
+        done, pf = _interpret_plan_result(
+            result, state=state, harness={"backend": "claude_code"},
+            task=task, repo_cfg={"provider": "github"},
+            progress_callback=lambda body: None,
+        )
+
+    assert done == "WAITING: questions"
+    mock_fb.assert_not_called()
+
+
+def test_interpret_plan_result_failed_question_post_falls_back(tmp_path):
+    """asked_question_posted=False triggers the fallback post so the user
+    still sees the question (issue #184)."""
+    from unittest.mock import patch
+
+    from autoswe.harness.planner import _interpret_plan_result
+    from autoswe.harness.runner import RunResult
+
+    result = RunResult("", "s", "success")
+    state = {"asked_question_md": "## Question", "asked_question_posted": False}
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+    sticky = []
+
+    with patch("autoswe.harness.planner.post_question_fallback") as mock_fb:
+        done, pf = _interpret_plan_result(
+            result, state=state, harness={"backend": "claude_code"},
+            task=task, repo_cfg={"provider": "github"},
+            progress_callback=sticky.append,
+        )
+
+    assert done == "WAITING: questions"
+    mock_fb.assert_called_once_with(task, {"provider": "github"}, "## Question", sticky.append)
+
+
+def test_interpret_plan_result_no_task_no_fallback(tmp_path):
+    """Without task/repo_cfg (e.g. direct test calls), a failed post is
+    reported as WAITING without attempting a fallback (no crash)."""
+    from autoswe.harness.planner import _interpret_plan_result
+    from autoswe.harness.runner import RunResult
+
+    result = RunResult("", "s", "success")
+    state = {"asked_question_md": "## Question", "asked_question_posted": False}
+
+    with patch("autoswe.harness.planner.post_question_fallback") as mock_fb:
+        done, pf = _interpret_plan_result(
+            result, state=state, harness={"backend": "claude_code"},
+        )
+
+    assert done == "WAITING: questions"
+    mock_fb.assert_not_called()
+
+
 def test_interpret_plan_result_fallback_to_text(tmp_path):
     """When no MCP flags set, fall back to text parsing."""
     from autoswe.harness.planner import _interpret_plan_result

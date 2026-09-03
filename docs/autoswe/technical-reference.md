@@ -121,7 +121,7 @@ After all dispatches in a cycle:
 - **→ pending** (set by `decide()`): First sight of an issue carrying a slash command (body or comment), or a user comment with a slash command whose ID is newer than `last_dispatched_command_id`, or any user reply on a task in `waiting`/`planned`.
 - **→ RUNNING statuses** (`planning`/`fixing`/`syncing`/`reviewing`/`shipping`; set by `_dispatch_task()`): Only from a non-noop Action. PID file is created first, then the status flips. The specific running status depends on the action kind.
 - **→ planned**: Planner returned `"PLAN_READY"` (MCP `post_plan` fired, or — deprecated fallback — an `<AUTOSWE_PLAN>` block / native plan file was found).
-- **→ waiting**: Planner returned `"WAITING: …"` (MCP `post_question`, an AskUserQuestion, or — deprecated fallback — an `<AUTOSWE_QUESTIONS>` block / no parseable plan).
+- **→ waiting**: Planner returned `"WAITING: …"` (MCP `post_question`, a standalone `AskUserQuestion` comment, or — deprecated fallback — an `<AUTOSWE_QUESTIONS>` block / no parseable plan).
 - **→ COMPLETED statuses** (`fixed`/`synced`/`shipped`/`reviewed`): Coder returned `"DONE*"` for `/fix` → `fixed`, or `/sync` succeeded → `synced`, or `/pr` succeeded → `shipped`, or `/review` succeeded → `reviewed`, or the issue was found closed at refresh time → `fixed`.
 - **→ failed**: Handler returned `"FAILED: …"`, or sync's attempt/time guard tripped.
 - **→ skipped**: `/skip`.

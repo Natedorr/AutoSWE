@@ -598,6 +598,7 @@ def test_mcp_comment_server_has_tools():
 # Minimal posting mode
 # ---------------------------------------------------------------------------
 
+
 class _FakeTracker:
     def __init__(self):
         self.posts = []
@@ -609,6 +610,176 @@ class _FakeTracker:
 
     def update_comment(self, issue_num, comment_id, body):
         self.updates.append(body)
+
+
+# ---------------------------------------------------------------------------
+# freeze() — posted questions must not be clobbered by later tool events
+# (issue #184)
+# ---------------------------------------------------------------------------
+
+
+def test_progress_freeze_flushes_body_immediately():
+    """freeze() writes the body immediately regardless of throttle."""
+    from autoswe.tracking.comments import BOT_MARKER
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class FreezeTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(FreezeTracker(), {}, 1)
+    progress.create("init")
+    updates.clear()
+    # Freeze within the throttle window — must still flush immediately.
+    progress.freeze("## Questions\n\nWhich approach?")
+    assert updates == ["## Questions\n\nWhich approach?\n" + BOT_MARKER]
+    assert progress.frozen is True
+
+
+def test_progress_update_noop_after_freeze():
+    """update() after freeze() must not clobber the frozen question."""
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class FreezeTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(FreezeTracker(), {}, 1)
+    progress.create("init")
+    updates.clear()
+    progress.freeze("## Questions\n\nWhich approach?")
+    progress.update("Tool: StructuredOutput")  # later tool event
+    progress.update("Running: git fetch")
+    assert len(updates) == 1  # only the frozen question was written
+
+
+def test_progress_drain_does_not_clobber_frozen_question():
+    """Regression (issue #184): the lost-question sequence.
+
+    Tool event flushes, question posted+coalesced, then the next tool event
+    (StructuredOutput) overwrote the pending body before drain() — the
+    question never reached the issue. With freeze(), drain() can only ever
+    write the question body.
+    """
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class FreezeTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(FreezeTracker(), {}, 1)
+    progress.create("init")
+    progress._last_update = 0  # release throttle so the tool event flushes
+    progress.update("Read: tests/test_transitions.py")  # flushes
+    assert len(updates) == 1
+
+    # Question posted moments later: within the throttle window a bare
+    # update() would coalesce, then get clobbered by the next tool event.
+    progress.freeze("## Questions\n\nWhich approach?\n\n_Reply in this thread._")
+    assert len(updates) == 2
+
+    # Simulate the SDK's turn-end StructuredOutput event arriving afterwards.
+    progress._last_update = 0  # release throttle so a bare update() WOULD flush
+    progress.update("Tool: StructuredOutput")
+    progress.drain()
+
+    # The final body on the sticky is still the question.
+    assert len(updates) == 2
+    assert "Which approach?" in updates[-1]
+    assert "StructuredOutput" not in updates[-1]
+
+
+def test_progress_freeze_noop_without_comment_id():
+    """freeze() without create() must not raise and must not post."""
+    from autoswe.tracking.progress import ProgressComment
+
+    class NoopTracker:
+        def post_comment(self, issue_num, body):
+            raise AssertionError("freeze must not post when create() never ran")
+
+        def update_comment(self, issue_num, comment_id, body):
+            raise AssertionError("freeze must not update when create() never ran")
+
+    progress = ProgressComment(NoopTracker(), {}, 1)
+    progress.freeze("question body")  # must not raise
+    assert progress.frozen is True
+
+
+def test_progress_freeze_minimal_queues_until_drain():
+    """In minimal mode freeze() queues the question; drain() flushes it."""
+    from autoswe.tracking.comments import BOT_MARKER
+    from autoswe.tracking.progress import ProgressComment
+
+    tracker = _FakeTracker()
+    progress = ProgressComment(tracker, {}, 1, minimal=True)
+    progress.create("initial")
+    progress.update("step one")
+    progress.freeze("## Questions\n\nWhich approach?")
+    progress.update("step two")  # must not replace the queued question
+    progress.drain()
+
+    assert tracker.updates == ["## Questions\n\nWhich approach?\n" + BOT_MARKER]
+
+
+def test_progress_finalize_still_wins_after_freeze():
+    """finalize() remains authoritative even after freeze()."""
+    from autoswe.tracking.comments import BOT_MARKER
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class FreezeTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(FreezeTracker(), {}, 1)
+    progress.create("init")
+    progress.freeze("## Questions\n\nWhich approach?")
+    progress.finalize("Completed with command `/fix`.")
+    assert updates[-1] == "Completed with command `/fix`.\n" + BOT_MARKER
+
+
+def test_progress_call_delegates_to_update():
+    """ProgressComment is usable as a plain progress_callback via __call__."""
+    from autoswe.tracking.comments import BOT_MARKER
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class CallTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(CallTracker(), {}, 1)
+    progress.create("init")
+    progress("step one")
+    assert updates == ["step one\n" + BOT_MARKER]
+
+
+# ---------------------------------------------------------------------------
+# Minimal posting mode
+# ---------------------------------------------------------------------------
 
 
 def test_progress_minimal_update_queues_only():

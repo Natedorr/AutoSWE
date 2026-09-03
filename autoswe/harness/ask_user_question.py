@@ -160,6 +160,49 @@ def format_ask_user_question(input_data: dict) -> str:
     return "\n".join(lines)
 
 
+def freeze_progress_on_post(progress_callback, body: str) -> None:
+    """Freeze the sticky progress comment on *body* (issue #184).
+
+    Called from the AskUserQuestion callback after the standalone question
+    comment is posted: no later tool event may clobber the posted question,
+    so the sticky must end on it. Works for a bare progress updater (plain
+    call, falls back to coalesced update) and for a ProgressComment object,
+    which knows about freeze().
+    """
+    if progress_callback is None:
+        return
+    freeze = getattr(progress_callback, "freeze", None)
+    if callable(freeze):
+        freeze(body)
+    else:
+        progress_callback(body)
+
+
+def post_question_fallback(task: dict, repo_cfg: dict, question_md: str, progress_callback=None) -> None:
+    """Post a question the AskUserQuestion callback failed to post (issue #184).
+
+    The callback records ``state["asked_question_posted"] = False`` when its
+    standalone post fails. Handlers call this so the user still sees the
+    question: the body is pushed through the sticky progress comment (drain()
+    flushes it) and a standalone comment is posted as the durable copy.
+    All failures are non-fatal — the session pauses either way.
+    """
+    body = question_md + BOT_MARKER
+    if progress_callback is not None:
+        try:
+            progress_callback(body)
+        except Exception:
+            pass
+    try:
+        rc = dict(repo_cfg)
+        rc.setdefault("owner", task.get("owner", ""))
+        rc.setdefault("repo", task.get("repo", ""))
+        rc.setdefault("pat", task.get("_token", ""))
+        get_tracker(rc).post_comment(task["issue_number"], body)
+    except Exception:
+        pass
+
+
 # Type hint for the callback signature expected by the SDK
 CanUseToolCallback = Callable[[str, Any, Any], Any]
 
@@ -175,23 +218,29 @@ def make_can_use_tool(
     """Build the async ``can_use_tool`` callback for the Claude Agent SDK.
 
     When Claude calls ``AskUserQuestion``, this callback formats the questions
-    as markdown, posts them as an issue comment, and returns PermissionResultDeny
-    to immediately pause the agent. The denial message informs Claude that its
-    session is paused and will resume when the user replies. The handler then
-    checks ``state["asked_question_md"]`` to detect and return WAITING.
+    as markdown, posts them as a **standalone issue comment** (never into the
+    throttled sticky progress comment — issue #184), and returns
+    PermissionResultDeny to immediately pause the agent. The denial message
+    informs Claude that its session is paused and will resume when the user
+    replies. The handler then checks ``state["asked_question_md"]`` to detect
+    and return WAITING; ``state["asked_question_posted"]`` records whether
+    the standalone post landed so the handler can fall back to posting it.
     All other tools are allowed through.
 
     Args:
         task: The dispatch task dict (mutated to record session_id, last_phase).
         repo_cfg: Repository configuration for provider factory.
-        state: Mutable dict shared with handler; gets ``asked_question_md`` key.
-        on_post: Optional callback(str) for sticky-progress posting.
-            If None, falls back to ``get_tracker(repo_cfg).post_comment()``.
+        state: Mutable dict shared with handler; gets ``asked_question_md``
+            and ``asked_question_posted`` keys.
+        on_post: Optional progress notification hook, called with the full
+            question body after the standalone post is attempted. Used to
+            freeze the sticky progress comment on the question (see
+            freeze_progress_on_post). It does NOT post the question — the
+            standalone post above is the only comment path.
         read_only: When True, blocks Write and Edit tools and Bash
             git write subcommands plus common file-mutation commands (sed -i,
             shell redirects, tee, python -c with open/write, curl -o, wget, etc.).
             TodoWrite and the sub-agent task family (TaskCreate, etc.) are
-            allowed — they are progress/orchestration tools that do not mutate
             allowed — they are progress/orchestration tools that do not mutate
             the repo. Used by plan phase as a safeguard against the CLI exiting
             plan mode via the native ExitPlanMode command or bash-based bypasses.
@@ -231,18 +280,30 @@ def make_can_use_tool(
 
         full_body = md + BOT_MARKER
 
+        # Post the question as a STANDALONE issue comment — never into the
+        # throttled, latest-wins sticky progress comment (issue #184: the
+        # question was coalesced away and clobbered by the next tool event
+        # before drain() flushed it, so the user saw no question at all).
+        posted = False
         try:
-            if on_post is not None:
-                on_post(full_body)
-            else:
-                rc = dict(repo_cfg)
-                rc.setdefault("owner", task.get("owner", ""))
-                rc.setdefault("repo", task.get("repo", ""))
-                rc.setdefault("pat", task.get("_token", ""))
-                tracker = get_tracker(rc)
-                tracker.post_comment(task["issue_number"], full_body)
+            rc = dict(repo_cfg)
+            rc.setdefault("owner", task.get("owner", ""))
+            rc.setdefault("repo", task.get("repo", ""))
+            rc.setdefault("pat", task.get("_token", ""))
+            tracker = get_tracker(rc)
+            tracker.post_comment(task["issue_number"], full_body)
+            posted = True
         except Exception:  # Post failure is non-fatal; session still pauses via PermissionResultDeny.
-            pass
+            posted = False
+        state["asked_question_posted"] = posted
+
+        # Notify the progress system so the sticky comment freezes on the
+        # question (never clobbered by a later tool event, issue #184).
+        if on_post is not None:
+            try:
+                freeze_progress_on_post(on_post, full_body)
+            except Exception:  # Progress notification is best-effort.
+                pass
 
         return PermissionResultDeny(
             message=(

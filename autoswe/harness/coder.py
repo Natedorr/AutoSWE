@@ -6,7 +6,7 @@ from pathlib import Path
 from autoswe.core.config import resolve_harness
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
-from autoswe.harness.ask_user_question import make_can_use_tool
+from autoswe.harness.ask_user_question import make_can_use_tool, post_question_fallback
 from autoswe.harness.mcp_config import build_mcp_comment_server, build_mcp_inline_comment_server
 from autoswe.harness.prompts import build_conflict_resolution_prompt, build_fix_prompt
 from autoswe.harness.runner import HandlerResult
@@ -195,6 +195,14 @@ def _run_fix_session(
     dbg.debug("FIX OUTPUT (%d chars):\n%s", len(run_result.text or ""), (run_result.text or "")[:4000])
 
     if state.get("asked_question_md"):
+        # The callback posts a standalone question comment and records
+        # whether it landed; fall back to posting it when the post failed
+        # (issue #184 — never trust "already posted" blindly).
+        if state.get("asked_question_posted") is False:
+            post_question_fallback(
+                task, rc,
+                state["asked_question_md"], progress_callback,
+            )
         return HandlerResult(
             "WAITING: questions",
             cost_usd=run_result.cost_usd,

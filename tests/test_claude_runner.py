@@ -225,6 +225,31 @@ def test_progress_callback_receives_tool_events():
     block = ToolUseBlock(id="6", name="SomeOtherTool", input={})
     assert runner._format_tool_progress(block) == "Tool: SomeOtherTool"
 
+    # StructuredOutput is SDK-internal structured-output plumbing (issue #184)
+    # — never user-meaningful progress; it must not become the final body of
+    # the sticky progress comment.
+    block = ToolUseBlock(id="7", name="StructuredOutput", input={"plan_markdown": "x"})
+    assert runner._format_tool_progress(block) is None
+
+
+def test_progress_state_ignores_structured_output():
+    """A StructuredOutput tool event must not overwrite last_command (issue #184)."""
+    from claude_agent_sdk import ToolUseBlock
+
+    from autoswe.harness import runner
+
+    ps = runner.ProgressState()
+    ps.note_tool_use(ToolUseBlock(id="1", name="Bash", input={"command": "pytest -q"}))
+    assert ps.render() == "Running: pytest -q"
+
+    # Turn-end StructuredOutput: last_command must keep the real progress.
+    changed = ps.note_tool_use(
+        ToolUseBlock(id="2", name="StructuredOutput", input={"plan_markdown": "x"})
+    )
+    assert changed is False
+    assert ps.render() == "Running: pytest -q"
+    assert "StructuredOutput" not in (ps.render() or "")
+
 
 # ---------------------------------------------------------------------------
 # Retry on failure (AGENT_RETRY_ON_FAILURE)

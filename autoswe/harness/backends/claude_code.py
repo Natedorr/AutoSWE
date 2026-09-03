@@ -193,6 +193,14 @@ def _format_tool_progress(block) -> str | None:
 
     if isinstance(block, ToolUseBlock):
         name = block.name
+        if name == "StructuredOutput":
+            # SDK-internal structured-output plumbing (issue #184): at turn end
+            # the SDK invokes its internal StructuredOutput tool to deliver the
+            # schema-validated payload. It is never meaningful progress —
+            # rendering it as "Tool: StructuredOutput" let it become the final
+            # body of the sticky progress comment, clobbering a posted
+            # question. Return None like the uninteresting tools.
+            return None
         inputs = block.input or {}
         if name == "Bash":
             cmd = inputs.get("command", "")
@@ -212,6 +220,8 @@ def _format_tool_progress(block) -> str | None:
         else:
             return f"Tool: {name}"
     elif isinstance(block, ServerToolUseBlock):
+        if block.name == "StructuredOutput":
+            return None
         return f"Server tool: {block.name}"
     return None
 

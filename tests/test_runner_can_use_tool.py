@@ -100,6 +100,96 @@ def test_run_threads_can_use_tool():
     assert mock_run.called
 
 
+def test_run_shares_state_dict_with_backend_when_harness_cfg_set():
+    """Regression (issue #184): with harness_cfg, runner.run must hand the
+    backend the SAME state dict the caller passed in.
+
+    The AskUserQuestion callback writes state["asked_question_md"] and the
+    backend's stream loop gates progress updates, the early break, and the
+    final question re-assert on that key. The old code copied the dict, so
+    the backend never saw the key — the agent kept running to the internal
+    StructuredOutput tool, whose progress event clobbered the coalesced
+    question in the sticky comment before drain() flushed it.
+    """
+    from autoswe.harness import runner as runner_mod
+    from autoswe.harness.runner import RunResult
+
+    captured = {}
+
+    class StubBackend:
+        def capabilities(self):
+            return set()
+
+        def retryable_subtypes(self):
+            return set()
+
+        def retryable_exceptions(self):
+            return ()
+
+        def run(self, spec):
+            captured["spec"] = spec
+
+            async def _done():
+                return RunResult(text="ok", session_id="s", subtype="success")
+
+            return _done()
+
+    state = {"caller_key": True}
+    harness_cfg = {"backend": "claude_code"}
+    with patch(
+        "autoswe.harness.backends.factory.get_backend", return_value=StubBackend()
+    ):
+        result = runner_mod.run(
+            "test", cwd="/tmp", cfg={}, state=state, harness_cfg=harness_cfg,
+        )
+
+    assert result.text == "ok"
+    spec = captured["spec"]
+    # The backend must see the caller's dict, not a copy.
+    assert spec.state is state
+    # Threading _harness_cfg in place is safe (fresh dict per session).
+    assert state["_harness_cfg"] is harness_cfg
+    assert state["caller_key"] is True
+
+
+def test_run_shares_state_dict_without_harness_cfg():
+    """Without harness_cfg, the caller's state dict is passed through as-is."""
+    from autoswe.harness import runner as runner_mod
+    from autoswe.harness.runner import RunResult
+
+    captured = {}
+
+    class StubBackend:
+        def capabilities(self):
+            return set()
+
+        def retryable_subtypes(self):
+            return set()
+
+        def retryable_exceptions(self):
+            return ()
+
+        def run(self, spec):
+            captured["spec"] = spec
+
+            async def _done():
+                return RunResult(text="ok", session_id="s", subtype="success")
+
+            return _done()
+
+    state = {}
+    with patch(
+        "autoswe.harness.backends.factory.get_backend", return_value=StubBackend()
+    ):
+        # harness_cfg omitted → default backend path is NOT used; the factory
+        # is still resolved via the default-None branch… runner.run without
+        # harness_cfg constructs ClaudeCodeBackend directly, so patch that.
+        with patch.object(runner_mod, "ClaudeCodeBackend", return_value=StubBackend()):
+            runner_mod.run("test", cwd="/tmp", cfg={}, state=state)
+
+    assert captured["spec"].state is state
+
+
 def test_run_no_can_use_tool_back_compat():
     """When can_use_tool is absent, run() should work as before."""
     cfg = {"AGENT_TIMEOUT": 7200, "CLAUDE_CLI_PATH": ""}

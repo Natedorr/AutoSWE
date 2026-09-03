@@ -657,6 +657,60 @@ def test_run_plan_ask_user_question_returns_waiting(tmp_path, mock_gh_post_comme
     assert result.done_content.startswith("WAITING:")
 
 
+def test_run_plan_question_post_succeeds_no_fallback(tmp_path, mock_gh_post_comment):
+    """When the callback confirmed the standalone question post
+    (asked_question_posted=True), the handler returns WAITING without
+    re-posting (issue #184)."""
+    task = make_task()
+
+    def fake_run(prompt, **kwargs):
+        state = kwargs.get("state")
+        assert state is not None, "state must be threaded to runner.run"
+        state["asked_question_md"] = "## Questions\n\nWhich approach?"
+        state["asked_question_posted"] = True
+        return _r("", "sess-1", "success")
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                with patch("autoswe.harness.planner.post_question_fallback") as mock_fb:
+                    from autoswe.harness.planner import run_plan
+                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "WAITING: questions"
+    mock_fb.assert_not_called()
+
+
+def test_run_plan_failed_question_post_triggers_fallback(tmp_path, mock_gh_post_comment):
+    """When the callback's standalone question post failed
+    (asked_question_posted=False), the handler falls back to posting the
+    question itself so the user always sees it (issue #184)."""
+    task = make_task()
+
+    def fake_run(prompt, **kwargs):
+        kwargs["state"]["asked_question_md"] = "## Questions\n\nWhich approach?"
+        kwargs["state"]["asked_question_posted"] = False
+        return _r("", "sess-1", "success")
+
+    sticky_bodies = []
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(
+                    task, {}, {"GITHUB_TOKEN": "tok"},
+                    progress_callback=sticky_bodies.append,
+                )
+
+    assert result.done_content == "WAITING: questions"
+    # The fallback pushed the question through the sticky progress callback…
+    assert len(sticky_bodies) == 1
+    assert "Which approach?" in sticky_bodies[0]
+    assert "<!-- autoswe-bot -->" in sticky_bodies[0]
+    # …and posted a standalone comment as the durable copy.
+    assert any("Which approach?" in c["body"] for c in mock_gh_post_comment.posted)
+
+
 def test_run_plan_returns_plan_ready_phase(tmp_path, mock_gh_post_comment):
     """run_plan returns PLAN_READY — last_phase is managed by emit() from action.kind."""
     task = make_task()

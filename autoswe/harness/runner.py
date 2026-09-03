@@ -189,9 +189,20 @@ def run(
 
     # Thread harness_cfg into spec.state so the backend can read
     # backend-specific fields (cli_path, anthropic_api_key, etc.).
+    #
+    # The caller's state dict must stay the SAME object the backend sees
+    # (issue #184): the AskUserQuestion callback writes
+    # state["asked_question_md"], and the backend's stream loop gates progress
+    # updates, the early break, and the final question re-assert on that key.
+    # Copying the dict here made the key invisible to the backend — the agent
+    # kept running to the SDK-internal StructuredOutput tool after posting a
+    # question, and that tool event clobbered the coalesced question in the
+    # sticky progress comment. (Callers create a fresh dict per session, so
+    # adding _harness_cfg in place is safe.)
     effective_state = state
     if harness_cfg is not None:
-        effective_state = dict(state) if state else {}
+        if effective_state is None:
+            effective_state = {}
         effective_state["_harness_cfg"] = harness_cfg
 
     spec = RunSpec(

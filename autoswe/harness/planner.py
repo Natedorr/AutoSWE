@@ -6,7 +6,7 @@ from pathlib import Path
 from autoswe.core.config import resolve_harness
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
-from autoswe.harness.ask_user_question import make_can_use_tool
+from autoswe.harness.ask_user_question import make_can_use_tool, post_question_fallback
 from autoswe.harness.mcp_config import build_mcp_comment_server
 from autoswe.harness.prompts import BOT_MARKER, build_plan_prompt
 from autoswe.harness.runner import HandlerResult
@@ -51,11 +51,22 @@ def _interpret_structured_plan(
     return comment, "WAITING: questions", None
 
 
-def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | None]:
+def _interpret_plan_result(
+    result,
+    state,
+    harness,
+    *,
+    task: dict | None = None,
+    repo_cfg: dict | None = None,
+    progress_callback=None,
+) -> tuple[str, str | None]:
     """Interpret a plan-phase RunResult, returning (done_content, plan_file_path).
 
     Source priority:
-      1. AskUserQuestion via the ``can_use_tool`` callback (already posted).
+      1. AskUserQuestion via the ``can_use_tool`` callback. The callback posts
+         the question as a standalone issue comment and records whether the
+         post landed (``state["asked_question_posted"]``); when the post
+         failed, the handler falls back to posting it itself (issue #184).
       2. MCP-specific fields (plan_posted, question_posted) — the comment is
          already on the thread, so these win over the not-yet-posted sources
          below; only when the backend advertises the ``"mcp"`` capability.
@@ -74,8 +85,16 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | Non
     Returns a tuple of (done_content, plan_file_path).  Callers should use
     these to construct the HandlerResult.
     """
-    # 1. AskUserQuestion via can_use_tool callback (already posted by the callback)
+    # 1. AskUserQuestion via can_use_tool callback (posts a standalone comment)
     if state.get("asked_question_md"):
+        # Only trust "already posted" when the callback confirmed it (issue
+        # #184: the sticky-comment path silently lost the question). A
+        # failed post gets a fallback post so the user always sees it.
+        if state.get("asked_question_posted") is False and task is not None:
+            post_question_fallback(
+                task, repo_cfg or {},
+                state["asked_question_md"], progress_callback,
+            )
         return "WAITING: questions", None
 
     # 2. MCP already-posted flags (comment already on the thread) — only when the
@@ -393,7 +412,10 @@ def _plan_session(
     dbg.debug("PLAN: sdk returned subtype=%s session=%s len=%d", result.subtype, result.session_id, len(result.text or ""))
     dbg.debug("PLAN OUTPUT (%d chars):\n%s", len(result.text or ""), (result.text or "")[:4000])
 
-    done_content, plan_file_path = _interpret_plan_result(result, state, harness)
+    done_content, plan_file_path = _interpret_plan_result(
+        result, state, harness,
+        task=task, repo_cfg=repo_cfg, progress_callback=progress_callback,
+    )
 
     if done_content.startswith("_POST:"):
         inner_done, comment = done_content[len("_POST:"):].split("\t", 1)
