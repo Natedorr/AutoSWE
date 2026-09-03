@@ -450,8 +450,14 @@ def build_test_cfg(isolated_dir: Path, provider: str = "github", backend: str = 
     return cfg
 
 
-def setup_repos(isolated_dir: Path, provider: str, state: dict) -> None:
-    """Write repos.json for a scenario test."""
+def setup_repos(isolated_dir: Path, provider: str, state: dict, repos_extra: dict | None = None) -> None:
+    """Write repos.json for a scenario test.
+
+    *repos_extra* (from a transition row's optional ``"repos"`` field) is
+    merged into the repo entry after the defaults, so a row can override
+    e.g. ``test_command`` for the post-fix test gate without touching the
+    shared defaults.
+    """
     import json
 
     if provider.lower() == "azure":
@@ -466,6 +472,9 @@ def setup_repos(isolated_dir: Path, provider: str, state: dict) -> None:
     else:
         repo_key = f"{state['owner']}/{state['repo']}"
         repos_cfg = {"provider": "github", "base_branch": "main", "pat": "ghp_scenario_token"}
+
+    if repos_extra:
+        repos_cfg.update(repos_extra)
 
     repos_data = {repo_key: repos_cfg}
     repos_path = isolated_dir / "config" / "repos.json"

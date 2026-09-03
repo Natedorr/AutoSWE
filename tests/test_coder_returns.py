@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from unittest.mock import patch
 
 from autoswe.harness.runner import RunResult
+from autoswe.harness.test_gate import GateResult
 
 
 def _r(text, session_id="sess", subtype="success"):
@@ -368,3 +369,64 @@ def test_run_fix_codex_harness_cfg(tmp_path):
     assert harness_cfg is not None
     assert harness_cfg.get("backend") == "codex"
     assert harness_cfg.get("model") == "gpt-5.6-terra"
+
+
+# ---------------------------------------------------------------------------
+# Post-fix test gate (Natedorr/testProject#20): a red suite must never be
+# marked terminal `fixed`. _finalize_fix runs the gate after commit/push and
+# returns TESTS_FAILED when it is red, so the state machine lands in the
+# non-terminal `test_failed` state.
+# ---------------------------------------------------------------------------
+
+
+def _finalize(task, tmp_path, gate):
+    from autoswe.harness import coder
+    with patch("autoswe.harness.coder.commit_and_push", return_value=FAKE_COMMIT_RESULT):
+        with patch("autoswe.harness.coder.run_test_gate", return_value=gate) as mock_gate:
+            hr = coder._finalize_fix(
+                task, _r("Done."), tmp_path, "o", "r", 1, "master", "github", "tok",
+                {}, {}, session_id="sess",
+            )
+    return hr, mock_gate
+
+
+def test_finalize_fix_red_suite_returns_tests_failed(tmp_path):
+    task = make_task()
+    gate = GateResult(ok=False, ran=True, reason="suite failing (exit 1)",
+                      output="assert 5.0 == 6.0", command="pytest", duration_seconds=1.0)
+    hr, mock_gate = _finalize(task, tmp_path, gate)
+    assert hr.done_content.startswith("TESTS_FAILED\t")
+    assert "suite failing (exit 1)" in hr.done_content
+    assert "assert 5.0 == 6.0" in hr.done_content
+    # The committed sha is preserved after the last tab.
+    assert hr.done_content.rstrip().endswith("abc1234")
+    assert hr.session_id == "sess"
+    mock_gate.assert_called_once()
+
+
+def test_finalize_fix_green_suite_returns_done_summary(tmp_path):
+    task = make_task()
+    gate = GateResult(ok=True, ran=True, reason="suite green", command="pytest")
+    hr, _ = _finalize(task, tmp_path, gate)
+    assert hr.done_content.startswith("DONE_SUMMARY\t")
+    assert hr.done_content.rstrip().endswith("abc1234")
+
+
+def test_finalize_fix_skipped_gate_returns_done_summary(tmp_path):
+    task = make_task()
+    gate = GateResult(ok=True, ran=False, reason="no test suite detected")
+    hr, _ = _finalize(task, tmp_path, gate)
+    assert hr.done_content.startswith("DONE_SUMMARY\t")
+
+
+def test_finalize_fix_no_changes_skips_gate(tmp_path):
+    task = make_task()
+    from autoswe.harness import coder
+    with patch("autoswe.harness.coder.commit_and_push", return_value=NO_CHANGES_RESULT):
+        with patch("autoswe.harness.coder.run_test_gate") as mock_gate:
+            hr = coder._finalize_fix(
+                task, _r("Done."), tmp_path, "o", "r", 1, "master", "github", "tok",
+                {}, {}, session_id="sess",
+            )
+    assert hr.done_content == "DONE: no changes detected"
+    mock_gate.assert_not_called()

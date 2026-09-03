@@ -23,6 +23,7 @@ AUTOSWE_LABELS = {
     "autoswe:reviewed":   {"color": "ededed", "description": "Review approved (LGTM)"},
     "autoswe:review_failed":  {"color": "fbca04", "description": "Review found issues — needs /fix"},
     "autoswe:review_blocked": {"color": "d73a4a", "description": "Review blocked — critical findings, needs /fix"},
+    "autoswe:test_failed":    {"color": "d73a4a", "description": "Fix pushed but test suite failing — needs /fix"},
     "autoswe:waiting":    {"color": "fbca04", "description": "Agent asked a question"},
     "autoswe:failed":     {"color": "d73a4a", "description": "Agent errored"},
     "autoswe:skipped":    {"color": "ffffff", "description": "Skipped by user"},
@@ -37,7 +38,7 @@ _PREFIX = "autoswe:"
 VALID_STATUSES = frozenset(
     {"pending", "planning", "fixing", "syncing", "reviewing", "shipping",
      "planned", "fixed", "synced", "shipped", "reviewed",
-     "review_failed", "review_blocked",
+     "review_failed", "review_blocked", "test_failed",
      "waiting", "failed", "skipped", "aborted", "error"}
 )
 
@@ -48,6 +49,13 @@ TERMINAL_STATUSES = COMPLETED_STATUSES | frozenset({"failed", "skipped", "aborte
 # Non-terminal resting states a /review lands in when it found problems. The
 # task is NOT done: /pr is blocked until the user posts /fix (which re-reviews).
 REVIEW_BLOCKING_STATUSES = frozenset({"review_failed", "review_blocked"})
+
+# Non-terminal resting states where shipping is blocked: the review verdicts
+# (review_failed/review_blocked) plus the post-fix test gate (test_failed —
+# the fix committed and pushed, but the branch suite is red). /pr is refused
+# until a /fix re-runs the blocking check green; restarts start a fresh
+# MAX_ATTEMPTS budget (the prior phase finished, the gate is a new signal).
+SHIPPING_BLOCKING_STATUSES = REVIEW_BLOCKING_STATUSES | frozenset({"test_failed"})
 
 # Action kind → status mappings (module-level to avoid per-call allocation)
 _KIND_TO_RUNNING = {
@@ -236,6 +244,12 @@ def _map_done_to_status(done_content: str, kind: str = "fix", verdict: str | Non
         return "waiting"
     elif done_content.startswith("FAILED:"):
         return "failed"
+    elif done_content.startswith("TESTS_FAILED"):
+        # Post-fix test gate red (Natedorr/testProject#20): the work was
+        # committed/pushed but the branch suite is failing. Non-terminal —
+        # the task stays restartable and /pr is blocked until a /fix clears
+        # the gate.
+        return "test_failed"
     elif done_content == "SKIPPED":
         return "skipped"
     elif done_content == "ABORTED":

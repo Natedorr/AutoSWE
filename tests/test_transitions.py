@@ -68,8 +68,8 @@ def test_transition(
     # Seed queue
     seed_queue(isolated_autoswe_dir, queue_task)
 
-    # Set up repos.json
-    setup_repos(isolated_autoswe_dir, provider, state)
+    # Set up repos.json (row may override the repo config, e.g. test_command)
+    setup_repos(isolated_autoswe_dir, provider, state, repos_extra=row.get("repos"))
 
     cfg = build_test_cfg(isolated_autoswe_dir, provider)
 
@@ -186,8 +186,8 @@ def test_transition_codex(
     # Seed queue
     seed_queue(isolated_autoswe_dir, queue_task)
 
-    # Set up repos.json
-    setup_repos(isolated_autoswe_dir, provider, state)
+    # Set up repos.json (row may override the repo config, e.g. test_command)
+    setup_repos(isolated_autoswe_dir, provider, state, repos_extra=row.get("repos"))
 
     # Build config with codex backend
     cfg = build_test_cfg(isolated_autoswe_dir, provider, backend="codex")

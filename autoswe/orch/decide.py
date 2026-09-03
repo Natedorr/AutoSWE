@@ -20,8 +20,8 @@ from autoswe.tracking.comments import (
 )
 from autoswe.tracking.labels import (
     COMPLETED_STATUSES,
-    REVIEW_BLOCKING_STATUSES,
     RUNNING_STATUSES,
+    SHIPPING_BLOCKING_STATUSES,
     TERMINAL_STATUSES,
     _kind_from_command,
 )
@@ -315,9 +315,11 @@ def _check_restart_or_guard(
         return Action(kind="noop", slug=task.slug)
 
     # Review gating: a review that found problems blocks shipping. Refuse /pr
-    # until the user posts /fix (which triggers an automatic re-review).
-    if slash_cmd == "/pr" and status in REVIEW_BLOCKING_STATUSES:
-        log(f"[DECIDE] {task.slug} /pr blocked — review status {status}")
+    # until the user posts /fix (which triggers an automatic re-review). The
+    # post-fix test gate state (test_failed) blocks /pr the same way — red
+    # code must not ship.
+    if slash_cmd == "/pr" and status in SHIPPING_BLOCKING_STATUSES:
+        log(f"[DECIDE] {task.slug} /pr blocked — shipping-blocking status {status}")
         return Action(kind="noop", slug=task.slug)
 
     # Find the reference ID (bot completion or last bot comment)
@@ -416,7 +418,7 @@ def _check_restart_or_guard(
         if slash_cmd == "/retry":
             attempt_count = 1
             _reset_attempt(task, attempt_count, f"cmd={slash_cmd}, max={max_attempts}")
-        elif status in COMPLETED_STATUSES or status in REVIEW_BLOCKING_STATUSES:
+        elif status in COMPLETED_STATUSES or status in SHIPPING_BLOCKING_STATUSES:
             attempt_count = 1
             _reset_attempt(task, attempt_count, f"fresh budget from {status}, cmd={slash_cmd}, max={max_attempts}")
         else:
@@ -577,11 +579,12 @@ def decide(world: World) -> Action:
     # ------ Has a slash command, task exists ------
     status = task.status
 
-    # Terminal state (or a review-blocking resting state) -> restart / guard logic.
-    # Review-blocking states reuse the terminal restart machinery so /fix,
-    # /retry, /skip, /abort and new-comment restarts behave consistently; the
-    # /pr guard inside _check_restart_or_guard refuses shipping until re-review.
-    if status in TERMINAL_STATUSES or status in REVIEW_BLOCKING_STATUSES:
+    # Terminal state (or a shipping-blocking resting state) -> restart / guard logic.
+    # Shipping-blocking states (review verdicts, test-gate red) reuse the
+    # terminal restart machinery so /fix, /retry, /skip, /abort and new-comment
+    # restarts behave consistently; the /pr guard inside _check_restart_or_guard
+    # refuses shipping until the blocking check is re-run green.
+    if status in TERMINAL_STATUSES or status in SHIPPING_BLOCKING_STATUSES:
         action = _check_restart_or_guard(
             world, slash_cmd, guidance, branch, cmd_author, cmd_id
         )

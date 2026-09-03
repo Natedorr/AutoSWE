@@ -6,6 +6,7 @@ import pytest
 
 from autoswe.providers.github.tracker import GitHubTracker
 from autoswe.providers.github.vcs import GitHubVCS
+from autoswe.tracking.labels import AUTOSWE_LABELS
 from tests.conftest import load_fixture
 
 # ============================================================================
@@ -252,13 +253,7 @@ class TestGitHubTracker:
 
     def test_set_status_ensures_labels_only_once(self, tracker, fake_token, mock_gh_request, gh_route_table):
         gh_route_table[("GET", "/repos/natedorr/autoswe/labels")] = [
-            {"name": name} for name in {"autoswe:pending", "autoswe:planning", "autoswe:fixing",
-                                         "autoswe:syncing", "autoswe:reviewing", "autoswe:shipping",
-                                         "autoswe:planned", "autoswe:fixed", "autoswe:synced",
-                                         "autoswe:shipped", "autoswe:reviewed",
-                                         "autoswe:review_failed", "autoswe:review_blocked",
-                                         "autoswe:waiting", "autoswe:failed", "autoswe:skipped",
-                                         "autoswe:aborted", "autoswe:error"}
+            {"name": name} for name in AUTOSWE_LABELS
         ]
         gh_route_table[("GET", "/repos/natedorr/autoswe/issues/42/labels")] = []
         gh_route_table[("PUT", "/repos/natedorr/autoswe/issues/42/labels")] = {}

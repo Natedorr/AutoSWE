@@ -28,6 +28,13 @@ def test_map_failed():
     assert _map_done_to_label("FAILED:") == "autoswe:failed"
 
 
+def test_map_tests_failed():
+    """Post-fix test gate red (Natedorr/testProject#20): non-terminal test_failed."""
+    assert _map_done_to_label("TESTS_FAILED") == "autoswe:test_failed"
+    detail = "suite failing (exit 1)\nFAILURES: tests/test_half.py::test_contract"
+    assert _map_done_to_label(f"TESTS_FAILED\t{detail}\tabc1234") == "autoswe:test_failed"
+
+
 def test_map_done_bare():
     assert _map_done_to_label("DONE") == "autoswe:fixed"
 

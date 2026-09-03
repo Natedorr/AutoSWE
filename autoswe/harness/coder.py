@@ -10,6 +10,7 @@ from autoswe.harness.ask_user_question import make_can_use_tool, post_question_f
 from autoswe.harness.mcp_config import build_mcp_comment_server, build_mcp_inline_comment_server
 from autoswe.harness.prompts import build_conflict_resolution_prompt, build_fix_prompt
 from autoswe.harness.runner import HandlerResult
+from autoswe.harness.test_gate import run_test_gate
 from autoswe.providers.factory import get_vcs
 from autoswe.vcs.worktree import (
     commit_and_push,
@@ -220,6 +221,7 @@ def _run_fix_session(
         task, run_result, wt, owner, repo, issue_num,
         base_branch, provider, token, rc, cfg or {},
         session_id=run_result.session_id,
+        progress_callback=progress_callback,
     )
 
 
@@ -428,8 +430,9 @@ def _finalize_fix(
     cfg: dict,
     *,
     session_id: str | None = None,
+    progress_callback=None,
 ) -> HandlerResult:
-    """Commit, push, and return the final HandlerResult after a successful fix run.
+    """Commit, push, run the post-fix test gate, and return the final HandlerResult.
 
     Shared by run_fix and resume_fix to avoid duplicating the commit/push flow.
     """
@@ -473,6 +476,25 @@ def _finalize_fix(
         )
 
     log(f"[FIX] {task['id']} committed sha={commit_result['commit_sha']} branch={commit_result['branch']}")
+
+    # Post-fix test gate (Natedorr/testProject#20): run the repo's suite on the
+    # committed work before this task can reach the terminal `fixed` state.
+    # It runs AFTER commit_and_push so the work is never lost — a red suite
+    # lands in the non-terminal `test_failed` state with a comment carrying
+    # the failure, and /pr stays blocked until a /fix re-runs it green.
+    gate = run_test_gate(wt, cfg, repo_cfg, progress_callback=progress_callback)
+    if not gate.ok:
+        log(f"[FIX] {task['id']} test gate RED: {gate.reason} — refusing terminal `fixed`")
+        detail = gate.reason + (f"\n{gate.output}" if gate.output else "")
+        return HandlerResult(
+            f"TESTS_FAILED\t{detail}\t{commit_result['commit_sha']}",
+            cost_usd=run_result.cost_usd,
+            duration_seconds=run_result.duration_seconds,
+            session_id=session_id,
+        )
+    if not gate.ran:
+        log(f"[FIX] {task['id']} test gate skipped: {gate.reason}")
+
     return HandlerResult(
         f"DONE_SUMMARY\t{summary_text}\t{commit_result['commit_sha']}",
         cost_usd=run_result.cost_usd,

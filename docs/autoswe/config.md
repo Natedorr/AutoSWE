@@ -84,11 +84,14 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | `SYNC_STRATEGY` | `merge` | Strategy for `/sync`: `"merge"` (append-only merge commit) or `"rebase"` (linear history, force-pushes) |
 | `PR_REQUIRE_SYNC` | `true` | Gate `/pr` (and auto-PR) on the feature branch being in sync with its base. When behind, `pr_gate.preflight_pr()` runs the same sync used by `/sync`, resolving merge conflicts via `coder.resolve_sync_conflicts()`; if sync can't complete cleanly, the PR is blocked with `FAILED: <reason>`. Set `false` to skip this check entirely. |
 | `PR_REQUIRE_CI` | `true` | Gate `/pr` (and auto-PR) on CI status via `VCSProvider.get_ci_status()`. `pending` or `failure` blocks the PR; `success` or `none` (no CI configured on the repo) passes. Set `false` to skip this check entirely. |
+| `TEST_GATE` | `true` | Post-fix test gate (Natedorr/testProject#20): after the fix agent commits/pushes, `coder._finalize_fix` runs the repo's test suite in the worktree before the task can reach terminal `fixed`. A red suite lands the task in the non-terminal `test_failed` status (a comment carries the failure, `/pr` is blocked, `/fix`/`/retry` restart with a fresh attempt budget). Skips (no resolvable command, missing runner, timeout, no tests collected) are non-gating. Set `false` to disable. |
+| `TEST_GATE_TIMEOUT` | `600` | Post-fix test gate timeout in seconds. A timeout is non-gating (skip + warning). |
+| `TEST_COMMAND` | `""` | Explicit test command run in the worktree root for the post-fix test gate (e.g. `pytest -q`, `npm test`). Resolution order: per-repo `test_command` → `TEST_COMMAND` → Python/pytest detection in the worktree → skip. Blank = rely on per-repo / detection only. |
 | `AUTO_PURGE_BRANCHES` | `false` | Opt-in heartbeat cleanup of worktrees whose remote `autoswe/issue-{N}` branch no longer exists. When `true`, each poll cycle prunes a repo's remote-tracking refs (`git fetch --prune`) and removes any `issue-{N}/` worktree dir + local branch whose remote branch is gone — e.g. a merged-and-auto-deleted PR. In-flight tasks (live PID) and dirty worktrees are always skipped; a failed `fetch --prune` makes the whole step a no-op. Only the worktree dir + local branch are removed — `queue.json` is left to the separate `queue prune` job. See [git-worktrees.md](git-worktrees.md). |
 
-**Integer keys re-parsed:** After loading the file, `AGENT_TIMEOUT`, `AGENT_RETRY_ON_FAILURE`, `MAX_ATTEMPTS`, `MAX_TOTAL_HOURS`, `MAX_CONCURRENT`, and `MAX_DRAIN_CYCLES` are cast to `int` (`config.py:51-55`).
+**Integer keys re-parsed:** After loading the file, `AGENT_TIMEOUT`, `AGENT_RETRY_ON_FAILURE`, `MAX_ATTEMPTS`, `MAX_TOTAL_HOURS`, `MAX_CONCURRENT`, `MAX_DRAIN_CYCLES`, and `TEST_GATE_TIMEOUT` are cast to `int` (`config.py:51-55`).
 
-**Boolean keys re-parsed:** `SILENT_REPORTING`, `MINIMAL_POSTING`, `AUTO_ASSIGN`, `AUTO_CREATE_PR`, `LINK_BRANCH_TO_ISSUE`, `PR_REQUIRE_SYNC`, `PR_REQUIRE_CI`, and `AUTO_PURGE_BRANCHES` are compared to `"true"` (case-insensitive) after file load.
+**Boolean keys re-parsed:** `SILENT_REPORTING`, `MINIMAL_POSTING`, `AUTO_ASSIGN`, `AUTO_CREATE_PR`, `LINK_BRANCH_TO_ISSUE`, `PR_REQUIRE_SYNC`, `PR_REQUIRE_CI`, `AUTO_PURGE_BRANCHES`, and `TEST_GATE` are compared to `"true"` (case-insensitive) after file load.
 
 **Per-repo overrides:** `pr_gate._flag()` checks `repo_cfg` first — a lowercase `pr_require_sync` / `pr_require_ci` key in a `repos.json` entry overrides the global `autoswe.env` value for that repo only (same pattern as `plan_model`/`fix_model` overrides).
 
@@ -119,6 +122,9 @@ Loaded by `core/config.py:load_repos_config()`. Keys starting with `_` are skipp
 | `anthropic_auth_token` | No | (from env) | Per-repo auth token |
 | `auto_dispatch_new` | No | `false` | On a brand-new issue with no slash command, set `autoswe_status = pending` anyway (treated as a default `/fix`) instead of waiting for a command |
 | `allowed_authors` | No | `""` | Comma-separated list of allowed author logins (overrides global `ALLOWED_AUTHORS`). Controls who can trigger slash commands and whose issues are processed |
+| `test_command` | No | (from `TEST_COMMAND`) | Post-fix test gate command run in the worktree root (e.g. `pytest -q`, `npm test`). Wins over global `TEST_COMMAND` and Python detection — see `handlers.md` (post-fix test gate) |
+| `test_gate` | No | (from `TEST_GATE`) | Enable/disable the post-fix test gate for this repo |
+| `test_gate_timeout` | No | (from `TEST_GATE_TIMEOUT`) | Test-suite timeout in seconds for this repo |
 
 ### Azure Entry (`"org/project/repo"`)
 

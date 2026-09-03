@@ -29,6 +29,7 @@ All labels use the `autoswe:` prefix. Defined in `tracking/labels.py:AUTOSWE_LAB
 | `autoswe:reviewed` | `reviewed` | `ededed` | Review approved (LGTM) — `/pr` allowed |
 | `autoswe:review_failed` | `review_failed` | `fbca04` | Review verdict "Needs changes" — `/pr` blocked until `/fix` |
 | `autoswe:review_blocked` | `review_blocked` | `d73a4a` | Review verdict "Blocked" (CRITICAL findings) — `/pr` blocked until `/fix` |
+| `autoswe:test_failed` | `test_failed` | `d73a4a` | Post-fix test gate red: fix was committed/pushed but the branch suite is failing — `/pr` blocked until `/fix` re-runs the gate green |
 | `autoswe:waiting` | `waiting` | `fbca04` | Claude asked a question; awaiting a reply |
 | `autoswe:failed` | `failed` | `d73a4a` | Handler errored, or a limit guard tripped |
 | `autoswe:skipped` | `skipped` | `ffffff` | `/skip` |
@@ -59,6 +60,7 @@ The transitions below happen by writing `autoswe_status` in `queue.json`; the la
 - **→ waiting**: planner returned `"WAITING: …"` (MCP `post_question`, a standalone `AskUserQuestion` comment, or — deprecated fallback — an `<AUTOSWE_QUESTIONS>` block / no parseable plan).
 - **→ COMPLETED statuses** (`fixed`/`synced`/`shipped`/`reviewed`): coder returned `"DONE*"` for `/fix` → `fixed`, or `/sync` succeeded → `synced`, or `/pr` succeeded → `shipped`, or `/review` returned an **LGTM** verdict → `reviewed`, or the issue was found closed at refresh time → `fixed`.
 - **→ review_failed / review_blocked** (non-terminal resting states): `/review` returned a gating verdict. `_map_done_to_status` parses the `## Verdict` section of the review report — `Needs changes` → `review_failed`, `Blocked` → `review_blocked`. In both states `decide()` refuses `/pr`; a `/fix` is accepted (it addresses the findings and, via the `rereview_after_fix` flag, triggers an automatic re-review before shipping). See `handlers.md`.
+- **→ test_failed** (non-terminal resting state): the post-fix test gate ran the branch's test suite after commit/push and it was red. The coder returns `"TESTS_FAILED\t<detail>\t<sha>"` (the work is committed and pushed — a red gate never loses the agent's work) and a comment carries the failure. `decide()` refuses `/pr` until a `/fix` re-runs the gate green; restarts from `test_failed` start a fresh attempt budget, like a review verdict. See `handlers.md` (post-fix test gate).
 - **→ failed**: handler returned `"FAILED: …"`, or `sync`'s attempt/time guard tripped.
 - **→ skipped**: `/skip`.
 - **→ aborted**: `/abort`.

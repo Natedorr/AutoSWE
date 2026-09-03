@@ -1091,6 +1091,127 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "fix_red_suite_marks_test_failed",
+        "description": (
+            "The fix agent commits/pushes successfully, but the post-fix test gate "
+            "runs the repo's suite in the worktree (explicit repo-level test_command) "
+            "and it is red. The task must NOT reach terminal `fixed`: it lands in the "
+            "non-terminal `test_failed` state with a comment carrying the failure "
+            "(Natedorr/testProject#20: a guaranteed-red suite was silently marked "
+            "autoswe:fixed)"
+        ),
+        "start": {
+            "issue": {"body": "Implement half().\n\n/fix"},
+            "queue_task": None,
+        },
+        "repos": {"test_command": "echo 'FAIL: 1 failed, 1 passed' && exit 1"},
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tImplemented half()\tdef5678", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:test_failed",
+            "autoswe_status": "test_failed",
+            "comment_contains": ["Test gate failed", "marked done", "FAIL: 1 failed"],
+            "claude_permission": "bypassPermissions",
+        },
+    },
+    {
+        "name": "test_failed_blocks_pr",
+        "description": (
+            "Task at test_failed (post-fix test gate red): /pr is refused — red code "
+            "must not ship. No dispatch, no label change."
+        ),
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:test_failed"],
+            "comments": [
+                {
+                    "body": "🧪 **Test gate failed** — the branch suite is red, so `/fix` is **not** marked done.\n\n**Failure:**\n\n```\nsuite failing (exit 1)\n```\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "test_failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/fix",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:test_failed",
+            "autoswe_status": "test_failed",
+            "no_claude_calls": True,
+        },
+    },
+    {
+        "name": "test_failed_then_fix_fresh_budget",
+        "description": (
+            "Task at test_failed with attempt_count=3 (== MAX_ATTEMPTS): the follow-up "
+            "/fix that addresses the red suite starts a fresh budget (attempt 1) "
+            "instead of tripping the MAX_ATTEMPTS guard — the gate verdict is a new "
+            "signal, like a review verdict. The fake worktree has no suite, so the "
+            "gate skips and the fix completes normally."
+        ),
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:test_failed"],
+            "comments": [
+                {
+                    "body": "🧪 **Test gate failed** — the branch suite is red, so `/fix` is **not** marked done.\n\n**Failure:**\n\n```\nsuite failing (exit 1)\n```\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/fix",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "test_failed",
+                "base_branch": "main",
+                "session_id": "s-fix-42",
+                "attempt_count": 3,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/fix",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed the red test\tdef5678", "session_id": "s-fix-42b", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "attempt_count": 1,
+            "comment_contains": ["Completed with command", "Fixed the red test"],
+        },
+    },
+    {
         "name": "retry_resets_attempt_count",
         "description": "/retry from failed state resets attempt count and re-dispatches",
         "start": {
@@ -1870,6 +1991,7 @@ CODEX_TRANSITIONS: list[str] = [
     "planned_then_review_blocked",   # Review verdict gating (Blocked → review_blocked)
     "retry_forks_from_last_good_session",  # /retry: Codex lacks session_fork → degrades to fresh/resume, still reaches fixed
     "attempts_guard_fires_on_restart",     # MAX_ATTEMPTS guard fires (decide-level, backend-agnostic)
+    "fix_red_suite_marks_test_failed",     # Post-fix test gate red → test_failed (backend-agnostic gate in _finalize_fix)
 ]
 
 

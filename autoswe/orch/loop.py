@@ -35,8 +35,8 @@ from autoswe.orch.types import ApiState, TaskState, World
 from autoswe.providers.adapter import apply_effect, read_api
 from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
 from autoswe.tracking.labels import (
-    REVIEW_BLOCKING_STATUSES,
     RUNNING_STATUSES,
+    SHIPPING_BLOCKING_STATUSES,
     TERMINAL_STATUSES,
     _kind_from_command,
     completed_status_for,
@@ -46,7 +46,7 @@ from autoswe.tracking.labels import (
 from autoswe.tracking.progress import ProgressComment
 
 # Statuses whose label mirror is synced in Phase 3
-_MIRROR_STATUSES = TERMINAL_STATUSES | {"planned", "waiting"} | REVIEW_BLOCKING_STATUSES
+_MIRROR_STATUSES = TERMINAL_STATUSES | {"planned", "waiting"} | SHIPPING_BLOCKING_STATUSES
 
 dbg = get_debug_logger()
 

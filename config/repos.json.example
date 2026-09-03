@@ -12,7 +12,10 @@
     "plan_model": "claude-haiku-4-5-20251001",
     "fix_model": "claude-opus-5",
     "agent_timeout": 7200,
-    "auto_dispatch_new": false
+    "auto_dispatch_new": false,
+    "test_command": "pytest -q",
+    "test_gate": true,
+    "test_gate_timeout": 600
   },
   "your-org/your-project/your-repo": {
     "provider": "azure",

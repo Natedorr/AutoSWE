@@ -16,6 +16,7 @@ from autoswe.tracking.comments import BOT_MARKER
 from autoswe.tracking.labels import (
     COMPLETED_STATUSES,
     REVIEW_BLOCKING_STATUSES,
+    SHIPPING_BLOCKING_STATUSES,
     TERMINAL_STATUSES,
     _map_done_to_status,
 )
@@ -85,9 +86,10 @@ def _field_lifecycle_patch(
         patch["review_file_path"] = None
 
     # first_dispatched_at: clear on terminal statuses and on the non-terminal
-    # review-blocking states (the review phase completed; the follow-up /fix
-    # should start its time/attempt clock fresh).
-    if new_status in TERMINAL_STATUSES or new_status in REVIEW_BLOCKING_STATUSES:
+    # shipping-blocking states (the review phase completed, or the post-fix
+    # test gate ran to a verdict; the follow-up /fix should start its
+    # time/attempt clock fresh).
+    if new_status in TERMINAL_STATUSES or new_status in SHIPPING_BLOCKING_STATUSES:
         patch["first_dispatched_at"] = None
 
     # _guard_blocked: reset on retry
@@ -150,6 +152,19 @@ def _resolve_branch(owner: str, repo: str, issue_num: int, plan_branch: str | No
         # Unknown/unregistered provider: fall back to the conventional
         # autoSWE branch name so a completion comment still renders.
         return f"autoswe/issue-{issue_num}"
+
+
+def _parse_tests_failed(done_content: str) -> tuple[str, str | None]:
+    """Split ``TESTS_FAILED\t<detail>\t<sha>`` into (detail, sha).
+
+    Mirrors the DONE_SUMMARY rfind pattern: the LAST tab separates the commit
+    SHA, so newlines/tabs in the failure detail are preserved.
+    """
+    rest = done_content[len("TESTS_FAILED\t"):]
+    tab_idx = rest.rfind("\t")
+    if tab_idx >= 0:
+        return rest[:tab_idx].strip(), rest[tab_idx + 1:].strip()
+    return rest.strip(), None
 
 
 def _build_completion_comment(
@@ -491,6 +506,38 @@ def emit(
         # Clear session_id on failure — the remote session is likely broken,
         # so the next retry should start fresh instead of resuming a stale session
         queue_patch["session_id"] = None
+        effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
+
+    elif new_status == "test_failed":
+        # Post-fix test gate red (Natedorr/testProject#20): the work was
+        # committed and pushed, but the branch suite is failing. This is NOT
+        # terminal — surface the failure, keep the task restartable, and let
+        # the /pr guard (decide: SHIPPING_BLOCKING_STATUSES) refuse shipping
+        # until a /fix re-runs the gate green.
+        detail, commit_sha = _parse_tests_failed(done)
+        branch = _resolve_branch(
+            task.owner, task.repo, task.issue_number, task.plan_branch, task.provider,
+        )
+        lines = [
+            f"🧪 **Test gate failed** — the branch suite is red, so "
+            f"`{pending_command}` is **not** marked done.",
+        ]
+        if commit_sha:
+            commit_url = _vcs_commit_url(world.repo_cfg, commit_sha)
+            lines.append(f"[Commit]({commit_url})" if commit_url else f"Commit: {commit_sha}")
+            branch_url = _vcs_branch_url(world.repo_cfg, branch)
+            lines.append(f"[View branch]({branch_url})" if branch_url else f"Branch: {branch}")
+        shown = detail[:1500] + ("… truncated" if len(detail) > 1500 else "")
+        lines.append(f"\n**Failure:**\n\n```\n{shown}\n```")
+        lines.append(
+            "\nPost `/fix` to address the failing tests (or `/retry`). "
+            "`/pr` is blocked while the suite is red."
+        )
+        body = "\n".join(lines) + _format_metrics(result.cost_usd, result.duration_seconds, session_id) + BOT_MARKER
+        effects.append(Effect(kind="post_comment", body=body))
+        effects.append(Effect(kind="set_status", status="test_failed"))
+        # No pending re-review — the gate, not the reviewer, produced this state.
+        queue_patch["rereview_after_fix"] = False
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 
     elif new_status == "aborted":

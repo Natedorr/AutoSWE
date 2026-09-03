@@ -49,7 +49,10 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
 - **Returns:**
   - `"DONE_SUMMARY\t<summary>\t<sha>"` — changes committed (summary = last 10 non-empty lines of Claude output)
   - `"DONE: no changes detected"` — no staged changes
+  - `"TESTS_FAILED\t<detail>\t<sha>"` — changes committed/pushed, but the post-fix test gate ran the branch's suite and it is red (see below)
   - `"FAILED: …"` — timeout, SDK error, or commit/push failure
+
+- **Post-fix test gate (Natedorr/testProject#20):** before a `/fix` can reach the terminal `fixed` state, `_finalize_fix` runs `test_gate.run_test_gate()` in the worktree *after* `commit_and_push` — the work is committed and pushed first, so a red gate never loses the agent's work. The gate resolves a test command (repo `test_command` → global `TEST_COMMAND` → Python/pytest detection in the worktree, e.g. a `tests/` dir, `conftest.py`, or `pyproject.toml` `[tool.pytest]`); when one resolves and the suite exits non-zero, the handler returns `TESTS_FAILED` instead of `DONE_SUMMARY`. The state machine maps that to the non-terminal `autoswe:test_failed` status: a comment carries the failure, `/pr` is blocked (`SHIPPING_BLOCKING_STATUSES`), and `/fix` / `/retry` restart with a fresh attempt budget. Gate skips (no resolvable command, disabled, missing runner, timeout) are non-gating — they log a warning but never block the pipeline. Configure via `TEST_GATE` / `TEST_GATE_TIMEOUT` / `TEST_COMMAND` (global) and `test_gate` / `test_gate_timeout` / `test_command` (per-repo) — see `config.md`.
 
 ## `/pr` — `ship.open_pr(task, cfg, repo_cfg)`
 

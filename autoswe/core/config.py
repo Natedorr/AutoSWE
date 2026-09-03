@@ -147,6 +147,9 @@ def load_config() -> dict:
         "AGENT_RETRY_ON_SUBTYPE": os.environ.get("AGENT_RETRY_ON_SUBTYPE", ""),
         "WORKTREE_ORPHAN_POLICY": os.environ.get("WORKTREE_ORPHAN_POLICY", "commit"),
         "AUTO_PURGE_BRANCHES": _as_bool(os.environ.get("AUTO_PURGE_BRANCHES")),
+        "TEST_GATE": _as_bool(os.environ.get("TEST_GATE"), "true"),
+        "TEST_GATE_TIMEOUT": int(os.environ.get("TEST_GATE_TIMEOUT", 600)),
+        "TEST_COMMAND": os.environ.get("TEST_COMMAND", ""),
     }
     if CONFIG_FILE.exists():
         # Snapshot the defaults before the file-parse loop overwrites the
@@ -156,6 +159,7 @@ def load_config() -> dict:
             for int_key in (
                 "AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS",
                 "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES",
+                "TEST_GATE_TIMEOUT",
             )
         }
         for line in CONFIG_FILE.read_text().splitlines():
@@ -167,7 +171,7 @@ def load_config() -> dict:
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
                     v = v[1:-1]
                 cfg[k.strip()] = v
-        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES"):
+        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT"):
             raw = cfg.get(int_key)
             if raw is None:
                 continue
@@ -190,6 +194,7 @@ def load_config() -> dict:
         cfg["PR_REQUIRE_SYNC"] = _as_bool(cfg.get("PR_REQUIRE_SYNC"), "true")
         cfg["PR_REQUIRE_CI"] = _as_bool(cfg.get("PR_REQUIRE_CI"), "true")
         cfg["AUTO_PURGE_BRANCHES"] = _as_bool(cfg.get("AUTO_PURGE_BRANCHES"))
+        cfg["TEST_GATE"] = _as_bool(cfg.get("TEST_GATE"), "true")
     # Parse ALLOWED_AUTHORS as a set for O(1) lookup
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()
     cfg["ALLOWED_AUTHORS"] = {a.strip() for a in _raw.split(",") if a.strip()} if _raw else set()

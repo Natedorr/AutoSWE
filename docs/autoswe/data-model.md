@@ -24,6 +24,7 @@ This file is **the source of truth for what autoSWE runs**. The poll loop writes
 | `synced` | Sync completed | No |
 | `shipped` | PR created | No |
 | `reviewed` | Review completed | No |
+| `test_failed` | Fix committed/pushed, but the post-fix test gate found the branch suite red â€” needs `/fix` | No |
 | `waiting` | Claude asked a question; waiting for a reply | No |
 | `failed` | Handler errored, or a limit guard tripped | No |
 | `error` | Infrastructure error (dispatch crash, OOM, unhandled exception) | No |
@@ -55,7 +56,7 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it â€
 | `session_id` | `str` | Agent session ID (Claude Code or Codex); used to resume the planner/coder session. **Cleared on `FAILED`** so the next dispatch does not resume a broken session |
 | `last_good_session_id` | `str \| None` | Last known-good session checkpoint. Set by `emit()` on every non-failed run that persists a `session_id`; **never cleared on `FAILED`** (unlike `session_id`). This is the session `/retry` forks from on backends that advertise the `"session_fork"` capability, so a failed retry leaves the checkpoint intact and the next `/retry` re-forks from the same good session. See [harnesses.md](harnesses.md#retry-semantics) |
 | `last_good_session_backend` | `str \| None` | The coding backend (`claude_code` / `codex`) that produced `last_good_session_id`. Written by `emit()` alongside the checkpoint; **never cleared on `FAILED`**. `_run_retry` only forks when this matches the resolved fix backend, so a mixed per-phase config (e.g. Codex `plan_harness` + Claude `fix_harness`) can't hand a foreign-backend session id to the fix backend's SDK. See [harnesses.md](harnesses.md#retry-semantics) |
-| `attempt_count` | `int` | Retry budget. Restarting from a successful rest (completed status or `review_failed`/`review_blocked`) starts a fresh budget (`decide()` sets the next action's `attempt_count` to 1, issue #186); restarting from a failing/neutral rest (`failed`/`error`/`skipped`/`aborted`) or from `planned` carries `task.attempt_count + 1` forward (floored at 1 so a legacy task with a stored `0` doesn't jump to 2 on its first real dispatch); `/retry` always resets to 1. When the next carry-forward restart would exceed `MAX_ATTEMPTS`, `decide()` trips the `MAX_ATTEMPTS` guard (`mark_failed_limit`, `limit_reason="attempts"`) |
+| `attempt_count` | `int` | Retry budget. Restarting from a successful rest (completed status, `review_failed`/`review_blocked`, or `test_failed`) starts a fresh budget (`decide()` sets the next action's `attempt_count` to 1, issue #186); restarting from a failing/neutral rest (`failed`/`error`/`skipped`/`aborted`) or from `planned` carries `task.attempt_count + 1` forward (floored at 1 so a legacy task with a stored `0` doesn't jump to 2 on its first real dispatch); `/retry` always resets to 1. When the next carry-forward restart would exceed `MAX_ATTEMPTS`, `decide()` trips the `MAX_ATTEMPTS` guard (`mark_failed_limit`, `limit_reason="attempts"`) |
 | `first_dispatched_at` | `str` | ISO 8601; set on first dispatch, reset on terminal status (wall-clock guard anchor) |
 | `last_dispatched_command` | `str \| None` | The slash command string last dispatched (e.g. `/plan`) |
 | `last_dispatched_command_id` | `int \| None` | Comment ID of the slash command last dispatched |
