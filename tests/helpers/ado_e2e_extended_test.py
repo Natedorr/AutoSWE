@@ -86,10 +86,14 @@ def get_all_comments_with_questions(tracker, repo_cfg, wi_id):
         has_review = "<AUTOSWE_REVIEW>" in body
         has_error = "<AUTOSWE_ERROR>" in body
         markers = []
-        if has_questions: markers.append("QUESTIONS")
-        if has_plan: markers.append("PLAN")
-        if has_review: markers.append("REVIEW")
-        if has_error: markers.append("ERROR")
+        if has_questions:
+            markers.append("QUESTIONS")
+        if has_plan:
+            markers.append("PLAN")
+        if has_review:
+            markers.append("REVIEW")
+        if has_error:
+            markers.append("ERROR")
         results.append({
             "author": c.author_login,
             "markers": markers,
@@ -170,7 +174,7 @@ def main():
         print("=== DRY RUN ===\n")
         for i, s in enumerate(SCENARIOS[args.start:]):
             print(f"Scenario {i}: {s['title']}")
-            for name, cmd, expected, desc in s["steps"]:
+            for name, cmd, expected, _desc in s["steps"]:
                 print(f"  {name}: {cmd[:50]}... → expect {expected}")
             print()
         return
@@ -178,14 +182,14 @@ def main():
     # Create WIs
     wi_ids = args.issue_ids or []
     if not wi_ids:
-        for i, scenario in enumerate(SCENARIOS[args.start:]):
+        for _i, scenario in enumerate(SCENARIOS[args.start:]):
             wi_id = tracker.create_issue(repo_cfg, scenario["title"], scenario["body"])
             wi_ids.append(wi_id)
             print(f"✓ Created WI #{wi_id}: {scenario['title']}")
             time.sleep(1)
 
     results = []
-    for scenario, wi_id in zip(SCENARIOS[args.start:], wi_ids):
+    for scenario, wi_id in zip(SCENARIOS[args.start:], wi_ids, strict=True):
         print(f"\n\n{'#' * 80}")
         print(f"# WI #{wi_id}: {scenario['name']} — {scenario['title']}")
         print(f"{'#' * 80}")
@@ -234,7 +238,7 @@ def main():
             }
 
             # Analyze all bot comments
-            print(f"\n[Bot comments analysis]")
+            print("\n[Bot comments analysis]")
             all_comments = get_all_comments_with_questions(tracker, repo_cfg, wi_id)
             for c in all_comments:
                 markers = ', '.join(c['markers']) if c['markers'] else 'none'

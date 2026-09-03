@@ -80,12 +80,18 @@ def print_bot_summary(bot):
     has_error = "<AUTOSWE_ERROR>" in body
 
     markers = []
-    if has_plan: markers.append("PLAN")
-    if has_questions: markers.append("QUESTIONS")
-    if has_commit: markers.append("COMMIT")
-    if has_review: markers.append("REVIEW")
-    if has_pr: markers.append("PR")
-    if has_error: markers.append("ERROR")
+    if has_plan:
+        markers.append("PLAN")
+    if has_questions:
+        markers.append("QUESTIONS")
+    if has_commit:
+        markers.append("COMMIT")
+    if has_review:
+        markers.append("REVIEW")
+    if has_pr:
+        markers.append("PR")
+    if has_error:
+        markers.append("ERROR")
 
     print(f"  Markers: {', '.join(markers) if markers else 'none'}")
     for line in body.strip().split('\n')[:8]:
@@ -148,7 +154,7 @@ def main():
     # Create work items
     wi_ids = args.issue_ids or []
     if not wi_ids:
-        for i, scenario in enumerate(SCENARIOS[args.start:]):
+        for _i, scenario in enumerate(SCENARIOS[args.start:]):
             wi_id = tracker.create_issue(repo_cfg, scenario["title"], scenario["body"])
             wi_ids.append(wi_id)
             print(f"✓ Created WI #{wi_id}: {scenario['title']}")
@@ -156,7 +162,7 @@ def main():
 
     # Run tests
     results = []
-    for scenario, wi_id in zip(SCENARIOS[args.start:], wi_ids):
+    for scenario, wi_id in zip(SCENARIOS[args.start:], wi_ids, strict=True):
         print(f"\n\n{'#' * 80}")
         print(f"# WI #{wi_id}: {scenario['title']}")
         print(f"{'#' * 80}")
@@ -203,7 +209,7 @@ def main():
 
             # Bot comment analysis
             bot = get_last_bot_comment(tracker, repo_cfg, wi_id)
-            print(f"\n[Bot comment]")
+            print("\n[Bot comment]")
             print_bot_summary(bot)
 
             # Step-specific checks
