@@ -1,0 +1,56 @@
+{
+  "$schema_version": 1,
+  "name": "autoswe-live-e2e",
+  "purpose": "Drive real GitHub issues through the autoSWE state machine against a real coding backend, and score every path.",
+  "entry_point": "e2e/README.md",
+  "stable_location": "e2e/",
+  "_stability_contract": "This directory is the ONLY location for the live E2E harness. Paths below are stable; resolve everything from this file rather than searching the tree. If a file moves, this manifest moves with it and is updated in the same commit.",
+
+  "roles": {
+    "openclaw": {
+      "reads": ["e2e/README.md", "e2e/scenarios.json", "e2e/PLAN.md"],
+      "does": "Creates the issues from `scenarios[].title` / `scenarios[].body`, then executes `scenarios[].steps` in order against the GitHub API. Advances on the awaited `autoswe:*` label, never on a timer.",
+      "must_not": "Alter the issue titles - the `[E2E-NN]` marker is how the monitor maps an issue back to a scenario."
+    },
+    "monitor": {
+      "runs_on": "the autoSWE box, via cron, every minute",
+      "command": "python e2e/monitor.py --write-report --pass-label <A-claude|B-codex|C-mixed> --quiet",
+      "reads": ["data/queue.json", "e2e/scenarios.json"],
+      "writes": ["e2e/observed.json", "e2e/report.json"],
+      "exit_codes": {"0": "nothing failed or stalled", "1": "at least one fail/stall", "2": "harness misconfigured"}
+    }
+  },
+
+  "files": {
+    "e2e/README.md": "Entry point: how to run a pass, and the contract between openclaw and the monitor",
+    "e2e/PLAN.md": "The spec - one section per issue, its state machine, and every assertion",
+    "e2e/scenarios.json": "The driver script openclaw executes (21 scenarios + out-of-band cases)",
+    "e2e/monitor.py": "Cron scorer - reads the queue, writes the pass/fail matrix",
+    "e2e/seed_testbed.sh": "Creates the two fixture repos with the deterministic levers baked in",
+    "e2e/observed.json": "Per-pass status history (generated, gitignored, cleared by --reset)",
+    "e2e/report.json": "Latest pass/fail matrix (generated, gitignored)"
+  },
+
+  "upstream_docs": {
+    "_note": "The harness tests the behaviour these describe. Read them to understand what an assertion means.",
+    "state_machine": "docs/autoswe/labels.md",
+    "statuses_and_queue_shape": "docs/autoswe/data-model.md",
+    "commands": "docs/autoswe/slash-commands.md",
+    "handlers": "docs/autoswe/handlers.md",
+    "guards": "docs/autoswe/safeguards.md",
+    "backends": "docs/autoswe/harnesses.md",
+    "offline_suite": "docs/autoswe/testing.md"
+  },
+
+  "requires": {
+    "testbed_repos": ["<owner>/autoswe-e2e-testbed", "<owner>/autoswe-e2e-hostile"],
+    "config": ["config/repos.json", "config/harnesses.json", "config/autoswe.env"],
+    "openclaw_scopes": ["issues:write", "contents:write (fixture commits on main)", "checks:read (E2E-16 CI gate timing)"]
+  },
+
+  "passes": [
+    {"label": "A-claude", "plan": "claude", "fix": "claude", "review": "claude"},
+    {"label": "B-codex", "plan": "codex", "fix": "codex", "review": "codex"},
+    {"label": "C-mixed", "plan": "codex", "fix": "claude", "review": "claude"}
+  ]
+}

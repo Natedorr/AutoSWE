@@ -23,3 +23,7 @@
 
 # Manual test helpers — output files
 tests/helpers/ado_post_summary.json
+
+# Live E2E harness (e2e/) — per-pass generated run state
+e2e/observed.json
+e2e/report.json

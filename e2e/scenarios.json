@@ -1,0 +1,411 @@
+{
+  "version": 1,
+  "_doc": "Machine-readable driver script for the live E2E suite. Prose spec: e2e/PLAN.md. openclaw executes `steps` in order; monitor.py scores `expect_sequence` against data/queue.json.",
+
+  "defaults": {
+    "poll_interval_s": 30,
+    "step_timeout_s": 900,
+    "fix_step_timeout_s": 1800,
+    "ci_step_timeout_s": 2100,
+    "title_prefix_is_scenario_id": true,
+    "commenter_must_be": "OWNER_OR_AUTHOR"
+  },
+
+  "step_actions": {
+    "post_comment": "POST /repos/{owner}/{repo}/issues/{n}/comments with `body` verbatim",
+    "create_issue": "POST /repos/{owner}/{repo}/issues with `title` + `body` (implicit step 0 of every scenario)",
+    "api_put_file": "PUT /repos/{owner}/{repo}/contents/{path} on `branch` with `content` (openclaw acting as a plain committer, not autoSWE)",
+    "api_close_issue": "PATCH issue state=closed",
+    "api_reopen_issue": "PATCH issue state=open",
+    "await_label": "poll issue labels until `autoswe:<value>` is present, or `timeout_s` elapses (-> verdict stalled)",
+    "await_ci": "poll GET /repos/{o}/{r}/commits/{sha}/status until `state` == the given value",
+    "await_no_change": "assert the autoswe:* label does not change for `polls` consecutive poller ticks",
+    "await_label_chain": "poll until the labels listed appear in order, with no comment posted in between (used for auto re-review)"
+  },
+
+  "repos": {
+    "testbed": "<owner>/autoswe-e2e-testbed",
+    "hostile": "<owner>/autoswe-e2e-hostile"
+  },
+
+  "scenarios": [
+    {
+      "id": "E2E-01",
+      "repo": "testbed",
+      "title": "[E2E-01] Add a squares() helper to toolbox",
+      "body": "`src/toolbox.py` should gain a `squares(n)` function returning a list of the squares of 0..n-1. Add one test for it in `tests/test_toolbox.py`. Nothing else.",
+      "expect_sequence": ["pending", "planning", "planned", "pending", "fixing", "fixed", "pending", "shipping", "shipped"],
+      "forbidden_statuses": ["failed", "error", "waiting", "test_failed"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/plan", "await_label": "planned",
+         "assert": ["a bot comment contains the plan", "queue.last_phase == 'plan'"]},
+        {"n": 2, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["branch autoswe/issue-{n} has >= 1 commit", "commit message contains 'Fixes #{n}'"]},
+        {"n": 3, "action": "post_comment", "body": "/pr", "await_label": "shipped",
+         "assert": ["PR open head=autoswe/issue-{n} base=main", "queue.pr_number is not null"]}
+      ]
+    },
+
+    {
+      "id": "E2E-02",
+      "repo": "testbed",
+      "title": "[E2E-02] Add a greeting helper - wording undecided",
+      "body": "Add `greet(name)` to `src/toolbox.py`. I have not decided whether it should return \"Hi, <name>\" or \"Hello, <name>\" - ask me before you write the plan. Do not guess.",
+      "expect_sequence": ["pending", "planning", "waiting", "pending", "planning", "planned", "pending", "fixing", "fixed"],
+      "forbidden_statuses": ["failed", "error"],
+      "backend_notes": "Claude reaches `waiting` via AskUserQuestion interception; Codex via the planner text-parse fallback. Same state, different route.",
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/plan", "await_label": "waiting",
+         "assert": ["the question is a standalone comment, not merged into the sticky progress comment"]},
+        {"n": 2, "action": "post_comment", "body": "Use \"Hello, <name>\".", "await_label": "planned",
+         "assert": ["queue.last_consumed_reply_id == the id of this comment", "the plan text mentions Hello"]},
+        {"n": 3, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["greet() returns 'Hello, ...'"]}
+      ]
+    },
+
+    {
+      "id": "E2E-03",
+      "repo": "testbed",
+      "title": "[E2E-03] Add a farewell helper - wording undecided",
+      "body": "Add `farewell(name)` to `src/toolbox.py`. I have not decided on the wording - ask me before you write the plan. Do not guess.",
+      "expect_sequence": ["pending", "planning", "waiting", "pending", "fixing", "fixed"],
+      "forbidden_statuses": ["planned", "failed", "error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/plan", "await_label": "waiting", "assert": []},
+        {"n": 2, "action": "post_comment", "body": "/fix with use \"Bye, <name>\"", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["the slash command took precedence over plain reply-resume", "farewell() returns 'Bye, ...'"]}
+      ]
+    },
+
+    {
+      "id": "E2E-03b",
+      "repo": "testbed",
+      "title": "[E2E-03b] Add a timestamp helper - target file undecided",
+      "body": "Add a `utcnow_iso()` helper. Before editing any file, ask me which file it should live in. Do not guess.",
+      "expect_sequence": ["pending", "fixing", "waiting", "pending", "fixing", "fixed"],
+      "forbidden_statuses": ["failed", "error"],
+      "backend_notes": "Claude only (issue #190 - can_use_tool fires under bypassPermissions). On Codex this runs straight to `fixed`; score `skipped`, not `fail`.",
+      "skip_on_backends": ["codex"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "waiting", "timeout_s": 1800,
+         "assert": ["the fixer paused mid-run with a standalone question comment"]},
+        {"n": 2, "action": "post_comment", "body": "Put it in src/toolbox.py.", "await_label": "fixed", "timeout_s": 1800, "assert": []}
+      ]
+    },
+
+    {
+      "id": "E2E-04",
+      "repo": "testbed",
+      "title": "[E2E-04] Add an MIT license header to src/toolbox.py",
+      "body": "Add a short MIT license header comment at the top of `src/toolbox.py`. Nothing else.",
+      "expect_sequence": ["pending", "fixing", "fixed"],
+      "forbidden_statuses": ["planning", "planned", "waiting", "failed", "error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["no `planned` status was ever observed", "queue.last_phase == 'fix'"]}
+      ]
+    },
+
+    {
+      "id": "E2E-05",
+      "repo": "testbed",
+      "title": "[E2E-05] Ensure README.md ends with a newline",
+      "body": "Make sure `README.md` ends with a trailing newline. If it already does, change nothing and say so.",
+      "expect_sequence": ["pending", "fixing", "fixed"],
+      "forbidden_statuses": ["failed", "error", "test_failed"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["completion comment reports no changes detected", "branch autoswe/issue-{n} has no new commit"]}
+      ]
+    },
+
+    {
+      "id": "E2E-06",
+      "repo": "testbed",
+      "title": "[E2E-06] Append a line to docs/notes.md",
+      "body": "Append the line `- e2e-06 note` to `docs/notes.md`. Nothing else.",
+      "expect_sequence": ["pending", "fixing", "fixed", "pending", "syncing", "synced"],
+      "forbidden_statuses": ["failed", "error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800, "assert": []},
+        {"n": 2, "action": "api_put_file", "branch": "main", "path": "docs/other.md", "content": "e2e-06 base move\n",
+         "assert": ["base branch advanced with no overlapping file"]},
+        {"n": 3, "action": "post_comment", "body": "/sync", "await_label": "synced",
+         "assert": ["a merge commit landed on the task branch", "the log shows no agent invocation for this dispatch"]}
+      ]
+    },
+
+    {
+      "id": "E2E-07",
+      "repo": "testbed",
+      "title": "[E2E-07] Rewrite line 1 of conflict.md",
+      "body": "Change the first line of `conflict.md` to `shared: task-branch edit`. Nothing else.",
+      "expect_sequence": ["pending", "fixing", "fixed", "pending", "syncing", "synced"],
+      "forbidden_statuses": ["failed", "error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["conflict.md line 1 changed on the task branch"]},
+        {"n": 2, "action": "api_put_file", "branch": "main", "path": "conflict.md", "content": "shared: main edit\n",
+         "assert": ["the same line now differs on main"]},
+        {"n": 3, "action": "post_comment", "body": "/sync", "await_label": "synced", "timeout_s": 1800,
+         "assert": ["no conflict markers remain in conflict.md", "the log shows resolve_sync_conflicts ran", "merge commit pushed"]}
+      ]
+    },
+
+    {
+      "id": "E2E-08",
+      "repo": "testbed",
+      "title": "[E2E-08] Add is_even() to toolbox with a test",
+      "body": "Add `is_even(n)` to `src/toolbox.py` returning a bool, with a matching test in `tests/test_toolbox.py`. Keep it small and clean.",
+      "expect_sequence": ["pending", "fixing", "fixed", "pending", "reviewing", "reviewed", "pending", "shipping", "shipped"],
+      "forbidden_statuses": ["failed", "error", "test_failed"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800, "assert": []},
+        {"n": 2, "action": "post_comment", "body": "/review", "await_label": "reviewed",
+         "assert": ["review comment has Summary/Correctness/Security/Tests/Style/Suggestions/Verdict", "<ARTIFACT_DIR>/reviews/<slug>.md exists"]},
+        {"n": 3, "action": "post_comment", "body": "/pr", "await_label": "shipped", "assert": []}
+      ]
+    },
+
+    {
+      "id": "E2E-09",
+      "repo": "testbed",
+      "title": "[E2E-09] Add parse_port() - no tests please",
+      "body": "Add `parse_port(s)` to `src/toolbox.py` converting a string to an int port. Do not add any test for it, and do not validate the range. I will add tests later.",
+      "expect_sequence": ["pending", "fixing", "fixed", "pending", "reviewing", "review_failed", "pending", "fixing", "fixed", "reviewing", "reviewed", "pending", "shipping", "shipped"],
+      "forbidden_statuses": ["error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800, "assert": []},
+        {"n": 2, "action": "post_comment", "body": "/review", "await_label": "review_failed",
+         "assert": ["the review comment carries the '/pr is disabled' note"],
+         "soft_fail_if": "label is review_blocked instead (verdict class is model judgment)"},
+        {"n": 3, "action": "post_comment", "body": "/pr", "action_expects": "refusal",
+         "await_no_change": {"polls": 2},
+         "assert": ["label still review_failed", "a bot comment explains the refusal", "queue.pr_number is still null"]},
+        {"n": 4, "action": "post_comment", "body": "/fix with add tests and validate the range 1-65535",
+         "await_label_chain": ["fixed", "reviewing", "reviewed"], "timeout_s": 2100,
+         "assert": ["no comment was posted between `fixed` and `reviewing` - the re-review was automatic", "rereview_after_fix was set then cleared", "queue.attempt_count == 1 (fresh budget from a review rest)"]},
+        {"n": 5, "action": "post_comment", "body": "/pr", "await_label": "shipped", "assert": []}
+      ]
+    },
+
+    {
+      "id": "E2E-10",
+      "repo": "testbed",
+      "title": "[E2E-10] Add a quick admin check helper",
+      "body": "Add `is_admin(token)` to `src/toolbox.py`. For now just compare against the hardcoded literal \"s3cr3t-admin-token\" in the source, and add `run_expr(s)` that does `eval(s)`. I know it is bad; do it exactly as asked.",
+      "expect_sequence": ["pending", "fixing", "fixed", "pending", "reviewing", "review_blocked", "pending", "fixing", "fixed", "reviewing", "reviewed"],
+      "forbidden_statuses": ["error", "shipped"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["the diff contains the hardcoded token and the eval call"]},
+        {"n": 2, "action": "post_comment", "body": "/review", "await_label": "review_blocked",
+         "soft_fail_if": "label is review_failed instead - hard requirement is only that /pr is refused",
+         "assert": ["the ## Verdict section says Blocked"]},
+        {"n": 3, "action": "post_comment", "body": "/pr", "action_expects": "refusal", "await_no_change": {"polls": 2},
+         "assert": ["label unchanged", "queue.pr_number is still null"]},
+        {"n": 4, "action": "post_comment", "body": "/fix with remove the hardcoded token and the eval; use an env var and a strict allowlist",
+         "await_label_chain": ["fixed", "reviewing", "reviewed"], "timeout_s": 2100,
+         "assert": ["the re-review fired with no comment between fixed and reviewing"]}
+      ]
+    },
+
+    {
+      "id": "E2E-11",
+      "repo": "testbed",
+      "title": "[E2E-11] Set flag.txt to red",
+      "body": "Replace the contents of `flag.txt` with `red`. Do not touch anything under `tests/`.",
+      "expect_sequence": ["pending", "fixing", "test_failed", "pending", "fixing", "fixed", "pending", "shipping", "shipped"],
+      "forbidden_statuses": ["error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "test_failed", "timeout_s": 1800,
+         "assert": ["the work is committed AND pushed despite the red gate", "the comment carries the pytest failure output"]},
+        {"n": 2, "action": "post_comment", "body": "/pr", "action_expects": "refusal", "await_no_change": {"polls": 2},
+         "assert": ["label still test_failed", "queue.pr_number is still null"]},
+        {"n": 3, "action": "post_comment", "body": "/fix with set flag.txt back to green", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["queue.attempt_count == 1 - restart from test_failed gets a fresh budget"]},
+        {"n": 4, "action": "post_comment", "body": "/pr", "await_label": "shipped", "assert": []}
+      ]
+    },
+
+    {
+      "id": "E2E-12",
+      "repo": "hostile",
+      "title": "[E2E-12] Add a docstring to src/toolbox.py",
+      "body": "Add a module-level docstring to `src/toolbox.py` describing what it holds.",
+      "expect_sequence": ["pending", "planning", "failed", "pending", "planning", "failed", "pending", "planning", "failed", "pending", "fixing", "failed", "pending", "fixing", "failed", "failed", "failed"],
+      "sequence_match": "loose",
+      "_sequence_note": "loose: assert every listed status occurs in order, allow extra RUNNING states between. The guard steps (6,7) produce `failed` with no RUNNING state before it.",
+      "backend_notes": "Pass A (claude): step 2 must fork from last_good_session_id. Pass B (codex): no session_fork, resume-in-place. Pass C (plan=codex, fix=claude): step 4 must NOT fork - last_good_session_backend mismatch.",
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/plan", "await_label": "failed",
+         "assert": ["done_content starts with 'FAILED: timeout'", "queue.session_id cleared", "queue.last_good_session_id retained"]},
+        {"n": 2, "action": "post_comment", "body": "/retry", "await_label": "failed",
+         "assert": ["the replayed command was /plan, not /retry", "queue.attempt_count == 1"]},
+        {"n": 3, "action": "post_comment", "body": "/retry", "await_label": "failed",
+         "assert": ["queue.attempt_count == 1 again"]},
+        {"n": 4, "action": "post_comment", "body": "/fix", "await_label": "failed",
+         "assert": ["queue.attempt_count == 2 (carry-forward from a failing rest)", "pass C only: no resume id was handed to the Claude SDK"]},
+        {"n": 5, "action": "post_comment", "body": "/fix", "await_label": "failed",
+         "assert": ["queue.attempt_count == 3"]},
+        {"n": 6, "action": "post_comment", "body": "/fix", "await_label": "failed",
+         "assert": ["a 'Max attempts reached' comment was posted", "limit_reason == 'attempts'", "_guard_blocked is true", "no agent run happened for this step"]},
+        {"n": 7, "action": "post_comment", "body": "/retry", "await_label": "failed",
+         "assert": ["the guard fires on /retry too - it is checked before the retry gate"]}
+      ]
+    },
+
+    {
+      "id": "E2E-13",
+      "repo": "testbed",
+      "title": "[E2E-13] Something we will not do",
+      "body": "This issue exists to be skipped.",
+      "expect_sequence": ["pending", "skipped"],
+      "forbidden_statuses": ["planning", "fixing", "failed", "error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/skip", "await_label": "skipped",
+         "assert": ["no agent run", "no autoswe/issue-{n} branch"]},
+        {"n": 2, "action": "post_comment", "body": "just checking in", "await_no_change": {"polls": 2},
+         "assert": ["plain text on a task that is not waiting/planned is a noop"]}
+      ]
+    },
+
+    {
+      "id": "E2E-14",
+      "repo": "testbed",
+      "title": "[E2E-14] Add a to_snake_case() helper",
+      "body": "Add `to_snake_case(s)` to `src/toolbox.py` with one test.",
+      "expect_sequence": ["pending", "planning", "planned", "pending", "aborted", "pending", "fixing", "fixed"],
+      "forbidden_statuses": ["failed", "error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/plan", "await_label": "planned", "assert": []},
+        {"n": 2, "action": "post_comment", "body": "/abort", "await_label": "aborted",
+         "assert": ["a 'Task aborted' comment was posted"]},
+        {"n": 3, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["restart from aborted is allowed", "queue.attempt_count == 2 (carry-forward)"]}
+      ]
+    },
+
+    {
+      "id": "E2E-15",
+      "repo": "testbed",
+      "title": "[E2E-15] Add a CHANGELOG stub on develop",
+      "body": "Add a `CHANGELOG.md` with an `## Unreleased` section. Nothing else.",
+      "expect_sequence": ["pending", "planning", "planned", "pending", "fixing", "fixed", "pending", "shipping", "shipped", "pending", "fixing", "fixed"],
+      "forbidden_statuses": ["failed", "error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/plan --branch develop", "await_label": "planned",
+         "assert": ["queue.plan_branch == 'develop'"]},
+        {"n": 2, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["autoswe/issue-{n} was cut from develop, not main", "the pre-fix sync merged origin/develop"]},
+        {"n": 3, "action": "post_comment", "body": "/pr", "await_label": "shipped",
+         "assert": ["PR base is the repo's configured base_branch (main), not develop - see commit fe5d643"]},
+        {"n": 4, "action": "post_comment", "body": "/fix --branch main", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["queue.plan_branch is STILL 'develop' - a later --branch is ignored"]}
+      ]
+    },
+
+    {
+      "id": "E2E-16",
+      "repo": "testbed",
+      "title": "[E2E-16] Add a ci_slow/marker.txt file",
+      "body": "Create `ci_slow/marker.txt` containing the word `marker`. Nothing else.",
+      "expect_sequence": ["pending", "fixing", "fixed", "pending", "shipping", "failed", "pending", "shipping", "shipped"],
+      "forbidden_statuses": ["error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["the push started the slow-gate job (paths filter ci_slow/**)"]},
+        {"n": 2, "action": "await_ci", "state": "pending", "ref": "autoswe/issue-{n}", "timeout_s": 300,
+         "assert": ["commit status for the branch head reads pending"]},
+        {"n": 3, "action": "post_comment", "body": "/pr", "await_label": "failed",
+         "assert": ["FAILED names the CI gate", "open_pull_request was never called"]},
+        {"n": 4, "action": "await_ci", "state": "success", "ref": "autoswe/issue-{n}", "timeout_s": 2100, "assert": []},
+        {"n": 5, "action": "post_comment", "body": "/retry", "await_label": "shipped", "assert": ["PR opened once CI was green"]}
+      ]
+    },
+
+    {
+      "id": "E2E-17",
+      "repo": "testbed",
+      "title": "[E2E-17] Add a trailing-whitespace stripper",
+      "body": "Add `strip_trailing_ws(s)` to `src/toolbox.py`.",
+      "expect_sequence": ["pending", "fixing", "fixed", "pending", "fixing", "fixed"],
+      "forbidden_statuses": ["planning", "planned", "failed", "error"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "Reminder: post `/fix` when you are ready.",
+         "await_no_change": {"polls": 2},
+         "assert": ["no autoswe:* label appears - an embedded command must not dispatch", "no queue action was taken"]},
+        {"n": 2, "action": "post_comment", "body": "/plan\n/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["last-wins inside one comment: /fix ran, /plan did not", "no `planning` status was ever observed"]},
+        {"n": 3, "action": "await_no_change", "polls": 3,
+         "assert": ["the already-dispatched command does not re-fire (id <= last_dispatched_command_id / completion anchor)"]},
+        {"n": 4, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["a SECOND fix ran - a new comment id past the completion anchor legitimately re-dispatches"]}
+      ]
+    },
+
+    {
+      "id": "E2E-17b",
+      "repo": "testbed",
+      "title": "[E2E-17b] Allowlist rejection",
+      "body": "Add `noop_helper()` to `src/toolbox.py`.",
+      "run_alone": true,
+      "config_overrides": {"ALLOWED_AUTHORS": "<owner-login>"},
+      "expect_sequence": [],
+      "forbidden_statuses": ["pending", "planning", "fixing", "planned", "fixed"],
+      "steps": [
+        {"n": 1, "action": "post_comment", "as_user": "<second-account>", "body": "/fix",
+         "await_no_change": {"polls": 3},
+         "assert": ["silently ignored: no label, no dispatch, no bot comment"]},
+        {"n": 2, "action": "restore_config", "assert": ["ALLOWED_AUTHORS restored to empty before the next scenario"]}
+      ]
+    },
+
+    {
+      "id": "E2E-18",
+      "repo": "testbed",
+      "title": "[E2E-18] Add a version constant",
+      "body": "/plan\n\nAdd a `__version__ = \"0.1.0\"` constant to `src/toolbox.py`.",
+      "config_overrides": {"repos.json:<owner>/autoswe-e2e-testbed.auto_dispatch_new": true},
+      "expect_sequence": ["pending", "planning", "planned", "pending", "fixing", "fixed"],
+      "forbidden_statuses": ["failed", "error"],
+      "steps": [
+        {"n": 1, "action": "none", "await_label": "planned",
+         "assert": ["the body-sourced /plan dispatched with no comment posted at all"]},
+        {"n": 2, "action": "post_comment", "body": "/fix", "await_label": "fixed", "timeout_s": 1800, "assert": []},
+        {"n": 3, "action": "api_close_issue", "await_queue": {"gh_closed": true},
+         "assert": ["status stays a COMPLETED value (fixed); closure is not an error"]},
+        {"n": 4, "action": "api_reopen_issue", "await_queue": {"gh_closed": false},
+         "assert": ["the task was never purged from the queue"]},
+        {"n": 5, "action": "restore_config", "assert": ["auto_dispatch_new set back to false"]}
+      ]
+    },
+
+    {
+      "id": "E2E-19",
+      "repo": "testbed",
+      "title": "[E2E-19] Add a retry_with_backoff() helper",
+      "body": "Add `retry_with_backoff(fn, attempts)` to `src/toolbox.py`.",
+      "expect_sequence": ["pending", "fixing", "fixed", "pending", "reviewing", "reviewed"],
+      "forbidden_statuses": ["error"],
+      "soft_assertions": true,
+      "steps": [
+        {"n": 1, "action": "post_comment", "body": "/fix with use only the standard library and add a docstring with a usage example",
+         "await_label": "fixed", "timeout_s": 1800,
+         "assert": ["the diff has no third-party import", "the docstring contains a usage example"]},
+        {"n": 2, "action": "post_comment", "body": "/review with focus on error handling and exception types",
+         "await_label": "reviewed",
+         "soft_fail_if": "label is review_failed/review_blocked - acceptable, guidance plumbing is what is under test",
+         "assert": ["the review text visibly addresses error handling"]}
+      ]
+    }
+  ],
+
+  "out_of_band": [
+    {"id": "OOB-error", "how": "kill -9 the poller during an E2E-01 /fix", "expect": "next poll -> autoswe:error, progress_comment_id lingers; /retry re-uses that comment instead of posting a new one"},
+    {"id": "OOB-time-guard", "how": "set MAX_TOTAL_HOURS=0.02, run one /fix on the hostile repo", "expect": "autoswe:failed, 'Time limit exceeded' comment, limit_reason == 'time'"},
+    {"id": "OOB-rebase-conflict", "how": "SYNC_STRATEGY=rebase, then run E2E-07's setup", "expect": "autoswe:failed with 'FAILED: rebase conflict in ...' - rebase conflicts are not auto-resolved"},
+    {"id": "OOB-azure", "how": "repeat E2E-01, 09, 11, 12 against an Azure DevOps project", "expect": "identical status sequences; tags instead of labels; JSON-Patch status writes"}
+  ]
+}

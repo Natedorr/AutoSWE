@@ -15,9 +15,17 @@ The **tested combo** is that floor against Claude Code CLI **v2.1.251**.
   `CLAUDE_CODE_ENABLE_TODO_TOOLS` floor and also satisfies the Opus 5 floor
   (`v2.1.219`). Sonnet 5 needs `v2.1.197` or later.
 
-`tests/test_sdk_version.py` fails with an actionable message if the installed
-`claude-agent-sdk` drops below the pinned floor; it skips when the SDK is not installed
-(e.g. Codex-only deploys).
+Both floors are enforced by the offline suite, each with an actionable failure message:
+
+- `tests/test_sdk_version.py` — the installed `claude-agent-sdk` package. Skips when the
+  SDK is not installed (e.g. Codex-only deploys).
+- `tests/test_cli_version.py` — the `claude` **binary a dispatch would actually invoke**,
+  resolved the way production resolves it (`CLAUDE_CLI_PATH` if pinned, else `PATH`). The
+  binary can drift independently of pip, so the package guard alone is not enough. Skips
+  when nothing resolves, or when `--version` cannot be queried.
+
+Raising either floor is a one-line change in the corresponding test (`MIN_SDK_VERSION` /
+`MIN_CLI_VERSION`) plus the version quoted here.
 
 ## GitHub API version pin
 

@@ -2,6 +2,15 @@
 
 autoSWE uses an 11-layer test strategy, from canonical API fixtures to state-machine transitions to infrastructure edge cases. All offline tests run via `pytest -q -m "not live"`.
 
+> **Live layer — lives in [`e2e/`](../../e2e/README.md), not here.** Everything below proves the
+> state machine against *fakes*. The `e2e/` directory at the repo root proves the same machine
+> against a real provider and a real coding backend: an external agent (openclaw) opens issues
+> on a purpose-built testbed, drives `e2e/scenarios.json`, and `e2e/monitor.py` scores every
+> path from `data/queue.json` on cron. It is deliberately self-contained and indexed by
+> `e2e/MANIFEST.json` so an outside agent can find it without walking `docs/`.
+> When a live scenario finds a bug, the fix lands in **both** places — add the transition row
+> to `tests/scenarios/transitions.py` *and* keep the scenario in `e2e/scenarios.json`.
+
 ## Layer 0 — Canonical API Fixtures
 
 **Location:** `tests/fixtures/api/{github,azure}/`

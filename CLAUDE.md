@@ -26,6 +26,7 @@ All architecture, data shapes, and process documentation lives in `docs/autoswe/
 | Safeguards (limits, loop protection) | [docs/autoswe/safeguards.md](docs/autoswe/safeguards.md) |
 | Debugging & operations | [docs/autoswe/debugging.md](docs/autoswe/debugging.md) |
 | Testing strategy | [docs/autoswe/testing.md](docs/autoswe/testing.md) |
+| Live E2E suite (real repos, real backends) | [e2e/README.md](e2e/README.md) — self-contained in `e2e/`, indexed by `e2e/MANIFEST.json` |
 
 ## Working Rules for Claude
 
@@ -76,6 +77,7 @@ When autoSWE processes an issue that touches any `autoswe/` module, the work **m
 | Backend capabilities (mode→sandbox, capability checks) | `test_backend_capabilities.py` |
 | Backend parity (Claude Code vs Codex contract) | `test_backend_parity.py` |
 | Post-fix test gate (`harness/test_gate.py`) | `test_test_gate.py` |
+| SDK / CLI version floors | `test_sdk_version.py`, `test_cli_version.py` |
 | Codex backend (JSONL parsing, subprocess, pricing) | `test_codex_backend.py`, `test_codex_pricing.py` |
 | `CodexFake` fidelity to the real parser | `test_codex_fake.py` |
 | Queue store invariants, crash recovery | `test_queue_store.py` |
