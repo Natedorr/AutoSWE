@@ -280,6 +280,27 @@ def make_can_use_tool(
 
         full_body = md + BOT_MARKER
 
+        # Idempotent post guard (issue #194): this callback can fire more than
+        # once for a single question round — the agent may re-issue
+        # AskUserQuestion after the deny, or runner.run's retry re-invokes the
+        # backend with the same shared state dict. Re-posting yields a
+        # byte-identical duplicate comment (the E2E double-post, ~1 min apart).
+        # A previous firing that already landed the post set
+        # asked_question_posted=True, which also makes the finalize fallback a
+        # true no-op; here we re-pause without posting again.
+        if state.get("asked_question_posted") is True:
+            if on_post is not None:
+                try:
+                    freeze_progress_on_post(on_post, full_body)
+                except Exception:  # Progress notification is best-effort.
+                    pass
+            return PermissionResultDeny(
+                message=(
+                    "Questions were already posted to the issue as a comment. "
+                    "Your session is paused — it will resume when the user replies."
+                ),
+            )
+
         # Post the question as a STANDALONE issue comment — never into the
         # throttled, latest-wins sticky progress comment (issue #184: the
         # question was coalesced away and clobbered by the next tool event

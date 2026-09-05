@@ -159,6 +159,54 @@ def test_make_can_use_tool_denies_ask_and_sets_state():
         assert "<!-- autoswe-bot -->" in body
 
 
+def test_make_can_use_tool_posts_once_per_question_round():
+    """A second AskUserQuestion firing in the same dispatch (same shared state)
+    re-pauses WITHOUT re-posting — exactly one user-visible question post per
+    question round (issue #194: the sticky intercept could fire twice, e.g. the
+    agent re-asking after the deny or runner.run retrying, and post the
+    byte-identical question a second time ~1 minute later)."""
+    import asyncio
+
+    from autoswe.harness.ask_user_question import make_can_use_tool
+
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+    repo_cfg = {"provider": "github"}
+    state = {}
+
+    input_data = {
+        "questions": [
+            {
+                "header": "H",
+                "question": "Question?",
+                "options": [{"label": "X", "description": ""}],
+                "multiSelect": False,
+            }
+        ]
+    }
+
+    callback = make_can_use_tool(task, repo_cfg, state)
+
+    with patch("autoswe.harness.ask_user_question.get_tracker") as mock_get:
+        mock_tracker = MagicMock()
+        mock_get.return_value = mock_tracker
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        # First firing: posts the standalone question comment.
+        first = asyncio.run(callback("AskUserQuestion", input_data, None))
+        assert isinstance(first, PermissionResultDeny)
+        assert state["asked_question_posted"] is True
+
+        # Second firing, same shared state (agent re-ask / runner retry):
+        # still denies, but must NOT post again.
+        second = asyncio.run(callback("AskUserQuestion", input_data, None))
+        assert isinstance(second, PermissionResultDeny)
+
+    # Exactly one user-visible question post for the whole question round.
+    mock_tracker.post_comment.assert_called_once()
+    assert state["asked_question_posted"] is True
+
+
 def test_make_can_use_tool_denies_ask_via_on_post():
     """AskUserQuestion denies, posts a standalone comment via the tracker,
     and notifies on_post with the full body (issue #184: the question must be
