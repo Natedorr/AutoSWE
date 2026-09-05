@@ -211,13 +211,53 @@ def test_run_ship_pr_calls_ship():
     world = _make_world(plan_branch="autoswe/issue-42")
     action = Action(kind="ship_pr", slug=world.task.slug)
 
+    def _fake_open_pr(task, *a, **kw):
+        # Real open_pr caches pr_number/pr_url on the task dict (issue #193);
+        # simulate that so the lift into DispatchResult is exercised.
+        task["pr_number"] = 1
+        task["pr_url"] = "https://github.com/o/r/pull/1"
+        return "DONE: PR https://github.com/o/r/pull/1"
+
     with patch("autoswe.orch.run.ship.open_pr") as mock_ship:
-        mock_ship.return_value = "DONE: PR https://github.com/o/r/pull/1"
+        mock_ship.side_effect = _fake_open_pr
         result = run(action, world)
 
     assert isinstance(result, DispatchResult)
     assert "PR" in result.done_content
+    assert result.pr_number == 1
+    assert result.pr_url == "https://github.com/o/r/pull/1"
     mock_ship.assert_called_once()
+
+
+def test_run_ship_pr_failure_carries_no_pr_identity():
+    """open_pr FAILED → DispatchResult carries no pr_number/pr_url, even when
+    the queue entry still holds a STALE cached number from a prior ship."""
+    world = _make_world(plan_branch="autoswe/issue-42")
+    # Rebuild the task state with a stale cached PR identity, as a task whose
+    # PR was deleted would have.
+    world = World(
+        api=world.api,
+        task=_with_pr_identity(world.task, pr_number=9, pr_url="https://github.com/o/r/pull/9"),
+        cfg=world.cfg,
+        repo_cfg=world.repo_cfg,
+    )
+    action = Action(kind="ship_pr", slug=world.task.slug)
+
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship:
+        mock_ship.return_value = "FAILED: could not create PR: boom"
+        result = run(action, world)
+
+    assert isinstance(result, DispatchResult)
+    assert result.done_content.startswith("FAILED")
+    assert result.pr_number is None
+    assert result.pr_url is None
+
+
+def _with_pr_identity(task: TaskState, pr_number, pr_url) -> TaskState:
+    """Rebuild a TaskState with a different cached PR identity (frozen dataclass)."""
+    return TaskState(
+        **{**task.__dict__, "pr_number": pr_number, "pr_url": pr_url},
+    )
 
 
 # ------ Sync action ------

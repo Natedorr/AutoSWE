@@ -283,6 +283,61 @@ def test_apply_effect_create_pr_existing_skipped(provider):
 
 
 # ---------------------------------------------------------------------------
+# apply_effect -- create_pr persists pr_number/pr_url on the queue entry
+# (issue #193: the auto-PR path used to discard the PRResult entirely)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_new_persists_pr_identity(provider):
+    """New PR created → pr_number/pr_url land on the queue entry."""
+    tracker = MagicMock()
+    vcs = MagicMock()
+    vcs.find_existing_pr.return_value = None
+    vcs.open_pull_request.return_value = PRResult(
+        number=7, url="https://github.com/o/r/pull/7",
+    )
+    slug = "gh__owner_repo_1"
+    queue = _queue_with_entry(provider, slug)
+    with patch("autoswe.providers.adapter.get_vcs", return_value=vcs):
+        _run_apply(provider, tracker, _create_pr_effect(), queue, 1, slug)
+    vcs.open_pull_request.assert_called_once()
+    assert queue[slug]["pr_number"] == 7
+    assert queue[slug]["pr_url"] == "https://github.com/o/r/pull/7"
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_existing_re_caches_pr_identity(provider):
+    """Existing PR + empty queue identity (crash recovery) → re-cached."""
+    tracker = MagicMock()
+    vcs = MagicMock()
+    vcs.find_existing_pr.return_value = PRResult(
+        number=15, url="https://github.com/o/r/pull/15",
+    )
+    slug = "gh__owner_repo_1"
+    queue = _queue_with_entry(provider, slug)
+    queue[slug]["pr_number"] = None
+    with patch("autoswe.providers.adapter.get_vcs", return_value=vcs):
+        _run_apply(provider, tracker, _create_pr_effect(), queue, 1, slug)
+    vcs.open_pull_request.assert_not_called()
+    assert queue[slug]["pr_number"] == 15
+    assert queue[slug]["pr_url"] == "https://github.com/o/r/pull/15"
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_missing_identity_is_noop(provider):
+    """PRResult without number/url must not write None over the queue entry."""
+    tracker = MagicMock()
+    vcs = MagicMock()
+    vcs.find_existing_pr.return_value = PRResult(number=None, url="")
+    slug = "gh__owner_repo_1"
+    queue = _queue_with_entry(provider, slug)
+    with patch("autoswe.providers.adapter.get_vcs", return_value=vcs):
+        _run_apply(provider, tracker, _create_pr_effect(), queue, 1, slug)
+    assert "pr_number" not in queue[slug]
+    assert "pr_url" not in queue[slug]
+
+
+# ---------------------------------------------------------------------------
 # apply_effect -- create_pr CI gate (no sync gate; already synced)
 # ---------------------------------------------------------------------------
 

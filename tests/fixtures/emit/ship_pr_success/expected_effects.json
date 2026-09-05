@@ -16,7 +16,9 @@
     "patch_contains": {
       "autoswe_status": "shipped",
       "last_dispatched_command": "/pr",
-      "last_consumed_reply_id": 1
+      "last_consumed_reply_id": 1,
+      "pr_number": 5,
+      "pr_url": "https://github.com/owner/repo/pull/5"
     }
   }
 ]

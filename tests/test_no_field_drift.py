@@ -91,6 +91,7 @@ def _fully_populated_entry() -> dict[str, Any]:
         "plan_file_path": "/tmp/plan.md",
         "review_file_path": "/tmp/review.md",
         "fix_summary": "fixed the thing",
+        "pr_url": "https://github.com/acme/widget/pull/5",
     }
 
 

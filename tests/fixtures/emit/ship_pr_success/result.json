@@ -2,5 +2,7 @@
   "done_content": "DONE_SUMMARY\tPR created\thttps://github.com/owner/repo/pull/5",
   "cost_usd": 0.05,
   "duration_seconds": 30.0,
-  "session_id": "session-pr-42"
+  "session_id": "session-pr-42",
+  "pr_number": 5,
+  "pr_url": "https://github.com/owner/repo/pull/5"
 }

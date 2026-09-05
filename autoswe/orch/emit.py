@@ -453,6 +453,18 @@ def emit(
         effects.append(Effect(kind="post_comment", body=comment))
         effects.append(Effect(kind="set_status", status=new_status))
 
+        # Persist the PR identity at ship time (issue #193): the shipped
+        # status transition and the queue patch that carry it are one and
+        # the same patch, so pr_number/pr_url land in the queue entry in the
+        # same write that marks the task shipped. Each field is guarded
+        # independently — a provider can supply the URL without the number
+        # and vice versa.
+        if kind == "ship_pr":
+            if result.pr_number is not None:
+                queue_patch["pr_number"] = result.pr_number
+            if result.pr_url:
+                queue_patch["pr_url"] = result.pr_url
+
         # Persist fix_summary from DONE_SUMMARY for PR body enrichment.
         # Mirrors _build_completion_comment's rfind pattern so tabs inside
         # the LLM-generated summary are preserved (the last tab separates

@@ -79,6 +79,7 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("review_file_path", "review_file_path", None),
     TaskField("fix_summary", "fix_summary", ""),
     TaskField("rereview_after_fix", "rereview_after_fix", False),
+    TaskField("pr_url", "pr_url", None),
 )
 
 
@@ -177,6 +178,10 @@ class TaskState:
     # state completes. decide() then auto-dispatches a /review on the next poll
     # (and clears the flag) so the gating verdict is re-checked before /pr.
     rereview_after_fix: bool = False
+    # Cached PR web URL, persisted alongside pr_number at ship time (issue #193).
+    # pr_number is the machine-facing cache (idempotency, result.json); pr_url
+    # is the human-facing link for operators inspecting queue.json.
+    pr_url: str | None = None
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:

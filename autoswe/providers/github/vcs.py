@@ -105,6 +105,14 @@ class GitHubVCS:
             )
             if result.returncode == 0:
                 url = result.stdout.strip()
+                # gh CLI prints the new PR's URL, so the number is known from it
+                # (GitHub URLs always end /pull/<number>). Persist it so the
+                # caller can cache it on the queue entry (issue #193).
+                number = None
+                try:
+                    number = int(url.rstrip("/").rsplit("/", 1)[-1])
+                except ValueError:
+                    pass
                 head_sha = None
                 # Best-effort: fetch PR details to get head SHA
                 try:
@@ -114,9 +122,10 @@ class GitHubVCS:
                         self._token, max_retries=1,
                     )
                     head_sha = pr_details.get("head", {}).get("sha")
+                    number = number or pr_details.get("number")
                 except Exception:  # Best-effort SHA lookup — PR is valid even if we can't fetch head SHA
                     pass
-                return PRResult(url=url, head_sha=head_sha)
+                return PRResult(url=url, number=number, head_sha=head_sha)
             dbg.warning("gh pr create failed: %s", result.stderr)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             dbg.warning("gh CLI unavailable, falling back to API")

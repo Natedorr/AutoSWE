@@ -94,7 +94,7 @@ The `emit()` layer maps `DispatchResult.done_content` to status transitions:
 
 ## Auto-PR
 
-After a successful `/fix` (`autoswe_status → fixed`), if `AUTO_CREATE_PR=true` and no PR exists for the branch, `emit()` includes a `create_pr` Effect. The adapter translates it to the provider's PR creation API.
+After a successful `/fix` (`autoswe_status → fixed`), if `AUTO_CREATE_PR=true` and no PR exists for the branch, `emit()` includes a `create_pr` Effect. The adapter translates it to the provider's PR creation API and persists the resulting `pr_number`/`pr_url` on the queue entry (issue #193).
 
 ## Post-Poll Bookkeeping
 

@@ -145,6 +145,8 @@ def _load_result(path: Path) -> DispatchResult | None:
         cost_usd=raw.get("cost_usd"),
         duration_seconds=raw.get("duration_seconds", 0.0),
         session_id=raw.get("session_id"),
+        pr_number=raw.get("pr_number"),
+        pr_url=raw.get("pr_url"),
     )
 
 
@@ -604,6 +606,56 @@ def test_ship_pr_does_not_clobber_checkpoint_backend():
     assert "last_good_session_backend" not in patch, (
         "a ship_pr run must not clobber last_good_session_backend"
     )
+
+
+def test_ship_pr_success_persists_pr_number_and_url():
+    """The shipped queue patch carries pr_number/pr_url from the DispatchResult
+    (issue #193): the PR identity lands in the same write that marks the task
+    shipped."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="ship_pr",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="DONE: PR https://github.com/o/r/pull/7",
+        pr_number=7,
+        pr_url="https://github.com/o/r/pull/7",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "ship_pr must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("autoswe_status") == "shipped"
+    assert patch.get("pr_number") == 7, (
+        "the shipped queue patch must persist pr_number (issue #193)"
+    )
+    assert patch.get("pr_url") == "https://github.com/o/r/pull/7"
+
+
+def test_ship_pr_failure_does_not_persist_pr_fields():
+    """A FAILED /pr must not write pr_number/pr_url into the queue patch."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="ship_pr",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(done_content="FAILED: could not create PR: boom")
+
+    effects = emit(action, result, world)
+    for e in effects:
+        if e.kind == "patch_queue" and e.queue_patch:
+            assert "pr_number" not in e.queue_patch
+            assert "pr_url" not in e.queue_patch
 
 
 def test_review_preserves_status_only_emits_queue_patch():

@@ -15,6 +15,29 @@ dbg = get_debug_logger()
 AUTOSWE_BOT_FOOTER = "\n<!-- autoswe-bot -->"
 
 
+def _pr_number_from_url(pr_url: str) -> int | None:
+    """Parse a PR number out of a provider PR URL, or None.
+
+    GitHub: .../pull/<n>; Azure DevOps: .../pullrequest/<n>. Providers are
+    expected to fill PRResult.number, but the gh-CLI create path historically
+    returned only the URL, so callers keep this fallback.
+    """
+    tail = pr_url.rstrip("/").rsplit("/", 1)[-1]
+    return int(tail) if tail.isdigit() else None
+
+
+def _record_pr(task: dict, pr_url: str, number: int | None) -> None:
+    """Cache the just-opened/existing PR on the task dict (issue #193).
+
+    run() reads pr_number/pr_url off the task dict and threads them into
+    DispatchResult so emit() can persist them on the shipped queue entry.
+    """
+    if number is None:
+        number = _pr_number_from_url(pr_url)
+    task["pr_number"] = number
+    task["pr_url"] = pr_url
+
+
 def _pr_ref(pr_url: str) -> str:
     """Extract a redacted PR reference from a URL for safe log output.
 
@@ -44,7 +67,11 @@ def open_pr(
     repo_cfg: dict | None = None,
     progress_callback: "Callable[[str], None] | None" = None,
 ) -> str:
-    """Open a PR from the worktree branch. Returns done-file content."""
+    """Open a PR from the worktree branch. Returns done-file content.
+
+    On success, caches ``pr_number``/``pr_url`` on the ``task`` dict so the
+    caller can persist them on the queue entry (issue #193).
+    """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     token = task["_token"]
     base_branch = task.get("plan_branch") or task.get("base_branch", "main")
@@ -92,6 +119,7 @@ def open_pr(
         with contextlib.suppress(Exception):
             tracker.post_comment(issue_num,
                 f"Pull request already exists: {pr_url}{AUTOSWE_BOT_FOOTER}")
+        _record_pr(task, pr_url, existing.number)
         return f"DONE: PR {pr_url}"
 
     try:
@@ -108,6 +136,7 @@ def open_pr(
         with contextlib.suppress(Exception):
             tracker.post_comment(issue_num,
                "Pull request opened: " + pr_url + AUTOSWE_BOT_FOOTER)
+        _record_pr(task, pr_url, pr_result.number)
         return f"DONE: PR {pr_url}"
     except Exception as e:  # Poller resilience — any PR creation failure is caught and reported
         dbg.error("open_pr: failed: %s", e, exc_info=True)

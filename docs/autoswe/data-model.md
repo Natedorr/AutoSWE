@@ -66,7 +66,8 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `welcome_comment_id` | `int \| None` | Comment ID of the welcome message (if posted) |
 | `progress_comment_id` | `int \| None` | Sticky progress comment ID for the in-flight dispatch. Cleared on any clean return (finalize), so it lingers **only** after a crash — a `/retry` from the `error` state re-uses this comment instead of posting a new one. See [handlers.md](handlers.md). |
 | `bot_comment_ids` | `list[int]` | Every comment ID autoSWE has posted on this issue |
-| `pr_number` | `int \| None` | Cached PR number |
+| `pr_number` | `int \| None` | Cached PR number. Persisted at ship time (both the explicit `/pr` path and the `AUTO_CREATE_PR` path) so consumers can reference the PR without re-querying the provider |
+| `pr_url` | `str \| None` | Cached PR web URL, persisted alongside `pr_number` at ship time |
 | `fix_summary` | `str \| None` | Extracted from `DONE_SUMMARY` on fix/retry completion; persisted in the queue so PR creation can include it in the body |
 | `rereview_after_fix` | `bool` | Set by `emit()` when a `/fix` dispatched from `review_failed`/`review_blocked` completes. `decide()` then auto-dispatches `/review` on the next poll (and `emit()` clears it when the review runs) so the gating verdict is re-checked before `/pr`. |
 | `gh_closed` | `bool` | True once the issue is observed closed; cleared if it's reopened; task is never auto-purged |
@@ -149,6 +150,7 @@ class TaskState:
     review_file_path: str | None = None
     fix_summary: str = ""
     rereview_after_fix: bool = False
+    pr_url: str | None = None
 ```
 
 Built from the queue entry by `TaskState.from_queue(slug, entry)` using the `TASK_FIELDS` registry in `types.py`. The registry is the single source of truth for field ↔ queue key ↔ default mappings — the drift test (`tests/test_no_field_drift.py`) fails CI if a field is added to one without the other. Transient fields (`_token`, `_comment_id`) are excluded — they belong in the dispatch runtime, not the decision boundary.

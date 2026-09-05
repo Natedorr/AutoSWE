@@ -61,7 +61,7 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
   - **CI gate** (`PR_REQUIRE_CI`, default on): calls `VCSProvider.get_ci_status()` for the branch head. `success` or `none` (repo has no CI configured) → pass. `pending` (checks still queued/running) or `failure` → gate fails.
   - If either enabled gate fails, `open_pr` returns `"FAILED: <reason>"` without calling `find_existing_pr`/`open_pull_request` — same failed-emit path as any other `FAILED:`, so the user is told to `/retry` once the branch/CI is green.
 - **Then, if the gate passes:** pure `VCSProvider.open_pull_request()` call.
-- **Flow:** open the PR for `autoswe/issue-{N}` → `base_branch`; post a "Pull request opened" comment.
+- **Flow:** open the PR for `autoswe/issue-{N}` → `base_branch`; post a "Pull request opened" comment. On success, `open_pr` caches `pr_number`/`pr_url` on the task dict; `run()` lifts them into `DispatchResult` and `emit()` persists them on the shipped queue entry in the same `patch_queue` that advances the status (issue #193).
 - **Returns:**
   - `"DONE: PR <url>"` — PR created
   - `"FAILED: <gate reason>"` — blocked by the sync or CI preflight gate
