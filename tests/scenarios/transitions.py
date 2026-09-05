@@ -585,6 +585,48 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "failed_review_refused",
+        "description": (
+            "Failed task; /review is refused (no completed work to review) — "
+            "posts a 'not accepted' comment, stays failed, no Claude call "
+            "(issue #192 M-1: removing the broad gate would otherwise let "
+            "/review re-run and flip a failed task to `reviewed`)"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/review",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "autoswe_status": "failed",
+            "no_claude_calls": True,
+            "comment_contains": ["not accepted", "no completed work", "/fix"],
+        },
+    },
+    {
         "name": "done_then_new_fix",
         "description": "Fixed task; new /fix from user → re-dispatches",
         "start": {

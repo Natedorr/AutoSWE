@@ -315,11 +315,10 @@ def _check_restart_or_guard(
     # a "post /retry" feedback instead of the old silent noop (issue #192): the
     # task is already at its limit, so a /fix or /plan must not re-dispatch (or
     # log a restart that won't happen), and /pr can't ship a limit-blocked task.
+    # slash_cmd is guaranteed non-None here: for a terminal task with no slash
+    # command, decide() returns a plain noop (before calling this function), so
+    # the guard-blocked path always has a concrete command to refuse or run.
     if task.guard_blocked and slash_cmd not in ("/retry", "/skip", "/abort"):
-        # A plain-text comment (no slash command) is not actionable → noop, and
-        # it can't be deduped by comment id, so it must not be refused either.
-        if slash_cmd is None:
-            return Action(kind="noop", slug=task.slug)
         # Refuse each distinct command ONCE. This branch runs BEFORE the shared
         # dedup guard further down, so dedup here via the dispatch watermark: if
         # this exact command was already refused (last_dispatched_command_id
@@ -437,9 +436,18 @@ def _check_restart_or_guard(
         # "attempt_count X->Y (restart ...)" line (issue #192: a /fix swallowed
         # by the failed-task gate logged a restart that never happened).
 
-        # /pr cannot ship a failed/error task — there is nothing ready to ship.
-        if status in ("failed", "error") and slash_cmd == "/pr":
-            log(f"[DECIDE] {task.slug} /pr refused in {status} state (use /fix or /retry)")
+        # Only /fix and /plan re-dispatch a failed/error task (issue #192). The
+        # other restart-cycle commands must NOT fall through to dispatch: /pr
+        # can't ship a task whose work never completed, /review can't meaningfully
+        # review a failed run (a passing verdict would flip the task to `reviewed`
+        # and make it /pr-shippable despite the failed fix), and /sync just
+        # re-pulls a branch with no completed work to advance. Refuse each with
+        # "post /fix first" feedback instead of the old silent noop.
+        if status in ("failed", "error") and slash_cmd in ("/pr", "/review", "/sync"):
+            log(
+                f"[DECIDE] {task.slug} {slash_cmd} refused in {status} state "
+                f"(post /fix to complete the work first)"
+            )
             return Action(
                 kind="refused",
                 slug=task.slug,

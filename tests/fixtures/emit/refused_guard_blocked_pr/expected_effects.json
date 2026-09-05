@@ -1,0 +1,24 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "This task is blocked after hitting its limits",
+      "Post `/retry`",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "failed",
+      "last_dispatched_command": "/pr",
+      "last_dispatched_command_id": 4,
+      "last_consumed_reply_id": 4,
+      "first_dispatched_at": null
+    }
+  }
+]

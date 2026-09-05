@@ -60,4 +60,10 @@ Note: `MAX_ATTEMPTS` is a **retry budget** — it bounds re-runs of work that ke
 
 ### Restarting a `failed`/`error` task
 
-A `/fix` (or `/plan`) on a task in `failed`/`error` state **restarts it** — it re-dispatches the command and carries the attempt counter forward, so the retry budget still bounds repeated failures. `/retry` remains the explicit **budget reset** (replays the last substantive command with `attempt_count = 1`). `/pr` on a `failed`/`error` task is **refused** — there is nothing ready to ship — and the bot posts a comment telling the user to post `/fix` (or `/retry`) instead. Any command other than `/retry` on a task that already hit its limit (`guard_blocked`) is likewise refused with a "post `/retry`" comment (see `safeguards.md`). Each distinct refusal is posted once; the shared dedup guard suppresses re-refusals of the same command on later ticks.
+A `/fix` (or `/plan`) on a task in `failed`/`error` state **restarts it** — it re-dispatches the command and carries the attempt counter forward, so the retry budget still bounds repeated failures. `/retry` remains the explicit **budget reset** (replays the last substantive command with `attempt_count = 1`). Only these three restart a failing task; the other restart-cycle commands are **refused** with a posted comment because there is no completed work for them to act on:
+
+- `/pr` — nothing ready to ship. The bot tells the user to post `/fix` (or `/retry`).
+- `/review` — no completed work to review (and a passing verdict would wrongly flip the task to `reviewed` → shippable). The bot tells the user to post `/fix` first.
+- `/sync` — no completed branch work to advance. The bot tells the user to post `/fix` first.
+
+Any command other than `/retry` on a task that already hit its limit (`guard_blocked`) is refused with a "post `/retry`" comment (see `safeguards.md`) — including `/pr`, `/review`, `/sync` *and* `/fix`, since on a limit-blocked task even `/fix` cannot restart. Each distinct refusal is posted once; the shared dedup guard suppresses re-refusals of the same command on later ticks.

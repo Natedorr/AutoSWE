@@ -187,7 +187,7 @@ class Action:
     refused_command: str | None = None
 ```
 
-Provider-agnostic. Cached at the test seam between Layer A (decide) and Layer B (run) / Layer C (emit). `limit_reason` is set only on `kind="mark_failed_limit"` to record which guard tripped (attempt count vs. wall-clock). `refused_command` is set on `kind="refused"` to record which slash command was refused (`/pr` on a `failed`/`error` task, or a non-`/retry` command on a guard-blocked task) so `emit()` can pick the right feedback comment (issue #192).
+Provider-agnostic. Cached at the test seam between Layer A (decide) and Layer B (run) / Layer C (emit). `limit_reason` is set only on `kind="mark_failed_limit"` to record which guard tripped (attempt count vs. wall-clock). `refused_command` is set on `kind="refused"` to record which slash command was refused (`/pr`, `/review`, or `/sync` on a `failed`/`error` task, or a non-`/retry` command on a guard-blocked task) so `emit()` can pick the right feedback comment (issue #192). The message also keys on `task.guard_blocked`: on a limit-blocked task every refusal points at `/retry`, since even `/fix` is refused there.
 
 ### `Effect` — What to write back (Layer C output)
 

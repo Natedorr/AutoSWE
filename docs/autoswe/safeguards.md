@@ -57,7 +57,7 @@ Because the counter carries forward only across failing/neutral rests, when it a
 
 Once `_guard_blocked = True`, the task is limit-blocked: `decide()` refuses every command except `/retry`, `/skip`, and `/abort` with `Action(kind="refused")` — `emit()` posts a "Post `/retry` to restart it" comment (instead of the old silent noop) and leaves the task in its current `failed`/`error` state. Plain-text comments (no slash command) stay silent noops. `/retry` is the only command that clears the flag (via `_field_lifecycle_patch` in `emit()`). Each distinct command is refused once: the shared dedup guard suppresses re-refusal of the same command on later ticks.
 
-Restarting a `failed`/`error` task: a `/fix` or `/plan` re-dispatches the command and **carries the attempt counter forward** (see above) — it no longer requires the explicit `/retry`. `/pr` on a `failed`/`error` task is refused (nothing ready to ship); `emit()` posts "`/pr` was not accepted … Post `/fix` to finish the work (or `/retry` to restart)."
+Restarting a `failed`/`error` task: a `/fix` or `/plan` re-dispatches the command and **carries the attempt counter forward** (see above) — it no longer requires the explicit `/retry`. These are the *only* commands that restart a failing task. `/pr`, `/review`, and `/sync` on a `failed`/`error` task are refused (`emit()` posts "Your `/…` was not accepted … Post `/fix` to complete the work first") — there is no completed work to ship, review, or sync, and a spurious `/review` verdict would wrongly flip the task to `reviewed` (→ shippable). Note the message keys on `task.guard_blocked`: on a limit-blocked task every refusal (including `/pr`) instead points at `/retry`, since `/fix` is itself refused there.
 
 ## `MAX_TOTAL_HOURS` Wall Clock
 

@@ -1,0 +1,26 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Your `/review` was not accepted",
+      "failed",
+      "no completed work",
+      "Post `/fix`",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "failed",
+      "last_dispatched_command": "/review",
+      "last_dispatched_command_id": 11,
+      "last_consumed_reply_id": 11,
+      "first_dispatched_at": null
+    }
+  }
+]

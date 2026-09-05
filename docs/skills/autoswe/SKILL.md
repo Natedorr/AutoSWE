@@ -171,7 +171,7 @@ When you see `autoswe:fixed`, you have options:
 - **Max attempts:** Default 3 per issue (configurable via `MAX_ATTEMPTS`)
 - **Time limit:** Default 2 hours total per issue (configurable via `MAX_TOTAL_HOURS`)
 - **Guard block:** When limits are hit, the issue is locked. Only `/retry`, `/skip`, or `/abort` work; other commands are refused with a "post `/retry`" comment
-- **Failed tasks:** Post `/fix` to restart (carries the attempt counter forward) or `/retry` to restart with a fresh budget. `/pr` on a `failed`/`error` task is refused
+- **Failed tasks:** Post `/fix` or `/plan` to restart (carries the attempt counter forward) or `/retry` to restart with a fresh budget. Only those three restart a `failed`/`error` task; `/pr`, `/review`, and `/sync` are refused (no completed work to ship/review/sync)
 - **Concurrent tasks:** Only one task per repo at a time (PID-based locking, default `MAX_CONCURRENT=1`)
 
 ---
@@ -198,6 +198,6 @@ Key settings in `config/autoswe.env`:
 |---------|-------------|-----|
 | Nothing happens after posting command | Poller not running | Someone needs to run `python3 autoswe.py poller` |
 | Stuck on `autoswe:planning` | Agent timed out or errored | Check logs, post `/retry` |
-| `autoswe:failed` | Agent hit max attempts or error | Post `/fix` to restart (or `/retry` for a fresh budget) |
+| `autoswe:failed` | Agent hit max attempts or error | Post `/fix` or `/plan` to restart (or `/retry` for a fresh budget); `/pr`/`/review`/`/sync` are refused |
 | Command ignored | Repo locked by another running task | Wait for current task to finish |
 | Bot not responding to your comments | You're not in `ALLOWED_AUTHORS` | Ask admin to add you |
