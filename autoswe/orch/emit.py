@@ -325,9 +325,16 @@ def emit(
         # command on the next tick (issue #192).
         rest = task.status or "failed"
         if action.refused_command == "/pr":
+            # The message must NOT start a line with a backtick-slash command
+            # (`/pr`...): the slash parser strips a single leading backtick and
+            # matches commands at line start, and _find_slash_command scans the
+            # bot's OWN comments. A line-leading "`/pr`..." would re-parse as a
+            # fresh /pr on the next tick, re-triggering this very refusal
+            # (issue #192 "spam trap"). Opening with "Your" keeps the /pr
+            # reference mid-line, where the parser ignores it.
             msg = (
-                f"`/pr` was not accepted — the task is in `{rest}` state and "
-                f"there is nothing ready to ship. Post `/fix` to finish the "
+                f"Your `/pr` was not accepted — the task is in `{rest}` state "
+                f"and there is nothing ready to ship. Post `/fix` to finish the "
                 f"work (or `/retry` to restart).{BOT_MARKER}"
             )
         else:

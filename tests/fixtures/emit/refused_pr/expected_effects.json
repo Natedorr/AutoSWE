@@ -2,7 +2,7 @@
   {
     "kind": "post_comment",
     "contains": [
-      "`/pr` was not accepted",
+      "Your `/pr` was not accepted",
       "failed",
       "nothing ready to ship",
       "`/fix`",
