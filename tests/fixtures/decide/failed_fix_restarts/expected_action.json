@@ -1,0 +1,9 @@
+{
+  "kind": "fix",
+  "slug": "gh:owner_repo_42",
+  "plan_branch": null,
+  "guidance": null,
+  "attempt_count": 2,
+  "triggering_comment_id": 11,
+  "resume_session_id": null
+}

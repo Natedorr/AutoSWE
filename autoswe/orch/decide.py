@@ -310,9 +310,37 @@ def _check_restart_or_guard(
     comments = api.comments
     status = task.status
 
-    # Guard-blocked tasks skip the entire restart cycle unless /retry, /skip, or /abort
+    # Guard-blocked tasks skip the entire restart cycle unless /retry, /skip, or
+    # /abort. When a slash command arrives that can't unblock it, refuse it with
+    # a "post /retry" feedback instead of the old silent noop (issue #192): the
+    # task is already at its limit, so a /fix or /plan must not re-dispatch (or
+    # log a restart that won't happen), and /pr can't ship a limit-blocked task.
     if task.guard_blocked and slash_cmd not in ("/retry", "/skip", "/abort"):
-        return Action(kind="noop", slug=task.slug)
+        # A plain-text comment (no slash command) is not actionable → noop, and
+        # it can't be deduped by comment id, so it must not be refused either.
+        if slash_cmd is None:
+            return Action(kind="noop", slug=task.slug)
+        # Refuse each distinct command ONCE. This branch runs BEFORE the shared
+        # dedup guard further down, so dedup here via the dispatch watermark: if
+        # this exact command was already refused (last_dispatched_command_id
+        # advanced by the prior refusal's emit), noop instead of re-posting the
+        # same "post /retry" comment every tick.
+        last_cmd = task.last_dispatched_command
+        last_dispatch_id = task.last_dispatched_command_id or 0
+        if (
+            cmd_id
+            and cmd_id > 0
+            and last_cmd == slash_cmd
+            and cmd_id <= last_dispatch_id
+        ):
+            return Action(kind="noop", slug=task.slug)
+        log(f"[DECIDE] {task.slug} {slash_cmd} refused: task is guard-blocked (post /retry)")
+        return Action(
+            kind="refused",
+            slug=task.slug,
+            triggering_comment_id=cmd_id,
+            refused_command=slash_cmd,
+        )
 
     # Review gating: a review that found problems blocks shipping. Refuse /pr
     # until the user posts /fix (which triggers an automatic re-review). The
@@ -404,6 +432,25 @@ def _check_restart_or_guard(
 
     # New user intent on a restartable command
     if has_new_user and slash_cmd not in ("/skip", "/abort"):
+        # ---- Refusals, checked BEFORE the attempt-count bump ----
+        # A command that will not actually run must never log a misleading
+        # "attempt_count X->Y (restart ...)" line (issue #192: a /fix swallowed
+        # by the failed-task gate logged a restart that never happened).
+
+        # /pr cannot ship a failed/error task — there is nothing ready to ship.
+        if status in ("failed", "error") and slash_cmd == "/pr":
+            log(f"[DECIDE] {task.slug} /pr refused in {status} state (use /fix or /retry)")
+            return Action(
+                kind="refused",
+                slug=task.slug,
+                triggering_comment_id=cmd_id,
+                refused_command=slash_cmd,
+            )
+
+        # Note: guard-blocked tasks are refused at the top of this function
+        # (before the attempt-count bump) for every command except /retry,
+        # /skip, and /abort; /retry falls through here to reset the budget.
+
         # Calculate attempt count (used for limit checks and dispatch).
         # Restarting from a *successful* rest (a completed status, or a
         # review verdict) starts a fresh MAX_ATTEMPTS budget: the previous
@@ -424,7 +471,7 @@ def _check_restart_or_guard(
         else:
             attempt_count = _next_attempt(task, f"restart cmd={slash_cmd}, max={max_attempts}")
 
-        # Guard: max attempts (checked before failed-task gate)
+        # Guard: max attempts
         if attempt_count > max_attempts and not task.guard_blocked:
             log(f"[LIMIT] {task.slug} guard fired: attempt_count={attempt_count} > MAX_ATTEMPTS={max_attempts}, first_dispatched_at={task.first_dispatched_at}")
             return Action(
@@ -449,9 +496,11 @@ def _check_restart_or_guard(
                     limit_reason="time",
                 )
 
-        # Failed and error issues only restart on explicit /retry
-        if status in ("failed", "error") and slash_cmd != "/retry":
-            return Action(kind="noop", slug=task.slug)
+        # /fix and /plan on a failed/error task now RESTART it here instead of
+        # the old silent noop (issue #192): the attempt counter has already
+        # carried forward above, the /pr-on-failed case was refused earlier,
+        # and the limit guards fired first, so reaching this line means a
+        # real dispatch. /retry remains the explicit budget reset.
 
         plan_branch = branch or task.plan_branch
 

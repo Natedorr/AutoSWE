@@ -242,6 +242,7 @@ class Action:
         "post_welcome",
         "advance_watermark",
         "mark_failed_limit",
+        "refused",
         "review",
     ]
     slug: str
@@ -252,6 +253,10 @@ class Action:
     triggering_comment_id: int | None = None
     user_reply_text: str | None = None
     limit_reason: Literal["attempts", "time"] | None = None
+    # For kind="refused": the slash command that was refused
+    # (e.g. "/pr" on a failed task, "/fix" on a guard-blocked task).
+    # emit() uses it to pick the refusal message.
+    refused_command: str | None = None
 
 
 @dataclass(frozen=True)

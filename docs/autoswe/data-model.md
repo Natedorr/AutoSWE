@@ -174,7 +174,7 @@ class Action:
     kind: Literal["plan", "fix", "ship_pr", "sync_branch",
                   "retry", "skip", "abort", "noop",
                   "post_welcome", "advance_watermark",
-                  "mark_failed_limit",
+                  "mark_failed_limit", "refused",
                   "review"]
     slug: str
     plan_branch: str | None = None
@@ -184,9 +184,10 @@ class Action:
     triggering_comment_id: int | None = None
     user_reply_text: str | None = None
     limit_reason: Literal["attempts", "time"] | None = None
+    refused_command: str | None = None
 ```
 
-Provider-agnostic. Cached at the test seam between Layer A (decide) and Layer B (run) / Layer C (emit). `limit_reason` is set only on `kind="mark_failed_limit"` to record which guard tripped (attempt count vs. wall-clock).
+Provider-agnostic. Cached at the test seam between Layer A (decide) and Layer B (run) / Layer C (emit). `limit_reason` is set only on `kind="mark_failed_limit"` to record which guard tripped (attempt count vs. wall-clock). `refused_command` is set on `kind="refused"` to record which slash command was refused (`/pr` on a `failed`/`error` task, or a non-`/retry` command on a guard-blocked task) so `emit()` can pick the right feedback comment (issue #192).
 
 ### `Effect` — What to write back (Layer C output)
 

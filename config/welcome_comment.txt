@@ -3,7 +3,7 @@ autoSWE picked up this issue (`{{SLUG}}`).
 **Available Commands:**
 - `/plan` - Start a planning session (reads code, asks questions, posts a plan)
 - `/plan --branch <name>` - Plan on a specific branch (default: main)
-- `/fix` - Implement the fix (runs Claude with code-editing permissions)
+- `/fix` - Implement the fix (runs Claude with code-editing permissions; restarts a failed/error task)
 - `/fix --branch <name>` - Fix on a specific branch (default: main)
 - `/fix with <guidance>` - Same as /fix but appends guidance to the prompt
 - `/review` - Review the changes on the branch (read-only, posts findings)

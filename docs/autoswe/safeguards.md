@@ -53,7 +53,11 @@ A label is never a steering input (`labels.md`).
 - **Carry forward (previous + 1, floored at 1)**: restarting from a *failing or neutral* rest (`failed`/`error`/`skipped`/`aborted`) or from `planned` (re-plan churn). This is the path the guard actually fires on.
 - **`/retry` (→ 1)**: explicit reset.
 
-Because the counter carries forward only across failing/neutral rests, when it already equals `MAX_ATTEMPTS` (default 3) the next *carry-forward* restart computes `attempt_count = MAX_ATTEMPTS + 1 > MAX_ATTEMPTS` and `decide()` returns `Action(kind="mark_failed_limit", limit_reason="attempts")` — `emit()` produces a "Max attempts reached" comment, sets `autoswe_status = "failed"`, and sets `_guard_blocked = True` so comment re-scans stop until a new command appears. The attempts guard is checked **before** the "failed/error only restart on `/retry`" gate, so it fires on both the `/fix`-again and `/retry` loops, not just `/retry`.
+Because the counter carries forward only across failing/neutral rests, when it already equals `MAX_ATTEMPTS` (default 3) the next *carry-forward* restart computes `attempt_count = MAX_ATTEMPTS + 1 > MAX_ATTEMPTS` and `decide()` returns `Action(kind="mark_failed_limit", limit_reason="attempts")` — `emit()` produces a "Max attempts reached" comment, sets `autoswe_status = "failed"`, and sets `_guard_blocked = True` so comment re-scans stop until a new command appears. The attempts guard is checked **before** any dispatch, so it fires on both the `/fix`-again and `/retry` restart loops, not just `/retry`.
+
+Once `_guard_blocked = True`, the task is limit-blocked: `decide()` refuses every command except `/retry`, `/skip`, and `/abort` with `Action(kind="refused")` — `emit()` posts a "Post `/retry` to restart it" comment (instead of the old silent noop) and leaves the task in its current `failed`/`error` state. Plain-text comments (no slash command) stay silent noops. `/retry` is the only command that clears the flag (via `_field_lifecycle_patch` in `emit()`). Each distinct command is refused once: the shared dedup guard suppresses re-refusal of the same command on later ticks.
+
+Restarting a `failed`/`error` task: a `/fix` or `/plan` re-dispatches the command and **carries the attempt counter forward** (see above) — it no longer requires the explicit `/retry`. `/pr` on a `failed`/`error` task is refused (nothing ready to ship); `emit()` posts "`/pr` was not accepted … Post `/fix` to finish the work (or `/retry` to restart)."
 
 ## `MAX_TOTAL_HOURS` Wall Clock
 

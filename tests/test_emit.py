@@ -132,6 +132,7 @@ def _load_action(data: dict) -> Action:
         triggering_comment_id=data.get("triggering_comment_id"),
         user_reply_text=data.get("user_reply_text"),
         limit_reason=data.get("limit_reason"),
+        refused_command=data.get("refused_command"),
     )
 
 

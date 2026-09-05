@@ -124,6 +124,7 @@ def _load_action(data: dict) -> Action:
         triggering_comment_id=data.get("triggering_comment_id"),
         user_reply_text=data.get("user_reply_text"),
         limit_reason=data.get("limit_reason"),
+        refused_command=data.get("refused_command"),
     )
 
 
@@ -171,6 +172,7 @@ def test_decide(scenario: Path):
     assert actual.resume_session_id == expected.resume_session_id
     assert actual.user_reply_text == expected.user_reply_text
     assert actual.limit_reason == expected.limit_reason, f"limit_reason: expected={expected.limit_reason!r} actual={actual.limit_reason!r}"
+    assert actual.refused_command == expected.refused_command, f"refused_command: expected={expected.refused_command!r} actual={actual.refused_command!r}"
 
 
 # ---------------------------------------------------------------------------

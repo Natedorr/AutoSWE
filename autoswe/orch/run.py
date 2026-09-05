@@ -87,7 +87,7 @@ def run(
     # Pure actions — no Claude run
     if kind in (
         "noop", "skip", "abort", "post_welcome",
-        "advance_watermark", "mark_failed_limit",
+        "advance_watermark", "mark_failed_limit", "refused",
     ):
         return None
 

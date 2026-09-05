@@ -10,7 +10,7 @@ Comments are the only steering input. A slash command at the start of a comment 
 | `/fix` | `/fix [--branch <name>] [with <guidance>]` | any | `fixed` or `failed` | Yes (write access) | OWNER/AUTHOR |
 | `/pr` | `/pr` | `fixed` (with commits) | `shipped` | No | OWNER/AUTHOR |
 | `/sync` | `/sync` | any (with worktree) | `synced` or `failed` | Only on conflict | OWNER/AUTHOR |
-| `/retry` | `/retry` | `failed` | `pending` → handler → final state | Yes (replayed) | OWNER/AUTHOR |
+| `/retry` | `/retry` | `failed`/`error` | `pending` → handler → final state | Yes (replayed) | OWNER/AUTHOR |
 | `/skip` | `/skip` | any | `skipped` | No | OWNER/AUTHOR |
 | `/abort` | `/abort` | any | `aborted` | No | OWNER/AUTHOR |
 | `/review` | `/review [with <guidance>]` | any | `reviewed` | Yes (read-only) | OWNER/AUTHOR |
@@ -56,4 +56,8 @@ When `/retry` action is run (`orch/run.py:_run_retry()`):
 2. `run()` looks at `last_dispatched_command` for the last substantive command (not `/pr`, `/sync`, `/retry`, `/skip`, or `/abort`)
 3. Replays that command via the appropriate planner/coder/ship handler
 
-Note: `MAX_ATTEMPTS` is a **retry budget** — it bounds re-runs of work that keeps failing, not the number of phases an issue goes through. Restarting from a *successful* rest (`fixed`/`synced`/`shipped`/`reviewed`, or `review_failed`/`review_blocked`) starts a fresh budget, so the follow-up `/fix` after a review verdict, or `/pr` after a `fixed` task, never burns attempts even after a long healthy lifecycle. `/retry` remains the explicit reset when a task is stuck in `failed`/`error` (see `safeguards.md`).
+Note: `MAX_ATTEMPTS` is a **retry budget** — it bounds re-runs of work that keeps failing, not the number of phases an issue goes through. Restarting from a *successful* rest (`fixed`/`synced`/`shipped`/`reviewed`, or `review_failed`/`review_blocked`) starts a fresh budget, so the follow-up `/fix` after a review verdict, or `/pr` after a `fixed` task, never burns attempts even after a long healthy lifecycle.
+
+### Restarting a `failed`/`error` task
+
+A `/fix` (or `/plan`) on a task in `failed`/`error` state **restarts it** — it re-dispatches the command and carries the attempt counter forward, so the retry budget still bounds repeated failures. `/retry` remains the explicit **budget reset** (replays the last substantive command with `attempt_count = 1`). `/pr` on a `failed`/`error` task is **refused** — there is nothing ready to ship — and the bot posts a comment telling the user to post `/fix` (or `/retry`) instead. Any command other than `/retry` on a task that already hit its limit (`guard_blocked`) is likewise refused with a "post `/retry`" comment (see `safeguards.md`). Each distinct refusal is posted once; the shared dedup guard suppresses re-refusals of the same command on later ticks.

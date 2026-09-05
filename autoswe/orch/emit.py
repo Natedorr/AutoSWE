@@ -317,6 +317,39 @@ def emit(
             ),
         )
 
+    if kind == "refused":
+        # A command was refused (e.g. /pr on a failed/error task, or any
+        # non-/retry command on a guard-blocked task). Post clear feedback
+        # instead of the old silent noop, and advance the dispatch watermark
+        # so the shared dedup guard suppresses a re-refusal of the same
+        # command on the next tick (issue #192).
+        rest = task.status or "failed"
+        if action.refused_command == "/pr":
+            msg = (
+                f"`/pr` was not accepted — the task is in `{rest}` state and "
+                f"there is nothing ready to ship. Post `/fix` to finish the "
+                f"work (or `/retry` to restart).{BOT_MARKER}"
+            )
+        else:
+            msg = (
+                f"This task is blocked after hitting its limits. Post `/retry` "
+                f"to restart it.{BOT_MARKER}"
+            )
+        return (
+            Effect(kind="post_comment", body=msg),
+            Effect(kind="set_status", status=rest),
+            Effect(
+                kind="patch_queue",
+                queue_patch={
+                    "autoswe_status": rest,
+                    "last_dispatched_command": action.refused_command,
+                    "last_dispatched_command_id": action.triggering_comment_id,
+                    "last_consumed_reply_id": action.triggering_comment_id,
+                    "first_dispatched_at": None,
+                },
+            ),
+        )
+
     # --- Claude actions (result should be DispatchResult) ---
 
     if result is None:
