@@ -702,6 +702,97 @@ TRANSITIONS: list[dict[str, Any]] = [
             "comment_contains": ["Completed with command", "/pr"],
         },
     },
+    # ---- PR ship clears a lingering rereview_after_fix (issue #195) ----
+    # A /fix dispatched from a review verdict set rereview_after_fix and left
+    # the task at "fixed". The user posted /pr before the auto re-review fired,
+    # so the re-review never ran. Shipping must clear the flag: a shipped task
+    # carrying it is one poll away from a stray review dispatch.
+    {
+        "name": "shipped_clears_rereview_flag",
+        "description": "Fixed task with a lingering rereview_after_fix; /pr → shipped clears the flag",
+        "skip_providers": ["azure"],
+        "start": {
+            "issue": {"body": "Fix.\n\n/fix"},
+            "labels": ["autoswe:fixed"],
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "rereview_after_fix": True,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:shipped",
+            "autoswe_status": "shipped",
+            "rereview_after_fix": False,
+            "comment_contains": ["Completed with command", "/pr"],
+        },
+    },
+    # ---- Shipped + live rereview_after_fix → no action (issue #195) ----
+    # The auto re-review in decide() is gated on status == "fixed"; a shipped
+    # task is terminal, so even if the flag somehow survives to shipped it must
+    # not dispatch a review. This pins that guarantee (defensive) on top of the
+    # ship-time clear above.
+    {
+        "name": "shipped_rereview_flag_no_action",
+        "description": "Shipped task still carrying rereview_after_fix → no dispatch, no status change",
+        "start": {
+            "issue": {"body": "Fix."},
+            "labels": ["autoswe:shipped"],
+            "comments": [
+                {
+                    "body": "Completed with command `/pr` — PR created\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "shipped",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/pr",
+                "last_dispatched_command_id": 2,
+                "last_consumed_reply_id": 2,
+                "session_id": "s-fix-prev",
+                "pr_number": 5,
+                "rereview_after_fix": True,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:shipped",
+            "autoswe_status": "shipped",
+            "rereview_after_fix": True,
+            "no_claude_calls": True,
+            "no_git_calls": True,
+        },
+    },
     # ---- PR preflight gate: CI pending blocks ----
     {
         "name": "pr_blocked_by_ci_pending",
