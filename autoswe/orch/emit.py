@@ -534,10 +534,16 @@ def emit(
 
         # Auto re-review: a /fix dispatched from a review_failed/review_blocked
         # state must be re-reviewed before it can ship. Flag it so decide()
-        # auto-dispatches /review on the next poll; otherwise clear any stale flag.
+        # auto-dispatches /review on the next poll; otherwise clear any stale
+        # flag. This must cover EVERY completion that lands in a COMPLETED
+        # status (fix/retry -> fixed, sync_branch -> synced, ship_pr ->
+        # shipped), not just fix/retry: a /sync or /pr that follows a flagged
+        # fix would otherwise leave rereview_after_fix live on a synced/shipped
+        # task — a latent re-review one poll away (issue #195). A re-review is
+        # pending only when the just-finished run is a fix/retry that started
+        # from a review-gating state; /pr and /sync never are.
         rereview_pending = kind in ("fix", "retry") and old_status in REVIEW_BLOCKING_STATUSES
-        if kind in ("fix", "retry"):
-            queue_patch["rereview_after_fix"] = rereview_pending
+        queue_patch["rereview_after_fix"] = rereview_pending
 
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 

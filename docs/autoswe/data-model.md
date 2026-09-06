@@ -69,7 +69,7 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `pr_number` | `int \| None` | Cached PR number. Persisted at ship time (both the explicit `/pr` path and the `AUTO_CREATE_PR` path) so consumers can reference the PR without re-querying the provider |
 | `pr_url` | `str \| None` | Cached PR web URL, persisted alongside `pr_number` at ship time |
 | `fix_summary` | `str \| None` | Extracted from `DONE_SUMMARY` on fix/retry completion; persisted in the queue so PR creation can include it in the body |
-| `rereview_after_fix` | `bool` | Set by `emit()` when a `/fix` dispatched from `review_failed`/`review_blocked` completes. `decide()` then auto-dispatches `/review` on the next poll (and `emit()` clears it when the review runs) so the gating verdict is re-checked before `/pr`. |
+| `rereview_after_fix` | `bool` | Set by `emit()` when a `/fix` dispatched from `review_failed`/`review_blocked` completes. `decide()` then auto-dispatches `/review` on the next poll (and `emit()` clears it when the review runs) so the gating verdict is re-checked before `/pr`. It is also cleared by any other completion that lands in a terminal status — a `/sync`→`synced` or `/pr`→`shipped` that follows a flagged fix — so a shipped/synced task never carries a live re-review (issue #195). |
 | `gh_closed` | `bool` | True once the issue is observed closed; cleared if it's reopened; task is never auto-purged |
 | `created_at` | `str` | ISO 8601; when the task was first created |
 | `last_synced` | `str` | ISO 8601; last poll time |
