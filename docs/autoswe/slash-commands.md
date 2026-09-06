@@ -10,7 +10,7 @@ Comments are the only steering input. A slash command at the start of a comment 
 | `/fix` | `/fix [--branch <name>] [with <guidance>]` | any | `fixed` or `failed` | Yes (write access) | OWNER/AUTHOR |
 | `/pr` | `/pr` | `fixed` (with commits) | `shipped` | No | OWNER/AUTHOR |
 | `/sync` | `/sync` | any (with worktree) | `synced` or `failed` | Only on conflict | OWNER/AUTHOR |
-| `/retry` | `/retry` | `failed` | `pending` → handler → final state | Yes (replayed) | OWNER/AUTHOR |
+| `/retry` | `/retry` | `failed`/`error` | `pending` → handler → final state | Yes (replayed) | OWNER/AUTHOR |
 | `/skip` | `/skip` | any | `skipped` | No | OWNER/AUTHOR |
 | `/abort` | `/abort` | any | `aborted` | No | OWNER/AUTHOR |
 | `/review` | `/review [with <guidance>]` | any | `reviewed` | Yes (read-only) | OWNER/AUTHOR |
@@ -56,4 +56,16 @@ When `/retry` action is run (`orch/run.py:_run_retry()`):
 2. `run()` looks at `last_dispatched_command` for the last substantive command (not `/pr`, `/sync`, `/retry`, `/skip`, or `/abort`)
 3. Replays that command via the appropriate planner/coder/ship handler
 
-Note: `MAX_ATTEMPTS` is a **retry budget** — it bounds re-runs of work that keeps failing, not the number of phases an issue goes through. Restarting from a *successful* rest (`fixed`/`synced`/`shipped`/`reviewed`, or `review_failed`/`review_blocked`) starts a fresh budget, so the follow-up `/fix` after a review verdict, or `/pr` after a `fixed` task, never burns attempts even after a long healthy lifecycle. `/retry` remains the explicit reset when a task is stuck in `failed`/`error` (see `safeguards.md`).
+A refusal advances the watermark (`last_dispatched_command`) so the same command isn't re-refused every tick (see [data-model.md](data-model.md)). That means a refused `/review` on a `failed`/`error` task leaves `last_dispatched_command = "/review"`. To keep `/retry` re-running the *work* — not a review that could flip the task to `reviewed` → shippable despite a failed fix — `_run_retry()` falls back to `/fix` when `last_dispatched_command` is `/review` and the task is still `failed`/`error` (issue #192). `/plan` is *not* subject to this fallback: a failed plan is retried as a plan.
+
+Note: `MAX_ATTEMPTS` is a **retry budget** — it bounds re-runs of work that keeps failing, not the number of phases an issue goes through. Restarting from a *successful* rest (`fixed`/`synced`/`shipped`/`reviewed`, or `review_failed`/`review_blocked`) starts a fresh budget, so the follow-up `/fix` after a review verdict, or `/pr` after a `fixed` task, never burns attempts even after a long healthy lifecycle.
+
+### Restarting a `failed`/`error` task
+
+A `/fix` (or `/plan`) on a task in `failed`/`error` state **restarts it** — it re-dispatches the command and carries the attempt counter forward, so the retry budget still bounds repeated failures. `/retry` remains the explicit **budget reset** (replays the last substantive command with `attempt_count = 1`). Only these three restart a failing task; the other restart-cycle commands are **refused** with a posted comment because there is no completed work for them to act on:
+
+- `/pr` — nothing ready to ship. The bot tells the user to post `/fix` (or `/retry`).
+- `/review` — no completed work to review (and a passing verdict would wrongly flip the task to `reviewed` → shippable). The bot tells the user to post `/fix` first.
+- `/sync` — no completed branch work to advance. The bot tells the user to post `/fix` first.
+
+Any command other than `/retry` on a task that already hit its limit (`guard_blocked`) is refused with a "post `/retry`" comment (see `safeguards.md`) — including `/pr`, `/review`, `/sync` *and* `/fix`, since on a limit-blocked task even `/fix` cannot restart. Each distinct refusal is posted once: a *comment*-sourced command dedups via the dispatch watermark (the `cmd_id`-based guard), and a *body*-sourced command — which has no comment ID to dedup on — is refused only when the user has posted a comment newer than the last bot comment (a stale body command noops, since the limit comment already told the user to post `/retry`). This prevents the "post `/retry`" comment from re-posting on every poll cycle for an issue whose trigger command lives in its body (issue #192).

@@ -148,7 +148,7 @@ def _build_welcome_comment(slash_cmd: str, guidance: str, slug: str, bot_name: s
             "**Available Commands:**\n"
             "- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n"
             "- `/plan --branch <name>` - Plan on a specific branch (default: main)\n"
-            "- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n"
+            "- `/fix` - Implement the fix (runs Claude with code-editing permissions; restarts a failed/error task)\n"
             "- `/fix --branch <name>` - Fix on a specific branch (default: main)\n"
             "- `/fix with <guidance>` - Same as /fix but appends guidance to the prompt\n"
             "- `/review` - Review the changes on the branch (read-only, posts findings)\n"
@@ -464,7 +464,8 @@ def _handle_dispatch_error(
     """Handle a dispatch failure: capture diagnostics, post error comment, transition to error state.
 
     Transitions the task to the "error" terminal state instead of rolling
-    back to "pending". The user must post `/retry` to resume.
+    back to "pending". The user can post `/fix` to restart it (carrying the
+    attempt counter forward) or `/retry` to restart with a fresh budget.
     """
     # Get worktree path for diagnostics — always attempt, even without
     # plan_branch (e.g. early /plan failures). _worktree_path is a pure
