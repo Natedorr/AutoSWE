@@ -189,6 +189,32 @@ def _next_attempt(task: object, reason: str) -> int:  # type: ignore[type-arg]
     return new_count
 
 
+def _effective_plan_branch(
+    task: object, branch: str | None, slash_cmd: str,
+) -> str | None:
+    """Resolve which branch this dispatch works against.
+
+    ``plan_branch`` is pinned by ``/plan --branch <b>`` and is *fixed for the
+    task* — a ``--branch`` on any *other* command (``/fix``, ``/sync``, ``/pr``
+    …) does not move it (issue #196, docs/autoswe/data-model.md: "set once;
+    later --branch flags ignored"). ``/plan`` is the one command that (re)pins
+    it, so a new ``/plan --branch <b>`` re-pins even when a value already exists
+    (re-planning on a different branch). Every other command honours the flag
+    only when no branch was pinned yet. An ignored flag is logged so a
+    mid-task ``--branch`` can't silently reshape the task.
+    """
+    pinned = task.plan_branch
+    if slash_cmd == "/plan":
+        # /plan is authoritative for (re)pins: honour the flag, else keep the pin.
+        return branch or pinned
+    if pinned and branch and branch != pinned:
+        log(
+            f"[DECIDE] {task.slug} --branch {branch!r} on {slash_cmd} ignored — "
+            f"plan_branch {pinned!r} was pinned by /plan and is not changed by later commands"
+        )
+    return pinned or branch
+
+
 # ---------------------------------------------------------------------------
 # Reply helpers
 # ---------------------------------------------------------------------------
@@ -254,7 +280,7 @@ def _handle_reply(
 
     if dispatch_slash and cmd_result and cmd_result[0] not in ("/skip",):
         reply_branch = cmd_result[2] if len(cmd_result) > 2 else None
-        plan_branch = reply_branch or task.plan_branch
+        plan_branch = _effective_plan_branch(task, reply_branch, cmd_result[0])
         if cmd_result[0] == "/retry":
             new_count = 1
             _reset_attempt(task, new_count, f"reply cmd={cmd_result[0]}")
@@ -453,7 +479,7 @@ def _check_restart_or_guard(
         if status in ("failed", "error") and slash_cmd != "/retry":
             return Action(kind="noop", slug=task.slug)
 
-        plan_branch = branch or task.plan_branch
+        plan_branch = _effective_plan_branch(task, branch, slash_cmd)
 
         kind = _kind_from_command(slash_cmd)
         log(f"[DECIDE] {task.slug} action={kind} attempt={attempt_count} resume_session_id={task.session_id}")
@@ -642,7 +668,7 @@ def decide(world: World) -> Action:
                 else:
                     # New command from planned — dispatch it. A restart carries
                     # the attempt counter forward; /retry resets to 1.
-                    plan_branch = branch or task.plan_branch
+                    plan_branch = _effective_plan_branch(task, branch, slash_cmd)
                     if slash_cmd == "/retry":
                         attempt_count = 1
                         _reset_attempt(task, attempt_count, f"cmd={slash_cmd} from planned")

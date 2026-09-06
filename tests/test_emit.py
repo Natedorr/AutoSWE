@@ -1544,8 +1544,11 @@ def test_retry_fix_persists_fix_summary():
 
 
 def test_auto_create_pr_uses_plan_branch():
-    """Auto-created PRs must use plan_branch as pr_base (not base_branch)
-    to respect the --branch flag from the original /plan command."""
+    """Auto-created PRs must target the repo's base_branch (issue #196).
+
+    plan_branch is where the work was forked from; it must NOT leak into the
+    PR target. A task planned on 'codex' still ships its PR into base_branch
+    ('main') so the auto-created PR lands where the repo policy says."""
     from autoswe.orch.types import ApiState, TaskState, World
     from autoswe.providers.base import NormalizedIssue
 
@@ -1578,8 +1581,8 @@ def test_auto_create_pr_uses_plan_branch():
     pr_effects = [e for e in effects if e.kind == "create_pr"]
     assert len(pr_effects) == 1, "AUTO_CREATE_PR must emit create_pr effect"
     pr_effect = pr_effects[0]
-    assert pr_effect.pr_base == "codex", (
-        "auto-create PR must use plan_branch as pr_base, not base_branch"
+    assert pr_effect.pr_base == "main", (
+        "auto-create PR must target base_branch (main), not plan_branch (codex)"
     )
     assert pr_effect.pr_head == "autoswe/issue-43", (
         "auto-create PR head should be the autoswe/issue-N branch"
@@ -1724,9 +1727,10 @@ def test_plan_branch_persisted_in_queue_patch():
     )
 
 
-def test_plan_branch_used_for_auto_create_pr_base():
-    """When AUTO_CREATE_PR is enabled and fix completes with plan_branch,
-    the create_pr effect must use plan_branch as pr_base (not 'main')."""
+def test_plan_branch_not_used_for_auto_create_pr_base():
+    """When AUTO_CREATE_PR is enabled and fix completes with plan_branch set,
+    the create_pr effect must target base_branch — plan_branch is the fork
+    point, not the PR target (issue #196)."""
     from autoswe.orch.types import ApiState, TaskState, World
     from autoswe.providers.base import NormalizedIssue
 
@@ -1763,6 +1767,7 @@ def test_plan_branch_used_for_auto_create_pr_base():
     pr_effects = [e for e in effects if e.kind == "create_pr"]
     assert len(pr_effects) == 1, f"Expected create_pr effect, got: {[e.kind for e in effects]}"
     pr_effect = pr_effects[0]
-    assert pr_effect.pr_base == "develop", (
-        f"create_pr must use plan_branch as pr_base. Got pr_base={pr_effect.pr_base!r}"
+    assert pr_effect.pr_base == "main", (
+        f"create_pr must use base_branch (main) as pr_base, not plan_branch. "
+        f"Got pr_base={pr_effect.pr_base!r}"
     )

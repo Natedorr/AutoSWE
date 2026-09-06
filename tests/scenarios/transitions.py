@@ -576,6 +576,51 @@ TRANSITIONS: list[dict[str, Any]] = [
             "comment_contains": ["Completed with command", "Extra fix"],
         },
     },
+    {
+        "name": "fix_branch_flag_ignored_after_plan_branch",
+        "description": "E2E-15 step 4: plan_branch pinned by /plan; a later /fix "
+                       "--branch must NOT mutate it (issue #196).",
+        "start": {
+            "issue": {"body": "Bug fix."},
+            "labels": ["autoswe:fixed"],
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — fixed.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/fix --branch main",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Bug fix.",
+                "autoswe_status": "fixed",
+                "plan_branch": "develop",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tRe-applied fix\taaa1111", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "plan_branch": "develop",
+            "comment_contains": ["Completed with command", "Re-applied fix"],
+        },
+    },
     # ---- Sync transitions ----
     {
         "name": "fresh_sync_command",

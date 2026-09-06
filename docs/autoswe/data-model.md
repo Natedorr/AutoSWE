@@ -50,7 +50,7 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `fix_prompt` | `str` | Custom fix prompt path from `repos.json` (optional, resolved against AUTOSWE_DIR) |
 | `review_prompt` | `str` | Custom review prompt path from `repos.json` (optional, resolved against AUTOSWE_DIR) |
 | `conflict_resolution_prompt` | `str` | Custom conflict resolution prompt path from `repos.json` (optional, resolved against AUTOSWE_DIR) |
-| `plan_branch` | `str` | Override branch from `/plan --branch <name>` (set once; later `--branch` flags ignored) |
+| `plan_branch` | `str` | The branch this task's work is cut from and kept in sync with — the fork base. Set once by `/plan --branch <name>`; a `--branch` on any *later* command (`/fix`, `/sync`, …) does not move it (issue #196). It drives worktree creation, `/sync`, review diffs, and the pre-PR sync. It is **not** the PR target: `/pr` and the auto-create-PR path always target `base_branch` (the repo's configured default), so a `develop` plan can't route the PR into `develop`. |
 | `provider` | `str` | `"github"` or `"azure"` |
 | `autoswe_status` | `str \| None` | Run-state enum (see above). **Source of truth.** |
 | `session_id` | `str` | Agent session ID (Claude Code or Codex); used to resume the planner/coder session. **Cleared on `FAILED`** so the next dispatch does not resume a broken session |

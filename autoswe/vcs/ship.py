@@ -47,7 +47,15 @@ def open_pr(
     """Open a PR from the worktree branch. Returns done-file content."""
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     token = task["_token"]
-    base_branch = task.get("plan_branch") or task.get("base_branch", "main")
+    # The PR *target* is the repo's configured base_branch — never plan_branch.
+    # plan_branch is the branch this task's work was forked from (a /plan
+    # --branch <b> pins it); the fix lives on the autoswe/issue-N work branch
+    # cut from plan_branch and must land in the configured default, or
+    # /plan --branch develop would route the PR into develop instead of main
+    # (issue #196). The preflight sync in pr_gate.preflight_pr still merges
+    # origin/plan_branch (the fork point) — that is a different concern from
+    # where the PR lands.
+    base_branch = task.get("base_branch", "main")
     title = task.get("title", f"Fix issue #{issue_num}")
 
     rcfg = repo_cfg or {"owner": owner, "repo": repo, "token": token}

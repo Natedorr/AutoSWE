@@ -62,6 +62,7 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
   - If either enabled gate fails, `open_pr` returns `"FAILED: <reason>"` without calling `find_existing_pr`/`open_pull_request` — same failed-emit path as any other `FAILED:`, so the user is told to `/retry` once the branch/CI is green.
 - **Then, if the gate passes:** pure `VCSProvider.open_pull_request()` call.
 - **Flow:** open the PR for `autoswe/issue-{N}` → `base_branch`; post a "Pull request opened" comment.
+- **PR target vs. fork base (issue #196):** the PR's *target* is always the repo's configured `base_branch` — never `plan_branch`. `plan_branch` is the branch this task's work was *forked from* (a `/plan --branch <b>` pins it); the fix lives on the `autoswe/issue-{N}` work branch cut from `plan_branch` and must land in the configured default, so `/plan --branch develop` cannot route the PR into `develop`. The preflight sync gate still merges `origin/plan_branch` (the fork point) — that is where the branch is *kept up to date*, a different concern from where the PR *lands*. The auto-create-PR path after `/fix` follows the same rule.
 - **Returns:**
   - `"DONE: PR <url>"` — PR created
   - `"FAILED: <gate reason>"` — blocked by the sync or CI preflight gate
