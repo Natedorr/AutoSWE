@@ -1,6 +1,6 @@
 # Get a pull request
 
-Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull%20requests/get%20pull%20request
+Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/get-pull-request?view=azure-devops-rest-7.1
 
 ## Get a pull request
 

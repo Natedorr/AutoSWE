@@ -43,10 +43,10 @@ def test_progress_update_applies_immediately(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append({"id": comment_id, "body": body})
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -66,10 +66,10 @@ def test_progress_update_throttles(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -94,10 +94,10 @@ def test_progress_drain_applies_pending(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -119,10 +119,10 @@ def test_progress_finalize_no_throttle(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -142,7 +142,7 @@ def test_progress_update_noop_without_comment_id(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.progress import ProgressComment
@@ -162,10 +162,10 @@ def test_progress_update_throttle_releases_after_interval(monkeypatch):
     updates = []
 
     class FakeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 999
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updates.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -190,10 +190,10 @@ def test_progress_update_throttle_releases_after_interval(monkeypatch):
 def test_progress_create_gracefully_on_error(monkeypatch):
     """create() should return None and not raise when tracker fails."""
     class BrokenTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             raise RuntimeError("API down")
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             pass
 
     from autoswe.tracking.progress import ProgressComment
@@ -209,10 +209,10 @@ def test_progress_create_gracefully_on_error(monkeypatch):
 def test_progress_update_comment_gracefully_on_error(monkeypatch):
     """update() should not raise when tracker fails."""
     class BrokenTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 42
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             raise RuntimeError("API down")
 
     from autoswe.tracking.progress import ProgressComment
@@ -241,13 +241,13 @@ def test_progress_flush_fallback_updates_comment_id():
             self.updates = []
             self._next_post_id = 100
 
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             cid = self._next_post_id
             self._next_post_id += 1
             self.posts.append({"id": cid, "body": body})
             return cid
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             self.updates.append({"id": comment_id, "body": body})
 
     tracker = FallingBackTracker()
@@ -287,10 +287,10 @@ def test_progress_flush_fallback_no_new_id():
     from autoswe.tracking.progress import ProgressComment
 
     class BrokenPostTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return None  # post succeeds but returns no ID
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             raise RuntimeError("API down")  # trigger fallback
 
     tracker = BrokenPostTracker()
@@ -312,11 +312,11 @@ def test_progress_flush_fallback_both_fail():
             self.posts = []
             self.updates = []
 
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             self.posts.append(body)
             raise RuntimeError("API down")
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             self.updates.append(body)
 
     tracker = TotallyBrokenTracker()
@@ -344,11 +344,11 @@ def test_progress_adopt_reuses_existing_comment():
     updated = []
 
     class AdoptTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted.append(body)
             return 111
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updated.append({"id": comment_id, "body": body})
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -368,11 +368,11 @@ def test_progress_adopt_falls_back_to_create_when_edit_fails():
     posted = []
 
     class GoneTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted.append(body)
             return 222
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             raise RuntimeError("404 comment deleted")
 
     from autoswe.tracking.progress import ProgressComment
@@ -406,7 +406,7 @@ def test_github_tracker_update_comment():
     api_mod.gh_patch = fake_patch
 
     try:
-        tracker.update_comment({"owner": "o", "repo": "r"}, 42, 123, "Updated body")
+        tracker.update_comment(42, 123, "Updated body")
     finally:
         api_mod.gh_patch = original_patch
 
@@ -432,7 +432,7 @@ def test_azure_tracker_update_comment_patches():
         tracker = AzureTracker({
             "org": "org", "project": "proj", "pat": "tok",
         })
-        tracker.update_comment({}, 42, 999, "Updated body")
+        tracker.update_comment(42, 999, "Updated body")
     finally:
         tracker_mod.ado_patch_json = original
 
@@ -452,11 +452,11 @@ def test_progress_azure_no_duplicate_post_on_update():
     updated = []
 
     class AzureLikeTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted.append(body)
             return len(posted)
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updated.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -526,7 +526,7 @@ def test_github_tracker_post_comment_returns_id():
     api_mod.gh_post = fake_post
 
     try:
-        result = tracker.post_comment({"owner": "o", "repo": "r"}, 1, "Hello")
+        result = tracker.post_comment(1, "Hello")
     finally:
         api_mod.gh_post = original_post
 
@@ -548,11 +548,11 @@ def test_progress_finalize_does_not_post_duplicate():
     updated_bodies = []
 
     class NoDuplicateTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted_bodies.append(body)
             return 999  # comment ID
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             updated_bodies.append(body)
 
     from autoswe.tracking.comments import BOT_MARKER
@@ -598,17 +598,188 @@ def test_mcp_comment_server_has_tools():
 # Minimal posting mode
 # ---------------------------------------------------------------------------
 
+
 class _FakeTracker:
     def __init__(self):
         self.posts = []
         self.updates = []
 
-    def post_comment(self, repo_cfg, issue_num, body):
+    def post_comment(self, issue_num, body):
         self.posts.append(body)
         return len(self.posts)  # incrementing fake comment ID
 
-    def update_comment(self, repo_cfg, issue_num, comment_id, body):
+    def update_comment(self, issue_num, comment_id, body):
         self.updates.append(body)
+
+
+# ---------------------------------------------------------------------------
+# freeze() — posted questions must not be clobbered by later tool events
+# (issue #184)
+# ---------------------------------------------------------------------------
+
+
+def test_progress_freeze_flushes_body_immediately():
+    """freeze() writes the body immediately regardless of throttle."""
+    from autoswe.tracking.comments import BOT_MARKER
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class FreezeTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(FreezeTracker(), {}, 1)
+    progress.create("init")
+    updates.clear()
+    # Freeze within the throttle window — must still flush immediately.
+    progress.freeze("## Questions\n\nWhich approach?")
+    assert updates == ["## Questions\n\nWhich approach?\n" + BOT_MARKER]
+    assert progress.frozen is True
+
+
+def test_progress_update_noop_after_freeze():
+    """update() after freeze() must not clobber the frozen question."""
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class FreezeTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(FreezeTracker(), {}, 1)
+    progress.create("init")
+    updates.clear()
+    progress.freeze("## Questions\n\nWhich approach?")
+    progress.update("Tool: StructuredOutput")  # later tool event
+    progress.update("Running: git fetch")
+    assert len(updates) == 1  # only the frozen question was written
+
+
+def test_progress_drain_does_not_clobber_frozen_question():
+    """Regression (issue #184): the lost-question sequence.
+
+    Tool event flushes, question posted+coalesced, then the next tool event
+    (StructuredOutput) overwrote the pending body before drain() — the
+    question never reached the issue. With freeze(), drain() can only ever
+    write the question body.
+    """
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class FreezeTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(FreezeTracker(), {}, 1)
+    progress.create("init")
+    progress._last_update = 0  # release throttle so the tool event flushes
+    progress.update("Read: tests/test_transitions.py")  # flushes
+    assert len(updates) == 1
+
+    # Question posted moments later: within the throttle window a bare
+    # update() would coalesce, then get clobbered by the next tool event.
+    progress.freeze("## Questions\n\nWhich approach?\n\n_Reply in this thread._")
+    assert len(updates) == 2
+
+    # Simulate the SDK's turn-end StructuredOutput event arriving afterwards.
+    progress._last_update = 0  # release throttle so a bare update() WOULD flush
+    progress.update("Tool: StructuredOutput")
+    progress.drain()
+
+    # The final body on the sticky is still the question.
+    assert len(updates) == 2
+    assert "Which approach?" in updates[-1]
+    assert "StructuredOutput" not in updates[-1]
+
+
+def test_progress_freeze_noop_without_comment_id():
+    """freeze() without create() must not raise and must not post."""
+    from autoswe.tracking.progress import ProgressComment
+
+    class NoopTracker:
+        def post_comment(self, issue_num, body):
+            raise AssertionError("freeze must not post when create() never ran")
+
+        def update_comment(self, issue_num, comment_id, body):
+            raise AssertionError("freeze must not update when create() never ran")
+
+    progress = ProgressComment(NoopTracker(), {}, 1)
+    progress.freeze("question body")  # must not raise
+    assert progress.frozen is True
+
+
+def test_progress_freeze_minimal_queues_until_drain():
+    """In minimal mode freeze() queues the question; drain() flushes it."""
+    from autoswe.tracking.comments import BOT_MARKER
+    from autoswe.tracking.progress import ProgressComment
+
+    tracker = _FakeTracker()
+    progress = ProgressComment(tracker, {}, 1, minimal=True)
+    progress.create("initial")
+    progress.update("step one")
+    progress.freeze("## Questions\n\nWhich approach?")
+    progress.update("step two")  # must not replace the queued question
+    progress.drain()
+
+    assert tracker.updates == ["## Questions\n\nWhich approach?\n" + BOT_MARKER]
+
+
+def test_progress_finalize_still_wins_after_freeze():
+    """finalize() remains authoritative even after freeze()."""
+    from autoswe.tracking.comments import BOT_MARKER
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class FreezeTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(FreezeTracker(), {}, 1)
+    progress.create("init")
+    progress.freeze("## Questions\n\nWhich approach?")
+    progress.finalize("Completed with command `/fix`.")
+    assert updates[-1] == "Completed with command `/fix`.\n" + BOT_MARKER
+
+
+def test_progress_call_delegates_to_update():
+    """ProgressComment is usable as a plain progress_callback via __call__."""
+    from autoswe.tracking.comments import BOT_MARKER
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class CallTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(CallTracker(), {}, 1)
+    progress.create("init")
+    progress("step one")
+    assert updates == ["step one\n" + BOT_MARKER]
+
+
+# ---------------------------------------------------------------------------
+# Minimal posting mode
+# ---------------------------------------------------------------------------
 
 
 def test_progress_minimal_update_queues_only():
@@ -682,10 +853,10 @@ def test_progress_create_tags_with_bot_marker():
     from autoswe.tracking.comments import BOT_MARKER
 
     class TagTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return self.posts.append(body) or 1
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             pass
 
         posts = []
@@ -705,10 +876,10 @@ def test_progress_update_tags_with_bot_marker():
     from autoswe.tracking.comments import BOT_MARKER
 
     class TagTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             return 1
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             self.updates.append(body)
 
         updates = []
@@ -729,11 +900,11 @@ def test_progress_bot_marker_idempotent():
     from autoswe.tracking.comments import BOT_MARKER
 
     class TagTracker:
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             self.posts.append(body)
             return 1
 
-        def update_comment(self, repo_cfg, issue_num, comment_id, body):
+        def update_comment(self, issue_num, comment_id, body):
             pass
 
         posts = []
@@ -907,6 +1078,56 @@ def test_progress_state_task_create_to_update_flow():
     ps.note_tool_use(update_block)
     body = ps.render()
     assert "✅" in body
+
+
+def test_progress_state_task_tools_only_drive_progress_callback():
+    """Regression (issue #120): when the task-tracking tools are the ONLY
+    progress source, the sticky-comment callback still fires.
+
+    Exercises the exact path the backend uses: fire progress_callback only
+    when note_tool_use / note_tool_result report a change. With TodoWrite
+    unavailable (newer models), TaskCreate/TaskUpdate must still produce a
+    non-empty rendered body.
+    """
+    from autoswe.harness.runner import ProgressState
+
+    fired = []
+
+    def progress_callback(body):
+        fired.append(body)
+
+    ps = ProgressState()
+
+    # TaskCreate — stashed, nothing rendered yet → no callback
+    changed = ps.note_tool_use(
+        _make_tool_use("TaskCreate", {"subject": "Investigate bug"}, bid="tc_1")
+    )
+    assert changed is False
+    if changed:
+        progress_callback(ps.render())
+
+    # ToolResultBlock resolves the task id → task now rendered → callback fires
+    changed = ps.note_tool_result(_make_tool_result("tc_1", "task-x"))
+    assert changed is True
+    if changed:
+        progress_callback(ps.render())
+
+    # TaskUpdate to in_progress → change → callback fires
+    changed = ps.note_tool_use(_make_tool_use(
+        "TaskUpdate", {"taskId": "task-x", "status": "in_progress",
+                       "activeForm": "Investigating bug"}
+    ))
+    assert changed is True
+    if changed:
+        progress_callback(ps.render())
+
+    # The callback received non-empty bodies and the rendered output is the todo list
+    assert len(fired) >= 1, "progress callback never fired with task-tools-only source"
+    assert all(body for body in fired), "empty progress body fired"
+    body = ps.render()
+    assert body is not None
+    assert "Todo List" in body
+    assert "Investigating bug" in body
 
 
 def test_progress_state_task_delete_removal():

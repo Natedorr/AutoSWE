@@ -24,8 +24,7 @@
         "id": 2,
         "is_bot": false
       }
-    ],
-    "open_pr_numbers": []
+    ]
   },
   "task": {
     "slug": "gh:owner_repo_42",
@@ -37,7 +36,7 @@
     "status": "planned",
     "plan_branch": null,
     "base_branch": "main",
-    "attempt_count": 3,
+    "attempt_count": 2,
     "first_dispatched_at": null,
     "last_dispatched_command": "/plan",
     "last_dispatched_command_id": 1,

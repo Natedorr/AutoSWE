@@ -118,6 +118,16 @@ def test_run_mark_failed_limit_returns_none():
     assert run(action, world) is None
 
 
+def test_run_refused_returns_none():
+    """refused is a pure action — no Claude run (issue #192)."""
+    world = _make_world()
+    action = Action(
+        kind="refused", slug=world.task.slug,
+        refused_command="/pr", triggering_comment_id=11,
+    )
+    assert run(action, world) is None
+
+
 # ------ Plan action routes to planner ------
 
 
@@ -211,13 +221,53 @@ def test_run_ship_pr_calls_ship():
     world = _make_world(plan_branch="autoswe/issue-42")
     action = Action(kind="ship_pr", slug=world.task.slug)
 
+    def _fake_open_pr(task, *a, **kw):
+        # Real open_pr caches pr_number/pr_url on the task dict (issue #193);
+        # simulate that so the lift into DispatchResult is exercised.
+        task["pr_number"] = 1
+        task["pr_url"] = "https://github.com/o/r/pull/1"
+        return "DONE: PR https://github.com/o/r/pull/1"
+
     with patch("autoswe.orch.run.ship.open_pr") as mock_ship:
-        mock_ship.return_value = "DONE: PR https://github.com/o/r/pull/1"
+        mock_ship.side_effect = _fake_open_pr
         result = run(action, world)
 
     assert isinstance(result, DispatchResult)
     assert "PR" in result.done_content
+    assert result.pr_number == 1
+    assert result.pr_url == "https://github.com/o/r/pull/1"
     mock_ship.assert_called_once()
+
+
+def test_run_ship_pr_failure_carries_no_pr_identity():
+    """open_pr FAILED → DispatchResult carries no pr_number/pr_url, even when
+    the queue entry still holds a STALE cached number from a prior ship."""
+    world = _make_world(plan_branch="autoswe/issue-42")
+    # Rebuild the task state with a stale cached PR identity, as a task whose
+    # PR was deleted would have.
+    world = World(
+        api=world.api,
+        task=_with_pr_identity(world.task, pr_number=9, pr_url="https://github.com/o/r/pull/9"),
+        cfg=world.cfg,
+        repo_cfg=world.repo_cfg,
+    )
+    action = Action(kind="ship_pr", slug=world.task.slug)
+
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship:
+        mock_ship.return_value = "FAILED: could not create PR: boom"
+        result = run(action, world)
+
+    assert isinstance(result, DispatchResult)
+    assert result.done_content.startswith("FAILED")
+    assert result.pr_number is None
+    assert result.pr_url is None
+
+
+def _with_pr_identity(task: TaskState, pr_number, pr_url) -> TaskState:
+    """Rebuild a TaskState with a different cached PR identity (frozen dataclass)."""
+    return TaskState(
+        **{**task.__dict__, "pr_number": pr_number, "pr_url": pr_url},
+    )
 
 
 # ------ Sync action ------
@@ -357,6 +407,71 @@ def test_run_retry_falls_back_to_fix():
 
     assert isinstance(result, DispatchResult)
     mock_fix.assert_called_once()
+
+
+# ------ _fork_session_for_retry (fork provenance gate) ------
+
+
+def test_fork_session_returns_id_when_backend_matches():
+    """A checkpoint produced by the same backend as the resolved fix backend
+    and a fork-capable fix backend → the gate returns that checkpoint id."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-good",
+        "last_good_session_backend": "claude_code",
+    }
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") == "s-good"
+
+
+def test_fork_session_false_when_checkpoint_backend_mismatches():
+    """A checkpoint produced by a DIFFERENT backend than the fix backend must
+    not be forked — the fix backend's SDK can't resolve a foreign session id."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-codex-plan",
+        "last_good_session_backend": "codex",
+    }
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is None
+
+
+def test_fork_session_false_when_checkpoint_has_no_backend():
+    """A checkpoint with no recorded backend (pre-field / unresolvable) is
+    treated as unusable → fresh session, no fork."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {"last_good_session_id": "s-good"}
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") is None
+
+
+def test_fork_session_false_when_no_checkpoint():
+    """Nothing to fork from → no fork."""
+    from autoswe.orch.run import _fork_session_for_retry
+    assert _fork_session_for_retry({}, {"provider": "github"}, {}, "slug") is None
+
+
+def test_fork_session_false_for_codex_fix_backend():
+    """Even with a matching checkpoint backend, a Codex fix backend lacks the
+    session_fork capability → no fork."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-good",
+        "last_good_session_backend": "codex",
+    }
+    cfg = {"FIX_HARNESS": "codex_profile"}
+    with patch("autoswe.orch.run.resolve_harness", return_value={
+        "backend": "codex", "model": "gpt-5.6-terra",
+    }):
+        assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") is None
+
+
+def test_fork_session_returns_session_id_when_no_last_good():
+    """When only session_id is set (no last_good_session_id yet), the gate
+    returns that session id as the checkpoint to fork from."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "session_id": "s-session",
+        "last_good_session_backend": "claude_code",
+    }
+    assert _fork_session_for_retry(task, {"provider": "github"}, {}, "slug") == "s-session"
 
 
 # ------ Task dict builder ------

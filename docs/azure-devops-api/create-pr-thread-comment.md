@@ -1,6 +1,6 @@
 # Create a pull request thread (comment)
 
-Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/comments/create%20thread
+Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/create?view=azure-devops-rest-7.1
 
 ## Create a pull request thread
 

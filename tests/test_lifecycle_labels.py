@@ -4,9 +4,48 @@ from autoswe.tracking.assignment import _auto_assign_issue
 from autoswe.tracking.labels import (
     AUTOSWE_LABELS,
     _ensure_repo_labels,
+    _kind_from_command,
     _set_autoswe_status,
+    completed_status_for,
 )
 from tests.conftest import load_fixture
+
+# ---------------------------------------------------------------------------
+# closed-issue status (gh_closed path, issue #173 F-11)
+# ---------------------------------------------------------------------------
+
+def test_closed_path_maps_command_to_correct_completed_status():
+    """Closing an issue after /sync or /pr must not mislabel it as 'fixed'.
+
+    The gh_closed path converts the last dispatched *command* to an action
+    *kind* via _kind_from_command before calling completed_status_for.
+    """
+    # /sync → kind sync_branch → synced (NOT "fixed")
+    assert completed_status_for(_kind_from_command("/sync")) == "synced"
+    # /pr → kind ship_pr → shipped (NOT "fixed")
+    assert completed_status_for(_kind_from_command("/pr")) == "shipped"
+    # /plan → kind plan → planned
+    assert completed_status_for(_kind_from_command("/plan")) == "planned"
+    # /review → kind review → reviewed
+    assert completed_status_for(_kind_from_command("/review")) == "reviewed"
+    # /fix → kind fix → fixed
+    assert completed_status_for(_kind_from_command("/fix")) == "fixed"
+    # default (no last_dispatched_command) → /fix → fixed
+    assert completed_status_for(_kind_from_command(None)) == "fixed"
+
+
+def test_closed_path_stripped_command_used_to_be_wrong():
+    """The old (buggy) mapping via lstrip('/') fell through to 'fixed'.
+
+    Documents why _kind_from_command is required: "sync" and "pr" are not keys
+    in _KIND_TO_COMPLETED, so completed_status_for returns the "fixed" default.
+    """
+    assert completed_status_for("sync") == "fixed"   # wrong, pre-fix behaviour
+    assert completed_status_for("pr") == "fixed"     # wrong, pre-fix behaviour
+    # The correct converter maps them properly:
+    assert completed_status_for(_kind_from_command("/sync")) != "fixed"
+    assert completed_status_for(_kind_from_command("/pr")) != "fixed"
+
 
 # ---------------------------------------------------------------------------
 # _set_autoswe_status

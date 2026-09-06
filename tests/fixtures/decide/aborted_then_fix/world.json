@@ -24,8 +24,7 @@
         "id": 2,
         "is_bot": false
       }
-    ],
-    "open_pr_numbers": []
+    ]
   },
   "task": {
     "slug": "gh:owner_repo_42",

@@ -72,7 +72,6 @@ def _load_world(data: dict) -> World:
     api = ApiState(
         issue=issue,
         comments=comments,
-        open_pr_numbers=tuple(api_data.get("open_pr_numbers", [])),
     )
 
     task = TaskState(
@@ -102,6 +101,8 @@ def _load_world(data: dict) -> World:
         bot_comment_ids=tuple(task_data.get("bot_comment_ids", [])),
         last_phase=task_data.get("last_phase", "plan"),
         resume_phase=task_data.get("resume_phase"),
+        last_good_session_id=task_data.get("last_good_session_id"),
+        last_good_session_backend=task_data.get("last_good_session_backend"),
         created_at=task_data.get("created_at", ""),
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
@@ -131,6 +132,7 @@ def _load_action(data: dict) -> Action:
         triggering_comment_id=data.get("triggering_comment_id"),
         user_reply_text=data.get("user_reply_text"),
         limit_reason=data.get("limit_reason"),
+        refused_command=data.get("refused_command"),
     )
 
 
@@ -144,6 +146,8 @@ def _load_result(path: Path) -> DispatchResult | None:
         cost_usd=raw.get("cost_usd"),
         duration_seconds=raw.get("duration_seconds", 0.0),
         session_id=raw.get("session_id"),
+        pr_number=raw.get("pr_number"),
+        pr_url=raw.get("pr_url"),
     )
 
 
@@ -408,6 +412,253 @@ def test_retry_clears_review_file_path():
     assert patch["review_file_path"] is None
 
 
+def test_fix_success_sets_last_good_session_id():
+    """A non-failed run that persists a session_id must record it as the
+    last-known-good checkpoint so /retry can fork from it later."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "action.json").read_text()
+    ))
+    result = _load_result(FIXTURE_DIR / "fix_action_success" / "result.json")
+    assert result is not None
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "fix success must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    # The run persisted session_id=session-fix-789 → it becomes the checkpoint.
+    assert patch.get("session_id") == "session-fix-789"
+    assert patch.get("last_good_session_id") == "session-fix-789", (
+        "non-failed run must record last_good_session_id as a fork checkpoint"
+    )
+    # ...and tag which backend produced it, so a later /retry only forks when
+    # the fix backend matches. The default (no harnesses.json) backend is Claude.
+    assert patch.get("last_good_session_backend") == "claude_code", (
+        "checkpoint must record its producing backend for the fork provenance gate"
+    )
+
+
+def test_failure_does_not_clear_last_good_session_id():
+    """On FAILED, session_id is nulled but the last-known-good checkpoint must
+    survive — it is the whole point of fork-on-retry (a failed retry leaves
+    the checkpoint intact so the next /retry re-forks from the same good session)."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "failed_clears_session_id" / "world.json").read_text()
+    ))
+    # Seed a surviving checkpoint from a prior successful run.
+    world = World(
+        api=world.api,
+        task=TaskState(
+            slug=world.task.slug,
+            owner=world.task.owner,
+            repo=world.task.repo,
+            issue_number=world.task.issue_number,
+            title=world.task.title,
+            body=world.task.body,
+            status=world.task.status,
+            plan_branch=world.task.plan_branch,
+            base_branch=world.task.base_branch,
+            attempt_count=world.task.attempt_count,
+            first_dispatched_at=world.task.first_dispatched_at,
+            last_dispatched_command=world.task.last_dispatched_command,
+            last_dispatched_command_id=world.task.last_dispatched_command_id,
+            last_consumed_reply_id=world.task.last_consumed_reply_id,
+            session_id=world.task.session_id,
+            last_good_session_id="last-good-checkpoint",
+            pr_number=world.task.pr_number,
+            guard_blocked=world.task.guard_blocked,
+            gh_closed=world.task.gh_closed,
+            pending_command=world.task.pending_command,
+            pending_guidance=world.task.pending_guidance,
+            pending_user_reply=world.task.pending_user_reply,
+            suppress_welcome=world.task.suppress_welcome,
+            welcome_comment_id=world.task.welcome_comment_id,
+            bot_comment_ids=world.task.bot_comment_ids,
+            last_phase=world.task.last_phase,
+            resume_phase=world.task.resume_phase,
+            created_at=world.task.created_at,
+            last_synced=world.task.last_synced,
+            provider=world.task.provider,
+            fix_summary=world.task.fix_summary,
+        ),
+        cfg=world.cfg,
+        repo_cfg=world.repo_cfg,
+    )
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "failed_clears_session_id" / "action.json").read_text()
+    ))
+    result = _load_result(FIXTURE_DIR / "failed_clears_session_id" / "result.json")
+    assert result is not None
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "failure must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    # session_id is nulled on failure...
+    assert patch.get("session_id") is None
+    # ...but the checkpoint must NOT be touched (absent from the patch → unchanged).
+    assert "last_good_session_id" not in patch, (
+        "FAILED must not write/overwrite last_good_session_id — the checkpoint "
+        "survives so the next /retry forks from the same good session"
+    )
+
+
+def test_review_success_does_not_set_last_good_session_id():
+    """Review uses a throwaway session; it must not record a fork checkpoint,
+    even though it completes non-failed."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "plan_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="review",
+        slug=world.task.slug,
+        plan_branch=world.task.plan_branch,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="REVIEW_READY\tLGTM looks good",
+        cost_usd=0.05,
+        duration_seconds=20.0,
+        session_id="review-session-xyz",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "review must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert "last_good_session_id" not in patch, (
+        "review's throwaway session must not become a fork checkpoint"
+    )
+    # Review also must not overwrite the persistent session_id.
+    assert patch.get("session_id") is None
+
+
+def test_sync_branch_does_not_clobber_checkpoint_backend():
+    """A non-failed sync run that carries a session_id must NOT touch the
+    last-known-good checkpoint. Before the fix, sync_branch (phase unresolvable)
+    would write last_good_session_id=<sync session> and last_good_session_backend
+    = None, silently disabling fork-on-retry for the task. Regression for the
+    cross-phase clobber: the surviving plan/fix checkpoint must be left intact."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="sync_branch",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    # DONE_SUMMARY → "synced" (non-failed), and the run carries a session_id.
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tMerged origin/main into autoswe/issue-42\tabc1234",
+        cost_usd=0.01,
+        duration_seconds=5.0,
+        session_id="sync-session-xyz",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "sync_branch must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    # The sync's own session becomes the live session_id...
+    assert patch.get("session_id") == "sync-session-xyz"
+    # ...but it must NOT become a fork checkpoint, and must not clobber the
+    # backend tag a prior plan/fix run wrote. Neither key is present → the
+    # surviving checkpoint (last_good_session_id + last_good_session_backend)
+    # is unchanged by the queue merge.
+    assert "last_good_session_id" not in patch, (
+        "a sync run must not overwrite last_good_session_id"
+    )
+    assert "last_good_session_backend" not in patch, (
+        "a sync run must not clobber last_good_session_backend — "
+        "clobbering it to None silently disables fork-on-retry"
+    )
+
+
+def test_ship_pr_does_not_clobber_checkpoint_backend():
+    """Same clobber guard for /pr: a successful ship carries a session_id but
+    its session is not a fork checkpoint (ship_pr has no coding phase)."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="ship_pr",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="DONE: PR https://github.com/o/r/pull/7",
+        cost_usd=0.01,
+        duration_seconds=5.0,
+        session_id="ship-session-xyz",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "ship_pr must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert "last_good_session_id" not in patch, (
+        "a ship_pr run must not overwrite last_good_session_id"
+    )
+    assert "last_good_session_backend" not in patch, (
+        "a ship_pr run must not clobber last_good_session_backend"
+    )
+
+
+def test_ship_pr_success_persists_pr_number_and_url():
+    """The shipped queue patch carries pr_number/pr_url from the DispatchResult
+    (issue #193): the PR identity lands in the same write that marks the task
+    shipped."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="ship_pr",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="DONE: PR https://github.com/o/r/pull/7",
+        pr_number=7,
+        pr_url="https://github.com/o/r/pull/7",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "ship_pr must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("autoswe_status") == "shipped"
+    assert patch.get("pr_number") == 7, (
+        "the shipped queue patch must persist pr_number (issue #193)"
+    )
+    assert patch.get("pr_url") == "https://github.com/o/r/pull/7"
+
+
+def test_ship_pr_failure_does_not_persist_pr_fields():
+    """A FAILED /pr must not write pr_number/pr_url into the queue patch."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="ship_pr",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(done_content="FAILED: could not create PR: boom")
+
+    effects = emit(action, result, world)
+    for e in effects:
+        if e.kind == "patch_queue" and e.queue_patch:
+            assert "pr_number" not in e.queue_patch
+            assert "pr_url" not in e.queue_patch
+
+
 def test_review_preserves_status_only_emits_queue_patch():
     """A review action transitions to 'reviewed' status and emits
     post_comment + set_status + patch_queue."""
@@ -424,7 +675,7 @@ def test_review_preserves_status_only_emits_queue_patch():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -498,7 +749,7 @@ def test_review_preserves_status_includes_review_comment():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -572,7 +823,7 @@ def test_review_on_done_includes_findings():
         repo="autoswe",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:natedorr_autoswe_245",
         owner="natedorr",
@@ -662,7 +913,7 @@ def test_review_on_failed_transitions_to_reviewed_and_shows_findings():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_99",
         owner="owner",
@@ -728,7 +979,7 @@ def test_review_does_not_overwrite_queue_session_id():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -792,22 +1043,25 @@ def test_review_does_not_overwrite_queue_session_id():
 # ---------------------------------------------------------------------------
 
 
-def _review_emit_world(status: str = "planned", *, pr_number=None):
+def _review_emit_world(status: str = "planned", *, pr_number=None,
+                       rereview_after_fix: bool = False,
+                       last_dispatched_command: str = "/review"):
     from autoswe.orch.types import ApiState, TaskState, World
     from autoswe.providers.base import NormalizedIssue
 
     issue = NormalizedIssue(
         number=42, title="Test", body="Body", owner="owner", repo="repo", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42", owner="owner", repo="repo", issue_number=42,
         title="Test", body="Body", status=status, plan_branch="autoswe/issue-42",
         base_branch="main", attempt_count=1, first_dispatched_at="2026-01-01T00:00:00Z",
-        last_dispatched_command="/review", last_dispatched_command_id=1,
+        last_dispatched_command=last_dispatched_command, last_dispatched_command_id=1,
         last_consumed_reply_id=1, session_id="fix-session", pr_number=pr_number,
         guard_blocked=False, gh_closed=False, pending_command=None,
         pending_guidance=None, pending_user_reply=None,
+        rereview_after_fix=rereview_after_fix,
     )
     return World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
 
@@ -883,6 +1137,82 @@ def test_fix_from_normal_state_clears_rereview_flag():
     assert patch["rereview_after_fix"] is False
 
 
+# ---------------------------------------------------------------------------
+# rereview_after_fix must not survive terminal transitions (issue #195)
+# ---------------------------------------------------------------------------
+#
+# A /fix dispatched from review_failed/review_blocked sets rereview_after_fix
+# and lands the task at "fixed". If the user posts /pr *before* the auto
+# re-review fires, the /pr (ship_pr) — or a /sync (sync_branch) — completes
+# into a terminal COMPLETED status while the flag is still live. Those
+# completions must clear the flag so a shipped/synced task is never one poll
+# away from a stray review dispatch.
+
+
+def test_ship_pr_clears_stale_rereview_flag():
+    """/pr on a task carrying rereview_after_fix -> shipped clears the flag."""
+    world = _review_emit_world(
+        status="fixed",
+        rereview_after_fix=True,
+        last_dispatched_command="/fix",
+    )
+    action = Action(kind="ship_pr", slug="gh:owner_repo_42", triggering_comment_id=9)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tPR created\thttps://github.com/owner/repo/pull/5",
+        cost_usd=0.05, duration_seconds=30, session_id="session-pr-42",
+    )
+
+    effects = emit(action, result, world)
+    set_status = next(e for e in effects if e.kind == "set_status")
+    assert set_status.status == "shipped"
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["rereview_after_fix"] is False, (
+        "shipped must clear any pending re-review flag (issue #195)"
+    )
+    assert patch["autoswe_status"] == "shipped"
+
+
+def test_sync_branch_clears_stale_rereview_flag():
+    """/sync on a task carrying rereview_after_fix -> synced clears the flag."""
+    world = _review_emit_world(
+        status="fixed",
+        rereview_after_fix=True,
+        last_dispatched_command="/fix",
+    )
+    action = Action(kind="sync_branch", slug="gh:owner_repo_42", triggering_comment_id=9)
+    result = DispatchResult(
+        done_content="DONE: branch up to date — 0 commits ahead",
+        cost_usd=0.01, duration_seconds=5,
+    )
+
+    effects = emit(action, result, world)
+    set_status = next(e for e in effects if e.kind == "set_status")
+    assert set_status.status == "synced"
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["rereview_after_fix"] is False, (
+        "synced must clear any pending re-review flag (issue #195)"
+    )
+    assert patch["autoswe_status"] == "synced"
+
+
+def test_ship_pr_without_flag_stays_false():
+    """/pr on a task without the flag -> shipped keeps it False (no re-review)."""
+    world = _review_emit_world(
+        status="fixed",
+        rereview_after_fix=False,
+        last_dispatched_command="/fix",
+    )
+    action = Action(kind="ship_pr", slug="gh:owner_repo_42", triggering_comment_id=9)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tPR created\thttps://github.com/owner/repo/pull/5",
+        cost_usd=0.05, duration_seconds=30, session_id="session-pr-42",
+    )
+
+    effects = emit(action, result, world)
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["rereview_after_fix"] is False
+
+
 def test_fix_still_overwrites_queue_session_id():
     """Non-review actions (fix, plan) should still update session_id in
     the queue_patch when the handler returns one."""
@@ -897,7 +1227,7 @@ def test_fix_still_overwrites_queue_session_id():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -968,7 +1298,7 @@ def test_review_on_done_resets_first_dispatched_at():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_247",
         owner="owner",
@@ -1037,7 +1367,7 @@ def test_mark_failed_limit_resets_first_dispatched_at():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_42",
         owner="owner",
@@ -1100,7 +1430,7 @@ def test_plan_emit_sets_resume_phase():
     from autoswe.providers.base import NormalizedIssue
 
     issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
         status="waiting", plan_branch=None, base_branch="main", attempt_count=1,
@@ -1130,7 +1460,7 @@ def test_fix_emit_sets_resume_phase():
     from autoswe.providers.base import NormalizedIssue
 
     issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
         status="planned", plan_branch="autoswe/issue-42", base_branch="main",
@@ -1162,7 +1492,7 @@ def test_plan_waiting_emit_sets_resume_phase():
     from autoswe.providers.base import NormalizedIssue
 
     issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
         status="waiting", plan_branch=None, base_branch="main", attempt_count=1,
@@ -1199,7 +1529,7 @@ def test_fix_waiting_emit_preserves_resume_phase_fix():
     from autoswe.providers.base import NormalizedIssue
 
     issue = NormalizedIssue(number=42, title="T", body="B", owner="o", repo="r", state="open")
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42, title="T", body="B",
         status="fixing", plan_branch="autoswe/issue-42", base_branch="main",
@@ -1243,7 +1573,7 @@ def test_fix_completed_persists_fix_summary():
         number=43, title="PR merge issue", body="The PR body is uninformative",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="The PR body is uninformative",
@@ -1280,7 +1610,7 @@ def test_fix_summary_not_set_on_failed():
         number=43, title="PR merge issue", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="Body",
@@ -1317,7 +1647,7 @@ def test_retry_fix_persists_fix_summary():
         number=43, title="PR merge issue", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="Body",
@@ -1346,8 +1676,11 @@ def test_retry_fix_persists_fix_summary():
 
 
 def test_auto_create_pr_uses_plan_branch():
-    """Auto-created PRs must use plan_branch as pr_base (not base_branch)
-    to respect the --branch flag from the original /plan command."""
+    """Auto-created PRs must target the repo's base_branch (issue #196).
+
+    plan_branch is where the work was forked from; it must NOT leak into the
+    PR target. A task planned on 'codex' still ships its PR into base_branch
+    ('main') so the auto-created PR lands where the repo policy says."""
     from autoswe.orch.types import ApiState, TaskState, World
     from autoswe.providers.base import NormalizedIssue
 
@@ -1355,7 +1688,7 @@ def test_auto_create_pr_uses_plan_branch():
         number=43, title="PR merge issue", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="Body",
@@ -1380,8 +1713,8 @@ def test_auto_create_pr_uses_plan_branch():
     pr_effects = [e for e in effects if e.kind == "create_pr"]
     assert len(pr_effects) == 1, "AUTO_CREATE_PR must emit create_pr effect"
     pr_effect = pr_effects[0]
-    assert pr_effect.pr_base == "codex", (
-        "auto-create PR must use plan_branch as pr_base, not base_branch"
+    assert pr_effect.pr_base == "main", (
+        "auto-create PR must target base_branch (main), not plan_branch (codex)"
     )
     assert pr_effect.pr_head == "autoswe/issue-43", (
         "auto-create PR head should be the autoswe/issue-N branch"
@@ -1404,7 +1737,7 @@ def test_auto_create_pr_body_includes_issue_body():
         number=43, title="PR merge issue", body="The original issue description here",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="PR merge issue", body="The original issue description here",
@@ -1448,7 +1781,7 @@ def test_fix_summary_preserves_tabs_in_summary():
         number=43, title="Tab issue", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_43", owner="o", repo="r", issue_number=43,
         title="Tab issue", body="Body",
@@ -1491,7 +1824,7 @@ def test_plan_branch_persisted_in_queue_patch():
         number=42, title="Bug", body="Body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     # Task does NOT have plan_branch yet (first dispatch with --branch)
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42,
@@ -1526,9 +1859,10 @@ def test_plan_branch_persisted_in_queue_patch():
     )
 
 
-def test_plan_branch_used_for_auto_create_pr_base():
-    """When AUTO_CREATE_PR is enabled and fix completes with plan_branch,
-    the create_pr effect must use plan_branch as pr_base (not 'main')."""
+def test_plan_branch_not_used_for_auto_create_pr_base():
+    """When AUTO_CREATE_PR is enabled and fix completes with plan_branch set,
+    the create_pr effect must target base_branch — plan_branch is the fork
+    point, not the PR target (issue #196)."""
     from autoswe.orch.types import ApiState, TaskState, World
     from autoswe.providers.base import NormalizedIssue
 
@@ -1536,7 +1870,7 @@ def test_plan_branch_used_for_auto_create_pr_base():
         number=42, title="Bug", body="Issue body",
         owner="o", repo="r", state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:o_r_42", owner="o", repo="r", issue_number=42,
         title="Bug", body="Issue body",
@@ -1565,6 +1899,7 @@ def test_plan_branch_used_for_auto_create_pr_base():
     pr_effects = [e for e in effects if e.kind == "create_pr"]
     assert len(pr_effects) == 1, f"Expected create_pr effect, got: {[e.kind for e in effects]}"
     pr_effect = pr_effects[0]
-    assert pr_effect.pr_base == "develop", (
-        f"create_pr must use plan_branch as pr_base. Got pr_base={pr_effect.pr_base!r}"
+    assert pr_effect.pr_base == "main", (
+        f"create_pr must use base_branch (main) as pr_base, not plan_branch. "
+        f"Got pr_base={pr_effect.pr_base!r}"
     )

@@ -11,15 +11,37 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+import autoswe.harness.backends.codex as _codex_mod
 from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.backends.codex import (
+    _BYPASS_APPROVALS_AND_SANDBOX,
+    _BYPASS_ENV_VAR,
     CodexBackend,
+    _bypass_approvals,
     _CodexAccumulator,
-    _mode_to_sandbox,
     _parse_jsonl_line,
+    _probe_output_last_message_support,
 )
 
 # ---------- Helpers ----------
+
+
+@pytest.fixture(autouse=True)
+def _pin_output_last_message_probe(monkeypatch):
+    """Pin the CLI capability probe result to 'supported' for every test.
+
+    ``_probe_output_last_message_support`` returns the cached module global
+    immediately when it is not None, so pinning it to True makes the probe a
+    no-op: flag-emission tests neither spawn a real ``codex`` subprocess nor
+    depend on whether a codex CLI happens to be on PATH in the CI runner.
+
+    Dedicated probe tests that exercise the *real* detection logic reset the
+    global to None and mock ``subprocess.run`` themselves (see
+    ``test_codex_probe_*`` below) — monkeypatch there overrides this pin for
+    that test's duration only.
+    """
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", True)
+    yield
 
 
 def _jsonl(*events: dict) -> str:
@@ -146,9 +168,14 @@ def _get_cmd(mock_exec: AsyncMock) -> tuple:
 
 
 def test_codex_capabilities():
-    """CodexBackend advertises mode, resume and progress_stream (Phase 4, core run only)."""
+    """CodexBackend advertises resume + progress_stream only (Phase 4, core run).
+
+    No 'mode' (issue #166): Codex accepts RunSpec.mode for contract parity
+    but performs no read-only enforcement, so it must not claim the
+    capability. Plan/review rely on the post-run worktree backstop.
+    """
     caps = CodexBackend.capabilities()
-    assert "mode" in caps
+    assert "mode" not in caps
     assert "resume" in caps
     assert "progress_stream" in caps
     # Phase 4: no mcp, no can_use_tool, no plan_permission
@@ -194,38 +221,64 @@ def test_codex_satisfies_protocol():
 def test_codex_run_returns_awaitable():
     """run(spec) should return an awaitable (coroutine)."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="test", cwd="/tmp")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="test", cwd="/tmp")
     result = backend.run(spec)
     assert asyncio.iscoroutine(result)
     result.close()
 
 
-# ---------- Mode → sandbox mapping ----------
+# ---------- Bypass approvals / sandbox ----------
 
 
-def test_mode_to_sandbox_plan():
-    """mode='plan' → read-only sandbox."""
-    assert _mode_to_sandbox("plan") == "read-only"
+def test_bypass_flag_constant():
+    """The explicit flag string is the documented Codex bypass flag."""
+    assert _BYPASS_APPROVALS_AND_SANDBOX == "--dangerously-bypass-approvals-and-sandbox"
 
 
-def test_mode_to_sandbox_read_only():
-    """mode='read_only' → read-only sandbox."""
-    assert _mode_to_sandbox("read_only") == "read-only"
+def test_bypass_default_true_when_no_config_or_env(monkeypatch):
+    """No profile field, no env var → bypass defaults to True (isolated machine)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    assert _bypass_approvals(None) is True
+    assert _bypass_approvals({}) is True
 
 
-def test_mode_to_sandbox_read_write():
-    """mode='read_write' → workspace-write sandbox."""
-    assert _mode_to_sandbox("read_write") == "workspace-write"
+def test_bypass_profile_field_true():
+    """Profile bypass_approvals=True wins (highest precedence)."""
+    assert _bypass_approvals({"bypass_approvals": True}) is True
 
 
-def test_mode_to_sandbox_none():
-    """mode=None → read-only (safe default)."""
-    assert _mode_to_sandbox(None) == "read-only"
+def test_bypass_profile_field_false_beats_env(monkeypatch):
+    """Profile bypass_approvals=False wins even when the env var is 'true'."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "true")
+    assert _bypass_approvals({"bypass_approvals": False}) is False
 
 
-def test_mode_to_sandbox_unknown():
-    """Unknown mode → read-only (fail-safe)."""
-    assert _mode_to_sandbox("unknown_mode") == "read-only"
+def test_bypass_env_var_true(monkeypatch):
+    """Env var 'true' (no profile field) → bypass on."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "true")
+    assert _bypass_approvals({}) is True
+
+
+def test_bypass_env_var_false(monkeypatch):
+    """Env var 'false' (no profile field) → bypass off."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "false")
+    assert _bypass_approvals({}) is False
+
+
+def test_bypass_env_var_case_and_whitespace(monkeypatch):
+    """Env var parsing is case-insensitive and tolerant of surrounding space."""
+    for raw in ("1", "TRUE", " Yes", " on"):
+        monkeypatch.setenv(_BYPASS_ENV_VAR, raw)
+        assert _bypass_approvals({}) is True, raw
+    for raw in ("0", "FALSE", " no", " off"):
+        monkeypatch.setenv(_BYPASS_ENV_VAR, raw)
+        assert _bypass_approvals({}) is False, raw
+
+
+def test_bypass_env_var_unset_falls_to_default(monkeypatch):
+    """Unset env var + empty harness_cfg → default True."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    assert _bypass_approvals({}) is True
 
 
 # ---------- JSONL line parser ----------
@@ -257,22 +310,58 @@ def test_parse_jsonl_line_agent_message_completed():
     assert acc.text_chunks == ["Hello"]
 
 
-def test_parse_jsonl_line_summary_output_collected():
-    """item.completed summary_output accumulates text."""
+def test_parse_jsonl_line_reasoning_completed():
+    """item.completed reasoning item fires a progress line; does not enter text_chunks."""
     acc = _CodexAccumulator()
     callback = Mock()
     _parse_jsonl_line(
         json.dumps({
             "type": "item.completed",
-            "item": {"id": "s1", "type": "summary_output", "text": "All done."},
+            "item": {"id": "r1", "type": "reasoning", "summary": "Thinking it through…"},
         }),
         acc=acc,
         callback=callback,
     )
-    assert acc.text_chunks == ["All done."]
-    # Callback should have fired with Agent: prefix
+    # Reasoning is not agent text — it must not pollute RunResult.text.
+    assert not acc.text_chunks
     callback.assert_called_once()
-    assert "Agent: All done." in callback.call_args[0][0]
+    assert "💭" in callback.call_args[0][0]
+    assert "Thinking it through" in callback.call_args[0][0]
+
+
+def test_parse_jsonl_line_reasoning_completed_no_summary_no_fire():
+    """A reasoning item with no summary fires no progress."""
+    acc = _CodexAccumulator()
+    callback = Mock()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "r1", "type": "reasoning"},
+        }),
+        acc=acc,
+        callback=callback,
+    )
+    assert not acc.text_chunks
+    callback.assert_not_called()
+
+
+def test_parse_jsonl_line_plan_item_completed_sets_plan_text():
+    """item.completed plan item sets acc.plan_text, fires progress, no text_chunks."""
+    acc = _CodexAccumulator()
+    callback = Mock()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "p1", "type": "plan", "text": "1. Fix login\n2. Add tests"},
+        }),
+        acc=acc,
+        callback=callback,
+    )
+    assert acc.plan_text == "1. Fix login\n2. Add tests"
+    # Plan text must not pollute RunResult.text.
+    assert not acc.text_chunks
+    callback.assert_called_once()
+    assert "📝 Plan:" in callback.call_args[0][0]
 
 
 def test_parse_jsonl_line_empty_text_skipped():
@@ -365,48 +454,78 @@ def test_parse_jsonl_line_error_event():
     assert not acc.text_chunks
 
 
-def test_parse_jsonl_line_todo_progress():
-    """todo_list item fires callback with rendered items."""
+def test_parse_jsonl_line_turn_plan_updated():
+    """turn.plan.updated renders step statuses; both dot and slash forms accepted."""
+    for etype in ("turn.plan.updated", "turn/plan/updated"):
+        acc = _CodexAccumulator()
+        callback = Mock()
+        _parse_jsonl_line(
+            json.dumps({
+                "type": etype,
+                "turnId": "t",
+                "plan": [
+                    {"step": "Fix bug", "status": "completed"},
+                    {"step": "Add tests", "status": "pending"},
+                ],
+            }),
+            acc=acc,
+            callback=callback,
+        )
+        callback.assert_called_once()
+        rendered = callback.call_args[0][0]
+        assert "✅" in rendered
+        assert "☐" in rendered
+        assert "Fix bug" in rendered
+        assert "Add tests" in rendered
+
+
+def test_parse_jsonl_line_turn_plan_updated_explanation():
+    """turn.plan.updated with an explanation prefixes the progress line."""
     acc = _CodexAccumulator()
     callback = Mock()
     _parse_jsonl_line(
         json.dumps({
-            "type": "item.completed",
-            "item": {
-                "type": "todo_list",
-                "items": [
-                    {"text": "Fix bug", "completed": True},
-                    {"text": "Add tests", "completed": False},
-                ],
-            },
+            "type": "turn/plan/updated",
+            "turnId": "t",
+            "explanation": "Refactor auth",
+            "plan": [{"step": "Step A", "status": "inProgress"}],
         }),
         acc=acc,
         callback=callback,
     )
-    callback.assert_called_once()
-    assert "✅" in callback.call_args[0][0]
-    assert "☐" in callback.call_args[0][0]
-    assert "Fix bug" in callback.call_args[0][0]
-    assert "Add tests" in callback.call_args[0][0]
+    rendered = callback.call_args[0][0]
+    assert "📝 Refactor auth" in rendered
+    assert "▶" in rendered
 
 
-def test_parse_jsonl_line_item_delta_appends():
-    """item.delta appends incremental content to the last chunk."""
+def test_parse_jsonl_line_agent_message_delta_accumulates():
+    """item.agentMessage.delta accumulates text; used when completed text is empty."""
     acc = _CodexAccumulator()
-    # Seed with a completed agent message
     _parse_jsonl_line(
         json.dumps({
-            "type": "item.completed",
-            "item": {"id": "i1", "type": "agent_message", "text": "Hello"},
+            "type": "item/agentMessage/delta",
+            "itemId": "i1",
+            "delta": "Hello",
         }),
         acc=acc,
         callback=None,
     )
-    # Delta extends it
     _parse_jsonl_line(
         json.dumps({
-            "type": "item.delta",
+            "type": "item.agent_message.delta",
+            "itemId": "i1",
             "delta": " world",
+        }),
+        acc=acc,
+        callback=None,
+    )
+    # Deltas buffer — nothing in text_chunks until the item completes.
+    assert not acc.text_chunks
+    # Completed item with empty text falls back to the buffered delta.
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "i1", "type": "agent_message", "text": ""},
         }),
         acc=acc,
         callback=None,
@@ -414,18 +533,96 @@ def test_parse_jsonl_line_item_delta_appends():
     assert acc.text_chunks == ["Hello world"]
 
 
-def test_parse_jsonl_line_item_delta_no_chunks():
-    """item.delta with no prior chunks creates a new one."""
+def test_parse_jsonl_line_completed_text_wins_over_delta():
+    """When the completed item carries text, it wins over the accumulated deltas."""
     acc = _CodexAccumulator()
     _parse_jsonl_line(
         json.dumps({
-            "type": "item.delta",
-            "delta": "streaming content",
+            "type": "item.agentMessage/delta",
+            "itemId": "i1",
+            "delta": "stale streaming text",
         }),
         acc=acc,
         callback=None,
     )
-    assert acc.text_chunks == ["streaming content"]
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item.completed",
+            "item": {"id": "i1", "type": "agent_message", "text": "Authoritative."},
+        }),
+        acc=acc,
+        callback=None,
+    )
+    assert acc.text_chunks == ["Authoritative."]
+
+
+def test_parse_jsonl_line_plan_delta_progress_only():
+    """item.plan.delta fires throttled progress; does not touch text_chunks/plan_text."""
+    acc = _CodexAccumulator()
+    callback = Mock()
+    _parse_jsonl_line(
+        json.dumps({
+            "type": "item/plan/delta",
+            "itemId": "p1",
+            "delta": "Step one of the plan…",
+        }),
+        acc=acc,
+        callback=callback,
+    )
+    # Progress fired for the first delta.
+    assert callback.call_count >= 1
+    # No RunResult impact.
+    assert not acc.text_chunks
+    assert acc.plan_text is None
+
+
+def test_parse_jsonl_line_plan_delta_throttle_refires_on_growth():
+    """Small streamed plan deltas re-fire progress as they accumulate past ~80 chars.
+
+    Pins the cumulative-growth throttle: a series of small deltas (each far
+    below 80 chars) must fire multiple progress lines, not just the first.
+    """
+    acc = _CodexAccumulator()
+    callback = Mock()
+    # 10 consecutive 30-char deltas = 300 chars of streamed plan text.
+    for _ in range(10):
+        _parse_jsonl_line(
+            json.dumps({
+                "type": "item/plan/delta",
+                "itemId": "p1",
+                "delta": "x" * 30,
+            }),
+            acc=acc,
+            callback=callback,
+        )
+    # First delta fires immediately, then again on every ~80-char growth.
+    # Expected fire points: after delta 1 (first), and at 300-char total in
+    # ~80-char strides → at least 3 fires (30, 90+, 210+ cumulative).
+    assert callback.call_count >= 3, (
+        f"Small deltas should re-fire progress as they accumulate, "
+        f"got {callback.call_count} fire(s)"
+    )
+    # Still no RunResult impact.
+    assert not acc.text_chunks
+    assert acc.plan_text is None
+
+
+def test_parse_jsonl_line_reasoning_delta_refires_on_growth():
+    """reasoning summaryTextDelta progress uses the same cumulative throttle."""
+    acc = _CodexAccumulator()
+    callback = Mock()
+    for _ in range(10):
+        _parse_jsonl_line(
+            json.dumps({
+                "type": "item/reasoning/summaryTextDelta",
+                "itemId": "r1",
+                "delta": "y" * 30,
+            }),
+            acc=acc,
+            callback=callback,
+        )
+    assert callback.call_count >= 3
+    assert not acc.text_chunks
 
 
 # ---------- CodexBackend integration (mocked subprocess) ----------
@@ -455,7 +652,7 @@ def test_codex_basic_run():
     spec = RunSpec(
         prompt="Fix the bug",
         cwd="/tmp/repo",
-        model="gpt-5.4",
+        model="gpt-5.6-terra",
         mode="read_write",
     )
     jsonl = _make_success_jsonl(thread_id="sess-codex-1", agent_texts=["Bug fixed."])
@@ -477,8 +674,13 @@ def test_codex_basic_run():
     assert result.duration_seconds >= 0
 
 
-def test_codex_run_calls_with_correct_flags():
-    """CodexBackend builds the correct command-line flags."""
+def test_codex_run_calls_with_correct_flags(monkeypatch):
+    """CodexBackend builds the correct command-line flags (Option A: no --sandbox).
+
+    Since issue #129 the backend no longer emits a per-mode ``--sandbox`` value
+    (the bypass flag neutralized it). It emits the explicit bypass flag instead.
+    """
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
     backend = CodexBackend()
     spec = RunSpec(
         prompt="Fix bug",
@@ -503,8 +705,9 @@ def test_codex_run_calls_with_correct_flags():
     # Without an API key, --ignore-user-config is absent (use local codex config)
     assert "--ignore-user-config" not in cmd
     assert "--ignore-rules" in cmd
-    assert "--sandbox" in cmd
-    assert "workspace-write" in cmd
+    # No per-mode sandbox value is emitted anymore (dead-weight removal)
+    assert "--sandbox" not in cmd
+    # Explicit bypass flag is present by default
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     # Old --ask-for-approval must NOT be present
     assert "--ask-for-approval" not in cmd
@@ -540,30 +743,101 @@ def test_codex_ignore_user_config_with_api_key():
     assert cmd[dash_idx + 1] == "Fix bug"
 
 
-def test_codex_read_only_mode():
-    """mode='read_only' produces --sandbox read-only."""
+def test_codex_read_only_mode_no_sandbox(monkeypatch):
+    """mode='read_only' no longer emits --sandbox; default bypass is present."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
     backend = CodexBackend()
-    spec = RunSpec(prompt="Review code", cwd="/tmp/repo", mode="read_only")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Review code", cwd="/tmp/repo", mode="read_only")
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    idx = cmd.index("--sandbox")
-    assert cmd[idx + 1] == "read-only"
+    assert "--sandbox" not in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
 
-def test_codex_plan_mode():
-    """mode='plan' produces --sandbox read-only."""
+def test_codex_plan_mode_no_sandbox(monkeypatch):
+    """mode='plan' no longer emits --sandbox; default bypass is present."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
     backend = CodexBackend()
-    spec = RunSpec(prompt="Plan the fix", cwd="/tmp/repo", mode="plan")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Plan the fix", cwd="/tmp/repo", mode="plan")
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    idx = cmd.index("--sandbox")
-    assert cmd[idx + 1] == "read-only"
+    assert "--sandbox" not in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+
+
+def test_codex_fresh_bypass_off_via_profile(monkeypatch):
+    """bypass_approvals=False in the profile drops the bypass flag (fresh exec)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    backend = CodexBackend()
+    spec = RunSpec(
+        model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp/repo",
+        mode="read_write",
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra",
+                                "bypass_approvals": False}},
+    )
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+
+def test_codex_fresh_bypass_on_via_profile_true(monkeypatch):
+    """bypass_approvals=True in the profile keeps the bypass flag (fresh exec)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    backend = CodexBackend()
+    spec = RunSpec(
+        model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp/repo",
+        mode="read_write",
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra",
+                                "bypass_approvals": True}},
+    )
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+
+
+def test_codex_fresh_bypass_on_via_env(monkeypatch):
+    """CODEX_BYPASS_APPROVALS_AND_SANDBOX=true (no profile field) → bypass on."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "true")
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp/repo", mode="read_write")
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+
+
+def test_codex_fresh_bypass_off_via_env(monkeypatch):
+    """CODEX_BYPASS_APPROVALS_AND_SANDBOX=false (no profile field) → bypass off."""
+    monkeypatch.setenv(_BYPASS_ENV_VAR, "false")
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp/repo", mode="read_write")
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+
+def test_codex_resume_bypass_off_via_profile(monkeypatch):
+    """bypass_approvals=False drops the flag on resume too (no sandbox on resume)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
+    backend = CodexBackend()
+    spec = RunSpec(
+        model="gpt-5.6-terra",
+        prompt="Continue",
+        cwd="/tmp/repo",
+        resume="sess-x",
+        mode="read_write",
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra",
+                                "bypass_approvals": False}},
+    )
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    assert "--sandbox" not in cmd
 
 
 def test_codex_resume_mode():
     """spec.resume produces 'codex exec resume <id>' command."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Continue the fix",
         cwd="/tmp/repo",
         resume="sess-abc-123",
@@ -575,10 +849,12 @@ def test_codex_resume_mode():
     assert "sess-abc-123" in cmd
 
 
-def test_codex_resume_no_sandbox_or_cd():
+def test_codex_resume_no_sandbox_or_cd(monkeypatch):
     """Resume command must NOT include --sandbox or -C (unsupported by resume subcommand)."""
+    monkeypatch.delenv(_BYPASS_ENV_VAR, raising=False)
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Continue",
         cwd="/tmp/repo",
         resume="sess-123",
@@ -588,13 +864,15 @@ def test_codex_resume_no_sandbox_or_cd():
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "--sandbox" not in cmd
     assert "-C" not in cmd
+    # Default-on bypass is still emitted on resume (resume keeps full access)
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
 
 def test_codex_prompt_starts_with_dash():
     """Prompt starting with - must be protected by -- separator."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="-Fix the bug",
         cwd="/tmp/repo",
         mode="read_write",
@@ -610,7 +888,7 @@ def test_codex_prompt_starts_with_dash():
 def test_codex_error_returncode():
     """Non-zero exit code → subtype='error'."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -632,7 +910,7 @@ def test_codex_killed_subtype():
     into positive values.
     """
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -648,7 +926,7 @@ def test_codex_killed_subtype():
 def test_codex_timeout():
     """asyncio.TimeoutError is re-raised after killing the process."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", timeout=0.5)
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write", timeout=0.5)
 
     mock_process = Mock()
     mock_process.stdout = None
@@ -683,7 +961,7 @@ def test_codex_timeout():
 def test_codex_not_found():
     """FileNotFoundError → RuntimeError with install hint."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(side_effect=FileNotFoundError("codex"))
@@ -698,20 +976,30 @@ def test_codex_not_found():
         assert "npm" in str(e)
 
 
-def test_codex_default_model():
-    """When spec.model is None, default to gpt-5.4."""
+def test_codex_missing_model_raises():
+    """When spec.model is None, _run_async fails fast (no hardcoded default)."""
     backend = CodexBackend()
     spec = RunSpec(prompt="Fix", cwd="/tmp", model=None, mode="read_write")
 
+    with pytest.raises(ValueError, match="missing required 'model'"):
+        asyncio.run(_run_backend(backend, spec))
+
+
+def test_codex_explicit_model_passthrough():
+    """An explicit spec.model is passed through to --model unchanged."""
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix", cwd="/tmp", model="gpt-5.6-terra", mode="read_write")
+
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     idx = cmd.index("--model")
-    assert cmd[idx + 1] == "gpt-5.4"
+    assert cmd[idx + 1] == "gpt-5.6-terra"
 
 
 def test_codex_env_openai_api_key_from_harness():
     """OPENAI_API_KEY from harness profile is passed to subprocess env."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -733,7 +1021,8 @@ def test_codex_env_openai_api_key_from_harness():
 def test_codex_env_codex_api_key_from_harness():
     """CODEX_API_KEY from harness profile is passed to subprocess env."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -755,7 +1044,8 @@ def test_codex_env_codex_api_key_from_harness():
 def test_codex_env_overrides():
     """Explicit env_overrides are merged into subprocess env."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -774,6 +1064,54 @@ def test_codex_env_overrides():
     assert env.get("CUSTOM_VAR") == "hello"
 
 
+def test_codex_profile_env_merged_into_subprocess_env():
+    """Per-profile `env` is merged into the `codex exec` subprocess env
+    (issue #120 Part B)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp",
+        mode="read_write",
+        state={"_harness_cfg": {"env": {"OPENAI_API_BASE": "http://x"}}},
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec.call_args[1].get("env", {})
+
+    env = asyncio.run(_run())
+    assert env.get("OPENAI_API_BASE") == "http://x"
+
+
+def test_codex_profile_env_wins_over_api_key_field():
+    """Profile `env` overrides the named api-key fields (precedence)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp",
+        mode="read_write",
+        state={"_harness_cfg": {
+            "openai_api_key": "sk-from-field",
+            "env": {"OPENAI_API_KEY": "sk-from-profile-env"},
+        }},
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec.call_args[1].get("env", {})
+
+    env = asyncio.run(_run())
+    assert env.get("OPENAI_API_KEY") == "sk-from-profile-env"
+
+
 def test_codex_progress_callback_streaming():
     """progress_callback fires with live agent messages during execution."""
     backend = CodexBackend()
@@ -783,7 +1121,8 @@ def test_codex_progress_callback_streaming():
         thread_id="t-1",
         agent_texts=["Step 1 done.", "Step 2 done."],
     )
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -804,21 +1143,19 @@ def test_codex_progress_callback_streaming():
     assert len(agent_calls) >= 2
 
 
-def test_codex_progress_callback_todo():
-    """progress_callback fires with rendered todo list for todo_list events."""
+def test_codex_progress_callback_plan():
+    """progress_callback fires with rendered plan step list for turn.plan.updated."""
     backend = CodexBackend()
     callback = Mock()
     jsonl = _jsonl(
         {"type": "thread.started", "thread_id": "t-1"},
         {
-            "type": "item.completed",
-            "item": {
-                "type": "todo_list",
-                "items": [
-                    {"text": "Fix bug", "completed": True},
-                    {"text": "Write tests", "completed": False},
-                ],
-            },
+            "type": "turn.plan.updated",
+            "turnId": "t-1",
+            "plan": [
+                {"step": "Fix bug", "status": "completed"},
+                {"step": "Write tests", "status": "pending"},
+            ],
         },
         {
             "type": "item.completed",
@@ -829,7 +1166,8 @@ def test_codex_progress_callback_todo():
             "usage": {"input_tokens": 1, "output_tokens": 1},
         },
     )
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Fix",
         cwd="/tmp",
         mode="read_write",
@@ -842,16 +1180,90 @@ def test_codex_progress_callback_todo():
             return await _run_backend(backend, spec)
 
     asyncio.run(_run())
-    # Should have fired at least once with todo content
-    todo_calls = [c for c in callback.call_args_list if "📋" in c[0][0]]
-    assert len(todo_calls) >= 1
-    assert "Fix bug" in todo_calls[0][0][0]
+    # Should have fired at least once with plan content
+    plan_calls = [c for c in callback.call_args_list if "✅" in c[0][0] or "📋" in c[0][0]]
+    assert len(plan_calls) >= 1
+    assert "Fix bug" in plan_calls[0][0][0]
+
+
+def test_codex_plan_text_in_run_result():
+    """A plan item populates RunResult.plan_text and is excluded from RunResult.text."""
+    backend = CodexBackend()
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {
+            "type": "item.completed",
+            "item": {"id": "p1", "type": "plan", "text": "Plan: refactor auth"},
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "msg1", "type": "agent_message", "text": "Done."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    )
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Plan", cwd="/tmp", mode="plan")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.plan_text == "Plan: refactor auth"
+    # Plan text must not be in RunResult.text (only the agent message is).
+    assert result.text == "Done."
+    assert "refactor auth" not in result.text
+
+
+def test_codex_camel_case_tolerance():
+    """A camelCase wire stream (agentMessage/commandExecution) parses end-to-end."""
+    backend = CodexBackend()
+    callback = Mock()
+    jsonl = _jsonl(
+        {"type": "thread.started", "thread_id": "t-1"},
+        {
+            "type": "item.started",
+            "item": {"id": "cmd1", "type": "commandExecution", "command": "ls"},
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "cmd1", "type": "commandExecution", "command": "ls", "exitCode": 0},
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "msg1", "type": "agentMessage", "text": "All good."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    )
+    spec = RunSpec(model="gpt-5.6-terra",
+        prompt="Fix",
+        cwd="/tmp",
+        mode="read_write",
+        progress_callback=callback,
+    )
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.text == "All good."
+    # commandExecution (camelCase) fired Working + exit progress
+    working = [c for c in callback.call_args_list if "Working: ls" in c[0][0]]
+    assert len(working) >= 1
 
 
 def test_codex_result_no_mcp_flags():
     """Phase 4: plan_posted and question_posted are always False."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Plan", cwd="/tmp", mode="plan")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Plan", cwd="/tmp", mode="plan")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -869,7 +1281,7 @@ def test_codex_result_no_mcp_flags():
 def test_codex_fresh_passes_cwd():
     """Fresh run passes cwd= to subprocess (authoritative alongside -C flag)."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp/repo", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp/repo", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -891,7 +1303,8 @@ def test_codex_resume_passes_cwd():
     mechanism that ensures the resumed session touches the right files.
     """
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Continue",
         cwd="/tmp/repo",
         resume="sess-123",
@@ -911,25 +1324,25 @@ def test_codex_resume_passes_cwd():
     assert cwd == "/tmp/repo", "Resume run should pass cwd= to subprocess"
 
 
-def test_codex_summary_output_collected():
-    """summary_output items are accumulated in RunResult.text."""
+def test_codex_plan_item_does_not_pollute_text():
+    """A plan item and an agent message coexist; only the agent message lands in text."""
     backend = CodexBackend()
     jsonl = _jsonl(
         {"type": "thread.started", "thread_id": "t-1"},
         {
             "type": "item.completed",
-            "item": {"id": "msg1", "type": "agent_message", "text": "Step 1"},
+            "item": {"id": "p1", "type": "plan", "text": "Plan: update parser"},
         },
         {
             "type": "item.completed",
-            "item": {"id": "sum1", "type": "summary_output", "text": "Summary: done"},
+            "item": {"id": "msg1", "type": "agent_message", "text": "Step 1"},
         },
         {
             "type": "turn.completed",
             "usage": {"input_tokens": 1, "output_tokens": 1},
         },
     )
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
@@ -938,7 +1351,9 @@ def test_codex_summary_output_collected():
 
     result = asyncio.run(_run())
     assert "Step 1" in result.text
-    assert "Summary: done" in result.text
+    # Plan text is surfaced via plan_text, not mixed into text.
+    assert "update parser" not in result.text
+    assert result.plan_text == "Plan: update parser"
 
 
 def test_codex_cost_usd_populated_for_known_model():
@@ -1020,7 +1435,7 @@ def test_codex_turn_failed_affects_subtype():
         {"type": "thread.started", "thread_id": "t-1"},
         {"type": "turn.failed", "error": {"message": "Model quota exceeded"}},
     )
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     async def _run():
         mock_exec = AsyncMock(return_value=_mock_create_process(
@@ -1037,7 +1452,7 @@ def test_codex_fresh_run_persists_session():
     """Fresh run (no resume) does NOT include --ephemeral so the session is persisted
     for subsequent resume (codex exec resume <session_id>) calls."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "--ephemeral" not in cmd
@@ -1046,7 +1461,8 @@ def test_codex_fresh_run_persists_session():
 def test_codex_no_ephemeral_resume():
     """Resume run omits --ephemeral (needs persistent session files)."""
     backend = CodexBackend()
-    spec = RunSpec(
+    spec = RunSpec(model="gpt-5.6-terra",
+
         prompt="Continue",
         cwd="/tmp",
         resume="sess-abc",
@@ -1057,24 +1473,300 @@ def test_codex_no_ephemeral_resume():
     assert "--ephemeral" not in cmd
 
 
-def test_codex_max_turns_flag():
-    """Non-default max_turns adds -c agent.max_turns=N to command."""
+# `agent.max_turns` was removed from the Codex CLI config schema. Live capture on
+# the installed CLI (codex-cli 0.150.1, 2026-08-29):
+#   $ codex exec --strict-config -c agent.max_turns=5 "hi"
+#   Error loading config.toml: unknown configuration field `agent` in -c/--config
+#   override   (exit 1)
+# Without --strict-config (autoSWE does not use it) the unknown override is
+# silently ignored — a no-op runaway guard. `codex exec` exposes no turn cap at
+# all, so RunSpec.max_turns must never be translated into a config override.
+# The effective anti-runaway guard is the wall-clock timeout (spec.timeout →
+# asyncio.wait_for + process.kill in codex.py).
+
+
+@pytest.mark.parametrize("turns", [1, 50, 80, 199, 200, 400])
+def test_codex_max_turns_never_emitted(turns):
+    """No max_turns value (incl. the 200 default) adds any -c agent.max_turns override.
+
+    Fixture/proof: live run of `codex exec --strict-config -c agent.max_turns=5`
+    on codex-cli 0.150.1 failed with exit 1 and stderr
+    ``unknown configuration field `agent` in -c/--config override`` — the key
+    no longer exists, so emitting it would be a silent no-op (or a hard error).
+    """
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=80)
-
-    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    assert "-c" in cmd
-    idx = cmd.index("-c")
-    assert cmd[idx + 1] == "agent.max_turns=80"
-
-
-def test_codex_default_max_turns_no_flag():
-    """Default max_turns (200) does NOT add -c flag."""
-    backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write", max_turns=200)
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write", max_turns=turns)
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
     assert "-c" not in cmd
+    assert not any("max_turns" in part for part in cmd)
+
+
+def test_codex_default_max_turns_no_flag():
+    """Default max_turns (200) does NOT add any -c override either.
+
+    max_turns is a documented no-op on the Codex backend (Codex `exec` has no
+    turn cap; the guard is the wall-clock timeout) — consistent for any value.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write", max_turns=200)
+
+    cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
+    assert "-c" not in cmd
+    assert not any("max_turns" in part for part in cmd)
+
+
+# ---------------------------------------------------------------------------
+# --output-last-message capture (issue #128)
+#
+# RunResult.text is sourced from the `-o` file when present, and falls back to
+# chunk accumulation when the file is absent or empty. The tests below exercise
+# _run_async directly with a controlled last_message_path so the golden/negative
+# cases are deterministic; flag-presence is asserted on the emitted command.
+
+
+def test_codex_last_message_file_is_authoritative(tmp_path):
+    """When the -o file holds content, RunResult.text is exactly that content,
+    even when the JSONL stream would have produced different text.
+
+    Fixture: a golden -o file whose content differs from the streamed chunks.
+    """
+    backend = CodexBackend()
+    golden = "Final summary from the -o file."
+    path = tmp_path / "lastmsg.txt"
+    path.write_text(golden + "\n", encoding="utf-8")  # trailing newline is stripped
+    # Streamed chunks would yield "Chunk text." — the file must win.
+    jsonl = _make_success_jsonl(thread_id="sess-om", agent_texts=["Chunk text."])
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, str(path))
+
+    result = asyncio.run(_run())
+    assert result.text == golden, f"expected -o file content, got {result.text!r}"
+    assert result.session_id == "sess-om"
+    assert result.subtype == "success"
+
+
+def test_codex_last_message_fallback_when_file_absent(tmp_path):
+    """Negative test: no -o file on disk → fall back to accumulated chunks."""
+    backend = CodexBackend()
+    missing = tmp_path / "does-not-exist.txt"  # never created
+    assert not missing.exists()
+    jsonl = _make_success_jsonl(thread_id="sess-1", agent_texts=["Fallback chunk."])
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, str(missing))
+
+    result = asyncio.run(_run())
+    assert result.text == "Fallback chunk."
+    assert result.subtype == "success"
+
+
+def test_codex_last_message_fallback_when_file_empty(tmp_path):
+    """Empty/whitespace-only -o file → fall back to accumulated chunks."""
+    backend = CodexBackend()
+    empty = tmp_path / "empty.txt"
+    empty.write_text("   \n\n  ", encoding="utf-8")
+    jsonl = _make_success_jsonl(thread_id="sess-2", agent_texts=["Chunk A", "Chunk B"])
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, str(empty))
+
+    result = asyncio.run(_run())
+    assert result.text == "Chunk A\nChunk B"
+    assert result.subtype == "success"
+
+
+def test_codex_output_last_message_flag_fresh():
+    """Fresh exec emits --output-last-message <path> before the -- separator."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await backend._run_async(spec, "/tmp/codex-lastmsg-xyz.txt")
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_run()))
+    assert "--output-last-message" in cmd
+    idx = cmd.index("--output-last-message")
+    assert cmd[idx + 1] == "/tmp/codex-lastmsg-xyz.txt"
+    # Flag must come before the `--` prompt separator (a global CLI flag).
+    assert idx < cmd.index("--")
+
+
+def test_codex_output_last_message_flag_resume():
+    """Resume also emits --output-last-message <path> (verified supported)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Continue", cwd="/tmp",
+                   resume="sess-123", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await backend._run_async(spec, "/tmp/codex-lastmsg-res.txt")
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_run()))
+    assert "resume" in cmd
+    assert "--output-last-message" in cmd
+    idx = cmd.index("--output-last-message")
+    assert cmd[idx + 1] == "/tmp/codex-lastmsg-res.txt"
+
+
+def test_codex_no_output_flag_when_path_empty():
+    """Backwards-compat: with no last_message_path the flag is omitted and
+    text comes purely from chunks (original behavior preserved)."""
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+    jsonl = _make_success_jsonl(thread_id="t-9", agent_texts=["Only chunks."])
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, "")
+
+    result = asyncio.run(_run())
+    assert result.text == "Only chunks."
+    # Re-check the flag is absent on the command line too.
+    async def _cmd():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await backend._run_async(spec, "")
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_cmd()))
+    assert "--output-last-message" not in cmd
+
+
+def test_codex_probe_detects_supported_flag(monkeypatch):
+    """Probe reads `codex exec --help` and returns True when the flag is present."""
+    import subprocess
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", None)
+    monkeypatch.setattr(subprocess, "run",
+                        Mock(return_value=Mock(
+                            stdout="  -o, --output-last-message <FILE>\n",
+                            stderr="", returncode=0,)))
+    assert _probe_output_last_message_support() is True
+    # Second call returns the cached value without re-running subprocess.
+    monkeypatch.setattr(subprocess, "run", Mock(side_effect=AssertionError(
+        "probe must not re-run subprocess after first call")))
+    assert _probe_output_last_message_support() is True
+
+
+def test_codex_probe_detects_unsupported_flag(monkeypatch):
+    """Probe returns False when the CLI help does not mention the flag."""
+    import subprocess
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", None)
+    monkeypatch.setattr(subprocess, "run",
+                        Mock(return_value=Mock(
+                            stdout="Usage: codex exec [OPTIONS] <PROMPT>\n",
+                            stderr="", returncode=0,)))
+    assert _probe_output_last_message_support() is False
+
+
+def test_codex_probe_defaults_true_on_probe_failure(monkeypatch):
+    """If `codex` is missing or times out, assume supported (default True).
+
+    Rationale: a probe failure (e.g. a sandboxed runner without a codex CLI)
+    should not silently degrade to chunk accumulation when the flag would
+    actually have worked — the flag is verified on codex-cli 0.150.1.
+    """
+    import subprocess
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", None)
+    monkeypatch.setattr(subprocess, "run",
+                        Mock(side_effect=FileNotFoundError("codex")))
+    assert _probe_output_last_message_support() is True
+    # Timeout is the same class of failure.
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", None)
+    monkeypatch.setattr(subprocess, "run",
+                        Mock(side_effect=subprocess.TimeoutExpired("codex", 10)))
+    assert _probe_output_last_message_support() is True
+
+
+def test_codex_output_last_message_omitted_when_unsupported(monkeypatch):
+    """On a CLI without the flag, _run_async omits it so codex doesn't reject
+    the whole command up front (the chunk fallback then produces RunResult.text)."""
+    monkeypatch.setattr(_codex_mod, "_OUTPUT_LAST_MESSAGE_SUPPORTED", False)
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await backend._run_async(spec, "/tmp/codex-lastmsg-unsup.txt")
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_run()))
+    assert "--output-last-message" not in cmd
+    # The chunk fallback still yields text (no -o file to read).
+    # Re-run to capture the RunResult under the same unsupported condition.
+    async def _run_result():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl()))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await backend._run_async(spec, "/tmp/codex-lastmsg-unsup.txt")
+
+    result = asyncio.run(_run_result())
+    assert result.text  # chunk accumulation produced non-empty text
+    assert result.subtype == "success"
+
+
+def test_read_last_message_file_absent():
+    """_read_last_message_file returns None for a missing path."""
+    from autoswe.harness.backends.codex import _read_last_message_file
+    assert _read_last_message_file("/nonexistent/nope-xyz.txt") is None
+
+
+def test_run_allocates_and_cleans_temp_file():
+    """run() passes a real temp path to _run_async and removes it afterwards.
+
+    The subprocess is mocked (no real ``codex`` binary needed — CI runners do
+    not have it on PATH), so this test verifies the temp-file lifecycle of
+    ``run()`` only: path allocation, pre-existence, and post-run cleanup.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+    seen: dict = {}
+
+    orig = backend._run_async
+
+    async def spy(self_, spec_, last_message_path=""):
+        seen["path"] = last_message_path
+        seen["exists_before"] = Path(last_message_path).exists()
+        # orig is the real (pre-patch) bound method, so call it directly.
+        return await orig(spec_, last_message_path)
+
+    mock_exec = AsyncMock(return_value=_mock_create_process(
+        stdout=_make_success_jsonl()
+    ))
+    with patch("asyncio.create_subprocess_exec", mock_exec), \
+            patch.object(CodexBackend, "_run_async", spy):
+        result = asyncio.run(backend.run(spec))
+
+    assert isinstance(result, RunResult)
+    path = seen["path"]
+    assert path, "run() must allocate a last-message temp path"
+    assert seen["exists_before"] is True, "mkstemp should create the file up front"
+    assert not Path(path).exists(), "temp file must be cleaned up after run()"
+    # The run() pass also threads the path into the emitted CLI flag.
+    cmd = _get_cmd(mock_exec)
+    assert "--output-last-message" in cmd
+    assert cmd[cmd.index("--output-last-message") + 1] == path
 
 
 # ---------- Config interpolation ----------
@@ -1138,7 +1830,7 @@ def test_factory_codex_case_insensitive():
     from autoswe.harness.backends.factory import get_backend
 
     for val in ("codex", "CODEX", "Codex"):
-        backend = get_backend({"backend": val})
+        backend = get_backend({"backend": val, "model": "gpt-5.6-terra"})
         assert isinstance(backend, CodexBackend)
 
 
@@ -1149,9 +1841,10 @@ def test_backend_has_capability_codex():
     """backend_has_capability returns correct values for Codex."""
     from autoswe.harness.runner import backend_has_capability
 
-    harness = {"backend": "codex"}
-    # Phase 4: mode, resume, and progress_stream
-    assert backend_has_capability(harness, "mode")
+    harness = {"backend": "codex", "model": "gpt-5.6-terra"}
+    # Phase 4: resume and progress_stream. No "mode" (issue #166): Codex has
+    # no read-only enforcement, so it must not advertise the capability.
+    assert not backend_has_capability(harness, "mode")
     assert backend_has_capability(harness, "resume")
     assert backend_has_capability(harness, "progress_stream")
     assert not backend_has_capability(harness, "mcp")
@@ -1173,7 +1866,7 @@ def test_codex_stream_limit_stdout_truncates(monkeypatch):
     from autoswe.harness.backends import codex as codex_mod
 
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     # Each JSONL line is ~100 bytes. 1000 lines ≈ 100 KB.
     small_limit = 500
@@ -1206,7 +1899,7 @@ def test_codex_stream_limit_stdout_truncates(monkeypatch):
 def test_codex_stream_limit_within_bounds():
     """Normal-sized stream (~1KB) completes without hitting the limit."""
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     # Build a ~1KB JSONL stream — well within 16MB
     jsonl = _jsonl(
@@ -1238,7 +1931,7 @@ def test_codex_stream_limit_stderr_truncates(monkeypatch):
     from autoswe.harness.backends import codex as codex_mod
 
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
     jsonl = _make_success_jsonl()
 
     # Create a process with large stderr (64KB is enough for 2+ read(64KB) calls
@@ -1270,7 +1963,7 @@ def test_codex_stream_limit_drains_pipe_after_truncation(monkeypatch):
     from autoswe.harness.backends import codex as codex_mod
 
     backend = CodexBackend()
-    spec = RunSpec(prompt="Fix", cwd="/tmp", mode="read_write")
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
     # Build stdout that exceeds the limit
     jsonl = _jsonl(

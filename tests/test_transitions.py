@@ -28,7 +28,6 @@ from tests.scenarios.harness import (
 from tests.scenarios.transitions import (
     CODEX_TRANSITIONS,
     TRANSITIONS,
-    _permission_to_sandbox,
     build_azure_state,
     build_github_state,
     build_queue_task,
@@ -69,8 +68,8 @@ def test_transition(
     # Seed queue
     seed_queue(isolated_autoswe_dir, queue_task)
 
-    # Set up repos.json
-    setup_repos(isolated_autoswe_dir, provider, state)
+    # Set up repos.json (row may override the repo config, e.g. test_command)
+    setup_repos(isolated_autoswe_dir, provider, state, repos_extra=row.get("repos"))
 
     cfg = build_test_cfg(isolated_autoswe_dir, provider)
 
@@ -107,7 +106,8 @@ def test_transition(
 
     # Queue task assertions
     queue_fields = {}
-    for key in ("autoswe_status", "session_id", "pending_command"):
+    for key in ("autoswe_status", "session_id", "pending_command", "attempt_count",
+                "plan_branch", "rereview_after_fix", "pr_number"):
         if key in expect:
             queue_fields[key] = expect[key]
 
@@ -143,6 +143,9 @@ def test_transition(
     no_claude = expect.get("no_claude_calls", False)
     if no_claude:
         assert len(hw.claude.calls) == 0, "Expected no Claude calls"
+    elif "claude_calls" in expect:
+        # Full per-call expectations (resume / fork_session / permission_mode …)
+        assert_claude_calls(hw.claude, expect["claude_calls"])
     elif "claude_permission" in expect:
         assert_claude_calls(hw.claude, [{"permission_mode": expect["claude_permission"]}])
 
@@ -184,8 +187,8 @@ def test_transition_codex(
     # Seed queue
     seed_queue(isolated_autoswe_dir, queue_task)
 
-    # Set up repos.json
-    setup_repos(isolated_autoswe_dir, provider, state)
+    # Set up repos.json (row may override the repo config, e.g. test_command)
+    setup_repos(isolated_autoswe_dir, provider, state, repos_extra=row.get("repos"))
 
     # Build config with codex backend
     cfg = build_test_cfg(isolated_autoswe_dir, provider, backend="codex")
@@ -216,7 +219,8 @@ def test_transition_codex(
 
     # Queue task assertions
     queue_fields = {}
-    for key in ("autoswe_status", "session_id", "pending_command"):
+    for key in ("autoswe_status", "session_id", "pending_command", "attempt_count",
+                "plan_branch", "rereview_after_fix", "pr_number"):
         if key in expect:
             queue_fields[key] = expect[key]
 
@@ -241,16 +245,19 @@ def test_transition_codex(
     if no_codex:
         assert len(hw.codex.calls) == 0, "Expected no Codex calls"
     elif "claude_permission" in expect:
-        # Translate claude_permission → expected sandbox
-        expected_sandbox = _permission_to_sandbox(expect["claude_permission"])
+        # Since issue #129 Codex no longer maps mode → --sandbox (the always-on
+        # bypass flag neutralized it). Every codex call carries the default-on
+        # bypass flag instead. (The env override is cleared above so the default
+        # applies deterministically.)
         from tests.scenarios.runner import assert_codex_calls
 
-        # Codex resume mode doesn't use --sandbox (the CLI doesn't support it).
-        # If the first call is a resume, assert is_resume=True; otherwise assert sandbox.
+        # Codex resume mode doesn't take --sandbox (the CLI doesn't support it).
+        # If the first call is a resume, assert is_resume=True; otherwise assert
+        # the fresh-exec call carries the default bypass flag.
         if hw.codex.calls and hw.codex.calls[0].get("is_resume"):
             assert_codex_calls(hw.codex, [{"is_resume": True}])
         else:
-            assert_codex_calls(hw.codex, [{"sandbox": expected_sandbox}])
+            assert_codex_calls(hw.codex, [{"bypass": True}])
 
     # Git call assertions
     if git_calls:

@@ -75,7 +75,20 @@ Strategy is controlled by `cfg["SYNC_STRATEGY"]` (default: `"merge"`).
 
 ## Garbage Collection
 
-Worktrees are **never automatically deleted**. Once `issue-{N}/` is created, it persists on disk even after the issue is closed, done, or skipped. Manual cleanup requires deleting the worktree directory and the remote branch.
+By default worktrees are **never automatically deleted**. Once `issue-{N}/` is created, it persists on disk even after the issue is closed, done, or skipped. Manual cleanup requires deleting the worktree directory and the remote branch.
+
+### Auto-purge of gone remote branches (opt-in)
+
+When `AUTO_PURGE_BRANCHES` is `true` (default `false` — see [config.md](config.md)), the poll cycle's heartbeat walks each repo's worktrees and removes any whose remote `autoswe/issue-{N}` branch no longer exists on the remote — e.g. the PR was merged and the branch auto-deleted, or the branch was deleted manually. For each such worktree the local `issue-{N}/` directory and the local `autoswe/issue-{N}` branch are removed.
+
+The primary gate is **pure remote-branch absence**: a single `git fetch --prune` on the `_main/` clone updates the remote-tracking refs, then each worktree is checked with `git show-ref --verify --quiet refs/remotes/origin/<branch>`. Two non-configurable integrity guards are always applied on top:
+
+- **In-flight tasks are skipped** — the loop builds the set of issue numbers that currently hold a live PID file (a task is actively running) and passes it to `purge_gone_branches`, so a running worktree is never touched.
+- **Dirty worktrees are skipped** — if the worktree has uncommitted changes or untracked files (`git status --porcelain` non-empty), it is left in place rather than destroyed.
+
+A failure to `fetch --prune` (network, credentials) means the remote-tracking refs can't be trusted, so nothing is purged on that cycle. The step is best-effort: any per-worktree or per-repo failure is logged and never aborts the poll.
+
+The primitives live in `autoswe/vcs/worktree.py` (`fetch_prune`, `remote_branch_exists`, `remove_worktree`, `purge_gone_branches`) and are invoked from the poll loop's Phase 4 (`autoswe/orch/loop.py`). Note this only removes the worktree directory and local branch; it does **not** prune `queue.json` — terminal-task cleanup is the separate `queue prune` job.
 
 ## Token Rewriting
 

@@ -1,7 +1,7 @@
 # WIQL Query
 
 > Grounding reference for Azure DevOps Work Item Query Language
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work%20items/query
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/wiql/query-by-wiql?view=azure-devops-rest-7.1
 > CQL Reference: https://learn.microsoft.com/en-us/azure/devops/boards/queries/query-help-for-the-query-editor
 
 ---
@@ -9,8 +9,10 @@
 ## WIQL (Work Item Query Language)
 
 ```
-POST /{organization}/{project}/_apis/wit/wiql?query?api-version=7.1
+POST /{organization}/{project}/_apis/wit/wiql?api-version=7.1
 ```
+
+The current reference also shows an optional `{team}` path segment (`POST /{organization}/{project}/{team}/_apis/wit/wiql`) — the team is optional; omit it to query the whole project.
 
 WIQL is Azure DevOps's query language for searching and filtering work items. It is the **primary mechanism** for finding work items — far more powerful than the `$filter` parameter on the direct GET endpoint.
 

@@ -28,6 +28,7 @@ CRON (e.g. every 10 min)
                f. release PID file
             4. Backfill bot_comment_ids              # self-heal first poll after wipe
             5. gh_closed detection & label mirror
+            5b. auto-purge gone remote branches      # opt-in: AUTO_PURGE_BRANCHES
             6. _post_pending_welcomes()             # first-time welcome (no Claude)
 ```
 
@@ -101,7 +102,7 @@ For each non-noop `Action`:
 8. Delete PID file
 ```
 
-The **progress comment** (via `tracking.progress.ProgressComment`) is a sticky comment: created with the dispatch status text, updated during the Claude run, then finalized with the completion/failure message. The comment ID is tracked in `bot_comment_ids` and in the per-dispatch `progress_comment_id`. A clean return clears `progress_comment_id`; if the dispatch **crashes**, it survives so a later `/retry` (from the `error` state) re-uses that same comment via `ProgressComment.adopt()` instead of starting a fresh one. When the run emits a todo list (via `TodoWrite` or `TaskCreate`/`TaskUpdate`), the comment body is rendered as a structured **Todo List** + **Last Command** markdown block instead of a bare tool-name string.
+The **progress comment** (via `tracking.progress.ProgressComment`) is a sticky comment: created with the dispatch status text, updated during the Claude run, then finalized with the completion/failure message. The comment ID is tracked in `bot_comment_ids` and in the per-dispatch `progress_comment_id`. A clean return clears `progress_comment_id`; if the dispatch **crashes**, it survives so a later `/retry` (from the `error` state) re-uses that same comment via `ProgressComment.adopt()` instead of starting a fresh one. When the run emits a todo list (via `TodoWrite` or `TaskCreate`/`TaskUpdate`), the comment body is rendered as a structured **Todo List** + **Last Command** markdown block instead of a bare tool-name string. When a clarifying question is posted mid-run (the `AskUserQuestion` interception), the sticky is **frozen** on the question (`ProgressComment.freeze()`): later tool events are gated off and `drain()` can no longer clobber the posted question with a raw tool event (issue #184). The SDK-internal `StructuredOutput` tool never renders as progress at all.
 
 **Input:** queue.json (tasks with non-noop Actions). **Output:** handler result → effects applied → `autoswe_status` transition → mirrored label → bot comment.
 
@@ -137,18 +138,19 @@ The `emit()` layer maps `DispatchResult.done_content` to status transitions:
 | `"DONE*"` (from `/sync`) | `synced` | `autoswe:synced` | Completion comment with commit link |
 | `"DONE*"` (from `/pr`) | `shipped` | `autoswe:shipped` | Completion comment with PR link |
 | `"FAILED: …"` | `failed` | `autoswe:failed` | Failure comment with `/retry` prompt |
+| `"TESTS_FAILED\t…\t<sha>"` (from `/fix`) | `test_failed` | `autoswe:test_failed` | Test-gate-failure comment (suite red; work committed/pushed; `/pr` blocked until a `/fix` re-runs the gate green) |
 | `"SKIPPED"` | `skipped` | `autoswe:skipped` | — |
 | `"ABORTED"` | `aborted` | `autoswe:aborted` | Abort comment |
 
 `"REVIEW_READY"` transitions to `reviewed` — it is now a terminal status. See `labels.py:_map_done_to_status()` and `orch/emit.py`.
 
-`"DONE*"` means any return starting with `DONE` — `"DONE_SUMMARY\t…\t<sha>"`, `"DONE: no changes detected"`, `"DONE: synced …"`, `"DONE: PR …"`.
+`"DONE*"` means any return starting with `DONE` — `"DONE_SUMMARY\t…\t<sha>"`, `"DONE: no changes detected"`, `"DONE: synced …"`, `"DONE: PR …"`. `"TESTS_FAILED\t<detail>\t<sha>"` is the post-fix test gate's red-suite return (see `handlers.md`): the work was committed/pushed, but the branch suite is failing, so the task lands in the non-terminal `test_failed` state instead of terminal `fixed`.
 
 ## Stage 6 — Auto-PR
 
 After a successful `/fix` (`autoswe_status → fixed`), if `AUTO_CREATE_PR=true` and no PR exists for the branch, `emit()` includes a `create_pr` Effect (this stays pure — no gating here).
 
-The adapter (`apply_effect` in `providers/github/adapter.py` / `providers/azure/adapter.py`) applies a **CI-only** preflight gate before translating the effect to the provider's PR creation API: `pr_gate.preflight_pr(task, cfg, repo_cfg, do_sync=False, vcs=vcs)`. No sync gate here — the branch was already synced pre-dispatch by `_run_fix_with_sync`. If `PR_REQUIRE_CI` is enabled and CI is `pending` or `failure`, the adapter skips PR creation and posts a "PR deferred" comment instead, telling the user to post `/pr` once checks are green. `AUTO_CREATE_PR` is therefore best-effort under this gate, not guaranteed on every `/fix` success. See [config.md](config.md) for `PR_REQUIRE_CI` / `PR_REQUIRE_SYNC`.
+The shared adapter (`apply_effect` in `providers/adapter.py`, one for every provider) applies a **CI-only** preflight gate before translating the effect to the provider's PR creation API: `pr_gate.preflight_pr(task, cfg, repo_cfg, do_sync=False, vcs=vcs)`. No sync gate here — the branch was already synced pre-dispatch by `_run_fix_with_sync`. If `PR_REQUIRE_CI` is enabled and CI is `pending` or `failure`, the adapter skips PR creation and posts a "PR deferred" comment instead, telling the user to post `/pr` once checks are green. `AUTO_CREATE_PR` is therefore best-effort under this gate, not guaranteed on every `/fix` success. When a PR is created (or an existing one is found), the adapter writes `pr_number`/`pr_url` onto the queue entry so the PR identity is persisted in the same cycle (issue #193). See [config.md](config.md) for `PR_REQUIRE_CI` / `PR_REQUIRE_SYNC`.
 
 ## Stage 7 — Post-Poll Bookkeeping
 
@@ -158,6 +160,8 @@ After all dispatches in a cycle:
 
 2. **`gh_closed` detection** — Issues that dropped out of the open-issues list get `gh_closed = True` and `autoswe_status = "fixed"`. Reopened issues clear the flag.
 
-3. **Label mirror** — Terminal statuses (`fixed`, `synced`, `shipped`, `reviewed`, `failed`, `skipped`, `aborted`, `planned`, `waiting`, `error`) have their `autoswe:*` label synced on the issue. The mirror is idempotent: `set_status` is only called when the issue's current status (from labels/tags refreshed by `list_open_issues`) differs from the queue status. This avoids a write that would bump the provider's `updated_at` timestamp and defeat the comment-fetch skip optimization.
+3. **Label mirror** — Terminal statuses (`fixed`, `synced`, `shipped`, `reviewed`, `failed`, `skipped`, `aborted`, `planned`, `waiting`, `error`) plus the non-terminal shipping-blocking rests (`review_failed`, `review_blocked`, `test_failed`) have their `autoswe:*` label synced on the issue. The mirror is idempotent: `set_status` is only called when the issue's current status (from labels/tags refreshed by `list_open_issues`) differs from the queue status. This avoids a write that would bump the provider's `updated_at` timestamp and defeat the comment-fetch skip optimization.
 
-4. **Welcome comments** — `_post_pending_welcomes()` posts the welcome message to newly discovered issues, capturing the returned comment ID in `welcome_comment_id` and `bot_comment_ids`.
+4. **Auto-purge of gone remote branches** (opt-in, `AUTO_PURGE_BRANCHES=true`) — The heartbeat's "loose" cleanup for issue #177. Per repo, the loop builds the set of in-flight issue numbers (tasks holding a live PID file) and calls `purge_gone_branches()`, which runs one `git fetch --prune` on the `_main/` clone and then removes any `issue-{N}/` worktree dir + local `autoswe/issue-{N}` branch whose `origin/autoswe/issue-{N}` no longer exists on the remote (e.g. a merged-and-auto-deleted PR). Two integrity guards are always applied: in-flight tasks are skipped, and dirty worktrees are left in place. A failed `fetch --prune` makes the step a no-op, and any per-repo failure is logged without aborting the cycle. Only the worktree dir + local branch are removed; `queue.json` is left to the separate `queue prune` job. See [git-worktrees.md](git-worktrees.md).
+
+5. **Welcome comments** — `_post_pending_welcomes()` posts the welcome message to newly discovered issues, capturing the returned comment ID in `welcome_comment_id` and `bot_comment_ids`.

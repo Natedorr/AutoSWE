@@ -499,8 +499,12 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "failed_plain_command_ignored",
-        "description": "Failed task; plain /fix (not /retry) → ignored",
+        "name": "failed_then_fix_restarts",
+        "description": (
+            "Failed task; a new /fix (not /retry) now RESTARTS it (issue #192) — "
+            "the old silent no-op. Carries the attempt counter forward and "
+            "re-dispatches /fix to completion."
+        ),
         "start": {
             "issue": {"body": "/fix"},
             "labels": ["autoswe:failed"],
@@ -529,9 +533,148 @@ TRANSITIONS: list[dict[str, Any]] = [
                 "provider": "github",
             },
         },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "attempt_count": 2,
+            "comment_contains": ["Completed with command"],
+        },
+    },
+    {
+        "name": "failed_pr_refused",
+        "description": (
+            "Failed task; /pr is refused (nothing ready to ship) — posts a "
+            "'not accepted' comment, stays failed, no Claude call (issue #192)"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
         "expect": {
             "autoswe_status": "failed",
             "no_claude_calls": True,
+            "comment_contains": ["not accepted", "/fix", "/retry"],
+        },
+    },
+    {
+        "name": "failed_review_refused",
+        "description": (
+            "Failed task; /review is refused (no completed work to review) — "
+            "posts a 'not accepted' comment, stays failed, no Claude call "
+            "(issue #192 M-1: removing the broad gate would otherwise let "
+            "/review re-run and flip a failed task to `reviewed`)"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/review",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "autoswe_status": "failed",
+            "no_claude_calls": True,
+            "comment_contains": ["not accepted", "no completed work", "/fix"],
+        },
+    },
+    {
+        "name": "failed_retry_replays_fix_not_review",
+        "description": (
+            "Failed task whose last_dispatched_command is /review — the watermark a "
+            "refused /review persists on this failed task (issue #192). /retry must "
+            "re-run the actual work as /fix, NOT replay a review: a passing review "
+            "verdict would wrongly flip the task to `reviewed` (→ /pr-shippable) even "
+            "though the fix never succeeded. The fix completes to `fixed`, so the "
+            "outcome uniquely pins the /fix path (a review would end `reviewed`)."
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/review",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed on retry\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command", "Fixed on retry"],
         },
     },
     {
@@ -574,6 +717,51 @@ TRANSITIONS: list[dict[str, Any]] = [
             "label_after": "autoswe:fixed",
             "autoswe_status": "fixed",
             "comment_contains": ["Completed with command", "Extra fix"],
+        },
+    },
+    {
+        "name": "fix_branch_flag_ignored_after_plan_branch",
+        "description": "E2E-15 step 4: plan_branch pinned by /plan; a later /fix "
+                       "--branch must NOT mutate it (issue #196).",
+        "start": {
+            "issue": {"body": "Bug fix."},
+            "labels": ["autoswe:fixed"],
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — fixed.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/fix --branch main",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Bug fix.",
+                "autoswe_status": "fixed",
+                "plan_branch": "develop",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tRe-applied fix\taaa1111", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "plan_branch": "develop",
+            "comment_contains": ["Completed with command", "Re-applied fix"],
         },
     },
     # ---- Sync transitions ----
@@ -620,7 +808,7 @@ TRANSITIONS: list[dict[str, Any]] = [
     # ---- Guard transitions ----
     {
         "name": "attempt_count_resets_from_plan_ready",
-        "description": "Task at planned with high attempt_count; /fix resets to 1 and dispatches successfully",
+        "description": "Task at planned with attempt_count=1; /fix restart carries the counter to 2 and dispatches successfully",
         "start": {
             "issue": {"body": "/fix"},
             "labels": ["autoswe:planned"],
@@ -644,7 +832,7 @@ TRANSITIONS: list[dict[str, Any]] = [
                 "title": "Test issue", "body": "/fix",
                 "autoswe_status": "planned",
                 "base_branch": "main",
-                "attempt_count": 3,
+                "attempt_count": 1,
                 "first_dispatched_at": None,
                 "provider": "github",
             },
@@ -656,6 +844,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "label_after": "autoswe:fixed",
             "autoswe_status": "fixed",
+            "attempt_count": 2,
             "comment_contains": ["Completed with command", "Applied fix"],
             "claude_permission": "bypassPermissions",
         },
@@ -698,7 +887,101 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "label_after": "autoswe:shipped",
             "autoswe_status": "shipped",
+            # issue #193: /pr must persist the created PR's number in the queue
+            # (the API fake assigns the first PR number = 1).
+            "pr_number": 1,
             "comment_contains": ["Completed with command", "/pr"],
+        },
+    },
+    # ---- PR ship clears a lingering rereview_after_fix (issue #195) ----
+    # A /fix dispatched from a review verdict set rereview_after_fix and left
+    # the task at "fixed". The user posted /pr before the auto re-review fired,
+    # so the re-review never ran. Shipping must clear the flag: a shipped task
+    # carrying it is one poll away from a stray review dispatch.
+    {
+        "name": "shipped_clears_rereview_flag",
+        "description": "Fixed task with a lingering rereview_after_fix; /pr → shipped clears the flag",
+        "skip_providers": ["azure"],
+        "start": {
+            "issue": {"body": "Fix.\n\n/fix"},
+            "labels": ["autoswe:fixed"],
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "rereview_after_fix": True,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:shipped",
+            "autoswe_status": "shipped",
+            "rereview_after_fix": False,
+            "comment_contains": ["Completed with command", "/pr"],
+        },
+    },
+    # ---- Shipped + live rereview_after_fix → no action (issue #195) ----
+    # The auto re-review in decide() is gated on status == "fixed"; a shipped
+    # task is terminal, so even if the flag somehow survives to shipped it must
+    # not dispatch a review. This pins that guarantee (defensive) on top of the
+    # ship-time clear above.
+    {
+        "name": "shipped_rereview_flag_no_action",
+        "description": "Shipped task still carrying rereview_after_fix → no dispatch, no status change",
+        "start": {
+            "issue": {"body": "Fix."},
+            "labels": ["autoswe:shipped"],
+            "comments": [
+                {
+                    "body": "Completed with command `/pr` — PR created\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "shipped",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/pr",
+                "last_dispatched_command_id": 2,
+                "last_consumed_reply_id": 2,
+                "session_id": "s-fix-prev",
+                "pr_number": 5,
+                "rereview_after_fix": True,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:shipped",
+            "autoswe_status": "shipped",
+            "rereview_after_fix": True,
+            "no_claude_calls": True,
+            "no_git_calls": True,
         },
     },
     # ---- PR preflight gate: CI pending blocks ----
@@ -782,6 +1065,9 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "label_after": "autoswe:shipped",
             "autoswe_status": "shipped",
+            # issue #193: /pr must persist the created PR's number in the queue
+            # (the API fake assigns the first PR number = 1).
+            "pr_number": 1,
             "comment_contains": ["Completed with command", "/pr"],
         },
     },
@@ -956,7 +1242,7 @@ TRANSITIONS: list[dict[str, Any]] = [
     # ---- Batch 11: Multi-turn workflow scenarios ----
     {
         "name": "attempt_limit_hit",
-        "description": "Guard-blocked task with /fix (not /retry) → stays blocked, requires /retry",
+        "description": "Guard-blocked task with /fix (not /retry) → refused with a 'post /retry' comment, stays blocked (issue #192)",
         "start": {
             "issue": {"body": "/fix"},
             "labels": ["autoswe:failed"],
@@ -989,6 +1275,226 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "autoswe_status": "failed",
             "no_claude_calls": True,
+            "comment_contains": ["blocked after hitting its limits", "/retry"],
+        },
+    },
+    {
+        "name": "attempts_guard_fires_on_restart",
+        "description": (
+            "Non-guard-blocked failed task at attempt_count=3 (== MAX_ATTEMPTS); "
+            "a /fix restart carries the counter to 4 (> limit) → mark_failed_limit "
+            "(limit_reason=attempts): 'Max attempts' comment, stays failed, guard_blocked set"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/fix",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 3,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/fix",
+                "last_dispatched_command_id": 1,
+                "_guard_blocked": False,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:failed",
+            "autoswe_status": "failed",
+            "comment_contains": ["Max attempts"],
+            "no_claude_calls": True,
+        },
+    },
+    {
+        "name": "review_failed_then_fix_fresh_budget",
+        "description": (
+            "Task at review_failed with attempt_count=3 (== MAX_ATTEMPTS); the follow-up "
+            "/fix that addresses the review finding starts a fresh budget (attempt 1) "
+            "instead of tripping the MAX_ATTEMPTS guard (issue #186: a successful "
+            "plan→fix→review cycle must not burn the retry budget — the old carry "
+            "forward computed 4 > 3 and marked the task failed with 'Post /retry')"
+        ),
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:review_failed"],
+            "comments": [
+                {
+                    "body": "## Review\n\n[Medium] planned-path time guard untested.\n\n## Verdict\n\nNeeds changes\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/fix",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "review_failed",
+                "base_branch": "main",
+                "session_id": "s-fix-42",
+                "attempt_count": 3,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/review",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tAddressed review finding\tdef5678", "session_id": "s-fix-42b", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "attempt_count": 1,
+            "comment_contains": ["Completed with command", "Addressed review finding"],
+            "claude_permission": "bypassPermissions",
+        },
+    },
+    {
+        "name": "fix_red_suite_marks_test_failed",
+        "description": (
+            "The fix agent commits/pushes successfully, but the post-fix test gate "
+            "runs the repo's suite in the worktree (explicit repo-level test_command) "
+            "and it is red. The task must NOT reach terminal `fixed`: it lands in the "
+            "non-terminal `test_failed` state with a comment carrying the failure "
+            "(Natedorr/testProject#20: a guaranteed-red suite was silently marked "
+            "autoswe:fixed)"
+        ),
+        "start": {
+            "issue": {"body": "Implement half().\n\n/fix"},
+            "queue_task": None,
+        },
+        "repos": {"test_command": "echo 'FAIL: 1 failed, 1 passed' && exit 1"},
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tImplemented half()\tdef5678", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:test_failed",
+            "autoswe_status": "test_failed",
+            "comment_contains": ["Test gate failed", "marked done", "FAIL: 1 failed"],
+            "claude_permission": "bypassPermissions",
+        },
+    },
+    {
+        "name": "test_failed_blocks_pr",
+        "description": (
+            "Task at test_failed (post-fix test gate red): /pr is refused — red code "
+            "must not ship. No dispatch, no label change."
+        ),
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:test_failed"],
+            "comments": [
+                {
+                    "body": "🧪 **Test gate failed** — the branch suite is red, so `/fix` is **not** marked done.\n\n**Failure:**\n\n```\nsuite failing (exit 1)\n```\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "test_failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/fix",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:test_failed",
+            "autoswe_status": "test_failed",
+            "no_claude_calls": True,
+        },
+    },
+    {
+        "name": "test_failed_then_fix_fresh_budget",
+        "description": (
+            "Task at test_failed with attempt_count=3 (== MAX_ATTEMPTS): the follow-up "
+            "/fix that addresses the red suite starts a fresh budget (attempt 1) "
+            "instead of tripping the MAX_ATTEMPTS guard — the gate verdict is a new "
+            "signal, like a review verdict. The fake worktree has no suite, so the "
+            "gate skips and the fix completes normally."
+        ),
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:test_failed"],
+            "comments": [
+                {
+                    "body": "🧪 **Test gate failed** — the branch suite is red, so `/fix` is **not** marked done.\n\n**Failure:**\n\n```\nsuite failing (exit 1)\n```\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/fix",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "test_failed",
+                "base_branch": "main",
+                "session_id": "s-fix-42",
+                "attempt_count": 3,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/fix",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed the red test\tdef5678", "session_id": "s-fix-42b", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "attempt_count": 1,
+            "comment_contains": ["Completed with command", "Fixed the red test"],
         },
     },
     {
@@ -1031,6 +1537,118 @@ TRANSITIONS: list[dict[str, Any]] = [
             "label_after": "autoswe:fixed",
             "autoswe_status": "fixed",
             "comment_contains": ["Completed with command"],
+        },
+    },
+    {
+        "name": "retry_forks_from_last_good_session",
+        "description": (
+            "/retry from failed state forks from last_good_session_id "
+            "(fork_session=True, resume=good session), leaving the original intact"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: timeout\n\nPost `/retry` to continue.\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 2,
+                "last_dispatched_command": "/fix",
+                # session_id was nulled on the FAILED path; the surviving
+                # known-good checkpoint (from the successful plan) remains,
+                # tagged with the backend that produced it.
+                "session_id": None,
+                "last_good_session_id": "s-plan-good-42",
+                "last_good_session_backend": "claude_code",
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command"],
+            # The /fix replay must branch from the good checkpoint: resume from
+            # last_good_session_id AND request a fork so the original stays intact.
+            "claude_calls": [
+                {"resume": "s-plan-good-42", "fork_session": True},
+            ],
+        },
+    },
+    {
+        "name": "retry_no_fork_when_checkpoint_backend_mismatches",
+        "description": (
+            "/retry from failed state where the checkpoint was produced by a "
+            "DIFFERENT backend than the fix backend → does NOT fork "
+            "(fork_session=False), falls back to a fresh session"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: timeout\n\nPost `/retry` to continue.\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 2,
+                "last_dispatched_command": "/fix",
+                "session_id": None,
+                # Checkpoint exists but was written by a DIFFERENT backend than
+                # the fix backend (mixed per-phase config). Forking it would
+                # hand a foreign session id to the fix backend's SDK.
+                "last_good_session_id": "s-codex-plan-42",
+                "last_good_session_backend": "codex",
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command"],
+            # Must NOT fork from a foreign-backend checkpoint: no resume, no fork.
+            "claude_calls": [
+                {"resume": None, "fork_session": False},
+            ],
         },
     },
     {
@@ -1646,10 +2264,10 @@ TRANSITIONS: list[dict[str, Any]] = [
 # MCP-only rows (waiting_resume_mcp_post_plan) are excluded — Claude only.
 
 CODEX_TRANSITIONS: list[str] = [
-    "fresh_plan_command",            # Plan with read-only sandbox
+    "fresh_plan_command",            # Plan phase (bypass flag, no --sandbox)
     "fresh_plan_with_questions",     # Questions → waiting
     "codex_plan_prose_only",         # Prose-only output → waiting (fs scan skipped)
-    "fresh_fix_command",             # Fix with workspace-write sandbox
+    "fresh_fix_command",             # Fix phase (bypass flag, no --sandbox)
     "fresh_fix_fails",               # Error subtype → failed
     "plan_ready_then_fix",           # Resume fix from planned
     "waiting_user_plain_reply",      # Resume plan from waiting
@@ -1657,26 +2275,11 @@ CODEX_TRANSITIONS: list[str] = [
     "sync_conflict_unresolved",      # Conflict resolution fails → failed
     "planned_then_review",           # Review phase
     "planned_then_review_blocked",   # Review verdict gating (Blocked → review_blocked)
+    "retry_forks_from_last_good_session",  # /retry: Codex lacks session_fork → degrades to fresh/resume, still reaches fixed
+    "attempts_guard_fires_on_restart",     # MAX_ATTEMPTS guard fires (decide-level, backend-agnostic)
+    "failed_then_fix_restarts",            # /fix on a failed task re-dispatches (issue #192)
+    "fix_red_suite_marks_test_failed",     # Post-fix test gate red → test_failed (backend-agnostic gate in _finalize_fix)
 ]
-
-
-# ---------------------------------------------------------------------------
-# Helper: translate claude_permission → codex sandbox
-
-
-def _permission_to_sandbox(permission: str) -> str:
-    """Map a claude_permission expectation to the Codex sandbox value.
-
-    ``"plan"`` → ``"read-only"``
-    ``"bypassPermissions"`` → ``"workspace-write"``
-    ``"read_only"`` → ``"read-only"``
-    """
-    mapping = {
-        "plan": "read-only",
-        "bypassPermissions": "workspace-write",
-        "read_only": "read-only",
-    }
-    return mapping.get(permission, "read-only")
 
 
 # ---------------------------------------------------------------------------

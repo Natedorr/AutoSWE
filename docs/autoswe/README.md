@@ -27,6 +27,7 @@ autoSWE is **queue-driven**, not label-driven:
 | [safeguards.md](safeguards.md) | MAX_CONCURRENT, MAX_ATTEMPTS, time limits, completion anchor |
 | [debugging.md](debugging.md) | Live log inspection, queue state, unsticking zombies, session files |
 | [testing.md](testing.md) | Test harness, pytest structure, test seams, CI strategy |
+| [../../e2e/README.md](../../e2e/README.md) | **Lives outside this folder.** The live E2E harness — testbed repos, per-issue scenarios, the openclaw driver script, cron scoring. Self-contained in `e2e/` so an outside agent can find it without walking `docs/` |
 | [technical-reference.md](technical-reference.md) | Consolidated pipeline internals (CLI entry points, status transitions, three-layer architecture) |
 
 ## Derivation Rule

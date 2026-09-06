@@ -1,0 +1,55 @@
+# Get a check suite
+
+Source: https://docs.github.com/en/rest/checks/suites
+
+## Get a check suite
+
+```
+GET /repos/{owner}/{repo}/check-suites/{check_suite_id}
+```
+
+Gets a single check suite using its id.
+Note
+
+The Checks API only looks for pushes in the repository where the check suite or check run were created. Pushes to a branch in a forked repository are not detected and return an empty pull\_requests array and a null value for head\_branch.
+
+OAuth app tokens and personal access tokens (classic) need the repo scope to use this endpoint on a private repository.
+
+### Parameters
+
+#### Headers
+
+* **`accept`** (string)
+  Setting to `application/vnd.github+json` is recommended.
+
+#### Path and query parameters
+
+* **`owner`** (string) (required)
+  The account owner of the repository. The name is not case sensitive.
+
+* **`repo`** (string) (required)
+  The name of the repository without the .git extension. The name is not case sensitive.
+
+* **`check_suite_id`** (integer) (required)
+  The unique identifier of the check suite.
+
+### HTTP response status codes
+
+* **200** - OK
+
+### Code examples
+
+#### Example
+
+**Request:**
+
+```curl
+curl -L \
+  -X GET \
+  https://api.github.com/repos/OWNER/REPO/check-suites/CHECK_SUITE_ID
+```
+
+**Response schema (Status: 200):**
+
+Same response schema as [Create a check suite](#create-a-check-suite).
+

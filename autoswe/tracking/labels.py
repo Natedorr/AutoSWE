@@ -23,6 +23,7 @@ AUTOSWE_LABELS = {
     "autoswe:reviewed":   {"color": "ededed", "description": "Review approved (LGTM)"},
     "autoswe:review_failed":  {"color": "fbca04", "description": "Review found issues — needs /fix"},
     "autoswe:review_blocked": {"color": "d73a4a", "description": "Review blocked — critical findings, needs /fix"},
+    "autoswe:test_failed":    {"color": "d73a4a", "description": "Fix pushed but test suite failing — needs /fix"},
     "autoswe:waiting":    {"color": "fbca04", "description": "Agent asked a question"},
     "autoswe:failed":     {"color": "d73a4a", "description": "Agent errored"},
     "autoswe:skipped":    {"color": "ffffff", "description": "Skipped by user"},
@@ -37,7 +38,7 @@ _PREFIX = "autoswe:"
 VALID_STATUSES = frozenset(
     {"pending", "planning", "fixing", "syncing", "reviewing", "shipping",
      "planned", "fixed", "synced", "shipped", "reviewed",
-     "review_failed", "review_blocked",
+     "review_failed", "review_blocked", "test_failed",
      "waiting", "failed", "skipped", "aborted", "error"}
 )
 
@@ -48,6 +49,13 @@ TERMINAL_STATUSES = COMPLETED_STATUSES | frozenset({"failed", "skipped", "aborte
 # Non-terminal resting states a /review lands in when it found problems. The
 # task is NOT done: /pr is blocked until the user posts /fix (which re-reviews).
 REVIEW_BLOCKING_STATUSES = frozenset({"review_failed", "review_blocked"})
+
+# Non-terminal resting states where shipping is blocked: the review verdicts
+# (review_failed/review_blocked) plus the post-fix test gate (test_failed —
+# the fix committed and pushed, but the branch suite is red). /pr is refused
+# until a /fix re-runs the blocking check green; restarts start a fresh
+# MAX_ATTEMPTS budget (the prior phase finished, the gate is a new signal).
+SHIPPING_BLOCKING_STATUSES = REVIEW_BLOCKING_STATUSES | frozenset({"test_failed"})
 
 # Action kind → status mappings (module-level to avoid per-call allocation)
 _KIND_TO_RUNNING = {
@@ -159,6 +167,23 @@ def _get_autoswe_status(labels: list):
 _VERDICT_RE = re.compile(r"#{1,6}\s*Verdict\b(.*?)(?:\n#{1,6}\s|\Z)", re.IGNORECASE | re.DOTALL)
 
 
+def _verdict_field_to_status(verdict: str) -> str:
+    """Map a reviewer's structured ``verdict`` field to an autoswe status.
+
+    This is the primary gate when the reviewer produces schema-validated
+    structured output (issue #173 F-18): it reads the one field designed for
+    the gate instead of scraping markdown. The mapping is conservative —
+    it only ever produces a *blocking* status when the verdict explicitly says
+    so; an unrecognised value falls back to the non-gating ``"reviewed"``.
+    """
+    low = (verdict or "").strip().lower()
+    if "block" in low:
+        return "review_blocked"
+    if "change" in low or "fail" in low or "request" in low:
+        return "review_failed"
+    return "reviewed"
+
+
 def parse_review_verdict(review_text: str) -> str:
     """Map a review report's verdict to an autoswe status.
 
@@ -186,26 +211,45 @@ def parse_review_verdict(review_text: str) -> str:
     return "reviewed"
 
 
-def _map_done_to_status(done_content: str, kind: str = "fix") -> str:
+def _map_done_to_status(done_content: str, kind: str = "fix", verdict: str | None = None) -> str:
     """Map handler return string to autoswe status (no prefix).
 
     The *kind* parameter determines which completed status to use for DONE*
     returns (e.g., "fixed" for fix, "synced" for sync_branch).
+
+    For REVIEW_READY, the structured ``verdict`` field (from the reviewer's
+    schema-validated output, issue #173 F-18) is the primary gate; the markdown
+    "## Verdict" regex (``parse_review_verdict``) is only the fallback when the
+    structured field is absent.
     """
     if done_content == "PLAN_READY":
         return "planned"
     elif done_content.startswith("REVIEW_READY\t"):
-        # Gate on the verdict embedded in the review text. A blocking verdict
-        # transitions to a non-terminal review_failed/review_blocked state so
-        # decide() can refuse /pr until a /fix addresses the findings.
-        return parse_review_verdict(done_content[len("REVIEW_READY\t"):])
+        review_text = done_content[len("REVIEW_READY\t"):]
+        # Primary gate: the structured verdict, when present. A blocking
+        # verdict transitions to a non-terminal review_failed/review_blocked
+        # state so decide() can refuse /pr until a /fix addresses the findings.
+        if verdict:
+            return _verdict_field_to_status(verdict)
+        # Fallback: no structured verdict (e.g. Codex/text path) — scrape the
+        # markdown "## Verdict" section as before.
+        return parse_review_verdict(review_text)
     elif done_content == "REVIEW_READY":
-        # Bare REVIEW_READY (no embedded text) — treat as approved.
+        # Bare REVIEW_READY (no embedded text). Still prefer the structured
+        # verdict over the historical "approved" default.
+        if verdict:
+            return _verdict_field_to_status(verdict)
         return "reviewed"
     elif done_content.startswith("WAITING:"):
         return "waiting"
     elif done_content.startswith("FAILED:"):
         return "failed"
+    elif done_content.startswith("TESTS_FAILED"):
+        # Post-fix test gate red (Natedorr/testProject#20): the work was
+        # committed/pushed but the branch suite is failing. Non-terminal —
+        # the task stays restartable and /pr is blocked until a /fix clears
+        # the gate.
+        return "test_failed"
     elif done_content == "SKIPPED":
         return "skipped"
     elif done_content == "ABORTED":

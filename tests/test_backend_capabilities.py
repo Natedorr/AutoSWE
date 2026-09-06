@@ -10,6 +10,8 @@ Verifies:
 """
 from unittest.mock import patch
 
+import pytest
+
 # ---------- RunSpec.mode field ----------
 
 
@@ -43,6 +45,25 @@ def test_run_spec_extra_tools():
     )
     assert spec.extra_tools == ["CustomTool"]
     assert spec.disallowed_tools_override == ["AskUserQuestion"]
+
+
+def test_run_spec_output_format_defaults_to_none():
+    """RunSpec.output_format defaults to None (no structured-output request)."""
+    from autoswe.harness.backends.base import RunSpec
+
+    spec = RunSpec(prompt="p", cwd="/tmp")
+    assert spec.output_format is None
+    spec = RunSpec(prompt="p", cwd="/tmp", output_format={"type": "json_schema", "schema": {}})
+    assert spec.output_format == {"type": "json_schema", "schema": {}}
+
+
+def test_claude_backend_structured_output_capability():
+    """Claude Code supports structured_output; Codex does not (issue #159)."""
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+    from autoswe.harness.backends.codex import CodexBackend
+
+    assert "structured_output" in ClaudeCodeBackend.capabilities()
+    assert "structured_output" not in CodexBackend.capabilities()
 
 
 def test_mode_type_exported():
@@ -166,6 +187,152 @@ def test_legacy_path_without_mode():
     coro.close()
 
 
+# ---------- fork-on-retry (session_fork capability) ----------
+
+
+def test_claude_backend_has_session_fork_capability():
+    """ClaudeCodeBackend should advertise 'session_fork' (it has fork_session)."""
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+
+    assert "session_fork" in ClaudeCodeBackend.capabilities()
+
+
+@pytest.mark.parametrize(
+    "version_str, expected",
+    [
+        ("0.2.137", True),   # exactly the floor
+        ("0.2.136", False),  # one patch below → no fork
+        ("0.2.138", True),
+        ("0.3.0", True),     # higher minor wins even with patch 0
+        ("0.1.999", False),  # lower minor loses even with a huge patch
+        ("1.0.0", True),     # higher major
+        ("0.2", False),      # 2-component → patch 0 → below the floor
+    ],
+)
+def test_sdk_supports_session_fork_version_boundary(monkeypatch, version_str, expected):
+    """_sdk_supports_session_fork compares the installed SDK against the floor
+    (>= 0.2.137). The installed SDK in the test env is exactly the floor, so this
+    branch is otherwise only exercised through its absence; pin the boundary
+    directly by faking importlib.metadata.version.
+    """
+    import importlib.metadata
+
+    from autoswe.harness.backends import claude_code as cc
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: version_str)
+    assert cc._sdk_supports_session_fork() is expected
+
+
+def test_sdk_supports_session_fork_unparseable_version(monkeypatch):
+    """An unreadable/unparseable SDK version is treated as 'new enough' (safe
+    direction) rather than demoting the capability."""
+    import importlib.metadata
+
+    from autoswe.harness.backends import claude_code as cc
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "not-a-version")
+    assert cc._sdk_supports_session_fork() is True
+
+
+def test_codex_backend_lacks_session_fork_capability():
+    """CodexBackend must NOT advertise 'session_fork' (no fork primitive)."""
+    from autoswe.harness.backends.codex import CodexBackend
+
+    assert "session_fork" not in CodexBackend.capabilities()
+
+
+def _capture_claude_options(spec):
+    """Run ClaudeCodeBackend with the SDK query() monkeypatched to a no-op that
+    records the ClaudeAgentOptions it receives. Returns the captured options.
+
+    ``_run_async`` consumes the SDK as ``async for msg in query(prompt=..., options=...)``
+    (the name ``query`` is imported fresh from claude_agent_sdk inside the
+    coroutine), so the patch target is ``claude_agent_sdk.query`` and it must
+    return an async iterable that yields nothing.
+    """
+    import asyncio
+
+    import claude_agent_sdk as sdk
+
+    from autoswe.harness.backends import claude_code as cc
+
+    captured = {}
+
+    def fake_query(prompt, options):
+        captured["options"] = options
+
+        async def _empty():
+            return
+            yield  # pragma: no cover
+
+        return _empty()
+
+    original_query = sdk.query
+    try:
+        sdk.query = fake_query
+        asyncio.run(cc.ClaudeCodeBackend()._run_async(spec))
+    finally:
+        sdk.query = original_query
+
+    return captured["options"]
+
+
+def test_claude_wires_fork_session_flag_on_retry_spec():
+    """fork_session=True + resume must reach ClaudeAgentOptions.fork_session=True."""
+    from autoswe.harness.backends.base import RunSpec
+
+    spec = RunSpec(
+        prompt="retry",
+        cwd="/tmp",
+        resume="last-good",
+        fork_session=True,
+        mode="read_write",
+    )
+    options = _capture_claude_options(spec)
+    assert getattr(options, "fork_session", False) is True, (
+        "ClaudeAgentOptions must carry fork_session=True on a fork spec"
+    )
+    assert options.resume == "last-good"
+
+
+def test_claude_no_fork_flag_when_not_requested():
+    """A plain resume (fork_session unset) must NOT set fork_session=True."""
+    from autoswe.harness.backends.base import RunSpec
+
+    spec = RunSpec(
+        prompt="resume",
+        cwd="/tmp",
+        resume="prior",
+        mode="read_write",
+    )
+    options = _capture_claude_options(spec)
+    assert getattr(options, "fork_session", False) in (False, None), (
+        "fork_session must stay falsy when the spec did not request a fork"
+    )
+
+
+def test_claude_degrades_to_resume_when_sdk_too_old(monkeypatch):
+    """On an SDK older than the floor, a fork spec degrades to plain resume
+    (no fork_session flag) instead of passing an unknown option / crashing."""
+    from autoswe.harness.backends import claude_code as cc
+    from autoswe.harness.backends.base import RunSpec
+
+    monkeypatch.setattr(cc, "_sdk_supports_session_fork", lambda: False)
+
+    spec = RunSpec(
+        prompt="retry",
+        cwd="/tmp",
+        resume="last-good",
+        fork_session=True,
+        mode="read_write",
+    )
+    options = _capture_claude_options(spec)
+    assert getattr(options, "fork_session", False) in (False, None), (
+        "An old SDK must NOT receive fork_session=True — degrade to plain resume"
+    )
+    assert options.resume == "last-good"
+
+
 # ---------- backend_has_capability helper ----------
 
 
@@ -195,6 +362,34 @@ def test_backend_has_capability_missing():
 
     harness = {"backend": "claude_code"}
     assert not backend_has_capability(harness, "nonexistent_capability")
+
+
+# ---------- has_read_only_enforcement helper (issue #166) ----------
+
+
+def test_has_read_only_enforcement_claude_code():
+    """Claude Code enforces read-only via mode + can_use_tool → True."""
+    from autoswe.harness.runner import has_read_only_enforcement
+
+    assert has_read_only_enforcement({"backend": "claude_code"}) is True
+
+
+def test_has_read_only_enforcement_codex_is_false():
+    """Codex has neither 'mode' nor 'can_use_tool' → read-only NOT enforced.
+
+    This is the issue #166 condition: plan/review on a Codex profile must
+    loudly degrade and rely on the post-run worktree backstop.
+    """
+    from autoswe.harness.runner import has_read_only_enforcement
+
+    assert has_read_only_enforcement({"backend": "codex", "model": "gpt-5.6-terra"}) is False
+
+
+def test_has_read_only_enforcement_default_is_claude():
+    """None harness_cfg defaults to Claude → enforced."""
+    from autoswe.harness.runner import has_read_only_enforcement
+
+    assert has_read_only_enforcement(None) is True
 
 
 # ---------- Capability-aware plan interpretation ----------
@@ -234,6 +429,71 @@ def test_interpret_plan_result_state_question(tmp_path):
 
     done, pf = _interpret_plan_result(result, state=state, harness={"backend": "claude_code"})
     assert done == "WAITING: questions"
+
+
+def test_interpret_plan_result_posted_question_trusts_callback(tmp_path):
+    """asked_question_posted=True means the standalone post landed — no
+    fallback re-post (issue #184)."""
+    from unittest.mock import patch
+
+    from autoswe.harness.planner import _interpret_plan_result
+    from autoswe.harness.runner import RunResult
+
+    result = RunResult("", "s", "success")
+    state = {"asked_question_md": "## Question", "asked_question_posted": True}
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+
+    with patch("autoswe.harness.planner.post_question_fallback") as mock_fb:
+        done, pf = _interpret_plan_result(
+            result, state=state, harness={"backend": "claude_code"},
+            task=task, repo_cfg={"provider": "github"},
+            progress_callback=lambda body: None,
+        )
+
+    assert done == "WAITING: questions"
+    mock_fb.assert_not_called()
+
+
+def test_interpret_plan_result_failed_question_post_falls_back(tmp_path):
+    """asked_question_posted=False triggers the fallback post so the user
+    still sees the question (issue #184)."""
+    from unittest.mock import patch
+
+    from autoswe.harness.planner import _interpret_plan_result
+    from autoswe.harness.runner import RunResult
+
+    result = RunResult("", "s", "success")
+    state = {"asked_question_md": "## Question", "asked_question_posted": False}
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+    sticky = []
+
+    with patch("autoswe.harness.planner.post_question_fallback") as mock_fb:
+        done, pf = _interpret_plan_result(
+            result, state=state, harness={"backend": "claude_code"},
+            task=task, repo_cfg={"provider": "github"},
+            progress_callback=sticky.append,
+        )
+
+    assert done == "WAITING: questions"
+    mock_fb.assert_called_once_with(task, {"provider": "github"}, "## Question", sticky.append)
+
+
+def test_interpret_plan_result_no_task_no_fallback(tmp_path):
+    """Without task/repo_cfg (e.g. direct test calls), a failed post is
+    reported as WAITING without attempting a fallback (no crash)."""
+    from autoswe.harness.planner import _interpret_plan_result
+    from autoswe.harness.runner import RunResult
+
+    result = RunResult("", "s", "success")
+    state = {"asked_question_md": "## Question", "asked_question_posted": False}
+
+    with patch("autoswe.harness.planner.post_question_fallback") as mock_fb:
+        done, pf = _interpret_plan_result(
+            result, state=state, harness={"backend": "claude_code"},
+        )
+
+    assert done == "WAITING: questions"
+    mock_fb.assert_not_called()
 
 
 def test_interpret_plan_result_fallback_to_text(tmp_path):
@@ -381,8 +641,7 @@ def test_runner_run_accepts_disallowed_tools_override():
 
 def test_mode_config_includes_progress_tools():
     """Plan and read_only modes should include PROGRESS_TOOLS."""
-    from autoswe.harness.backends.base import PROGRESS_TOOLS
-    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG, PROGRESS_TOOLS
 
     for mode_name in ("plan", "read_only"):
         _perm, tools, _disallowed = _MODE_CONFIG[mode_name]
@@ -392,12 +651,43 @@ def test_mode_config_includes_progress_tools():
 
 def test_read_write_includes_agent_task_tools():
     """read_write mode should include all AGENT_TASK_TOOLS (includes Agent)."""
-    from autoswe.harness.backends.base import AGENT_TASK_TOOLS
-    from autoswe.harness.backends.claude_code import _MODE_CONFIG
+    from autoswe.harness.backends.claude_code import _MODE_CONFIG, AGENT_TASK_TOOLS
 
     _perm, tools, _disallowed = _MODE_CONFIG["read_write"]
     for tool in AGENT_TASK_TOOLS:
         assert tool in tools, f"read_write should include {tool}"
+
+
+def test_read_write_tool_set_is_exact():
+    """read_write mode exposes exactly the documented tool set — no more, no
+    fewer. This pins the fix-phase allow-list so a silently dropped (or added)
+    tool fails the build.
+
+    Issue #169 S6 follow-up: TaskOutput was silently dropped from this list and
+    the change went unnoticed precisely because no test asserted the exact set.
+    This test makes the read_write composition auditable. TaskOutput is
+    intentionally part of the fix-phase set (see the note on _READ_WRITE_TOOLS
+    in claude_code.py) even though issue #132 removed it from the shared
+    PROGRESS_TOOLS list used by read_only/plan.
+
+    The expected set is built from the core tools plus the shared MCP comment
+    tools (themselves asserted by test_mode_includes_mcp_comment_tools), so it
+    stays a maintenance-free snapshot of intent.
+    """
+    from autoswe.harness.backends.claude_code import _MCP_COMMENT_TOOLS, _MODE_CONFIG
+
+    _perm, tools, _disallowed = _MODE_CONFIG["read_write"]
+    expected = {
+        "Read", "Edit", "Write", "Bash", "Glob", "Grep",
+        "AskUserQuestion",
+        "TodoWrite", "TaskCreate", "TaskUpdate", "TaskGet",
+        "TaskList", "TaskOutput", "TaskStop", "Agent",
+        *set(_MCP_COMMENT_TOOLS),
+    }
+    assert set(tools) == expected, (
+        "read_write tool set drifted from the documented set; "
+        "update _READ_WRITE_TOOLS deliberately and adjust this expectation"
+    )
 
 
 def test_plan_includes_ask_user_question():
@@ -440,7 +730,9 @@ def test_interpret_plan_result_codex_prose_skips_fs_scan(tmp_path):
     result = RunResult("Just some prose output", "s1", "success", plan_file_path=None)
 
     with patch("autoswe.harness.planner._find_latest_plan_file", return_value=stale):
-        done, pf = _interpret_plan_result(result, state={}, harness={"backend": "codex"})
+        done, pf = _interpret_plan_result(
+            result, state={}, harness={"backend": "codex", "model": "gpt-5.6-terra"}
+        )
 
     assert "WAITING: see comment" in done
     assert pf is None

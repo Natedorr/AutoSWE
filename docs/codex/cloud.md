@@ -1,37 +1,74 @@
-# Source: https://developers.openai.com/codex/cloud/
+# Source: https://learn.chatgpt.com/docs/cloud.md
 
-Copy Page
+# Codex cloud
 
-Codex is OpenAI’s coding agent that can read, edit, and run code. It helps you build faster, fix bugs, and understand unfamiliar code. With Codex cloud, Codex can work on tasks in the background (including in parallel) using its own cloud environment.
+> For the complete documentation index, see [llms.txt](https://learn.chatgpt.com/llms.txt). Markdown versions of documentation pages are available by appending `.md` to the page URL.
 
-## Codex web setup
+## Run coding tasks in parallel cloud environments
 
-Go toCodex[Codex](https://chatgpt.com/codex)and connect your GitHub account. This lets Codex work with the code in your repositories and create pull requests from its work.
+Run tasks in isolated cloud environments, work in parallel, and start work from the web, GitHub, GitLab, Linear, or Slack.
 
-Your Plus, Pro, Business, Edu, or Enterprise plan includes Codex. Learn more aboutwhat’s included[what’s included](/codex/pricing). Some Enterprise workspaces may requireadmin setup[admin setup](/codex/enterprise/admin-setup)before you can access Codex.
+> Illustration: Codex cloud chat composer and chat list with interactive archiving
 
-## Work with Codex web
+### Start here
 
-### Learn about prompting
+- [Open Codex cloud](https://chatgpt.com/codex)
+- [Set up Codex cloud](#getting-started)
 
-Write clearer prompts, add constraints, and choose the right level of detail to get better results.[Learn about promptingWrite clearer prompts, add constraints, and choose the right level of detail to get better results.](/codex/prompting#prompts)
+### Why use Codex cloud
 
-### Common workflows
+- **Run work in parallel:** Give longer tasks dedicated environments and let them continue while you work on something else.
+- **Reproduce the environment:** Configure the dependencies, tools, variables, and setup steps each repository needs.
+- **Review before you merge:** Inspect the summary and diff, request a follow-up, or open a pull request when the result is ready.
 
-Start with proven patterns for delegating tasks, reviewing changes, and turning results into PRs.[Common workflowsStart with proven patterns for delegating tasks, reviewing changes, and turning results into PRs.](/codex/workflows)
+## Getting started
 
-### Configuring environments
+**Set up Codex cloud.**
 
-Choose the repo, setup steps, and tools Codex should use when it runs tasks in the cloud.[Configuring environmentsChoose the repo, setup steps, and tools Codex should use when it runs tasks in the cloud.](/codex/cloud/environments)
+Connect GitHub or GitLab, create an environment, and start your first cloud chat.
 
-### Delegate work from the IDE extension
+### 1. Open Codex and sign in
 
-Kick off a cloud task from your editor, then monitor progress and apply the resulting diffs locally.[Delegate work from the IDE extensionKick off a cloud task from your editor, then monitor progress and apply the resulting diffs locally.](/codex/ide/features#cloud-delegation)
+Go to [Codex](https://chatgpt.com/codex) and sign in with your ChatGPT account.
 
-### Delegating from GitHub
+### 2. Connect GitHub or GitLab
 
-Tag`@codex`on issues and pull requests to spin up tasks and propose changes directly from GitHub.[Delegating from GitHubTag@codexon issues and pull requests to spin up tasks and propose changes directly from GitHub.](/codex/integrations/github)
+Connect GitHub or GitLab (Beta) when prompted. For GitHub, choose the repositories Codex can access; for GitLab, select a project when you create the environment. For GitLab setup, webhook permissions, and merge request reviews, see [Use Codex with GitLab (Beta)](https://learn.chatgpt.com/docs/third-party/gitlab).
 
-### Control internet access
+### 3. Create an environment
 
-Decide whether Codex can reach the public internet from cloud environments, and when to enable it.[Control internet accessDecide whether Codex can reach the public internet from cloud environments, and when to enable it.](/codex/cloud/internet-access)
+Open [environment settings](https://chatgpt.com/codex/settings/environments) and create an environment for the repository you selected. Configure any dependencies, tools, environment variables, or secrets the task needs.
+
+For configuration details, see [Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environment).
+
+### 4. Start your first task
+
+Return to [Codex](https://chatgpt.com/codex), choose your environment, and describe the result you want. You can watch the task logs or let the task run in the background.
+
+### 5. Review the result
+
+Review the summary and diff. Ask Codex to make follow-up changes, or open a pull request when the work is ready.
+
+### Next steps
+
+- [Customize the cloud environment](https://learn.chatgpt.com/docs/environments/cloud-environment)
+- [Configure agent internet access](https://learn.chatgpt.com/docs/cloud/internet-access)
+- [Use Codex with GitHub](https://learn.chatgpt.com/docs/third-party/github)
+- [Use Codex with GitLab (Beta)](https://learn.chatgpt.com/docs/third-party/gitlab)
+- [Use Codex in Linear](https://learn.chatgpt.com/docs/third-party/linear)
+- [Use Codex in Slack](https://learn.chatgpt.com/docs/third-party/slack)
+
+## See what Codex cloud can do
+
+Give each task the environment it needs, then review the result on your schedule.
+
+- [Delegate several tasks](https://learn.chatgpt.com/docs/environments/cloud-environment): Start work in parallel and return as each task reaches a reviewable result.
+- [Build a reproducible environment](https://learn.chatgpt.com/docs/environments/cloud-environment): Configure the dependencies, tools, variables, and setup steps a repository needs.
+- [Delegate from your integrations](https://learn.chatgpt.com/docs/developers): Start work in Codex cloud from GitHub pull requests, GitLab merge requests and issues, Linear issues, or Slack channels and threads.
+
+## Use Codex cloud when…
+
+- [Work needs to run in the background](https://learn.chatgpt.com/docs/environments/cloud-environment): Delegate a longer task and return when it is ready.
+- [You want to compare several attempts](https://learn.chatgpt.com/docs/environments/cloud-environment): Run tasks in parallel without tying up your local machine.
+- [Work starts in GitHub, GitLab, Linear, or Slack](https://learn.chatgpt.com/docs/developers): Use integrations to hand off work without leaving the pull request, merge request, issue, channel, or thread.
+- [You are away from your development machine](https://learn.chatgpt.com/docs/environments/cloud-environment): Start and review work from the web or Codex CLI.

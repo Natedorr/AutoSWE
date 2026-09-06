@@ -155,7 +155,7 @@ def test_normalized_issue_basic_fields(state, isolated_autoswe_dir):
 
     try:
         tracker = get_tracker(repo_cfg)
-        issues = tracker.list_open_issues(repo_cfg)
+        issues = tracker.list_open_issues()
     finally:
         fake.unpatch(mod, orig)
 
@@ -204,7 +204,7 @@ def test_normalized_issue_status(state, isolated_autoswe_dir):
 
     try:
         tracker = get_tracker(repo_cfg)
-        issues = tracker.list_open_issues(repo_cfg)
+        issues = tracker.list_open_issues()
     finally:
         fake.unpatch(mod, orig)
 
@@ -244,7 +244,7 @@ def test_normalized_comment_authors(provider, state, isolated_autoswe_dir):
         issue_num = st.get("issue", {}).get("number", 1)
         if provider == "azure":
             issue_num = st["work_item"]["id"]
-        comments = tracker.fetch_comments(repo_cfg, issue_num)
+        comments = tracker.fetch_comments(issue_num)
     finally:
         fake.unpatch(mod, orig)
 
@@ -279,7 +279,7 @@ def test_pull_request_filtering(provider, state, isolated_autoswe_dir):
 
     try:
         tracker = get_tracker(repo_cfg)
-        issues = tracker.list_open_issues(repo_cfg)
+        issues = tracker.list_open_issues()
     finally:
         fake.unpatch(mod, orig)
 
@@ -303,7 +303,7 @@ def test_azure_state_mapping(isolated_autoswe_dir):
 
     try:
         tracker = get_tracker(repo_cfg)
-        issues = tracker.list_open_issues(repo_cfg)
+        issues = tracker.list_open_issues()
     finally:
         fake.unpatch(mod, orig)
 
@@ -338,7 +338,7 @@ def test_azure_html_stripping(isolated_autoswe_dir):
 
     try:
         tracker = get_tracker(repo_cfg)
-        issues = tracker.list_open_issues(repo_cfg)
+        issues = tracker.list_open_issues()
     finally:
         fake.unpatch(mod, orig)
 

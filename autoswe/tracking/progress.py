@@ -45,7 +45,21 @@ class ProgressComment:
         self._comment_id: int | None = None
         self._last_update: float = 0.0
         self._pending_body: str | None = None
+        self._frozen = False
         self._minimal = minimal
+
+    @property
+    def frozen(self) -> bool:
+        return self._frozen
+
+    def __call__(self, body: str) -> None:
+        """Allow the ProgressComment itself to be used as progress_callback.
+
+        Handlers receive the progress object (not a bound update method) so
+        they can also call freeze() when a question is posted (issue #184);
+        plain ``progress_callback(body)`` call sites keep working via this.
+        """
+        self.update(body)
 
     @property
     def comment_id(self) -> int | None:
@@ -55,7 +69,7 @@ class ProgressComment:
         """Post the initial progress comment. Returns comment ID or None."""
         try:
             self._comment_id = self._tracker.post_comment(
-                self._repo_cfg, self._issue_num, _tag(initial_body),
+                self._issue_num, _tag(initial_body),
             )
             log(f"[PROGRESS] POST comment={self._comment_id}")
             return self._comment_id
@@ -75,7 +89,7 @@ class ProgressComment:
         log(f"[PROGRESS] ADOPT comment={comment_id}")
         try:
             self._tracker.update_comment(
-                self._repo_cfg, self._issue_num, comment_id, _tag(resume_body),
+                self._issue_num, comment_id, _tag(resume_body),
             )
             self._last_update = time.monotonic()
             return comment_id
@@ -88,9 +102,12 @@ class ProgressComment:
         """Queue a throttled edit. At most one edit per 10s.
 
         Intermediate calls coalesce — only the latest body is kept,
-        applied on the next eligible edit.
+        applied on the next eligible edit. No-ops while frozen: a posted
+        question must remain the last thing the sticky shows (issue #184).
         """
         if self._comment_id is None:
+            return
+        if self._frozen:
             return
         if self._minimal:
             self._pending_body = body
@@ -100,6 +117,23 @@ class ProgressComment:
             self._pending_body = body
             return
         self._flush(body)
+
+    def freeze(self, body: str) -> None:
+        """Freeze the sticky comment on *body* until finalize() (issue #184).
+
+        Once the clarifying question is posted, no later tool event may
+        clobber the sticky: update() and drain() become no-ops so the
+        comment ends on the question rather than on a raw internal tool
+        event. finalize() (dispatch-completion body) remains authoritative.
+        """
+        self._frozen = True
+        if self._minimal:
+            # Minimal mode never patches mid-run — queue the question so
+            # drain()/finalize() writes it as the single final update.
+            self._pending_body = body
+            return
+        if self._comment_id is not None:
+            self._flush(body, force=True)
 
     def finalize(self, body: str) -> None:
         """Write the final body (no throttle). Called after handler returns."""
@@ -112,13 +146,13 @@ class ProgressComment:
         tagged = _tag(body)
         log(f"[PROGRESS] PATCH comment={self._comment_id} body_len={len(tagged)} preview={tagged[:100]!r}")
         try:
-            self._tracker.update_comment(self._repo_cfg, self._issue_num, self._comment_id, tagged)
+            self._tracker.update_comment(self._issue_num, self._comment_id, tagged)
             self._last_update = time.monotonic()
             self._pending_body = None
         except Exception:  # Provider doesn't support comment editing; post a new comment instead
             _dbg.warning("progress: update_comment failed, falling back to post_comment", exc_info=True)
             try:
-                new_id = self._tracker.post_comment(self._repo_cfg, self._issue_num, tagged)
+                new_id = self._tracker.post_comment(self._issue_num, tagged)
                 if new_id is not None:
                     self._comment_id = new_id
                     log(f"[PROGRESS] Switched to fallback comment={new_id}")
@@ -128,6 +162,17 @@ class ProgressComment:
                 _dbg.warning("progress: fallback post_comment also failed", exc_info=True)
 
     def drain(self) -> None:
-        """Apply any pending coalesced update. Call before finalize."""
+        """Apply any pending coalesced update. Call before finalize.
+
+        While frozen, a stale coalesced tool event must NOT be flushed —
+        the frozen question body is already live (or queued, in minimal
+        mode), so only that body may be written.
+        """
+        if self._frozen:
+            if self._minimal and self._pending_body:
+                self._flush(self._pending_body, force=True)
+            else:
+                self._pending_body = None
+            return
         if self._pending_body:
             self._flush(self._pending_body, force=True)

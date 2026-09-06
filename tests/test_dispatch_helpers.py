@@ -339,6 +339,138 @@ def test_sync_returns_done_summary_format(tmp_path, monkeypatch):
     assert "Merging" in progress_calls[0]
 
 
+def test_sync_uses_plan_branch_as_sync_target(tmp_path, monkeypatch):
+    """/plan --branch docs locks plan_branch=docs: /sync must merge
+    origin/docs into the work branch, not origin/<repo default> (issue #187)."""
+    from autoswe.orch.run import run
+    from autoswe.orch.types import Action, ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+    from autoswe.vcs import worktree as worktree_mod
+
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    monkeypatch.setattr(worktree_mod, "worktree_path",
+                        lambda o, r, n, c, p="github": wt_dir)
+    sync_args = []
+    monkeypatch.setattr(worktree_mod, "sync_branch",
+        lambda wt, o, r, n, b, p="github", cfg=None: sync_args.append(b) or {
+            "synced": True, "conflict": False, "branch": "autoswe/issue-1",
+            "ahead": 2, "commit_sha": "abc1234", "changed": True,
+        })
+
+    api = ApiState(
+        issue=NormalizedIssue(number=1, title="t", body="b", owner="o", repo="r"),
+        comments=(),
+    )
+    task = TaskState(
+        slug="gh:o_r_1", owner="o", repo="r", issue_number=1, title="t", body="b",
+        status=None, plan_branch="docs", base_branch="master", attempt_count=0,
+        first_dispatched_at=None, last_dispatched_command=None,
+        last_dispatched_command_id=None, last_consumed_reply_id=None,
+        session_id=None, pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+        provider="github",
+    )
+    world = World(api=api, task=task, cfg={"WORKTREE_DIR": str(tmp_path)},
+                  repo_cfg={"provider": "github"})
+    progress_calls = []
+    result = run(Action(kind="sync_branch", slug="gh:o_r_1"), world,
+                 progress_callback=progress_calls.append)
+
+    assert sync_args == ["docs"], \
+        f"sync must target origin/docs, got {sync_args}"
+    assert any("origin/docs" in c for c in progress_calls)
+    assert "origin/master" not in result.done_content
+
+
+def test_sync_falls_back_to_base_branch_without_plan_branch(tmp_path, monkeypatch):
+    """No --branch given → /sync targets the repo default base branch."""
+    from autoswe.orch.run import run
+    from autoswe.orch.types import Action, ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+    from autoswe.vcs import worktree as worktree_mod
+
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    monkeypatch.setattr(worktree_mod, "worktree_path",
+                        lambda o, r, n, c, p="github": wt_dir)
+    sync_args = []
+    monkeypatch.setattr(worktree_mod, "sync_branch",
+        lambda wt, o, r, n, b, p="github", cfg=None: sync_args.append(b) or {
+            "synced": True, "conflict": False, "branch": "autoswe/issue-1",
+            "ahead": 2, "commit_sha": "abc1234", "changed": True,
+        })
+
+    api = ApiState(
+        issue=NormalizedIssue(number=1, title="t", body="b", owner="o", repo="r"),
+        comments=(),
+    )
+    task = TaskState(
+        slug="gh:o_r_1", owner="o", repo="r", issue_number=1, title="t", body="b",
+        status=None, plan_branch=None, base_branch="master", attempt_count=0,
+        first_dispatched_at=None, last_dispatched_command=None,
+        last_dispatched_command_id=None, last_consumed_reply_id=None,
+        session_id=None, pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+        provider="github",
+    )
+    world = World(api=api, task=task, cfg={"WORKTREE_DIR": str(tmp_path)},
+                  repo_cfg={"provider": "github"})
+    run(Action(kind="sync_branch", slug="gh:o_r_1"), world)
+
+    assert sync_args == ["master"]
+
+
+def test_run_fix_pre_dispatch_sync_uses_plan_branch(tmp_path, monkeypatch):
+    """Pre-fix sync on a --branch docs task must merge origin/docs, not
+    origin/master — otherwise every /fix pollutes the work branch with
+    default-branch history (issue #187)."""
+    from autoswe.harness.runner import HandlerResult
+    from autoswe.orch.run import run
+    from autoswe.orch.types import Action, ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+    from autoswe.vcs import worktree as worktree_mod
+
+    wt_dir = tmp_path / "wt"
+    wt_dir.mkdir()
+    monkeypatch.setattr(worktree_mod, "worktree_path",
+                        lambda o, r, n, c, p="github": wt_dir)
+    sync_args = []
+    monkeypatch.setattr(worktree_mod, "sync_branch",
+        lambda wt, o, r, n, b, p="github", cfg=None: sync_args.append(b) or {
+            "synced": True, "conflict": False, "branch": "autoswe/issue-1",
+            "ahead": 2, "commit_sha": "def5678", "changed": True,
+        })
+
+    import autoswe.harness.coder as coder_mod
+    fix_called = []
+    monkeypatch.setattr(coder_mod, "run_fix",
+        lambda *a, **kw: fix_called.append(True) or HandlerResult("DONE_SUMMARY\tfixed\tabc"))
+
+    api = ApiState(
+        issue=NormalizedIssue(number=1, title="t", body="b", owner="o", repo="r"),
+        comments=(),
+    )
+    task = TaskState(
+        slug="gh:o_r_1", owner="o", repo="r", issue_number=1, title="t", body="b",
+        status=None, plan_branch="docs", base_branch="master", attempt_count=0,
+        first_dispatched_at=None, last_dispatched_command=None,
+        last_dispatched_command_id=None, last_consumed_reply_id=None,
+        session_id=None, pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+        provider="github",
+    )
+    world = World(api=api, task=task, cfg={"WORKTREE_DIR": str(tmp_path)},
+                  repo_cfg={"provider": "github", "pat": "fake"})
+    result = run(Action(kind="fix", slug="gh:o_r_1"), world)
+
+    assert result is not None
+    assert result.done_content.startswith("DONE_SUMMARY")
+    assert sync_args == ["docs"], \
+        f"pre-fix sync must target origin/docs, got {sync_args}"
+    assert len(fix_called) == 1
+
+
 # ---------------------------------------------------------------------------
 # Batch 4 — Safeguard negative paths (roadmap hole-closing)
 # ---------------------------------------------------------------------------
@@ -750,7 +882,7 @@ def test_dispatch_failure_transitions_to_error(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -762,7 +894,7 @@ def test_dispatch_failure_transitions_to_error(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -839,9 +971,11 @@ def test_dispatch_failure_sets_error_label(
     posted_comments = []
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def slug_prefix(self):
+            return "gh"
+        def set_status(self, issue_num, label):
             set_status_calls.append((issue_num, label))
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted_comments.append((issue_num, body))
         def fetch_comments(self, *a, **kw):
             return []
@@ -857,7 +991,7 @@ def test_dispatch_failure_sets_error_label(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -869,7 +1003,7 @@ def test_dispatch_failure_sets_error_label(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -938,9 +1072,9 @@ def test_dispatch_error_label_is_best_effort(
 
     # Tracker that raises RuntimeError on set_status
     class FailingTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             raise RuntimeError("API is down")
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             raise RuntimeError("API is down")
         def fetch_comments(self, *a, **kw):
             return []
@@ -956,7 +1090,7 @@ def test_dispatch_error_label_is_best_effort(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -968,7 +1102,7 @@ def test_dispatch_error_label_is_best_effort(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1043,7 +1177,7 @@ def test_dispatch_error_task_not_redispatched_on_next_poll(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1055,7 +1189,7 @@ def test_dispatch_error_task_not_redispatched_on_next_poll(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1127,9 +1261,9 @@ def test_dispatch_error_posts_comment(
     posted_comments = []
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             pass
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             posted_comments.append((issue_num, body))
         def fetch_comments(self, *a, **kw):
             return []
@@ -1145,7 +1279,7 @@ def test_dispatch_error_posts_comment(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1157,7 +1291,7 @@ def test_dispatch_error_posts_comment(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1224,9 +1358,9 @@ def test_dispatch_error_clears_session_id(
     monkeypatch.setattr(loop_mod, "_dispatch_task", failing_dispatch)
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             pass
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             pass
         def fetch_comments(self, *a, **kw):
             return []
@@ -1242,7 +1376,7 @@ def test_dispatch_error_clears_session_id(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1254,7 +1388,7 @@ def test_dispatch_error_clears_session_id(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1319,9 +1453,9 @@ def test_dispatch_error_clears_first_dispatched_at(
     monkeypatch.setattr(loop_mod, "_dispatch_task", failing_dispatch)
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             pass
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             pass
         def fetch_comments(self, *a, **kw):
             return []
@@ -1337,7 +1471,7 @@ def test_dispatch_error_clears_first_dispatched_at(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1349,7 +1483,7 @@ def test_dispatch_error_clears_first_dispatched_at(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {
         "MAX_CONCURRENT": 1,
@@ -1383,16 +1517,16 @@ class _CapturingTracker:
         self.updates = []
         self._next_id = 900
 
-    def set_status(self, repo_cfg, issue_num, label):
+    def set_status(self, issue_num, label):
         pass
 
-    def post_comment(self, repo_cfg, issue_num, body):
+    def post_comment(self, issue_num, body):
         cid = self._next_id
         self._next_id += 1
         self.posts.append({"id": cid, "body": body})
         return cid
 
-    def update_comment(self, repo_cfg, issue_num, comment_id, body):
+    def update_comment(self, issue_num, comment_id, body):
         self.updates.append({"id": comment_id, "body": body})
 
 
@@ -1551,9 +1685,9 @@ def test_dispatch_error_preserves_progress_comment_id(
     monkeypatch.setattr(loop_mod, "_dispatch_task", failing_dispatch)
 
     class FakeTracker:
-        def set_status(self, repo_cfg, issue_num, label):
+        def set_status(self, issue_num, label):
             pass
-        def post_comment(self, repo_cfg, issue_num, body):
+        def post_comment(self, issue_num, body):
             pass
         def fetch_comments(self, *a, **kw):
             return []
@@ -1565,7 +1699,7 @@ def test_dispatch_error_preserves_progress_comment_id(
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
-    def fake_read_api(tracker, repo_cfg, cfg, *, bot_ids=None, prev_updated=None, force_fetch=None):
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1577,7 +1711,7 @@ def test_dispatch_error_preserves_progress_comment_id(
             ),
         }
 
-    monkeypatch.setattr(loop_mod, "_get_read_api", lambda provider: fake_read_api)
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
 
     cfg = {"MAX_CONCURRENT": 1, "SILENT_REPORTING": True, "WORKTREE_DIR": str(tmp_path / "worktrees")}
     loop_mod.poll(cfg, mode="full", repo_filter="owner/repo")
@@ -1588,5 +1722,136 @@ def test_dispatch_error_preserves_progress_comment_id(
     assert entry.get("progress_comment_id") == 555, (
         "progress_comment_id must survive a crash so /retry re-uses the sticky comment"
     )
+
+
+# ---------------------------------------------------------------------------
+# F-22: credential-bearing URLs must not appear in posted comments
+# ---------------------------------------------------------------------------
+
+import subprocess as _subprocess
+
+from autoswe.core.error_utils import capture_dispatch_error, format_error_comment
+from autoswe.core.logging_utils import MASK as _MASK
+
+
+def _make_clone_called_process_error(pat: str) -> _subprocess.CalledProcessError:
+    """Build a CalledProcessError as raised by worktree._run on git clone failure.
+
+    The command list mirrors what _run actually constructs (with credential.helper=
+    prepended), so the credential URL appears exactly as it would in the real
+    exception message.
+    """
+    clone_url = f"https://x-access-token:{pat}@github.com/owner/repo.git"
+    cmd = ["git", "-c", "credential.helper=", "clone", clone_url, "/tmp/wt"]
+    return _subprocess.CalledProcessError(
+        returncode=128,
+        cmd=cmd,
+        output=None,
+        stderr=f"fatal: Authentication failed for '{clone_url}'",
+    )
+
+
+def test_f22_dispatch_error_comment_redacts_pat(monkeypatch):
+    """A credential-bearing CalledProcessError must not leak the PAT into the
+    posted error comment (dispatch-error route)."""
+    pat = "ghp_AbC12345678901234567890"
+    exc = _make_clone_called_process_error(pat)
+
+    ctx = capture_dispatch_error(exc, "gh:owner_repo_42", None)
+    body = format_error_comment(ctx)
+
+    # Precondition: the raw comment body DOES contain the secret (without
+    # redaction it would be visible).  This is the bug F-02 is fixing.
+    assert pat in body, (
+        "Test precondition failed: raw comment body does not contain the PAT; "
+        "the test does not exercise the credential-URL path"
+    )
+
+    # Patch gh_post so we capture what would actually be posted to GitHub.
+    posted: list[dict] = []
+    import autoswe.tracking.api as gh_api
+
+    def fake_gh_post(path: str, token: str, body: dict, **kw):
+        posted.append(body)
+        return {"id": 999}
+
+    monkeypatch.setattr(gh_api, "gh_post", fake_gh_post)
+
+    from autoswe.providers.github.tracker import GitHubTracker
+    tracker = GitHubTracker({"owner": "owner", "repo": "repo", "token": "tok"})
+    tracker.post_comment(42, body)
+
+    assert len(posted) == 1
+    posted_body = posted[0]["body"]
+    assert pat not in posted_body, f"PAT leaked into posted comment: {posted_body}"
+    assert _MASK in posted_body, "expected redaction marker in posted comment"
+
+
+def test_f22_failed_sync_comment_redacts_pat(monkeypatch):
+    """A FAILED: sync-error body (raw git stderr containing a credential URL)
+    must not leak the PAT into the posted comment (sync-error route)."""
+    pat = "ghp_SecretSync5678901234567890"
+    # Simulates what run.py builds when sync_branch's result["error"] carries
+    # git stderr with the clone URL.
+    stderr_line = (
+        f"fatal: Authentication failed for 'https://x-access-token:{pat}"
+        "@github.com/owner/repo.git'"
+    )
+    body = f"FAILED: {stderr_line}"
+
+    # Precondition
+    assert pat in body
+
+    posted: list[dict] = []
+    import autoswe.tracking.api as gh_api
+
+    def fake_gh_post(path: str, token: str, body: dict, **kw):
+        posted.append(body)
+        return {"id": 999}
+
+    monkeypatch.setattr(gh_api, "gh_post", fake_gh_post)
+
+    from autoswe.providers.github.tracker import GitHubTracker
+    tracker = GitHubTracker({"owner": "owner", "repo": "repo", "token": "tok"})
+    tracker.post_comment(42, body)
+
+    assert len(posted) == 1
+    assert pat not in posted[0]["body"], f"PAT leaked into FAILED: comment: {posted[0]['body']}"
+    assert _MASK in posted[0]["body"]
+
+
+def test_f22_azure_pat_redacted_in_dispatch_error(monkeypatch):
+    """Azure PAT (no distinguishing prefix) in a credential URL is also
+    redacted in the posted error comment — the specific gap F-02 calls out."""
+    azure_pat = "AzPat012345678901234567890123456789"
+    clone_url = f"https://autoswe:{azure_pat}@dev.azure.com/org/proj/_git/repo"
+    cmd = ["git", "-c", "credential.helper=", "clone", clone_url, "/tmp/wt"]
+    exc = _subprocess.CalledProcessError(
+        returncode=128,
+        cmd=cmd,
+        output=None,
+        stderr=f"fatal: Authentication failed for '{clone_url}'",
+    )
+    ctx = capture_dispatch_error(exc, "ado:org_proj_repo_70", None)
+    body = format_error_comment(ctx)
+    assert azure_pat in body
+
+    posted: list[dict] = []
+    import autoswe.providers.azure.tracker as azure_tracker_mod
+
+    def fake_ado_post(path: str, pat: str, body: dict, **kw):
+        posted.append(body)
+        return {"id": 999}
+
+    # Patch where the tracker's post_comment actually resolves it.
+    monkeypatch.setattr(azure_tracker_mod, "ado_post", fake_ado_post)
+
+    from autoswe.providers.azure.tracker import AzureTracker
+    tracker = AzureTracker({"org": "org", "project": "proj", "pat": azure_pat})
+    tracker.post_comment(70, body)
+
+    assert len(posted) == 1
+    assert azure_pat not in posted[0]["text"], f"Azure PAT leaked: {posted[0]['text']}"
+    assert _MASK in posted[0]["text"]
 
 

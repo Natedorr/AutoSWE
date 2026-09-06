@@ -107,6 +107,7 @@ def test_run_spec_defaults():
     spec = RunSpec(prompt="p", cwd="/tmp")
     assert spec.model is None
     assert spec.resume is None
+    assert spec.fork_session is False
     # Phase 3: mode-based fields
     assert spec.mode is None
     assert spec.extra_tools is None

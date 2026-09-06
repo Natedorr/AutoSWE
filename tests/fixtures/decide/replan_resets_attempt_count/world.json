@@ -23,8 +23,7 @@
         "id": 2,
         "is_bot": false
       }
-    ],
-    "open_pr_numbers": []
+    ]
   },
   "task": {
     "slug": "gh:owner_repo_42",
@@ -42,7 +41,9 @@
     "last_dispatched_command_id": 1,
     "last_consumed_reply_id": 1,
     "welcome_comment_id": null,
-    "bot_comment_ids": [1]
+    "bot_comment_ids": [
+      1
+    ]
   },
   "cfg": {},
   "repo_cfg": {}

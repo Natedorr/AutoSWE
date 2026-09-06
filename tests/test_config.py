@@ -14,13 +14,18 @@ def test_as_bool_true_strings():
     assert _as_bool("TRUE") is True
 
 def test_as_bool_false_strings():
-    """_as_bool treats anything other than 'true' (case-insensitive) as False."""
+    """_as_bool treats non-truthy values as False.
+
+    Truthy spellings are true/1/yes/on (case-insensitive, issue #173 F-17),
+    so "0", "off" and a blank are the falsy cases.
+    """
     from autoswe.core.config import _as_bool
 
     assert _as_bool("false") is False
     assert _as_bool("False") is False
     assert _as_bool("0") is False
-    assert _as_bool("yes") is False
+    assert _as_bool("off") is False
+    assert _as_bool("maybe") is False
     assert _as_bool("") is False
 
 def test_as_bool_none_uses_default():
@@ -29,13 +34,14 @@ def test_as_bool_none_uses_default():
 
     assert _as_bool(None) is False  # default="false"
     assert _as_bool(None, "true") is True
+    assert _as_bool(None, "1") is True
 
 def test_as_bool_non_string_coerced():
     """_as_bool coerces non-string values (e.g., int from env file)."""
     from autoswe.core.config import _as_bool
 
-    assert _as_bool(1) is False  # str(1).lower() == "1" != "true"
-    assert _as_bool(0) is False
+    assert _as_bool(1) is True  # str(1) == "1" is truthy (issue #173 F-17)
+    assert _as_bool(0) is False  # str(0) == "0" is not a truthy spelling
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +100,28 @@ def test_load_config_defaults(isolated_autoswe_dir):
     assert cfg["AUTO_ASSIGN"] is True
     assert cfg["AUTO_CREATE_PR"] is False
     assert cfg["WORKTREE_DIR"] == "worktrees"
+    # GitHub Development-sidebar linkage is on by default (issue #142):
+    # the createLinkedBranch mutation runs at worktree creation so bot PRs
+    # show their issue in the Development section.
+    assert cfg["LINK_BRANCH_TO_ISSUE"] is True
+
+
+def test_artifact_dir_is_backend_neutral(isolated_autoswe_dir):
+    """ARTIFACT_DIR is a backend-neutral root, not under any vendor dir.
+
+    S6 / issue #169 F-10: handler-owned review artifacts (and any future
+    backend-neutral artifacts) live under <AUTOSWE_DIR>/artifacts — they must
+    not be hard-wired to a Claude-specific path like ~/.claude/reviews.
+    """
+    from autoswe.core import config
+
+    root = config.AUTOSWE_DIR
+    assert root / "artifacts" == config.ARTIFACT_DIR
+    # Must not live under a vendor-specific directory.
+    assert ".claude" not in config.ARTIFACT_DIR.parts
+    assert ".codex" not in config.ARTIFACT_DIR.parts
+    # And it tracks the isolated AUTOSWE_DIR (redirects with the fixture).
+    assert config.ARTIFACT_DIR.parent == root
 
 
 def test_load_config_env_override(isolated_autoswe_dir, monkeypatch):
@@ -109,6 +137,34 @@ def test_load_config_env_override(isolated_autoswe_dir, monkeypatch):
     assert cfg["SILENT_REPORTING"] is True
     assert cfg["AUTO_CREATE_PR"] is True
     assert "GITHUB_TOKEN" not in cfg
+
+
+def test_load_config_link_branch_default_and_env_opt_out(
+    isolated_autoswe_dir, monkeypatch
+):
+    """LINK_BRANCH_TO_ISSUE defaults True; an explicit 'false' in the env opts out."""
+    from autoswe.core.config import load_config
+
+    # Default (no env, no config file): on.
+    assert load_config()["LINK_BRANCH_TO_ISSUE"] is True
+
+    # Explicit env opt-out.
+    monkeypatch.setenv("LINK_BRANCH_TO_ISSUE", "false")
+    assert load_config()["LINK_BRANCH_TO_ISSUE"] is False
+
+    # Explicit env opt-in (covers a config file that omits the key).
+    monkeypatch.setenv("LINK_BRANCH_TO_ISSUE", "true")
+    assert load_config()["LINK_BRANCH_TO_ISSUE"] is True
+
+
+def test_load_config_link_branch_config_file_opt_out(isolated_autoswe_dir):
+    """A config file setting LINK_BRANCH_TO_ISSUE=false overrides the True default."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("LINK_BRANCH_TO_ISSUE=false\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    assert load_config()["LINK_BRANCH_TO_ISSUE"] is False
 
 
 def test_load_config_reads_autoswe_env_file(isolated_autoswe_dir):
@@ -160,6 +216,101 @@ def test_load_config_auto_create_pr_defaults_false(isolated_autoswe_dir):
 
     assert cfg["AUTO_CREATE_PR"] is False
     assert isinstance(cfg["AUTO_CREATE_PR"], bool)
+
+
+# ---------------------------------------------------------------------------
+# Malformed config handling (issue #173 F-17)
+# ---------------------------------------------------------------------------
+
+def test_load_config_bad_int_falls_back_to_default_with_warning(
+    isolated_autoswe_dir, caplog
+):
+    """MAX_ATTEMPTS=thre must fall back to the default (3) and log a warning.
+
+    The ``autoswe.debug`` logger is deliberately set to ``propagate=False``
+    (init_debug_logger avoids double-emitting through root handlers), so
+    caplog's root-level handler never sees its records. Re-enable
+    propagation for the duration of the capture and restore it after.
+    """
+    import logging
+
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("MAX_ATTEMPTS=thre\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    dbg = logging.getLogger("autoswe.debug")
+    prev_propagate = dbg.propagate
+    dbg.propagate = True
+    try:
+        with caplog.at_level("WARNING"):
+            cfg = load_config()
+    finally:
+        dbg.propagate = prev_propagate
+
+    assert cfg["MAX_ATTEMPTS"] == 3
+    assert isinstance(cfg["MAX_ATTEMPTS"], int)
+    assert any(
+        "MAX_ATTEMPTS" in r.getMessage() and "not a valid integer" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_load_config_bad_int_keeps_int_type(isolated_autoswe_dir):
+    """A malformed int must not linger as a string (the later TypeError cause)."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("MAX_CONCURRENT=oops\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["MAX_CONCURRENT"] == 1
+    assert isinstance(cfg["MAX_CONCURRENT"], int)
+
+
+def test_load_config_bool_accepts_one_yes_on(isolated_autoswe_dir):
+    """AUTO_CREATE_PR set to 1 / yes / on must all read as True (issue #173)."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    for val in ("1", "yes", "on"):
+        autoswe_env.write_text(f"AUTO_CREATE_PR={val}\n", encoding="utf-8")
+        from autoswe.core.config import load_config
+
+        assert load_config()["AUTO_CREATE_PR"] is True, val
+
+
+def test_load_config_bool_true_false_unchanged(isolated_autoswe_dir):
+    """Existing true/false spellings still coerce as before."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text(
+        "AUTO_CREATE_PR=true\nMINIMAL_POSTING=false\n", encoding="utf-8"
+    )
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AUTO_CREATE_PR"] is True
+    assert cfg["MINIMAL_POSTING"] is False
+
+
+def test_load_config_strips_matched_surrounding_quotes(isolated_autoswe_dir):
+    """BOT_NAME="bot" should lose its quotes; 'bot' too."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text('BOT_NAME="bot"\n', encoding="utf-8")
+    from autoswe.core.config import load_config
+
+    assert load_config()["BOT_NAME"] == "bot"
+
+    autoswe_env.write_text("BOT_NAME='bot'\n", encoding="utf-8")
+    assert load_config()["BOT_NAME"] == "bot"
+
+
+def test_load_config_unmatched_quotes_are_not_stripped(isolated_autoswe_dir):
+    """A lone leading or trailing quote must not be stripped."""
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("BOT_NAME=\"bot\n", encoding="utf-8")
+    from autoswe.core.config import load_config
+
+    # only one quote present → not "matched surrounding" → value kept as-is
+    assert load_config()["BOT_NAME"] == '"bot'
 
 
 def test_load_repos_config_missing_returns_empty(isolated_autoswe_dir):
@@ -363,6 +514,36 @@ def test_load_config_minimal_posting_file_true(isolated_autoswe_dir):
 
     cfg = load_config()
     assert cfg["MINIMAL_POSTING"] is True
+
+
+def test_load_config_auto_purge_default_false(isolated_autoswe_dir):
+    """AUTO_PURGE_BRANCHES defaults to False when not set (opt-in)."""
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AUTO_PURGE_BRANCHES"] is False
+
+
+def test_load_config_auto_purge_env_true(isolated_autoswe_dir, monkeypatch):
+    """AUTO_PURGE_BRANCHES=true env var is parsed as True boolean."""
+    monkeypatch.setenv("AUTO_PURGE_BRANCHES", "true")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AUTO_PURGE_BRANCHES"] is True
+
+
+def test_load_config_auto_purge_file_true(isolated_autoswe_dir):
+    """AUTO_PURGE_BRANCHES=true in autoswe.env is parsed as True boolean."""
+    from autoswe.core import config as config_mod
+
+    config_mod.CONFIG_FILE.write_text("AUTO_PURGE_BRANCHES=true\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["AUTO_PURGE_BRANCHES"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -755,6 +936,39 @@ def test_load_harnesses_config_with_list_values(isolated_autoswe_dir):
     result = load_harnesses_config()
     assert "with-list" in result
     assert result["with-list"]["extra_tools"] == ["Read", "Write"]
+
+
+def test_load_harnesses_config_nested_env_preserved_and_expanded(
+    isolated_autoswe_dir, monkeypatch
+):
+    """A per-profile `env` map is preserved as a nested dict and its string
+    values undergo ${VAR} / ${VAR:-default} expansion (issue #120 Part B)."""
+    harnesses_json = isolated_autoswe_dir / "config" / "harnesses.json"
+    harnesses_json.write_text(
+        '{"claude-env": {"backend": "claude_code", "model": "m", '
+        '"env": {"FOO": "${BAR:-default}", "STATIC": "1"}}, '
+        '"codex-env": {"backend": "codex", "model": "gpt-5", '
+        '"env": {"OPENAI_API_BASE": "${CUSTOM_BASE:-http://x}"}}}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("BAR", raising=False)
+    monkeypatch.delenv("CUSTOM_BASE", raising=False)
+
+    from autoswe.core import config as config_mod
+    config_mod._harnesses_cache.clear()
+
+    from autoswe.core.config import load_harnesses_config
+
+    result = load_harnesses_config()
+    claude_env = result["claude-env"]["env"]
+    assert isinstance(claude_env, dict)
+    assert claude_env["FOO"] == "default"  # ${BAR:-default} → default
+    assert claude_env["STATIC"] == "1"
+
+    codex_env = result["codex-env"]["env"]
+    assert isinstance(codex_env, dict)
+    assert codex_env["OPENAI_API_BASE"] == "http://x"
 
 
 # ---------------------------------------------------------------------------

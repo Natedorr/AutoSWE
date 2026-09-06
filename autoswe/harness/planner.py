@@ -6,39 +6,109 @@ from pathlib import Path
 from autoswe.core.config import resolve_harness
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
-from autoswe.harness.ask_user_question import make_can_use_tool
+from autoswe.harness.ask_user_question import make_can_use_tool, post_question_fallback
 from autoswe.harness.mcp_config import build_mcp_comment_server
 from autoswe.harness.prompts import BOT_MARKER, build_plan_prompt
 from autoswe.harness.runner import HandlerResult
+from autoswe.harness.schemas import PLAN_SCHEMA, output_format_for
 from autoswe.providers.factory import get_tracker
 from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
-from autoswe.vcs.worktree import create_worktree
+from autoswe.vcs.worktree import create_worktree, ensure_worktree_unchanged
 
 dbg = get_debug_logger()
 
 
-def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | None]:
+def _interpret_structured_plan(
+    structured: dict | None,
+) -> tuple[str, str, str | None] | None:
+    """Interpret a schema-validated plan payload (``PLAN_SCHEMA``).
+
+    Returns ``(comment_body, done_content, plan_file_path)`` when the payload is
+    usable, else ``None`` so the caller falls through to the next source in the
+    priority chain (graceful degrade, issue #159).
+
+    A payload is usable only when it carries the markdown the handler would
+    post: a non-empty ``plan_markdown`` for a ready plan, or a non-empty
+    ``question_markdown`` when questions are still pending.  A ready-but-empty
+    or question-less payload is treated as malformed and dropped to the fallback
+    chain rather than posted blank.
+    """
+    if not isinstance(structured, dict):
+        return None
+
+    if structured.get("is_plan_ready"):
+        plan_md = str(structured.get("plan_markdown") or "").strip()
+        if not plan_md:
+            return None
+        comment = f"## Plan\n\n{plan_md}\n\n_Reply with `/fix` to start coding._"
+        return comment, "PLAN_READY", None
+
+    # Not ready: the plan is waiting on clarification.
+    question_md = str(structured.get("question_markdown") or "").strip()
+    if not question_md:
+        return None
+    comment = f"## Questions\n\n{question_md}\n\n_Reply in this thread to answer._"
+    return comment, "WAITING: questions", None
+
+
+def _interpret_plan_result(
+    result,
+    state,
+    harness,
+    *,
+    task: dict | None = None,
+    repo_cfg: dict | None = None,
+    progress_callback=None,
+) -> tuple[str, str | None]:
     """Interpret a plan-phase RunResult, returning (done_content, plan_file_path).
 
-    Checks MCP-specific fields (plan_posted, question_posted) only when the
-    backend advertises the ``"mcp"`` capability.  Falls back to text parsing
-    (``_extract_plan_output``) when MCP is unavailable or flags are not set.
+    Source priority:
+      1. AskUserQuestion via the ``can_use_tool`` callback. The callback posts
+         the question as a standalone issue comment and records whether the
+         post landed (``state["asked_question_posted"]``); when the post
+         failed, the handler falls back to posting it itself (issue #184).
+      2. MCP-specific fields (plan_posted, question_posted) — the comment is
+         already on the thread, so these win over the not-yet-posted sources
+         below; only when the backend advertises the ``"mcp"`` capability.
+      3. Structured output (``result.structured_output``) when present and valid
+         — schema-validated but not yet posted; the handler posts it.
+      4. Text parsing (``_extract_plan_output``): tags, filesystem scan, raw.
+
+    Structured output is additive (issue #159): the MCP tools stay enabled. It
+    is checked *after* the MCP already-posted flags on purpose — when the
+    backend posts via MCP the plan comment already exists, so re-posting it from
+    the structured payload would double-post. It is checked *before* text parse
+    because, like text parse, it is a not-yet-posted source the handler must
+    post (the structured payload is the schema-validated, more reliable form of
+    the same content).
 
     Returns a tuple of (done_content, plan_file_path).  Callers should use
     these to construct the HandlerResult.
     """
-    # 1. AskUserQuestion via can_use_tool callback (always available)
+    # 1. AskUserQuestion via can_use_tool callback (posts a standalone comment)
     if state.get("asked_question_md"):
+        # Only trust "already posted" when the callback confirmed it (issue
+        # #184: the sticky-comment path silently lost the question). A
+        # failed post gets a fallback post so the user always sees it.
+        if state.get("asked_question_posted") is False and task is not None:
+            post_question_fallback(
+                task, repo_cfg or {},
+                state["asked_question_md"], progress_callback,
+            )
         return "WAITING: questions", None
 
+    # 2. MCP already-posted flags (comment already on the thread) — only when the
+    #    backend advertises the "mcp" capability. These take precedence over the
+    #    not-yet-posted sources below because the comment already exists; posting
+    #    again would double-post (issue #159).
     has_mcp = runner.backend_has_capability(harness, "mcp")
 
     if has_mcp:
-        # 2. MCP post_question → WAITING
+        # MCP post_question → WAITING
         if result.question_posted:
             return "WAITING: questions", None
 
-        # 3. MCP post_plan → PLAN_READY
+        # MCP post_plan → PLAN_READY
         if result.plan_posted:
             plan_file_path: str | None = None
             if result.plan_file_path:
@@ -48,6 +118,14 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | Non
                     if not _plan_file_is_pending(plan_text):
                         plan_file_path = str(pf)
             return "PLAN_READY", plan_file_path
+
+    # 3. Structured output (schema-validated, NOT yet posted) — the handler posts
+    #    it. Preferred over text parse when present & usable (issue #159).
+    structured = getattr(result, "structured_output", None)
+    interpreted = _interpret_structured_plan(structured)
+    if interpreted is not None:
+        comment, done_content, plan_file_path = interpreted
+        return f"_POST:{done_content}\t{comment}", plan_file_path
 
     # 4. Text-parse fallback (always available)
     plan_file: Path | None = (
@@ -69,8 +147,18 @@ def _interpret_plan_result(result, state, harness: dict) -> tuple[str, str | Non
 
 
 def _get_plans_dir() -> Path:
-    """Return the Claude Code plan file directory."""
-    return Path.home() / ".claude" / "plans"
+    """Return the plan-file directory, delegated to the backend that owns it.
+
+    The plan-file path is a Claude-Code-SDK concern (the SDK writes native
+    plan files to ``~/.claude/plans/``), so the planner no longer hard-codes
+    it — it asks the Claude Code backend for the directory (S6 / issue #169
+    F-10). This path is only consulted when the resolved backend advertises the
+    ``plan_file`` capability (see ``_extract_plan_output``'s ``allow_fs_scan``
+    gate), so the Claude accessor is the correct source.
+    """
+    from autoswe.harness.backends.claude_code import plan_file_dir
+
+    return plan_file_dir()
 
 
 def _find_latest_plan_file() -> Path | None:
@@ -214,7 +302,7 @@ def _post_and_return(task: dict, comment_body: str, done_content: str, repo_cfg:
     rc.setdefault("pat", task.get("_token", ""))
     tracker = get_tracker(rc)
     try:
-        tracker.post_comment(rc, task["issue_number"], comment_body + BOT_MARKER)
+        tracker.post_comment(task["issue_number"], comment_body + BOT_MARKER)
     except Exception as e:  # Provider call failure is non-fatal; proceed without posting comment.
         dbg.error("planner: comment failed: %s", e)
 
@@ -230,15 +318,6 @@ def _get_git_head(wt: Path) -> str | None:
     if result.returncode == 0:
         return result.stdout.strip()
     return None
-
-
-def _ensure_worktree_unchanged(wt: Path, head_before: str | None) -> None:
-    """Reset the worktree if the agent modified it during plan phase."""
-    head_after = _get_git_head(wt)
-    if head_before and head_after and head_before != head_after:
-        log(f"[WARN] Plan session modified worktree ({head_before[:8]} -> {head_after[:8]}). Resetting.")
-        subprocess.run(["git", "-C", str(wt), "reset", "--hard", head_before], timeout=10, check=False)
-        subprocess.run(["git", "-C", str(wt), "clean", "-fd"], timeout=10, check=False)
 
 
 def _plan_session(
@@ -285,7 +364,24 @@ def _plan_session(
     state = {}
     cut = make_can_use_tool(task, repo_cfg, state, on_post=progress_callback, read_only=True)
 
+    # Loudly degrade when the backend cannot enforce read-only access (issue
+    # #166): the plan session may still edit the worktree, so the post-run
+    # ensure_worktree_unchanged backstop below is the real guarantee.
+    if not runner.has_read_only_enforcement(harness):
+        log(f"[WARN][PLAN] {task['id']} backend '{harness.get('backend')}' has no read-only "
+            f"enforcement (no 'mode'/'can_use_tool') — plan edits will be rolled back "
+            f"post-run (issue #166)")
+
     head_before = _get_git_head(wt)
+
+    # Request a schema-validated plan payload when the resolved backend supports
+    # it (issue #159). Additive: the MCP comment tools below stay enabled; this
+    # simply gives the handler a preferred structured source to read.
+    plan_output_format = (
+        output_format_for(PLAN_SCHEMA)
+        if runner.backend_has_capability(harness, "structured_output")
+        else None
+    )
 
     try:
         result = runner.run(
@@ -301,6 +397,7 @@ def _plan_session(
             can_use_tool=cut,
             state=state,
             harness_cfg=harness,
+            output_format=plan_output_format,
         )
     except asyncio.TimeoutError:
         return HandlerResult(f"FAILED: {timeout_msg}")
@@ -308,13 +405,17 @@ def _plan_session(
         dbg.error(f"{error_prefix}: SDK error: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: {e}")
 
-    _ensure_worktree_unchanged(wt, head_before)
+    # Backstop: roll back any worktree edits the plan session made (issue #166).
+    ensure_worktree_unchanged(wt, head_before)
 
     log(f"[PLAN] {task['id']} session={result.session_id} subtype={result.subtype} duration={result.duration_seconds:.1f}s cost=${result.cost_usd or 0:.4f}")
     dbg.debug("PLAN: sdk returned subtype=%s session=%s len=%d", result.subtype, result.session_id, len(result.text or ""))
     dbg.debug("PLAN OUTPUT (%d chars):\n%s", len(result.text or ""), (result.text or "")[:4000])
 
-    done_content, plan_file_path = _interpret_plan_result(result, state, harness)
+    done_content, plan_file_path = _interpret_plan_result(
+        result, state, harness,
+        task=task, repo_cfg=repo_cfg, progress_callback=progress_callback,
+    )
 
     if done_content.startswith("_POST:"):
         inner_done, comment = done_content[len("_POST:"):].split("\t", 1)

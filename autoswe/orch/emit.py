@@ -9,7 +9,6 @@ Tests live in tests/test_emit.py, parametrized over fixture JSON files.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from urllib.parse import quote as _url_quote
 
 from autoswe.core.logging_utils import log
 from autoswe.orch.types import Action, Effect, World
@@ -17,6 +16,7 @@ from autoswe.tracking.comments import BOT_MARKER
 from autoswe.tracking.labels import (
     COMPLETED_STATUSES,
     REVIEW_BLOCKING_STATUSES,
+    SHIPPING_BLOCKING_STATUSES,
     TERMINAL_STATUSES,
     _map_done_to_status,
 )
@@ -86,9 +86,10 @@ def _field_lifecycle_patch(
         patch["review_file_path"] = None
 
     # first_dispatched_at: clear on terminal statuses and on the non-terminal
-    # review-blocking states (the review phase completed; the follow-up /fix
-    # should start its time/attempt clock fresh).
-    if new_status in TERMINAL_STATUSES or new_status in REVIEW_BLOCKING_STATUSES:
+    # shipping-blocking states (the review phase completed, or the post-fix
+    # test gate ran to a verdict; the follow-up /fix should start its
+    # time/attempt clock fresh).
+    if new_status in TERMINAL_STATUSES or new_status in SHIPPING_BLOCKING_STATUSES:
         patch["first_dispatched_at"] = None
 
     # _guard_blocked: reset on retry
@@ -117,70 +118,53 @@ def _format_metrics(cost_usd: float | None, duration_seconds: float | None, sess
     return ""
 
 
-def _resolve_azure_parts(repo_cfg: dict) -> tuple[str, str, str]:
-    """Return (org, project, repo) for Azure, with fallback from owner/repo.
+def _vcs_commit_url(repo_cfg: dict | None, commit_sha: str) -> str | None:
+    """Return a provider-specific commit URL via the VCS provider, or None."""
+    if not repo_cfg:
+        return None
+    from autoswe.providers.factory import get_vcs
+    try:
+        return get_vcs(repo_cfg).commit_url(commit_sha)
+    except Exception:
+        return None
 
-    When repos_cfg lookup succeeds, org/project/repo are explicit keys.
-    When it misses, owner=org and repo="project/repo_name". Mirrors
-    AzureTracker.__init__ fallback logic.
+
+def _vcs_branch_url(repo_cfg: dict | None, branch: str) -> str | None:
+    """Return a provider-specific branch URL via the VCS provider, or None."""
+    if not repo_cfg:
+        return None
+    from autoswe.providers.factory import get_vcs
+    try:
+        return get_vcs(repo_cfg).branch_url(branch)
+    except Exception:
+        return None
+
+
+def _resolve_branch(owner: str, repo: str, issue_num: int, plan_branch: str | None, provider: str) -> str:
+    """The branch a fix landed on: plan_branch when set, else the provider's
+    per-issue branch name (``VCSProvider.branch_name`` is the single source)."""
+    if plan_branch:
+        return plan_branch
+    from autoswe.providers.factory import get_vcs
+    try:
+        return get_vcs({"owner": owner, "repo": repo, "provider": provider}).branch_name(issue_num)
+    except Exception:
+        # Unknown/unregistered provider: fall back to the conventional
+        # autoSWE branch name so a completion comment still renders.
+        return f"autoswe/issue-{issue_num}"
+
+
+def _parse_tests_failed(done_content: str) -> tuple[str, str | None]:
+    """Split ``TESTS_FAILED\t<detail>\t<sha>`` into (detail, sha).
+
+    Mirrors the DONE_SUMMARY rfind pattern: the LAST tab separates the commit
+    SHA, so newlines/tabs in the failure detail are preserved.
     """
-    org = repo_cfg.get("org", "")
-    project = repo_cfg.get("project", "")
-    repo = repo_cfg.get("repo", "")
-
-    if not org or not project:
-        owner = repo_cfg.get("owner", "")
-        repo_val = repo_cfg.get("repo", "")
-        if "/" in repo_val:
-            proj_part, _, _repo_part = repo_val.partition("/")
-            if proj_part:
-                org = owner
-                project = proj_part
-                if _repo_part:
-                    repo = _repo_part
-
-    return org, project, repo
-
-
-def _build_commit_url(provider: str, repo_cfg: dict | None, commit_sha: str) -> str | None:
-    """Return a provider-specific commit URL, or None if unavailable."""
-    if not repo_cfg:
-        return None
-    if provider == "github":
-        owner = repo_cfg.get("owner", "")
-        repo = repo_cfg.get("repo", "")
-        if owner and repo:
-            return f"https://github.com/{owner}/{repo}/commit/{commit_sha}"
-    elif provider == "azure":
-        org, project, repo = _resolve_azure_parts(repo_cfg)
-        if org and project and repo:
-            org_e = _url_quote(org, safe="")
-            proj_e = _url_quote(project, safe="")
-            repo_id = repo_cfg.get("repo_id")
-            repo_e = _url_quote(repo_id, safe="") if repo_id else _url_quote(repo, safe="")
-            return f"https://dev.azure.com/{org_e}/{proj_e}/_git/{repo_e}/commit/{commit_sha}"
-    return None
-
-
-def _build_branch_url(provider: str, repo_cfg: dict | None, branch: str) -> str | None:
-    """Return a provider-specific branch URL, or None if unavailable."""
-    if not repo_cfg:
-        return None
-    if provider == "github":
-        owner = repo_cfg.get("owner", "")
-        repo = repo_cfg.get("repo", "")
-        if owner and repo:
-            return f"https://github.com/{owner}/{repo}/compare/{branch}"
-    elif provider == "azure":
-        org, project, repo = _resolve_azure_parts(repo_cfg)
-        if org and project and repo:
-            org_e = _url_quote(org, safe="")
-            proj_e = _url_quote(project, safe="")
-            repo_id = repo_cfg.get("repo_id")
-            repo_e = _url_quote(repo_id, safe="") if repo_id else _url_quote(repo, safe="")
-            branch_e = _url_quote(branch, safe="")
-            return f"https://dev.azure.com/{org_e}/{proj_e}/_git/{repo_e}?version=GB{branch_e}"
-    return None
+    rest = done_content[len("TESTS_FAILED\t"):]
+    tab_idx = rest.rfind("\t")
+    if tab_idx >= 0:
+        return rest[:tab_idx].strip(), rest[tab_idx + 1:].strip()
+    return rest.strip(), None
 
 
 def _build_completion_comment(
@@ -201,7 +185,7 @@ def _build_completion_comment(
     For DONE_SUMMARY produces a rich comment with commit link, branch link,
     and Claude's summary. For other DONE variants falls back to simpler format.
     """
-    branch = plan_branch or f"autoswe/issue-{issue_num}"
+    branch = _resolve_branch(task_owner, task_repo, issue_num, plan_branch, provider)
 
     if done_content.startswith("DONE_SUMMARY\t"):
         rest = done_content[len("DONE_SUMMARY\t") :]
@@ -216,13 +200,13 @@ def _build_completion_comment(
         lines = [f"Completed with command `{pending_command}`."]
 
         if commit_sha:
-            commit_url = _build_commit_url(provider, repo_cfg, commit_sha)
+            commit_url = _vcs_commit_url(repo_cfg, commit_sha)
             if commit_url:
                 lines.append(f"[Commit]({commit_url})")
             else:
                 lines.append(f"Commit: {commit_sha}")
 
-            branch_url = _build_branch_url(provider, repo_cfg, branch)
+            branch_url = _vcs_branch_url(repo_cfg, branch)
             if branch_url:
                 lines.append(f"[View branch]({branch_url})")
             else:
@@ -333,6 +317,62 @@ def emit(
             ),
         )
 
+    if kind == "refused":
+        # A command was refused (e.g. /pr on a failed/error task, or any
+        # non-/retry command on a guard-blocked task). Post clear feedback
+        # instead of the old silent noop, and advance the dispatch watermark
+        # so the shared dedup guard suppresses a re-refusal of the same
+        # command on the next tick (issue #192).
+        rest = task.status or "failed"
+        # Every refusal message opens with "Your `…` was not accepted" or
+        # "This task is blocked…" — never a bare backtick-slash command at line
+        # start. The slash parser strips one leading backtick and matches
+        # commands at line start, and _find_slash_command scans the bot's OWN
+        # comments; a line-leading "`/pr`…" would re-parse as a fresh command on
+        # the next tick and re-trigger this very refusal (issue #192 "spam
+        # trap"). Opening with "Your"/"This" keeps command references mid-line.
+        if task.guard_blocked:
+            # The task is already at its limit; /retry is the ONLY command that
+            # can unblock it, so every refusal — including /pr, /review, /sync,
+            # and /fix — points at /retry. Telling a limit-blocked user to "post
+            # /fix" would be wrong, because /fix is itself refused here.
+            msg = (
+                f"This task is blocked after hitting its limits. Post `/retry` "
+                f"to restart it.{BOT_MARKER}"
+            )
+        elif action.refused_command == "/pr":
+            # /pr on a plain failed/error task (not limit-blocked): there is
+            # nothing ready to ship; /fix restarts the work, /retry resets the
+            # attempt budget.
+            msg = (
+                f"Your `/pr` was not accepted — the task is in `{rest}` state "
+                f"and there is nothing ready to ship. Post `/fix` to finish the "
+                f"work (or `/retry` to restart).{BOT_MARKER}"
+            )
+        else:
+            # /review or /sync on a plain failed/error task: no completed work
+            # to review or sync yet.
+            cmd = action.refused_command or "/review"
+            msg = (
+                f"Your `{cmd}` was not accepted — the task is in `{rest}` state "
+                f"and has no completed work to operate on. Post `/fix` to "
+                f"complete the work first.{BOT_MARKER}"
+            )
+        return (
+            Effect(kind="post_comment", body=msg),
+            Effect(kind="set_status", status=rest),
+            Effect(
+                kind="patch_queue",
+                queue_patch={
+                    "autoswe_status": rest,
+                    "last_dispatched_command": action.refused_command,
+                    "last_dispatched_command_id": action.triggering_comment_id,
+                    "last_consumed_reply_id": action.triggering_comment_id,
+                    "first_dispatched_at": None,
+                },
+            ),
+        )
+
     # --- Claude actions (result should be DispatchResult) ---
 
     if result is None:
@@ -340,7 +380,10 @@ def emit(
         return ()
 
     done = result.done_content
-    new_status = _map_done_to_status(done, kind)
+    # The reviewer's structured verdict (issue #173 F-18) drives the status
+    # gate first; _map_done_to_status falls back to the markdown regex only
+    # when verdict is None.
+    new_status = _map_done_to_status(done, kind, verdict=result.verdict)
     session_id = result.session_id or task.session_id
 
     # --- Common queue patch for all Claude actions ---
@@ -368,6 +411,33 @@ def emit(
     # uses a throwaway session and should not overwrite the persistent fix session)
     if session_id and kind != "review":
         queue_patch["session_id"] = session_id
+        # Record the last known-good session checkpoint. Only a NON-failed run in
+        # a *coding* phase (plan/fix/retry, i.e. one that maps to a phase in
+        # _KIND_TO_PHASE) is a good checkpoint. A failed run's session is not one
+        # we want to fork from. Non-coding kinds (sync_branch, ship_pr) must NOT
+        # touch the checkpoint: they would otherwise clobber the backend tag a
+        # prior plan/fix wrote (their phase is unresolvable → None) and leave a
+        # non-fix session id behind, silently disabling fork-on-retry. This is
+        # intentionally NOT nullled on the FAILED path below (which nulls
+        # session_id), so /retry forks from the most recent *good* coding session
+        # and a failed retry leaves the checkpoint intact for the next /retry.
+        # Review is excluded above: its throwaway session is not a checkpoint.
+        if new_status != "failed" and _KIND_TO_PHASE.get(kind) is not None:
+            phase = _KIND_TO_PHASE.get(kind)
+            queue_patch["last_good_session_id"] = session_id
+            # Tag which backend produced this checkpoint. A /retry later only
+            # forks when the checkpoint's backend matches the phase's resolved
+            # backend, so a Codex-produced session id can never be resumed by a
+            # Claude fix (the SDK can't resolve a foreign-backend session). Best
+            # effort: if the harness can't be resolved we record None and the
+            # fork gate simply treats the checkpoint as unusable (fresh start).
+            checkpoint_backend = None
+            try:
+                from autoswe.core.config import resolve_harness
+                checkpoint_backend = resolve_harness(phase, world.repo_cfg, cfg).get("backend")
+            except Exception:
+                checkpoint_backend = None
+            queue_patch["last_good_session_backend"] = checkpoint_backend
 
     # Merge lifecycle field mutations (last_phase, resume_phase, plan_file_path,
     # review_file_path, first_dispatched_at, _guard_blocked). Computed once up
@@ -439,6 +509,18 @@ def emit(
         effects.append(Effect(kind="post_comment", body=comment))
         effects.append(Effect(kind="set_status", status=new_status))
 
+        # Persist the PR identity at ship time (issue #193): the shipped
+        # status transition and the queue patch that carry it are one and
+        # the same patch, so pr_number/pr_url land in the queue entry in the
+        # same write that marks the task shipped. Each field is guarded
+        # independently — a provider can supply the URL without the number
+        # and vice versa.
+        if kind == "ship_pr":
+            if result.pr_number is not None:
+                queue_patch["pr_number"] = result.pr_number
+            if result.pr_url:
+                queue_patch["pr_url"] = result.pr_url
+
         # Persist fix_summary from DONE_SUMMARY for PR body enrichment.
         # Mirrors _build_completion_comment's rfind pattern so tabs inside
         # the LLM-generated summary are preserved (the last tab separates
@@ -452,18 +534,26 @@ def emit(
 
         # Auto re-review: a /fix dispatched from a review_failed/review_blocked
         # state must be re-reviewed before it can ship. Flag it so decide()
-        # auto-dispatches /review on the next poll; otherwise clear any stale flag.
+        # auto-dispatches /review on the next poll; otherwise clear any stale
+        # flag. This must cover EVERY completion that lands in a COMPLETED
+        # status (fix/retry -> fixed, sync_branch -> synced, ship_pr ->
+        # shipped), not just fix/retry: a /sync or /pr that follows a flagged
+        # fix would otherwise leave rereview_after_fix live on a synced/shipped
+        # task — a latent re-review one poll away (issue #195). A re-review is
+        # pending only when the just-finished run is a fix/retry that started
+        # from a review-gating state; /pr and /sync never are.
         rereview_pending = kind in ("fix", "retry") and old_status in REVIEW_BLOCKING_STATUSES
-        if kind in ("fix", "retry"):
-            queue_patch["rereview_after_fix"] = rereview_pending
+        queue_patch["rereview_after_fix"] = rereview_pending
 
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 
         # Auto-create PR if fix completed and configured (but never when a
         # re-review is pending — the gating verdict has not cleared yet).
         if kind in ("fix", "retry") and cfg.get("AUTO_CREATE_PR") and task.pr_number is None and not rereview_pending:
-            pr_head = f"autoswe/issue-{task.issue_number}"
-            pr_base = task.plan_branch or task.base_branch
+            pr_head = _resolve_branch(task.owner, task.repo, task.issue_number, None, task.provider)
+            # PR target = the repo's configured base_branch, never plan_branch.
+            # plan_branch is the branch the work was forked from (issue #196).
+            pr_base = task.base_branch
             # Build PR body from task data for context
             body_parts = [f"Fixes #{task.issue_number}"]
             issue_body = task.body or ""
@@ -492,6 +582,38 @@ def emit(
         # Clear session_id on failure — the remote session is likely broken,
         # so the next retry should start fresh instead of resuming a stale session
         queue_patch["session_id"] = None
+        effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
+
+    elif new_status == "test_failed":
+        # Post-fix test gate red (Natedorr/testProject#20): the work was
+        # committed and pushed, but the branch suite is failing. This is NOT
+        # terminal — surface the failure, keep the task restartable, and let
+        # the /pr guard (decide: SHIPPING_BLOCKING_STATUSES) refuse shipping
+        # until a /fix re-runs the gate green.
+        detail, commit_sha = _parse_tests_failed(done)
+        branch = _resolve_branch(
+            task.owner, task.repo, task.issue_number, task.plan_branch, task.provider,
+        )
+        lines = [
+            f"🧪 **Test gate failed** — the branch suite is red, so "
+            f"`{pending_command}` is **not** marked done.",
+        ]
+        if commit_sha:
+            commit_url = _vcs_commit_url(world.repo_cfg, commit_sha)
+            lines.append(f"[Commit]({commit_url})" if commit_url else f"Commit: {commit_sha}")
+            branch_url = _vcs_branch_url(world.repo_cfg, branch)
+            lines.append(f"[View branch]({branch_url})" if branch_url else f"Branch: {branch}")
+        shown = detail[:1500] + ("… truncated" if len(detail) > 1500 else "")
+        lines.append(f"\n**Failure:**\n\n```\n{shown}\n```")
+        lines.append(
+            "\nPost `/fix` to address the failing tests (or `/retry`). "
+            "`/pr` is blocked while the suite is red."
+        )
+        body = "\n".join(lines) + _format_metrics(result.cost_usd, result.duration_seconds, session_id) + BOT_MARKER
+        effects.append(Effect(kind="post_comment", body=body))
+        effects.append(Effect(kind="set_status", status="test_failed"))
+        # No pending re-review — the gate, not the reviewer, produced this state.
+        queue_patch["rereview_after_fix"] = False
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 
     elif new_status == "aborted":

@@ -4,6 +4,8 @@ import asyncio
 import sys
 from unittest.mock import patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # run() — env overrides and parameter resolution
 # ---------------------------------------------------------------------------
@@ -222,6 +224,31 @@ def test_progress_callback_receives_tool_events():
 
     block = ToolUseBlock(id="6", name="SomeOtherTool", input={})
     assert runner._format_tool_progress(block) == "Tool: SomeOtherTool"
+
+    # StructuredOutput is SDK-internal structured-output plumbing (issue #184)
+    # — never user-meaningful progress; it must not become the final body of
+    # the sticky progress comment.
+    block = ToolUseBlock(id="7", name="StructuredOutput", input={"plan_markdown": "x"})
+    assert runner._format_tool_progress(block) is None
+
+
+def test_progress_state_ignores_structured_output():
+    """A StructuredOutput tool event must not overwrite last_command (issue #184)."""
+    from claude_agent_sdk import ToolUseBlock
+
+    from autoswe.harness import runner
+
+    ps = runner.ProgressState()
+    ps.note_tool_use(ToolUseBlock(id="1", name="Bash", input={"command": "pytest -q"}))
+    assert ps.render() == "Running: pytest -q"
+
+    # Turn-end StructuredOutput: last_command must keep the real progress.
+    changed = ps.note_tool_use(
+        ToolUseBlock(id="2", name="StructuredOutput", input={"plan_markdown": "x"})
+    )
+    assert changed is False
+    assert ps.render() == "Running: pytest -q"
+    assert "StructuredOutput" not in (ps.render() or "")
 
 
 # ---------------------------------------------------------------------------
@@ -880,3 +907,276 @@ def test_credentials_restore_preexisting_values():
             os.environ.pop("ANTHROPIC_API_KEY", None)
         else:
             os.environ["ANTHROPIC_API_KEY"] = original_key
+
+
+# ---------------------------------------------------------------------------
+# Per-session env — task-tracking opt-in + no process-env mutation (issue #120)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["plan", "read_only", "read_write"])
+def test_todo_tools_enabled_by_default_in_options_env(mode):
+    """ClaudeCodeBackend opts into the task-tracking tools by default.
+
+    CLAUDE_CODE_ENABLE_TODO_TOOLS=1 must be set on options.env (the child CLI
+    env) for every mode when no profile env is configured — this keeps the
+    sticky progress comment rendering on newer model families that no longer
+    provide those tools by default.
+    """
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt", cwd="/tmp", mode=mode, state={"_harness_cfg": {}}
+        ))
+
+    assert "options" in captured, "fake_query was not called"
+    opts_env = captured["options"].env
+    assert opts_env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "1", (
+        f"mode={mode!r}: expected default opt-in, got env={opts_env!r}"
+    )
+
+
+def test_todo_tools_default_via_legacy_no_mode():
+    """The legacy path (mode=None) also gets the default opt-in on options.env."""
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt",
+            cwd="/tmp",
+            permission_mode="default",
+            allowed_tools=["Read"],
+            state={"_harness_cfg": {}},
+        ))
+
+    assert captured["options"].env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "1"
+
+
+def test_profile_env_overrides_todo_tools_default():
+    """A per-profile `env` value wins over the backend's todo-tools default."""
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt",
+            cwd="/tmp",
+            mode="read_write",
+            state={"_harness_cfg": {"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "0"}}},
+        ))
+
+    # user value wins over the "1" default
+    assert captured["options"].env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "0"
+
+
+def test_profile_env_extra_var_and_credentials_on_options_env():
+    """Profile `env` vars + Anthropic creds all land on options.env, not os.environ."""
+    import os
+
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    orig_api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    async def run_it():
+        sdk = sys.modules["claude_agent_sdk"]
+        with patch.object(sdk, "query", fake_query):
+            await _run_async(
+                "test prompt",
+                cwd="/tmp",
+                mode="read_write",
+                state={"_harness_cfg": {
+                    "anthropic_api_key": "sk-per-session",
+                    "env": {"MY_CUSTOM_VAR": "from-profile"},
+                }},
+            )
+
+    try:
+        asyncio.run(run_it())
+    finally:
+        if orig_api_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = orig_api_key
+
+    opts_env = captured["options"].env
+    assert opts_env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "1"
+    assert opts_env.get("ANTHROPIC_API_KEY") == "sk-per-session"
+    assert opts_env.get("MY_CUSTOM_VAR") == "from-profile"
+    # Process env must NOT have been mutated — creds reach only the child CLI.
+    assert os.environ.get("ANTHROPIC_API_KEY") == orig_api_key, \
+        "ANTHROPIC_API_KEY leaked into the poller process env"
+    assert "MY_CUSTOM_VAR" not in os.environ
+
+
+def test_spec_env_overrides_win_over_profile_env():
+    """spec.env_overrides has highest precedence, beating both profile `env`
+    and the backend default."""
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt",
+            cwd="/tmp",
+            mode="read_write",
+            env_overrides={"CLAUDE_CODE_ENABLE_TODO_TOOLS": "spec-wins"},
+            state={"_harness_cfg": {"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "0"}}},
+        ))
+
+    assert captured["options"].env.get("CLAUDE_CODE_ENABLE_TODO_TOOLS") == "spec-wins"
+
+
+# ---------------------------------------------------------------------------
+# system-prompt preset — all phases must run on the claude_code preset
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("mode", ["plan", "read_only", "read_write"])
+def test_system_prompt_preset_emitted_for_all_phases(mode):
+    """All three phases (plan/fix/review) pass the claude_code system-prompt
+    preset through to ClaudeAgentOptions.
+
+    Phase → mode mapping (planner/coder/reviewer): plan→"plan",
+    fix→"read_write", review→"read_only".
+    """
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.backends.claude_code import CLAUDE_CODE_SYSTEM_PROMPT_PRESET
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt", cwd="/tmp", mode=mode, state={"_harness_cfg": {}}
+        ))
+
+    assert "options" in captured, "fake_query was not called"
+    assert captured["options"].system_prompt == CLAUDE_CODE_SYSTEM_PROMPT_PRESET, (
+        f"mode={mode!r}: system_prompt={captured['options'].system_prompt!r} "
+        f"expected {CLAUDE_CODE_SYSTEM_PROMPT_PRESET!r}"
+    )
+
+
+def test_system_prompt_preset_emitted_for_legacy_no_mode():
+    """The legacy path (mode=None, explicit permission_mode/allowed_tools) also
+    receives the preset, because it sits in the base options_kwargs dict rather
+    than any mode-specific branch.
+
+    Locks in the claude_code.py:420-424 legacy branch.
+    """
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    from autoswe.harness.backends.claude_code import CLAUDE_CODE_SYSTEM_PROMPT_PRESET
+    from autoswe.harness.runner import _run_async
+
+    captured = {}
+
+    async def fake_query(prompt, options):
+        captured["options"] = options
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+
+    sdk = sys.modules["claude_agent_sdk"]
+    with patch.object(sdk, "query", fake_query):
+        asyncio.run(_run_async(
+            "test prompt",
+            cwd="/tmp",
+            permission_mode="default",
+            allowed_tools=["Read"],
+            state={"_harness_cfg": {}},
+        ))
+
+    assert "options" in captured, "fake_query was not called"
+    assert captured["options"].system_prompt == CLAUDE_CODE_SYSTEM_PROMPT_PRESET, (
+        f"legacy path: system_prompt={captured['options'].system_prompt!r} "
+        f"expected {CLAUDE_CODE_SYSTEM_PROMPT_PRESET!r}"
+    )
+
+
+def test_system_prompt_preset_is_a_plain_dict_for_sdk_boundary():
+    """CLAUDE_CODE_SYSTEM_PROMPT_PRESET must be a real dict, not a
+    MappingProxyType, because the Claude Agent SDK consumes it through an
+    ``isinstance(sp, dict)`` guard (client.py / _internal/client.py, for the
+    ``exclude_dynamic_sections`` preset field) and its transport path expects a
+    JSON-serializable value.
+
+    A MappingProxyType is not a dict subclass (isinstance → False) and is not
+    JSON-serializable (json.dumps → TypeError), so either trait would silently
+    drop or break the system-prompt preset at the SDK boundary. This test locks
+    in that contract: it would fail if the constant regressed to a
+    MappingProxyType even though dict/mappingproxy compare equal (the
+    ==-based assertions above would not catch it).
+    """
+    import json
+    import types
+
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from autoswe.harness.backends.claude_code import (
+        CLAUDE_CODE_SYSTEM_PROMPT_PRESET as preset,
+    )
+
+    # The core SDK contract: must pass isinstance(sp, dict) so the SDK's
+    # preset-handling guard treats it as a dict.
+    assert isinstance(preset, dict), (
+        f"system_prompt preset must be a dict, got {type(preset).__name__}"
+    )
+    assert not isinstance(preset, types.MappingProxyType)
+
+    # Must be JSON-serializable (SDK transport may encode options).
+    json.dumps(preset)
+
+    # Content is the bare claude_code preset.
+    assert preset == {"type": "preset", "preset": "claude_code"}
+
+    # It must survive actual ClaudeAgentOptions construction (the value the
+    # real run passes on every Claude invocation).
+    options = ClaudeAgentOptions(cwd="/tmp", system_prompt=preset)
+    assert options.system_prompt == preset

@@ -26,22 +26,19 @@ from autoswe.core.config import (
 )
 from autoswe.core.error_utils import capture_dispatch_error, format_error_comment
 from autoswe.core.logging_utils import get_debug_logger, init_issue_logger, log, remove_issue_logger
-from autoswe.core.queue_store import LockedQueue
+from autoswe.core.queue_store import load_queue, save_queue
 from autoswe.core.slug import make_slug, slug_to_filename
 from autoswe.orch.decide import decide
 from autoswe.orch.emit import emit
 from autoswe.orch.run import DispatchResult, run
 from autoswe.orch.types import ApiState, TaskState, World
-from autoswe.providers.azure.adapter import apply_effect as azure_apply_effect
-from autoswe.providers.azure.adapter import read_api as azure_read_api
-from autoswe.providers.azure.tracker import AzureTracker
-from autoswe.providers.factory import build_repo_cfg, get_tracker
-from autoswe.providers.github.adapter import apply_effect as gh_apply_effect
-from autoswe.providers.github.adapter import read_api as gh_read_api
+from autoswe.providers.adapter import apply_effect, read_api
+from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
 from autoswe.tracking.labels import (
-    REVIEW_BLOCKING_STATUSES,
     RUNNING_STATUSES,
+    SHIPPING_BLOCKING_STATUSES,
     TERMINAL_STATUSES,
+    _kind_from_command,
     completed_status_for,
     normalize_legacy_status,
     running_status_for,
@@ -49,7 +46,7 @@ from autoswe.tracking.labels import (
 from autoswe.tracking.progress import ProgressComment
 
 # Statuses whose label mirror is synced in Phase 3
-_MIRROR_STATUSES = TERMINAL_STATUSES | {"planned", "waiting"} | REVIEW_BLOCKING_STATUSES
+_MIRROR_STATUSES = TERMINAL_STATUSES | {"planned", "waiting"} | SHIPPING_BLOCKING_STATUSES
 
 dbg = get_debug_logger()
 
@@ -151,7 +148,7 @@ def _build_welcome_comment(slash_cmd: str, guidance: str, slug: str, bot_name: s
             "**Available Commands:**\n"
             "- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n"
             "- `/plan --branch <name>` - Plan on a specific branch (default: main)\n"
-            "- `/fix` - Implement the fix (runs Claude with code-editing permissions)\n"
+            "- `/fix` - Implement the fix (runs Claude with code-editing permissions; restarts a failed/error task)\n"
             "- `/fix --branch <name>` - Fix on a specific branch (default: main)\n"
             "- `/fix with <guidance>` - Same as /fix but appends guidance to the prompt\n"
             "- `/review` - Review the changes on the branch (read-only, posts findings)\n"
@@ -215,6 +212,18 @@ def _is_task_running(slug: str) -> bool:
         return False
 
 
+def _repo_stem_prefix(owner: str, repo: str, provider: str) -> str:
+    """The underscore-joined prefix shared by a repo's PID-file stems and
+    worktree directories.
+
+    Derived from the provider (``pid_prefix`` + ``worktree_path_parts``) rather
+    than a hardcoded provider map, so a third provider's layout works here
+    without an edit in this module (issue #168, seam table).
+    """
+    vcs = get_vcs({"owner": owner, "repo": repo, "provider": provider})
+    return f"{vcs.pid_prefix()}{'_'.join(vcs.worktree_path_parts())}_"
+
+
 def _is_repo_locked(owner: str, repo: str, provider: str) -> str | None:
     """Check if any other issue in this repo is currently running.
 
@@ -222,12 +231,7 @@ def _is_repo_locked(owner: str, repo: str, provider: str) -> str | None:
     """
     if not RUNNING_DIR.exists():
         return None
-    prefix = {"github": "gh_", "azure": "ado_"}.get(provider.lower(), "gh_")
-    if provider.lower() == "azure" and "/" in owner:
-        org, _, proj = owner.partition("/")
-        stem_prefix = f"{prefix}{org}_{proj}_{repo}_"
-    else:
-        stem_prefix = f"{prefix}{owner}_{repo}_"
+    stem_prefix = _repo_stem_prefix(owner, repo, provider)
     for pid_path in RUNNING_DIR.iterdir():
         if pid_path.name.endswith(".pid") and pid_path.stem.startswith(stem_prefix):
             try:
@@ -240,22 +244,6 @@ def _is_repo_locked(owner: str, repo: str, provider: str) -> str | None:
                 # Corrupt/gone — clean up
                 pid_path.unlink(missing_ok=True)
     return None
-
-
-# ---------------------------------------------------------------------------
-# Provider adapter selectors
-# ---------------------------------------------------------------------------
-
-def _get_read_api(provider: str):
-    if provider.lower() == "azure":
-        return azure_read_api
-    return gh_read_api
-
-
-def _get_apply_effect(provider: str):
-    if provider.lower() == "azure":
-        return azure_apply_effect
-    return gh_apply_effect
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +291,7 @@ def _dispatch_task(
             task_entry.get("resume_phase") or task_entry.get("last_phase"),
         )
         try:
-            tracker.set_status(repo_cfg, issue_num, f"autoswe:{running}")
+            tracker.set_status(issue_num, f"autoswe:{running}")
         except RuntimeError as e:
             log(f"[WARN] could not set running label: {e}")
 
@@ -337,7 +325,11 @@ def _dispatch_task(
                 bot_ids.append(progress.comment_id)
 
         # --- Run the action (Layer B) ---
-        result = run(action, world, progress_callback=progress.update)
+        # Pass the ProgressComment object (not just its .update bound method):
+        # it is callable (see __call__) for plain progress updates, and the
+        # AskUserQuestion callback can additionally freeze() it on a posted
+        # question so no later tool event clobbers it (issue #184).
+        result = run(action, world, progress_callback=progress)
 
         # --- Emit effects (Layer C) ---
         effects = emit(action, result, world)
@@ -345,14 +337,13 @@ def _dispatch_task(
         # --- Apply effects ---
         # post_comment effects from emit() are used to finalize the sticky
         # progress comment in-place (not posted as a separate comment).
-        apply_fn = _get_apply_effect(provider)
         for effect in effects:
             if effect.kind == "post_comment":
                 progress.finalize(effect.body or "")
                 log("[DISPATCH] Finalized sticky progress comment")
             else:
                 try:
-                    apply_fn(tracker, effect, repo_cfg, issue_num, queue, slug, cfg)
+                    apply_effect(tracker, effect, repo_cfg, issue_num, queue, slug, cfg)
                 except RuntimeError as e:
                     log(f"[WARN] failed to apply effect {effect.kind!r}: {e}")
 
@@ -473,7 +464,8 @@ def _handle_dispatch_error(
     """Handle a dispatch failure: capture diagnostics, post error comment, transition to error state.
 
     Transitions the task to the "error" terminal state instead of rolling
-    back to "pending". The user must post `/retry` to resume.
+    back to "pending". The user can post `/fix` to restart it (carrying the
+    attempt counter forward) or `/retry` to restart with a fresh budget.
     """
     # Get worktree path for diagnostics — always attempt, even without
     # plan_branch (e.g. early /plan failures). _worktree_path is a pure
@@ -498,7 +490,7 @@ def _handle_dispatch_error(
     # 2. Post structured error comment (best effort)
     try:
         comment_body = format_error_comment(ctx)
-        tracker.post_comment(repo_cfg, issue_num, comment_body)
+        tracker.post_comment(issue_num, comment_body)
         log(f"[ERROR] {slug}: posted error comment")
     except Exception as post_err:  # Post is best-effort; log and continue if the provider API fails
         dbg.error("dispatch error: failed to post comment for %s: %s", slug, post_err, exc_info=True)
@@ -547,7 +539,7 @@ def _post_pending_welcomes(
         try:
             repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg, provider=provider)
             tracker = get_tracker(repo_cfg)
-            comments = tracker.fetch_comments(repo_cfg, issue_num)
+            comments = tracker.fetch_comments(issue_num)
 
             slash_result = None
             for comment in sorted(comments, key=lambda c: c.created_at, reverse=True):
@@ -559,7 +551,7 @@ def _post_pending_welcomes(
 
             slash_cmd, guidance, _branch = slash_result if slash_result else (None, None, None)
             body = _build_welcome_comment(slash_cmd or "", guidance or "", task["id"], bot_name=bot_name)
-            welcome_id = tracker.post_comment(repo_cfg, issue_num, body)
+            welcome_id = tracker.post_comment(issue_num, body)
             task["suppress_welcome"] = True
             if welcome_id:
                 task["welcome_comment_id"] = welcome_id
@@ -579,7 +571,8 @@ def _post_pending_welcomes(
 def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None:
     """Recover worktrees left dirty by SIGKILL'd dispatch processes.
 
-    Runs at poll-cycle startup (inside the LockedQueue context, before dispatch).
+    Runs at poll-cycle startup (on the in-memory queue, before dispatch); its
+    mutations are persisted by save_queue() at the end of the cycle.
     For each queue entry with a dead PID file:
     - Clears the stale PID.
     - Resets any RUNNING status to "pending" so decide() re-dispatches.
@@ -653,7 +646,10 @@ def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None
             continue
 
         try:
-            repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg)
+            # Pass the task's provider so that a repos_cfg lookup miss
+            # (two-part key for a three-part Azure repo) does not silently
+            # fall back to the GitHub default (issue #173 F-16).
+            repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg, provider=provider)
         except Exception as e:
             dbg.error("recover: build_repo_cfg failed for %s: %s", slug, e, exc_info=True)
             log(f"[RECOVER] {slug}: could not build repo_cfg: {e}")
@@ -688,10 +684,11 @@ def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None
         # Best-effort recovery comment
         try:
             tracker = get_tracker(repo_cfg)
+            branch = get_vcs(repo_cfg).branch_name(issue_num)
             tracker.post_comment(
-                repo_cfg, issue_num,
+                issue_num,
                 f"**autoSWE recovery**: found orphaned changes from an interrupted run "
-                f"— committed and pushed them to `autoswe/issue-{issue_num}`."
+                f"— committed and pushed them to `{branch}`."
                 f"{AUTOSWE_BOT_FOOTER}",
             )
         except Exception as e:
@@ -741,261 +738,312 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
     tasks_processed = 0
     dispatched_this_cycle: set[str] = set()
 
-    with LockedQueue() as lq:
-        queue = lq.queue
+    # Load the queue under a brief exclusive lock, then release it (issue #173 F-12):
+    # the agent runs and welcome throttling below take far longer than the
+    # read, so the lock is NOT held across them. All in-memory mutations are
+    # accumulated on `queue` and persisted once at the end via save_queue(),
+    # which re-takes the lock to merge the patch over any concurrent changes.
+    queue = load_queue()
 
-        if run_actions and cfg.get("WORKTREE_DIR"):
-            _recover_orphaned_worktrees(cfg, queue, repos_cfg)
+    if run_actions and cfg.get("WORKTREE_DIR"):
+        _recover_orphaned_worktrees(cfg, queue, repos_cfg)
 
-        for repo_path in repo_keys:
-            owner, _, repo = repo_path.partition("/")
-            if not repo:
-                log(f"[WARN] invalid repo key '{repo_path}', skipping")
-                continue
+    for repo_path in repo_keys:
+        owner, _, repo = repo_path.partition("/")
+        if not repo:
+            log(f"[WARN] invalid repo key '{repo_path}', skipping")
+            continue
 
-            log(f"[SYNC] {owner}/{repo}")
+        log(f"[SYNC] {owner}/{repo}")
 
-            try:
-                repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg)
-            except Exception as e:  # Config parse failure is per-repo; skip repo, continue to next.
-                log(f"[ERROR] {owner}/{repo}: failed to build repo_cfg: {e}")
-                continue
+        try:
+            repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg)
+        except Exception as e:  # Config parse failure is per-repo; skip repo, continue to next.
+            log(f"[ERROR] {owner}/{repo}: failed to build repo_cfg: {e}")
+            continue
 
-            tracker = get_tracker(repo_cfg)
-            provider = repo_cfg.get("provider", "github")
+        tracker = get_tracker(repo_cfg)
+        provider = repo_cfg.get("provider", "github")
 
-            # Resolve repo UUID for Azure — web URLs require UUID, not display name
-            if provider == "azure" and isinstance(tracker, AzureTracker):
-                try:
-                    repo_id = tracker.resolve_repo_id()
-                    if repo_id:
-                        repo_cfg["repo_id"] = repo_id
-                except Exception as e:  # Azure repo_id resolution is optional — fallback to repo name
-                    log(f"[WARN] {owner}/{repo}: failed to resolve repo_id ({type(e).__name__}: {e}), falling back to name")
+        # Resolve a platform-specific repo identifier (Azure: Git repo UUID —
+        # web URLs require UUID, not display name; GitHub: no-op).
+        try:
+            repo_id = get_vcs(repo_cfg).resolve_repo_id()
+            if repo_id:
+                repo_cfg["repo_id"] = repo_id
+        except Exception as e:  # repo_id resolution is optional — fallback to repo name
+            log(f"[WARN] {owner}/{repo}: failed to resolve repo_id ({type(e).__name__}: {e}), falling back to name")
 
-            repo_override = repos_cfg.get(repo_path, {})
-            base_branch = repo_override.get("base_branch", "main")
+        repo_override = repos_cfg.get(repo_path, {})
+        base_branch = repo_override.get("base_branch", "main")
 
-            # Fetch API state for this repo
-            # Pass bot_ids from queue so adapters can set is_bot flags.
-            # First poll after queue wipe relies on fallback (author_login == "BOT",
-            # body marker check) — the backfill below self-heals after apply.
-            try:
-                read_api_fn = _get_read_api(provider)
-                all_bot_ids = {
-                    cid
-                    for t in queue.values()
-                    for cid in t.get("bot_comment_ids", [])
-                }
-
-                # Build skip-rule inputs from queue entries for this repo
-                # Slugs in queue keys use colons (gh: / ado:) — see make_slug().
-                # Do NOT confuse with PID-file stems which use underscores (gh_ / ado_)
-                # via slug_to_filename() — that's what _is_repo_locked() uses.
-                slug_prefix = {"github": "gh:", "azure": "ado:"}.get(provider.lower(), "gh:")
-                if provider.lower() == "azure" and "/" in owner:
-                    org, _, proj = owner.partition("/")
-                    stem_prefix = f"{slug_prefix}{org}_{proj}_{repo}_"
-                else:
-                    stem_prefix = f"{slug_prefix}{owner}_{repo}_"
-
-                prev_updated: dict[int, str | None] = {}
-                force_fetch: set[int] = set()
-                for _slug, _entry in queue.items():
-                    if (_entry.get("owner") == owner and _entry.get("repo") == repo
-                            and _slug.startswith(stem_prefix)):
-                        _inum = _entry.get("issue_number")
-                        if _inum is not None:
-                            prev_updated[_inum] = _entry.get("last_updated")
-                            _status = _entry.get("autoswe_status")
-                            if _status == "pending" or _status in RUNNING_STATUSES:
-                                force_fetch.add(_inum)
-
-                api_states = read_api_fn(
-                    tracker, repo_cfg, cfg,
-                    bot_ids=all_bot_ids,
-                    prev_updated=prev_updated,
-                    force_fetch=force_fetch,
-                )
-            except RuntimeError as e:
-                log(f"[ERROR] {owner}/{repo}: {e}")
-                continue
-
-            # Build set of genuinely open issue numbers for gh_closed detection
-            open_issue_numbers = {
-                api.issue.number
-                for api in api_states.values()
-                if not api.issue.is_pull_request and api.issue.state != "closed"
+        # Fetch API state for this repo
+        # Pass bot_ids from queue so adapters can set is_bot flags.
+        # First poll after queue wipe relies on fallback (author_login == "BOT",
+        # body marker check) — the backfill below self-heals after apply.
+        try:
+            all_bot_ids = {
+                cid
+                for t in queue.values()
+                for cid in t.get("bot_comment_ids", [])
             }
 
-            # --- Phase 0a: Ensure queue entries exist ---
-            # Create queue entries for all open issues before Phase 0b (welcomes).
-            # This ensures _post_pending_welcomes can find newly discovered tasks.
-            active_slugs: set[str] = set()
-            for issue_number, api in api_states.items():
-                if api.issue.is_pull_request:
-                    continue
-                if api.issue.state == "closed":
-                    continue
-                slug = make_slug(provider, (owner, repo), issue_number)
-                active_slugs.add(slug)
-                _ensure_queue_entry(
-                    queue, slug, api, owner, repo, issue_number,
-                    now_iso, base_branch, provider, silent_reporting,
-                )
+            # Build skip-rule inputs from queue entries for this repo.
+            # Queue keys are ``make_slug(provider, (owner, repo), n)`` =
+            # ``{slug_prefix}:{owner}_{repo}_{n}`` — so the scan prefix must be
+            # that same shape. The slug prefix comes from the provider object
+            # (``VCSProvider.slug_prefix``) rather than a hardcoded map
+            # (issue #168, seam table); ``owner``/``repo`` are the same values
+            # make_slug is called with just below.
+            # Do NOT confuse with PID-file stems which use underscores
+            # (``gh_``/``ado_``) via slug_to_filename() — that's what
+            # _is_repo_locked() uses.
+            stem_prefix = f"{get_vcs(repo_cfg).slug_prefix()}:{owner}_{repo}_"
 
-            # --- Phase 0b: Post pending welcome comments before dispatch ---
-            # Run after queue entries are ensured, so the welcome comment
-            # is always the first bot comment on the issue.
-            # The queue is mutated in-place; _build_poll_task reads the
-            # updated suppress_welcome flag for each issue.
-            if run_actions:
-                _post_pending_welcomes(queue, repos_cfg, cfg, bot_name, silent_reporting,
-                                       active_slugs=active_slugs)
+            prev_updated: dict[int, str | None] = {}
+            force_fetch: set[int] = set()
+            for _slug, _entry in queue.items():
+                if (_entry.get("owner") == owner and _entry.get("repo") == repo
+                        and _slug.startswith(stem_prefix)):
+                    _inum = _entry.get("issue_number")
+                    if _inum is not None:
+                        prev_updated[_inum] = _entry.get("last_updated")
+                        _status = _entry.get("autoswe_status")
+                        if _status == "pending" or _status in RUNNING_STATUSES:
+                            force_fetch.add(_inum)
 
-            # --- Phase 1: Process open issues ---
-            for issue_number, api in api_states.items():
-                if api.issue.is_pull_request:
-                    continue
-                if api.issue.state == "closed":
-                    continue  # handled by gh_closed detection below
+            api_states = read_api(
+                tracker,
+                bot_ids=all_bot_ids,
+                prev_updated=prev_updated,
+                force_fetch=force_fetch,
+            )
+        except RuntimeError as e:
+            log(f"[ERROR] {owner}/{repo}: {e}")
+            continue
 
-                slug = make_slug(provider, (owner, repo), issue_number)
+        # Build set of genuinely open issue numbers for gh_closed detection
+        open_issue_numbers = {
+            api.issue.number
+            for api in api_states.values()
+            if not api.issue.is_pull_request and api.issue.state != "closed"
+        }
 
-                # Ensure queue entry is up-to-date (title/body/last_synced)
-                _ensure_queue_entry(
-                    queue, slug, api, owner, repo, issue_number,
-                    now_iso, base_branch, provider, silent_reporting,
-                )
+        # --- Phase 0a: Ensure queue entries exist ---
+        # Create queue entries for all open issues before Phase 0b (welcomes).
+        # This ensures _post_pending_welcomes can find newly discovered tasks.
+        active_slugs: set[str] = set()
+        for issue_number, api in api_states.items():
+            if api.issue.is_pull_request:
+                continue
+            if api.issue.state == "closed":
+                continue
+            slug = make_slug(provider, (owner, repo), issue_number)
+            active_slugs.add(slug)
+            _ensure_queue_entry(
+                queue, slug, api, owner, repo, issue_number,
+                now_iso, base_branch, provider, silent_reporting,
+            )
 
-                # Build TaskState + World
-                pt = _build_poll_task(queue, slug, api, cfg, repo_cfg)
-                action = decide(pt.world)
+        # --- Phase 0b: Post pending welcome comments before dispatch ---
+        # Run after queue entries are ensured, so the welcome comment
+        # is always the first bot comment on the issue.
+        # The queue is mutated in-place; _build_poll_task reads the
+        # updated suppress_welcome flag for each issue.
+        if run_actions:
+            _post_pending_welcomes(queue, repos_cfg, cfg, bot_name, silent_reporting,
+                                   active_slugs=active_slugs)
 
-                # Bookkeeping: update last_comment_sync and last_updated
-                task_entry = queue[slug]
-                if api.comments_fetched:
-                    task_entry["last_comment_sync"] = now_iso
-                    if action.kind == "noop":
-                        task_entry["last_updated"] = api.issue.last_updated
+        # --- Phase 1: Process open issues ---
+        for issue_number, api in api_states.items():
+            if api.issue.is_pull_request:
+                continue
+            if api.issue.state == "closed":
+                continue  # handled by gh_closed detection below
 
+            slug = make_slug(provider, (owner, repo), issue_number)
+
+            # Ensure queue entry is up-to-date (title/body/last_synced)
+            _ensure_queue_entry(
+                queue, slug, api, owner, repo, issue_number,
+                now_iso, base_branch, provider, silent_reporting,
+            )
+
+            # Build TaskState + World
+            pt = _build_poll_task(queue, slug, api, cfg, repo_cfg)
+            action = decide(pt.world)
+
+            # Bookkeeping: update last_comment_sync and last_updated
+            task_entry = queue[slug]
+            if api.comments_fetched:
+                task_entry["last_comment_sync"] = now_iso
                 if action.kind == "noop":
-                    continue
+                    task_entry["last_updated"] = api.issue.last_updated
 
-                # Sync-only mode: log decision but don't run
-                if not run_actions:
-                    log(f"[DISPATCH] {slug} would run {action.kind!r} (sync-only mode, skipping)")
-                    continue
+            if action.kind == "noop":
+                continue
 
-                # Concurrency gate
-                if tasks_processed >= max_concurrent:
-                    log(f"[DISPATCH] MAX_CONCURRENT ({max_concurrent}) reached, stopping dispatch")
-                    break
+            # Sync-only mode: log decision but don't run
+            if not run_actions:
+                log(f"[DISPATCH] {slug} would run {action.kind!r} (sync-only mode, skipping)")
+                continue
 
-                if _is_task_running(slug):
-                    log(f"[DISPATCH] {slug} already running, skipping")
-                    continue
+            # Concurrency gate
+            if tasks_processed >= max_concurrent:
+                log(f"[DISPATCH] MAX_CONCURRENT ({max_concurrent}) reached, stopping dispatch")
+                break
 
-                if slug in dispatched_this_cycle:
-                    log(f"[DISPATCH] {slug} already dispatched this cycle — skipping")
-                    continue
+            if _is_task_running(slug):
+                log(f"[DISPATCH] {slug} already running, skipping")
+                continue
 
-                repo_locked_by = _is_repo_locked(owner, repo, provider)
-                if repo_locked_by:
-                    log(f"[DISPATCH] {slug} skipped — repo in use by {repo_locked_by}")
-                    continue
+            if slug in dispatched_this_cycle:
+                log(f"[DISPATCH] {slug} already dispatched this cycle — skipping")
+                continue
 
-                # Dispatch
-                tasks_processed += 1
-                dispatched_this_cycle.add(slug)
+            repo_locked_by = _is_repo_locked(owner, repo, provider)
+            if repo_locked_by:
+                log(f"[DISPATCH] {slug} skipped — repo in use by {repo_locked_by}")
+                continue
 
-                try:
-                    _dispatch_task(pt, action, tracker, repo_cfg, provider, cfg, queue, now_iso)
-                except Exception as e:  # Dispatch state-machine boundary; ANY failure must become a handled error.
-                    dbg.error("poll: dispatch failed for %s: %s", slug, e, exc_info=True)
-                    log(f"[ERROR] {slug}: dispatch failed: {e}")
-                    _handle_dispatch_error(
-                        slug=slug,
-                        exc=e,
-                        tracker=tracker,
-                        repo_cfg=repo_cfg,
-                        issue_num=queue[slug]["issue_number"],
-                        queue_entry=queue[slug],
-                        cfg=cfg,
-                        owner=pt.task_state.owner,
-                        repo=pt.task_state.repo,
-                        provider=provider,
-                    )
+            # Dispatch
+            tasks_processed += 1
+            dispatched_this_cycle.add(slug)
 
-            # --- Observability: per-repo comment-fetch summary ---
-            fetched_count = sum(
-                1 for api in api_states.values()
-                if not api.issue.is_pull_request
-                and api.issue.state != "closed"
-                and api.comments_fetched
-            )
-            total_open = sum(
-                1 for api in api_states.values()
-                if not api.issue.is_pull_request
-                and api.issue.state != "closed"
-            )
-            log(f"[SYNC] {owner}/{repo}: fetched comments for {fetched_count}/{total_open} open issues")
+            try:
+                _dispatch_task(pt, action, tracker, repo_cfg, provider, cfg, queue, now_iso)
+            except Exception as e:  # Dispatch state-machine boundary; ANY failure must become a handled error.
+                dbg.error("poll: dispatch failed for %s: %s", slug, e, exc_info=True)
+                log(f"[ERROR] {slug}: dispatch failed: {e}")
+                _handle_dispatch_error(
+                    slug=slug,
+                    exc=e,
+                    tracker=tracker,
+                    repo_cfg=repo_cfg,
+                    issue_num=queue[slug]["issue_number"],
+                    queue_entry=queue[slug],
+                    cfg=cfg,
+                    owner=pt.task_state.owner,
+                    repo=pt.task_state.repo,
+                    provider=provider,
+                )
 
-            # --- Backfill bot_comment_ids (self-healing) ---
-            # After dispatch-apply, any comments with is_bot=True but ID not yet
-            # in bot_comment_ids get backfilled. Makes the system self-healing
-            # on the first poll after a queue wipe.
-            for issue_number, api in api_states.items():
-                slug = make_slug(provider, (owner, repo), issue_number)
-                if slug not in queue:
-                    continue
-                task_entry = queue[slug]
-                task_entry.setdefault("bot_comment_ids", [])
-                existing_ids = set(task_entry["bot_comment_ids"])
-                for c in api.comments:
-                    if c.is_bot and c.id and c.id not in existing_ids:
-                        task_entry["bot_comment_ids"].append(c.id)
-                        existing_ids.add(c.id)
+        # --- Observability: per-repo comment-fetch summary ---
+        fetched_count = sum(
+            1 for api in api_states.values()
+            if not api.issue.is_pull_request
+            and api.issue.state != "closed"
+            and api.comments_fetched
+        )
+        total_open = sum(
+            1 for api in api_states.values()
+            if not api.issue.is_pull_request
+            and api.issue.state != "closed"
+        )
+        log(f"[SYNC] {owner}/{repo}: fetched comments for {fetched_count}/{total_open} open issues")
 
-            # --- Phase 2: gh_closed detection ---
-            for slug in list(queue.keys()):
-                task_entry = queue[slug]
-                if task_entry["owner"] != owner or task_entry["repo"] != repo:
-                    continue
-                if task_entry["issue_number"] not in open_issue_numbers:
-                    if not task_entry.get("gh_closed", False):
-                        task_entry["gh_closed"] = True
-                        closed_status = completed_status_for(
-                            task_entry.get("last_dispatched_command", "/fix").lstrip("/")
+        # --- Backfill bot_comment_ids (self-healing) ---
+        # After dispatch-apply, any comments with is_bot=True but ID not yet
+        # in bot_comment_ids get backfilled. Makes the system self-healing
+        # on the first poll after a queue wipe.
+        for issue_number, api in api_states.items():
+            slug = make_slug(provider, (owner, repo), issue_number)
+            if slug not in queue:
+                continue
+            task_entry = queue[slug]
+            task_entry.setdefault("bot_comment_ids", [])
+            existing_ids = set(task_entry["bot_comment_ids"])
+            for c in api.comments:
+                if c.is_bot and c.id and c.id not in existing_ids:
+                    task_entry["bot_comment_ids"].append(c.id)
+                    existing_ids.add(c.id)
+
+        # --- Phase 2: gh_closed detection ---
+        for slug in list(queue.keys()):
+            task_entry = queue[slug]
+            if task_entry["owner"] != owner or task_entry["repo"] != repo:
+                continue
+            if task_entry["issue_number"] not in open_issue_numbers:
+                if not task_entry.get("gh_closed", False):
+                    task_entry["gh_closed"] = True
+                    # last_dispatched_command is a slash command ("/sync",
+                    # "/pr", ...), not an action kind. completed_status_for
+                    # is keyed by kind ("sync_branch", "ship_pr", ...), so
+                    # use _kind_from_command to convert — otherwise /sync
+                    # and /pr both fall through to the "fixed" default.
+                    closed_status = completed_status_for(
+                        _kind_from_command(
+                            task_entry.get("last_dispatched_command", "/fix")
                         )
-                        task_entry["autoswe_status"] = closed_status
-                        with contextlib.suppress(RuntimeError):
-                            tracker.set_status(repo_cfg, task_entry["issue_number"], f"autoswe:{closed_status}")
-                        log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
-                    continue
-                if task_entry.get("gh_closed", False):
-                    task_entry["gh_closed"] = False
-                    log(f"[REOPENED] {slug} — issue reopened on platform")
+                    )
+                    task_entry["autoswe_status"] = closed_status
+                    with contextlib.suppress(RuntimeError):
+                        tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
+                    log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
+                continue
+            if task_entry.get("gh_closed", False):
+                task_entry["gh_closed"] = False
+                log(f"[REOPENED] {slug} — issue reopened on platform")
 
-            # --- Phase 3: Label mirror for terminal tasks ---
-            # Only call set_status when the issue's current status (from labels/tags
-            # refreshed by list_open_issues) differs from the queue status. This
-            # avoids a write that would bump the provider's updated timestamp,
-            # which would defeat the comment-fetch skip optimization.
-            for slug in list(queue.keys()):
-                task_entry = queue[slug]
-                if task_entry["owner"] != owner or task_entry["repo"] != repo:
-                    continue
-                if task_entry["issue_number"] not in open_issue_numbers:
-                    continue
-                qs = task_entry.get("autoswe_status")
-                if qs in _MIRROR_STATUSES:
-                    api_state = api_states.get(task_entry["issue_number"])
-                    if api_state is not None and api_state.issue.status != qs:
-                        with contextlib.suppress(RuntimeError):
-                            tracker.set_status(
-                                repo_cfg, task_entry["issue_number"], f"autoswe:{qs}"
-                            )
+        # --- Phase 3: Label mirror for terminal tasks ---
+        # Only call set_status when the issue's current status (from labels/tags
+        # refreshed by list_open_issues) differs from the queue status. This
+        # avoids a write that would bump the provider's updated timestamp,
+        # which would defeat the comment-fetch skip optimization.
+        for slug in list(queue.keys()):
+            task_entry = queue[slug]
+            if task_entry["owner"] != owner or task_entry["repo"] != repo:
+                continue
+            if task_entry["issue_number"] not in open_issue_numbers:
+                continue
+            qs = task_entry.get("autoswe_status")
+            if qs in _MIRROR_STATUSES:
+                api_state = api_states.get(task_entry["issue_number"])
+                if api_state is not None and api_state.issue.status != qs:
+                    with contextlib.suppress(RuntimeError):
+                        tracker.set_status(
+                            task_entry["issue_number"], f"autoswe:{qs}"
+                        )
+
+        # --- Phase 4: Auto-purge worktrees for gone remote branches ---
+        # When a remote autoswe/issue-N branch is deleted (PR merged +
+        # auto-deleted, or removed manually), the local worktree dir and branch
+        # become orphaned. This is opt-in (AUTO_PURGE_BRANCHES, default off) and
+        # best-effort: a purge failure must never abort the poll cycle. The
+        # in-flight set is built here — this module owns the PID/lifecycle
+        # knowledge — and passed to purge_gone_branches so worktree.py stays
+        # free of loop imports.
+        if run_actions and cfg.get("AUTO_PURGE_BRANCHES"):
+            try:
+                from autoswe.vcs.worktree import purge_gone_branches
+
+                in_flight: set[int] = set()
+                for slug in queue:
+                    te = queue[slug]
+                    if te["owner"] != owner or te["repo"] != repo:
+                        continue
+                    if _is_task_running(slug):
+                        in_flight.add(te["issue_number"])
+                purged = purge_gone_branches(
+                    owner, repo, cfg, provider=provider,
+                    skip_issue_numbers=in_flight,
+                )
+                if purged:
+                    log(
+                        f"[PURGE] {owner}/{repo}: auto-removed "
+                        f"{len(purged)} gone branch(es): {purged}"
+                    )
+            except Exception as e:
+                dbg.error(
+                    "purge_gone_branches failed for %s/%s: %s", owner, repo, e,
+                    exc_info=True,
+                )
+
+    # Persist all in-memory queue mutations accumulated during this cycle.
+    # Re-takes the exclusive lock and merges the patch over the on-disk state
+    # (issue #173 F-12): the lock was released before dispatch so agent runs
+    # never held it, so this is the single write point.
+    save_queue(queue)
 
     return tasks_processed
 

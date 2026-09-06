@@ -1,7 +1,7 @@
 # GitHub REST API Reference
 
 > Grounding reference for Claude Code sessions — prevents hallucinated endpoints.
-> Fetched: 2026-05-02
+> Fetched: 2026-07-19
 
 ---
 

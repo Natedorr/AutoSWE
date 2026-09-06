@@ -10,17 +10,12 @@ GET /repos/{owner}/{repo}/labels
 
 Lists all labels for a repository.
 
-
 ### Parameters
-
 
 #### Headers
 
-
 - **`accept`** (string)
   Setting to `application/vnd.github+json` is recommended.
-
-
 
 #### Path and query parameters
 
@@ -38,25 +33,13 @@ Lists all labels for a repository.
   The page number of the results to fetch. For more information, see "Using pagination in the REST API."
   Default: `1`
 
-
-
-
-
-
 ### HTTP response status codes
-
 
 - **200** - OK
 
-
 - **404** - Resource not found
 
-
-
-
 ### Code examples
-
-
 
 #### Example
 
@@ -71,7 +54,3 @@ curl -L \
 **Response schema (Status: 200):**
 
 Same response schema as [List labels for an issue](#list-labels-for-an-issue).
-
-
-
-

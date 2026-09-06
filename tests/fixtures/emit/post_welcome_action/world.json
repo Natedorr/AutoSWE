@@ -8,8 +8,7 @@
       "repo": "repo",
       "state": "open"
     },
-    "comments": [],
-    "open_pr_numbers": []
+    "comments": []
   },
   "task": {
     "slug": "gh:owner_repo_42",

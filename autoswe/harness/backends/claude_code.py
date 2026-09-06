@@ -12,18 +12,53 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
+import warnings
 from collections.abc import Awaitable
+from contextlib import contextmanager
 from pathlib import Path
 
 from autoswe.core.logging_utils import get_debug_logger, log
-from autoswe.harness.backends.base import PROGRESS_TOOLS, RunResult, RunSpec
+from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.prompts import BOT_MARKER
 
 _dbg = get_debug_logger()
 
 _RETRYABLE_SDK_EXCEPTIONS: tuple = ()
 _PLANS_DIR = Path.home() / ".claude" / "plans"
+
+# ---------- Claude Code tool sets ----------
+#
+# These are Claude-Code-specific tool names and therefore live here — in the
+# backend that actually consumes them — not in the harness-agnostic base
+# (S6 / issue #169 F-10). runner.py and backends/__init__.py re-export them
+# for back-compat so existing importers need no changes.
+
+# Read-only-safe progress/orchestration tools (no repo mutation)
+PROGRESS_TOOLS = [
+    "TodoWrite",
+    "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop",
+]
+
+# Full agent toolset: includes sub-agent spawning. Only safe for fix/coder phases.
+AGENT_TASK_TOOLS = [*PROGRESS_TOOLS, "Agent"]
+
+# Claude Code's default system-prompt preset. When system_prompt is unset the
+# SDK falls back to a minimal prompt that covers tool calling but omits the
+# preset's tool-usage guidance, security/safety instructions, and
+# working-directory/environment context. Setting the bare preset makes
+# plan/fix/review run on the full Claude Code prompt.
+#
+# Plain dict (NOT MappingProxyType): the Agent SDK branches on
+# ``isinstance(system_prompt, dict)`` (e.g. to read exclude_dynamic_sections),
+# and a MappingProxyType fails that check even though it compares equal to a
+# dict. Content-based equality with a plain dict still holds, so tests that
+# assert ``system_prompt == CLAUDE_CODE_SYSTEM_PROMPT_PRESET`` are unaffected.
+# The shared constant is only ever read by the SDK; call sites that build
+# ``options_kwargs`` pass ``dict(CLAUDE_CODE_SYSTEM_PROMPT_PRESET)`` (a fresh
+# copy) so the module-level object is never mutated.
+CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {
+    "type": "preset", "preset": "claude_code",
+}
 
 # ---------- Mode → Claude Code mapping ----------
 
@@ -43,6 +78,15 @@ _READ_ONLY_TOOLS = [
 ]
 
 # Full read-write tools (everything the fix phase needs)
+#
+# NOTE on TaskOutput: the *deprecated* TaskOutput tool was removed in
+# issue #132 (commit 8198408) — from the shared PROGRESS_TOOLS list (which
+# feeds _READ_ONLY_TOOLS / _PLAN_TOOLS) and, because this read_write list is
+# hand-maintained and does not spread PROGRESS_TOOLS, from this list with a
+# separate edit. It is deliberately re-added here (S6 follow-up on issue
+# #169): in the fix phase the coder may spawn background sub-agents via Agent
+# and read their output directly through TaskOutput (Read remains the
+# canonical fallback). read_only/plan still omit it, matching #132.
 _READ_WRITE_TOOLS = [
     "Read", "Edit", "Write", "Bash", "Glob", "Grep",
     "AskUserQuestion", *_MCP_COMMENT_TOOLS,
@@ -64,6 +108,95 @@ _MODE_CONFIG = {
     "read_only": ("plan", _READ_ONLY_TOOLS, ()),
     "read_write": ("bypassPermissions", _READ_WRITE_TOOLS, ()),
 }
+
+
+# Minimum Agent SDK version that exposes ``fork_session`` (and
+# ``resume_session_at``). ``claude-agent-sdk`` ships no pinned ``__version__``
+# everywhere, so we read the installed distribution version defensively and
+# treat an unreadable/unknown version as "new enough" (the capability is still
+# advertised; the guard only degrades to plain resume on a *known* old SDK).
+_FORK_MIN_SDK_VERSION = (0, 2, 137)
+
+# Minimum Agent SDK version that exposes ``output_format`` on
+# ``ClaudeAgentOptions`` and ``ResultMessage.structured_output``. Verified to
+# be 0.2.137 — the same floor as ``fork_session`` (see requirements.txt /
+# tests/test_sdk_version.py). On a *known* older SDK the guard degrades to a
+# plain run (no output_format) rather than passing an unknown option.
+_STRUCTURED_OUTPUT_MIN_SDK_VERSION = (0, 2, 137)
+
+
+def _sdk_version_tuple() -> tuple | None:
+    """Return the installed ``claude-agent-sdk`` (major, minor, patch), or None."""
+    try:
+        from importlib.metadata import version  # deferred import
+        raw = version("claude-agent-sdk")
+    except Exception:
+        return None
+    parts = raw.split(".")
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return None
+    patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    return (major, minor, patch)
+
+
+def _sdk_supports_structured_output() -> bool:
+    """Return True when the installed Agent SDK is new enough for ``output_format``.
+
+    Reads the installed ``claude-agent-sdk`` distribution version lazily. Returns
+    True when the version cannot be read so a fresh/edge install is not needlessly
+    demoted; the guard only skips the option on a *known* old SDK.
+    """
+    ver = _sdk_version_tuple()
+    if ver is None:
+        return True
+    return ver >= _STRUCTURED_OUTPUT_MIN_SDK_VERSION
+
+
+def _sdk_supports_session_fork() -> bool:
+    """Return True when the installed Agent SDK is new enough for ``fork_session``.
+
+    Reads the installed ``claude-agent-sdk`` distribution version lazily (the
+    SDK is a heavy, possibly-missing dependency). Returns True when the version
+    cannot be read so a fresh/edge install is not needlessly demoted.
+    """
+    ver = _sdk_version_tuple()
+    if ver is None:
+        return True
+    return ver >= _FORK_MIN_SDK_VERSION
+
+
+@contextmanager
+def _can_use_tool_shadowing_suppressed(enabled: bool):
+    """Suppress the SDK's ``CanUseToolShadowedWarning`` advisory (issue #190).
+
+    The SDK emits this advisory whenever ``can_use_tool`` is registered
+    alongside options that *statically* shadow it (``permission_mode``
+    ``"bypassPermissions"``, or whole-tool ``allowed_tools`` entries).  For
+    every autoSWE configuration that shadowing is intentional: each phase's
+    tool set is pre-approved by design, and the CLI still routes
+    user-interaction tools (``AskUserQuestion``) to the callback regardless
+    of allow rules or permission mode — so the AskUserQuestion → pause →
+    ``autoswe:waiting`` path works even under ``bypassPermissions``
+    (verified against CLI 2.1.252; see
+    docs/claude-agent-sdk/agent-sdk/permissions.md, "Ask rules").  Filtering
+    the false-positive advisory here keeps one line out of ``poller.log``
+    per dispatch; the SDK's own warning docstring recommends exactly this
+    filter.
+    """
+    if not enabled:
+        yield
+        return
+    try:
+        from claude_agent_sdk import CanUseToolShadowedWarning  # deferred import: SDK may not be installed
+    except ImportError:
+        # An SDK build predating the advisory has nothing to suppress.
+        yield
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", CanUseToolShadowedWarning)
+        yield
 
 
 def _get_retryable_exceptions() -> tuple:
@@ -94,6 +227,14 @@ def _format_tool_progress(block) -> str | None:
 
     if isinstance(block, ToolUseBlock):
         name = block.name
+        if name == "StructuredOutput":
+            # SDK-internal structured-output plumbing (issue #184): at turn end
+            # the SDK invokes its internal StructuredOutput tool to deliver the
+            # schema-validated payload. It is never meaningful progress —
+            # rendering it as "Tool: StructuredOutput" let it become the final
+            # body of the sticky progress comment, clobbering a posted
+            # question. Return None like the uninteresting tools.
+            return None
         inputs = block.input or {}
         if name == "Bash":
             cmd = inputs.get("command", "")
@@ -113,8 +254,22 @@ def _format_tool_progress(block) -> str | None:
         else:
             return f"Tool: {name}"
     elif isinstance(block, ServerToolUseBlock):
+        if block.name == "StructuredOutput":
+            return None
         return f"Server tool: {block.name}"
     return None
+
+
+def plan_file_dir() -> Path:
+    """Return the native plan-file directory the Claude Code SDK writes to.
+
+    The plan-file path is a Claude-Code-SDK concern (the SDK writes plan
+    files to ``~/.claude/plans/`` natively), so this accessor lives here — the
+    backend that owns the path — rather than in the harness-agnostic planner
+    (S6 / issue #169 F-10). The planner reads it through this accessor, gated
+    on the ``plan_file`` capability.
+    """
+    return _PLANS_DIR
 
 
 def _extract_plan_file_path(block) -> str | None:
@@ -341,8 +496,10 @@ class ClaudeCodeBackend:
         "can_use_tool",
         "plan_permission",
         "resume",
+        "session_fork",
         "progress_stream",
         "plan_file",
+        "structured_output",
     }
 
     @classmethod
@@ -351,8 +508,14 @@ class ClaudeCodeBackend:
 
     @classmethod
     def retryable_subtypes(cls) -> set[str]:
-        # Claude retries via SDK exceptions (_get_retryable_exceptions), not subtypes.
+        # Claude retries via SDK exceptions (retryable_exceptions), not subtypes.
         return set()
+
+    @classmethod
+    def retryable_exceptions(cls) -> tuple:
+        # Claude retries on SDK exception types: TimeoutError + the Agent SDK
+        # error classes, degrading to bare TimeoutError when the SDK is absent.
+        return _get_retryable_exceptions()
 
     def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec via Claude Agent SDK.
@@ -375,93 +538,160 @@ class ClaudeCodeBackend:
             query,
         )
 
-        log(f"[CLAUDE] starting cwd={spec.cwd} resume={'NEW' if not spec.resume else spec.resume[:8]} model={spec.model} mode={spec.mode}")
+        _resume_lbl = "NEW" if not spec.resume else spec.resume[:8]
+        _fork_lbl = " fork" if (spec.fork_session and spec.resume) else ""
+        log(f"[CLAUDE] starting cwd={spec.cwd} resume={_resume_lbl}{_fork_lbl} model={spec.model} mode={spec.mode}")
 
-        # --- Apply Anthropic env vars from harness profile ---
+        # --- Build the per-session child-process env (no os.environ mutation) ---
+        # The Claude Agent SDK merges this into the spawned CLI's environment,
+        # so these values reach only the child CLI — never the poller's own
+        # process env (credential isolation, task-tracking opt-in).
         harness_cfg = (spec.state or {}).get("_harness_cfg") or {}
-        _claude_env = {}
+
+        # Backend default: opt into the task-tracking tools. On Agent SDK
+        # >= 0.2.139 these are NOT provided by default on the newer model
+        # families (Opus 4.8, Sonnet 5, ...); CLAUDE_CODE_ENABLE_TODO_TOOLS=1
+        # restores them (honor requires CLI >= v2.1.233). The sticky progress
+        # comment renders from these tools, so opt in by default.
+        #
+        # Note: this 0.2.139 threshold is independent of _FORK_MIN_SDK_VERSION
+        # (0.2.137) — that is the floor for the fork_session capability, a
+        # different feature. The todo-tools default flips two patch levels
+        # later; on a 0.2.137/0.2.138 install the env var is simply inert
+        # (unknown option) and the sticky comment just doesn't render.
+        env = {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"}
+
+        # Anthropic credentials from the harness profile.
         if harness_cfg.get("anthropic_base_url"):
-            _claude_env["ANTHROPIC_BASE_URL"] = harness_cfg["anthropic_base_url"]
+            env["ANTHROPIC_BASE_URL"] = harness_cfg["anthropic_base_url"]
         if harness_cfg.get("anthropic_auth_token"):
-            _claude_env["ANTHROPIC_AUTH_TOKEN"] = harness_cfg["anthropic_auth_token"]
+            env["ANTHROPIC_AUTH_TOKEN"] = harness_cfg["anthropic_auth_token"]
         if harness_cfg.get("anthropic_api_key"):
-            _claude_env["ANTHROPIC_API_KEY"] = harness_cfg["anthropic_api_key"]
-        # Merge with spec.env_overrides (explicit overrides take precedence)
-        _env_to_set = {}
-        if _claude_env or spec.env_overrides:
-            merged_env = dict(_claude_env)
-            merged_env.update(spec.env_overrides or {})
-            _env_to_set = {k: v for k, v in merged_env.items() if v}
+            env["ANTHROPIC_API_KEY"] = harness_cfg["anthropic_api_key"]
 
-        # Snapshot original values so we can restore them (credential cleanup)
-        _original_env = {k: os.environ.get(k) for k in _env_to_set}
+        # Per-harness-profile `env` override (Part B): user values win over
+        # backend defaults (including CLAUDE_CODE_ENABLE_TODO_TOOLS above).
+        env.update(harness_cfg.get("env") or {})
 
-        try:
-            if _env_to_set:
-                os.environ.update(_env_to_set)
+        # Explicit spec-level overrides take highest precedence.
+        if spec.env_overrides:
+            env.update(spec.env_overrides)
 
-            # --- Resolve permission_mode + tool lists from mode (Phase 3) ---
-            if spec.mode is not None:
-                _perm, _tools, _disallowed = _MODE_CONFIG[spec.mode]
-                final_allowed = list(_tools)
-                # Append extra_tools (e.g. inline comment MCP tools)
-                if spec.extra_tools:
-                    final_allowed.extend(spec.extra_tools)
-                # Remove disallowed_tools_override (e.g. exclude AskUserQuestion)
-                if spec.disallowed_tools_override:
-                    _disallowed = list(_disallowed) + list(spec.disallowed_tools_override)
+        # Drop empty-string values (a blank credential must not clobber a
+        # real one in the inherited environment).
+        env = {k: v for k, v in env.items() if v}
+
+        # --- Resolve permission_mode + tool lists from mode (Phase 3) ---
+        if spec.mode is not None:
+            _perm, _tools, _disallowed = _MODE_CONFIG[spec.mode]
+            final_allowed = list(_tools)
+            # Append extra_tools (e.g. inline comment MCP tools)
+            if spec.extra_tools:
+                final_allowed.extend(spec.extra_tools)
+            # Remove disallowed_tools_override (e.g. exclude AskUserQuestion)
+            if spec.disallowed_tools_override:
+                _disallowed = list(_disallowed) + list(spec.disallowed_tools_override)
+        else:
+            # Legacy path: use explicit fields directly (backward compat)
+            _perm = spec.permission_mode
+            final_allowed = spec.allowed_tools or ["Read", "Glob", "Grep"]
+            _disallowed = spec.disallowed_tools or []
+
+        options_kwargs = {
+            "cwd": spec.cwd,
+            "resume": spec.resume,
+            "permission_mode": _perm,
+            "allowed_tools": final_allowed,
+            "disallowed_tools": _disallowed,
+            "max_turns": spec.max_turns,
+            "model": spec.model or None,
+            "cli_path": spec.cli_path or harness_cfg.get("cli_path"),
+            "mcp_servers": spec.mcp_servers or {},
+            "system_prompt": dict(CLAUDE_CODE_SYSTEM_PROMPT_PRESET),
+        }
+
+        # Structured output (issue #159): when the spec requests a JSON-Schema
+        # validated payload, hand it to the SDK so the agent's result is
+        # delivered on ``ResultMessage.structured_output``. Gated on an SDK new
+        # enough for ``output_format``; on a known-old SDK we log and run
+        # without it (the handler's text-pattern fallback then applies).
+        if spec.output_format is not None:
+            if _sdk_supports_structured_output():
+                options_kwargs["output_format"] = spec.output_format
             else:
-                # Legacy path: use explicit fields directly (backward compat)
-                _perm = spec.permission_mode
-                final_allowed = spec.allowed_tools or ["Read", "Glob", "Grep"]
-                _disallowed = spec.disallowed_tools or []
+                log(
+                    f"[CLAUDE] output_format requested but installed Agent SDK is "
+                    f"older than {_STRUCTURED_OUTPUT_MIN_SDK_VERSION}; running without "
+                    f"structured output (text-pattern fallback will apply)"
+                )
 
-            options_kwargs = {
-                "cwd": spec.cwd,
-                "resume": spec.resume,
-                "permission_mode": _perm,
-                "allowed_tools": final_allowed,
-                "disallowed_tools": _disallowed,
-                "max_turns": spec.max_turns,
-                "model": spec.model or None,
-                "cli_path": spec.cli_path or harness_cfg.get("cli_path"),
-                "mcp_servers": spec.mcp_servers or {},
+        # Fork-on-retry: when the spec asks to fork off a resume session, branch
+        # into a NEW session (fork_session=True) so the original stays intact for
+        # rollback. Gated on a non-empty resume and an SDK new enough for
+        # fork_session; on an older SDK we log and degrade to a plain resume
+        # rather than passing an unknown option to the SDK.
+        if spec.fork_session and spec.resume:
+            if _sdk_supports_session_fork():
+                options_kwargs["fork_session"] = True
+            else:
+                log(
+                    f"[CLAUDE] fork_session requested but installed Agent SDK is "
+                    f"older than {_FORK_MIN_SDK_VERSION}; degrading to plain resume "
+                    f"(original session will be continued in place)"
+                )
+
+        # Per-session child-process env (see construction above). The SDK merges
+        # this over the inherited environment for the spawned CLI only.
+        options_kwargs["env"] = env
+
+        # --- Setup phase: can_use_tool requires streaming prompt + hooks ---
+        if spec.can_use_tool is not None:
+            from claude_agent_sdk import HookMatcher  # deferred import: SDK may not be installed
+
+            # Issue #190: the mode-derived tool list pre-approves every tool
+            # this phase uses, so the SDK's CanUseToolShadowedWarning is a
+            # false positive here — the CLI still routes user-interaction
+            # tools (AskUserQuestion) to the callback even under
+            # bypassPermissions. Log the real semantics once instead of the
+            # per-dispatch warning line (the warning is filtered around the
+            # query loop below).
+            _dbg.debug(
+                "[CLAUDE] can_use_tool registered — auto-approved tools are intentionally "
+                "shadowed; AskUserQuestion still reaches the callback (issue #190)"
+            )
+
+            async def dummy_hook(input_data, tool_use_id, ctx):
+                return {"continue_": True}
+
+            options_kwargs["can_use_tool"] = spec.can_use_tool
+            options_kwargs["hooks"] = {
+                "PreToolUse": [HookMatcher(matcher=None, hooks=[dummy_hook])]
             }
 
-            # --- Setup phase: can_use_tool requires streaming prompt + hooks ---
-            if spec.can_use_tool is not None:
-                from claude_agent_sdk import HookMatcher  # deferred import: SDK may not be installed
+            async def _prompt_stream():
+                yield {"type": "user", "message": {"role": "user", "content": spec.prompt}}
 
-                async def dummy_hook(input_data, tool_use_id, ctx):
-                    return {"continue_": True}
+            prompt_source = _prompt_stream()
+        else:
+            prompt_source = spec.prompt
 
-                options_kwargs["can_use_tool"] = spec.can_use_tool
-                options_kwargs["hooks"] = {
-                    "PreToolUse": [HookMatcher(matcher=None, hooks=[dummy_hook])]
-                }
+        options = ClaudeAgentOptions(**options_kwargs)
 
-                async def _prompt_stream():
-                    yield {"type": "user", "message": {"role": "user", "content": spec.prompt}}
+        # --- Single message-processing loop ---
+        text_chunks, session_id, subtype = [], None, None
+        cost_usd = None
+        duration_ms = 0
+        captured_plan_file: str | None = None
+        captured_plan_text: str | None = None
+        plan_posted, question_posted = False, False
+        structured_output: dict | None = None
+        progress_state = ProgressState()
 
-                prompt_source = _prompt_stream()
-            else:
-                prompt_source = spec.prompt
+        def _question_asked() -> bool:
+            return bool(spec.state and spec.state.get("asked_question_md"))
 
-            options = ClaudeAgentOptions(**options_kwargs)
-
-            # --- Single message-processing loop ---
-            text_chunks, session_id, subtype = [], None, None
-            cost_usd = None
-            duration_ms = 0
-            captured_plan_file: str | None = None
-            captured_plan_text: str | None = None
-            plan_posted, question_posted = False, False
-            progress_state = ProgressState()
-
-            def _question_asked() -> bool:
-                return bool(spec.state and spec.state.get("asked_question_md"))
-
-            try:
+        try:
+            with _can_use_tool_shadowing_suppressed(spec.can_use_tool is not None):
                 async for msg in query(prompt=prompt_source, options=options):
                     if isinstance(msg, AssistantMessage):
                         if session_id is None and msg.session_id:
@@ -506,46 +736,53 @@ class ClaudeCodeBackend:
                         subtype = msg.subtype
                         cost_usd = msg.total_cost_usd
                         duration_ms = msg.duration_ms
+                        # Structured output (issue #159): the validated payload is
+                        # only ever on the final result message. ``getattr`` guards
+                        # against an SDK build predating the field (reads None).
+                        # On ``error_max_structured_output_retries`` (or any
+                        # success-without-structured-output) this is None, so the
+                        # handler falls back to the text-pattern path.
+                        so = getattr(msg, "structured_output", None)
+                        if isinstance(so, dict):
+                            structured_output = so
+                        elif subtype == "error_max_structured_output_retries":
+                            log(f"[CLAUDE] structured-output retries exhausted "
+                                f"(session={session_id}); falling back to text-pattern path")
                         log(f"[CLAUDE] session={session_id} subtype={subtype} cost=${cost_usd or 0:.4f} duration={duration_ms/1000:.1f}s")
 
                     # Break early when AskUserQuestion fired — prevents the agent from
                     # running more tools after posting a question.
                     if spec.state and spec.state.get("asked_question_md"):
                         break
-            except (RuntimeError, Exception) as e:
-                error_msg = str(e).lower()
-                # Async generator crashes and "Claude Code returned an error result:
-                # success" (SDK throws Exception on ollama even after a successful run).
-                # In both cases we already captured the result via the message stream,
-                # so return partial results rather than failing.
-                if ("generator" in error_msg and ("async" in error_msg or "aclose" in error_msg)) \
-                   or "returned an error result" in error_msg:
-                    log(f"[CLAUDE] {type(e).__name__}: {e} — returning partial results "
-                        f"(session_id={session_id}, subtype={subtype})")
-                else:
-                    raise
+        except (RuntimeError, Exception) as e:
+            error_msg = str(e).lower()
+            # Async generator crashes and "Claude Code returned an error result:
+            # success" (SDK throws Exception on ollama even after a successful run).
+            # In both cases we already captured the result via the message stream,
+            # so return partial results rather than failing.
+            if ("generator" in error_msg and ("async" in error_msg or "aclose" in error_msg)) \
+               or "returned an error result" in error_msg:
+                log(f"[CLAUDE] {type(e).__name__}: {e} — returning partial results "
+                    f"(session_id={session_id}, subtype={subtype})")
+            else:
+                raise
 
-            # Re-assert the question as the final sticky-comment content. Guards
-            # against any progress update that fired in the same message as the
-            # AskUserQuestion call (before the flag became visible to the loop).
-            if _question_asked() and spec.progress_callback:
-                spec.progress_callback(spec.state["asked_question_md"] + BOT_MARKER)
+        # Re-assert the question as the final sticky-comment content. Guards
+        # against any progress update that fired in the same message as the
+        # AskUserQuestion call (before the flag became visible to the loop).
+        if _question_asked() and spec.progress_callback:
+            spec.progress_callback(spec.state["asked_question_md"] + BOT_MARKER)
 
-            return RunResult(
-                text="\n".join(text_chunks),
-                session_id=session_id,
-                subtype=subtype,
-                cost_usd=cost_usd,
-                duration_seconds=duration_ms / 1000,
-                plan_file_path=captured_plan_file,
-                plan_posted=plan_posted,
-                question_posted=question_posted,
-                plan_text=captured_plan_text,
-            )
-        finally:
-            # Restore original environment — prevents credential leakage between tasks
-            for k, v in _original_env.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+        return RunResult(
+            text="\n".join(text_chunks),
+            session_id=session_id,
+            subtype=subtype,
+            ok=(subtype == "success"),
+            cost_usd=cost_usd,
+            duration_seconds=duration_ms / 1000,
+            plan_file_path=captured_plan_file,
+            plan_posted=plan_posted,
+            question_posted=question_posted,
+            plan_text=captured_plan_text,
+            structured_output=structured_output,
+        )

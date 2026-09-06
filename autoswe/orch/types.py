@@ -55,6 +55,8 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("last_dispatched_command_id", "last_dispatched_command_id", None),
     TaskField("last_consumed_reply_id", "last_consumed_reply_id", None),
     TaskField("session_id", "session_id", None),
+    TaskField("last_good_session_id", "last_good_session_id", None),
+    TaskField("last_good_session_backend", "last_good_session_backend", None),
     TaskField("pr_number", "pr_number", None),
     TaskField("guard_blocked", "_guard_blocked", False),
     TaskField("gh_closed", "gh_closed", False),
@@ -77,6 +79,7 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("review_file_path", "review_file_path", None),
     TaskField("fix_summary", "fix_summary", ""),
     TaskField("rereview_after_fix", "rereview_after_fix", False),
+    TaskField("pr_url", "pr_url", None),
 )
 
 
@@ -94,7 +97,6 @@ class ApiState:
     """
     issue: NormalizedIssue
     comments: tuple[NormalizedComment, ...]
-    open_pr_numbers: tuple[int, ...] = ()
     comments_fetched: bool = True
 
 
@@ -140,6 +142,21 @@ class TaskState:
     # Set by emit() alongside last_phase. Used by _resume_kind() as the
     # authoritative source (falls back to last_phase if missing).
     resume_phase: str | None = None
+    # Last known-good session checkpoint. Set by emit() on every non-failed run
+    # that persists a session_id, and NEVER cleared on FAILED (unlike
+    # session_id, which the FAILED path nulls out). This is what /retry forks
+    # from on backends that advertise the "session_fork" capability, so a
+    # failed retry leaves the checkpoint intact and the next /retry re-forks
+    # from the same good session. Defaulted so positional TaskState(...)
+    # construction in tests is unaffected.
+    last_good_session_id: str | None = None
+    # Which coding backend produced last_good_session_id (its "backend" field,
+    # e.g. "claude_code" / "codex"). Set by emit() alongside the checkpoint so a
+    # /retry only forks when the checkpoint's backend matches the phase's
+    # resolved backend — a Codex plan's session must not be resumed by a Claude
+    # fix (the SDK can't resolve a foreign-backend session id). Never cleared on
+    # FAILED, mirroring last_good_session_id.
+    last_good_session_backend: str | None = None
     created_at: str = ""
     last_synced: str = ""
     provider: str = "github"
@@ -161,6 +178,10 @@ class TaskState:
     # state completes. decide() then auto-dispatches a /review on the next poll
     # (and clears the flag) so the gating verdict is re-checked before /pr.
     rereview_after_fix: bool = False
+    # Cached PR web URL, persisted alongside pr_number at ship time (issue #193).
+    # pr_number is the machine-facing cache (idempotency, result.json); pr_url
+    # is the human-facing link for operators inspecting queue.json.
+    pr_url: str | None = None
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:
@@ -226,6 +247,7 @@ class Action:
         "post_welcome",
         "advance_watermark",
         "mark_failed_limit",
+        "refused",
         "review",
     ]
     slug: str
@@ -236,6 +258,10 @@ class Action:
     triggering_comment_id: int | None = None
     user_reply_text: str | None = None
     limit_reason: Literal["attempts", "time"] | None = None
+    # For kind="refused": the slash command that was refused
+    # (e.g. "/pr" on a failed task, "/fix" on a guard-blocked task).
+    # emit() uses it to pick the refusal message.
+    refused_command: str | None = None
 
 
 @dataclass(frozen=True)

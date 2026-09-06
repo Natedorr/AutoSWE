@@ -1,7 +1,8 @@
 # List Repo Contributors
 
 > Grounding reference for Azure DevOps Git API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/contributors/list
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git?view=azure-devops-rest-7.1 (Git area overview)
+> **Note (verified 2026-07-19):** Microsoft removed the dedicated "Contributors - List" reference page from the current 7.1/7.2 Azure DevOps REST API docs. The `GET .../repositories/{repositoryId}/contributors` endpoint still exists on the service; this extract is preserved from the 6.x-era docs for grounding.
 
 ---
 

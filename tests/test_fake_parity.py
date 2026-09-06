@@ -186,7 +186,7 @@ class TestAzureFakeCoverage:
         resp = azure_fake.handle_request(
             "GET", "https://dev.azure.com/org/proj/_users/me", "pat",
         )
-        assert "uniqueName" in resp
+        assert "emailAddress" in resp
 
     def test_handles_wiql(self, azure_fake):
         azure_fake.load({
@@ -272,7 +272,7 @@ class TestAzureFakeCoverage:
         resp = azure_fake.handle_request(
             "GET", "https://dev.azure.com/org/_users/me", "pat",
         )
-        assert "uniqueName" in resp
+        assert "emailAddress" in resp
 
     def test_handles_list_repos(self, azure_fake):
         azure_fake.load({

@@ -8,7 +8,7 @@ This prevents the agent from implementing code during planning, even if
 the CLI exits plan mode via the native ExitPlanMode command.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 def test_git_commit_push_re_matches_commit():
@@ -790,3 +790,101 @@ def test_plan_phase_allows_progress_tools(tmp_path, mock_gh_post_comment):
     from autoswe.harness.runner import PROGRESS_TOOLS
     for tool in PROGRESS_TOOLS:
         assert tool in tools, f"{tool} should be in plan mode tools"
+
+
+# ---------------------------------------------------------------------------
+# Read-only enforcement gate (issue #166)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_loudly_degrades_when_backend_lacks_read_only_enforcement(
+    tmp_path, mock_gh_post_comment
+):
+    """When the resolved backend advertises neither 'mode' nor 'can_use_tool'
+    (e.g. Codex, issue #166), the planner must loudly degrade with a warning
+    (not fail silently) and still run the phase — relying on the post-run
+    worktree backstop.
+
+    We simulate a codex profile (no mode, no can_use_tool) and spy on the
+    module's log() to assert the warning was emitted.
+    """
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        from autoswe.harness.runner import RunResult
+        return RunResult("<AUTOSWE_PLAN>\nPlan\n</AUTOSWE_PLAN>", "sess", "success")
+
+    task = {
+        "id": "o_r_1", "owner": "o", "repo": "r", "issue_number": 1,
+        "title": "Test", "body": "/plan", "base_branch": "master",
+        "session_id": None, "_token": "ghp_fake",
+    }
+
+    codex_harness = {"backend": "codex", "model": "gpt-5.6-terra"}
+    log_mock = MagicMock()
+
+    with patch("autoswe.harness.planner.create_worktree", return_value=tmp_path):
+        with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+            with patch("autoswe.tracking.api._fetch_comments", return_value=[]):
+                with patch(
+                    "autoswe.harness.planner.resolve_harness",
+                    return_value=codex_harness,
+                ):
+                    with patch("autoswe.harness.planner.log", log_mock):
+                        with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                            from autoswe.harness.planner import run_plan
+                            run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    # The phase still ran (loudly degraded, not refused)
+    assert len(run_calls) == 1
+    # A prominent read-only-enforcement warning was logged
+    warn_msgs = [str(c.args[0]) for c in log_mock.call_args_list
+                 if c.args and "read-only enforcement" in str(c.args[0])]
+    assert warn_msgs, (
+        "planner must loudly degrade (log a warning) when the backend has no "
+        "read-only enforcement (issue #166)"
+    )
+    assert "issue #166" in warn_msgs[0]
+    assert "codex" in warn_msgs[0]
+
+
+def test_plan_does_not_warn_when_backend_enforces_read_only(
+    tmp_path, mock_gh_post_comment
+):
+    """Claude Code (mode + can_use_tool) → no read-only-enforcement warning."""
+    run_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(kwargs)
+        from autoswe.harness.runner import RunResult
+        return RunResult("<AUTOSWE_PLAN>\nPlan\n</AUTOSWE_PLAN>", "sess", "success")
+
+    task = {
+        "id": "o_r_1", "owner": "o", "repo": "r", "issue_number": 1,
+        "title": "Test", "body": "/plan", "base_branch": "master",
+        "session_id": None, "_token": "ghp_fake",
+    }
+
+    log_mock = MagicMock()
+    with patch("autoswe.harness.planner.create_worktree", return_value=tmp_path):
+        with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+            with patch("autoswe.tracking.api._fetch_comments", return_value=[]):
+                with patch("autoswe.harness.planner.log", log_mock):
+                    with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                        from autoswe.harness.planner import run_plan
+                        run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert len(run_calls) == 1
+    warn_msgs = [str(c.args[0]) for c in log_mock.call_args_list
+                 if c.args and "read-only enforcement" in str(c.args[0])]
+    assert not warn_msgs, (
+        "no read-only-enforcement warning expected for a backend that "
+        "enforces read-only (claude_code)"
+    )
+
+
+# The behavioral read-only guarantee (a mode="plan" run cannot leave the
+# worktree dirty, asserted identically on both backends) lives in
+# tests/test_backend_parity.py::TestReadOnlyBehavioralParity — the single
+# canonical copy of that assertion (S6 / issue #169 F-21).

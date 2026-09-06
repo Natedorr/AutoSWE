@@ -10,17 +10,12 @@ PATCH /repos/{owner}/{repo}/labels/{name}
 
 Updates a label using the given label name.
 
-
 ### Parameters
-
 
 #### Headers
 
-
 - **`accept`** (string)
   Setting to `application/vnd.github+json` is recommended.
-
-
 
 #### Path and query parameters
 
@@ -31,9 +26,6 @@ Updates a label using the given label name.
   The name of the repository without the .git extension. The name is not case sensitive.
 
 - **`name`** (string) (required)
-
-
-
 
 #### Body parameters
 
@@ -46,21 +38,11 @@ Updates a label using the given label name.
 - **`description`** (string)
   A short description of the label. Must be 100 characters or fewer.
 
-
-
-
-
 ### HTTP response status codes
-
 
 - **200** - OK
 
-
-
-
 ### Code examples
-
-
 
 #### Example
 
@@ -80,7 +62,3 @@ curl -L \
 **Response schema (Status: 200):**
 
 Same response schema as [Create a label](#create-a-label).
-
-
-
-

@@ -40,6 +40,16 @@ def _replace_url_cred(m: re.Match[str]) -> str:
     return m.group(1) + MASK
 
 
+def _replace_url_userinfo(m: re.Match[str]) -> str:
+    """Replacement callable for ``scheme://user:secret@host`` credential URLs.
+
+    Preserves the scheme (``group(1)``) and the host after ``@``, masking only
+    the userinfo (``user:secret`` or user-only).  ``https://user:secret@host``
+    becomes ``https://***REDACTED***@host``.
+    """
+    return m.group(1) + MASK + "@"
+
+
 _REDACTION_PATTERNS: list[re.Pattern[str]] = [
     # GitHub tokens: classic (ghp_), OAuth (gho_), user (ghu_), static (ghs_), refresh (ghr_)
     re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
@@ -53,6 +63,10 @@ _REDACTION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"Basic\s+[A-Za-z0-9+/=]{20,}"),
     # URL credential parameters: ?pat=xxx, &token=xxx, ?password=xxx, etc.
     re.compile(r"([?&](?:pat|token|password|access_token|api_key)=)[^&\s]+", re.IGNORECASE),
+    # URL-embedded credentials: scheme://user:secret@host and scheme://user@host.
+    # Requires the "@" terminator so ordinary URLs (no credentials) are untouched.
+    # Userinfo excludes "*" so already-masked text does not re-match (idempotent).
+    re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s@*]+@"),
 ]
 
 # Replacement value for each entry in _REDACTION_PATTERNS (same index).
@@ -63,6 +77,7 @@ _REDACTION_REPLACEMENTS: list[str | Callable] = [
     MASK,  # Bearer/Token prefix
     MASK,  # Basic auth header
     _replace_url_cred,  # URL credentials (preserves param name)
+    _replace_url_userinfo,  # scheme://user:secret@host (preserves scheme + host)
 ]
 
 

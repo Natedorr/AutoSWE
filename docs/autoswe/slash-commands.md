@@ -10,7 +10,7 @@ Comments are the only steering input. A slash command at the start of a comment 
 | `/fix` | `/fix [--branch <name>] [with <guidance>]` | any | `fixed` or `failed` | Yes (write access) | OWNER/AUTHOR |
 | `/pr` | `/pr` | `fixed` (with commits) | `shipped` | No | OWNER/AUTHOR |
 | `/sync` | `/sync` | any (with worktree) | `synced` or `failed` | Only on conflict | OWNER/AUTHOR |
-| `/retry` | `/retry` | `failed` | `pending` → handler → final state | Yes (replayed) | OWNER/AUTHOR |
+| `/retry` | `/retry` | `failed`/`error` | `pending` → handler → final state | Yes (replayed) | OWNER/AUTHOR |
 | `/skip` | `/skip` | any | `skipped` | No | OWNER/AUTHOR |
 | `/abort` | `/abort` | any | `aborted` | No | OWNER/AUTHOR |
 | `/review` | `/review [with <guidance>]` | any | `reviewed` | Yes (read-only) | OWNER/AUTHOR |
@@ -25,14 +25,14 @@ Returns `(command, guidance, branch)` or `None`.
 
 | Modifier | Example | Effect |
 |----------|---------|--------|
-| `--branch <name>` | `/plan --branch develop` | Sets `plan_branch` on task (only if not already set — subsequent `--branch` flags are ignored) |
+| `--branch <name>` | `/plan --branch develop` | Sets `plan_branch` on task (the fork base). Only `/plan` (re)pins it: on any *other* command (`/fix`, `/sync`, …) the flag is ignored once `plan_branch` is already set — a later `--branch` can't move which branch the task works on (issue #196). The token is the full whitespace-delimited word and is validated against git's ref-name rules (approximation of `git check-ref-format --branch`); the trailing-period typo is repaired (`docs.` → `docs`). An invalid token that can't be repaired is ignored (default branch) — issue #184 |
 | `with <guidance>` | `/fix with performance focus` | Appends guidance to fix prompt via `{{GUIDANCE_BLOCK}}` |
 | Both | `/fix --branch main with hotfix` | Branch + guidance combined |
 
 ### Regex Patterns
 
 - Command: `r"/(?:fix|plan|pr|retry|skip|sync|abort|review)"` (case-insensitive, at line start)
-- Branch: `r"--branch\s+([\w][\w\-./]+)"`
+- Branch: `r"--branch\s+(\S+)"` followed by `_sanitize_branch_token()` validation (git ref-name rules, trailing-period repair)
 
 ## Multi-Command-Last-Wins Rule
 
@@ -55,3 +55,17 @@ When `/retry` action is run (`orch/run.py:_run_retry()`):
 1. `decide()` sets `attempt_count = 1` (resets the counter)
 2. `run()` looks at `last_dispatched_command` for the last substantive command (not `/pr`, `/sync`, `/retry`, `/skip`, or `/abort`)
 3. Replays that command via the appropriate planner/coder/ship handler
+
+A refusal advances the watermark (`last_dispatched_command`) so the same command isn't re-refused every tick (see [data-model.md](data-model.md)). That means a refused `/review` on a `failed`/`error` task leaves `last_dispatched_command = "/review"`. To keep `/retry` re-running the *work* — not a review that could flip the task to `reviewed` → shippable despite a failed fix — `_run_retry()` falls back to `/fix` when `last_dispatched_command` is `/review` and the task is still `failed`/`error` (issue #192). `/plan` is *not* subject to this fallback: a failed plan is retried as a plan.
+
+Note: `MAX_ATTEMPTS` is a **retry budget** — it bounds re-runs of work that keeps failing, not the number of phases an issue goes through. Restarting from a *successful* rest (`fixed`/`synced`/`shipped`/`reviewed`, or `review_failed`/`review_blocked`) starts a fresh budget, so the follow-up `/fix` after a review verdict, or `/pr` after a `fixed` task, never burns attempts even after a long healthy lifecycle.
+
+### Restarting a `failed`/`error` task
+
+A `/fix` (or `/plan`) on a task in `failed`/`error` state **restarts it** — it re-dispatches the command and carries the attempt counter forward, so the retry budget still bounds repeated failures. `/retry` remains the explicit **budget reset** (replays the last substantive command with `attempt_count = 1`). Only these three restart a failing task; the other restart-cycle commands are **refused** with a posted comment because there is no completed work for them to act on:
+
+- `/pr` — nothing ready to ship. The bot tells the user to post `/fix` (or `/retry`).
+- `/review` — no completed work to review (and a passing verdict would wrongly flip the task to `reviewed` → shippable). The bot tells the user to post `/fix` first.
+- `/sync` — no completed branch work to advance. The bot tells the user to post `/fix` first.
+
+Any command other than `/retry` on a task that already hit its limit (`guard_blocked`) is refused with a "post `/retry`" comment (see `safeguards.md`) — including `/pr`, `/review`, `/sync` *and* `/fix`, since on a limit-blocked task even `/fix` cannot restart. Each distinct refusal is posted once: a *comment*-sourced command dedups via the dispatch watermark (the `cmd_id`-based guard), and a *body*-sourced command — which has no comment ID to dedup on — is refused only when the user has posted a comment newer than the last bot comment (a stale body command noops, since the limit comment already told the user to post `/retry`). This prevents the "post `/retry`" comment from re-posting on every poll cycle for an issue whose trigger command lives in its body (issue #192).

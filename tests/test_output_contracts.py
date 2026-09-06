@@ -256,7 +256,7 @@ class TestAzureOutputContracts:
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
-            {"op": "replace", "path": "/fields/System.Tags",
+            {"op": "add", "path": "/fields/System.Tags",
              "value": "tag1; autoswe:planned"},
         ]
         azure_fake.handle_request(
@@ -269,7 +269,7 @@ class TestAzureOutputContracts:
         assert calls, "Expected PATCH workitem call"
         body = calls[-1]["body"]
         assert isinstance(body, list), "PATCH body should be JSON-Patch array"
-        assert body[0]["op"] == "replace"
+        assert body[0]["op"] == "add"
         assert body[0]["path"] == "/fields/System.Tags"
 
     def test_patch_tags_content_type(self, isolated_autoswe_dir, azure_fake):
@@ -277,7 +277,7 @@ class TestAzureOutputContracts:
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
-            {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:fixed"},
+            {"op": "add", "path": "/fields/System.Tags", "value": "autoswe:fixed"},
         ]
         azure_fake.handle_request(
             "PATCH",
@@ -303,7 +303,7 @@ class TestAzureOutputContracts:
         new_tags.append("autoswe:fixed")
 
         patch_body = [
-            {"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
+            {"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
         ]
         azure_fake.handle_request(
             "PATCH",
@@ -324,7 +324,7 @@ class TestAzureOutputContracts:
         comment_body = {"text": "Plan posted"}
         azure_fake.handle_request(
             "POST",
-            "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/1/comments?format=Markdown&api-version=7.1-preview.4",
+            "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/1/comments?format=Markdown&api-version=7.1",
             "pat", body=comment_body,
         )
 
@@ -342,7 +342,7 @@ class TestAzureOutputContracts:
         comment_body = {"text": body_text}
         azure_fake.handle_request(
             "POST",
-            "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/2/comments?format=Markdown&api-version=7.1-preview.4",
+            "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/2/comments?format=Markdown&api-version=7.1",
             "pat", body=comment_body,
         )
 

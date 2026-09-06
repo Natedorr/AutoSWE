@@ -73,4 +73,3 @@ curl -L \
 **Response schema (Status: 201):**
 
 Same response schema as [Get an issue comment](#get-an-issue-comment).
-

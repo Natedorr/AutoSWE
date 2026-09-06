@@ -13,9 +13,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from autoswe.core.logging_utils import log
+from autoswe.core.config import resolve_harness
+from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import coder, planner
-from autoswe.harness.runner import HandlerResult
+from autoswe.harness.runner import HandlerResult, backend_has_capability
 from autoswe.orch.types import Action, World
 from autoswe.vcs import ship
 from autoswe.vcs import worktree as worktree_mod
@@ -41,6 +42,15 @@ class DispatchResult:
     session_id: str | None = None
     plan_file_path: str | None = None
     review_file_path: str | None = None
+    # Reviewer's structured verdict (issue #173 F-18). Threaded from
+    # HandlerResult through _to_dispatch so emit() can drive the status gate
+    # off the schema-validated field instead of the markdown regex.
+    verdict: str | None = None
+    # PR identity cached at ship time (issue #193): ship.open_pr records
+    # pr_number/pr_url on the task dict; run() lifts them here so emit() can
+    # persist them on the shipped queue entry. None for every other kind.
+    pr_number: int | None = None
+    pr_url: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +92,7 @@ def run(
     # Pure actions — no Claude run
     if kind in (
         "noop", "skip", "abort", "post_welcome",
-        "advance_watermark", "mark_failed_limit",
+        "advance_watermark", "mark_failed_limit", "refused",
     ):
         return None
 
@@ -114,6 +124,16 @@ def run(
 
     if kind == "ship_pr":
         done = ship.open_pr(task, cfg, rc, progress_callback=progress_callback)
+        if done.startswith("DONE"):
+            # open_pr cached the PR identity on the task dict (issue #193);
+            # lift it into the result so emit() persists it on the shipped
+            # queue entry. Only on DONE — a FAILED ship must not carry a
+            # (possibly stale) cached PR number into the result.
+            return DispatchResult(
+                done_content=done,
+                pr_number=task.get("pr_number"),
+                pr_url=task.get("pr_url"),
+            )
         return DispatchResult(done_content=done)
 
     if kind == "sync_branch":
@@ -150,6 +170,7 @@ def _to_dispatch(hr: HandlerResult, task: dict, review_file_path: str | None = N
         session_id=hr.session_id or task.get("session_id"),
         plan_file_path=hr.plan_file_path,
         review_file_path=review_file_path or hr.review_file_path,
+        verdict=hr.verdict,
     )
 
 
@@ -166,21 +187,27 @@ def _run_sync(
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     provider = repo_cfg.get("provider", "github")
     base_branch = task.get("base_branch", "main")
+    # Sync target: the branch this task's work was actually forked from.
+    # With /plan --branch <b> that's <b> (plan_branch), not the repo default —
+    # merging origin/<default> would pollute the branch and bloat every
+    # subsequent diff (issue #187). Falls back to the repo default when no
+    # explicit base was given.
+    sync_base = task.get("plan_branch") or base_branch
     token = task["_token"]
     wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
     if not wt.exists():
         wt = worktree_mod.create_worktree(
-            owner, repo, issue_num, base_branch, token, cfg, provider,
+            owner, repo, issue_num, sync_base, token, cfg, provider,
             default_branch=base_branch, pull_strategy="reset", push_new=True,
         )
     try:
         if progress_callback:
             progress_callback(
-                f"Merging `origin/{base_branch}` into "
+                f"Merging `origin/{sync_base}` into "
                 f"`{worktree_mod.get_vcs({'owner': owner, 'repo': repo, 'token': '', 'provider': provider}).branch_name(issue_num)}`"
                 f"&hellip;{BOT_MARKER}"
             )
-        result = worktree_mod.sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)
+        result = worktree_mod.sync_branch(wt, owner, repo, issue_num, sync_base, provider, cfg)
         log(f"[SYNC] {task['id']} synced={result.get('synced')} conflict={result.get('conflict')} ahead={result.get('ahead', 0)}")
         if result.get("synced"):
             branch = result["branch"]
@@ -189,11 +216,11 @@ def _run_sync(
             ahead = result.get("ahead", 0)
             if changed:
                 summary = (
-                    f"Merged `origin/{base_branch}` into `{branch}`.\n\n"
-                    f"{ahead} commits ahead of `{base_branch}` after sync."
+                    f"Merged `origin/{sync_base}` into `{branch}`.\n\n"
+                    f"{ahead} commits ahead of `{sync_base}` after sync."
                 )
             else:
-                summary = f"Already up to date with `origin/{base_branch}`."
+                summary = f"Already up to date with `origin/{sync_base}`."
             return DispatchResult(
                 done_content=f"DONE_SUMMARY\t{summary}\t{commit_sha}",
             )
@@ -245,6 +272,11 @@ def _sync_before_dispatch(
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     provider = repo_cfg.get("provider", "github")
     base_branch = task.get("base_branch", "main")
+    # The work branch was forked from plan_branch when /plan --branch <b> was
+    # given, so pre-dispatch syncs must merge origin/plan_branch — never
+    # origin/<repo default> — or every dispatch pollutes the branch with
+    # unrelated default-branch history (issue #187).
+    sync_base = task.get("plan_branch") or base_branch
     token = task["_token"]
 
     wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
@@ -254,7 +286,7 @@ def _sync_before_dispatch(
             default_branch=base_branch, pull_strategy="reset", push_new=True,
         )
 
-    sync_result = worktree_mod.sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)
+    sync_result = worktree_mod.sync_branch(wt, owner, repo, issue_num, sync_base, provider, cfg)
     log(f"[SYNC] {task['id']} pre-{phase} synced={sync_result.get('synced')} conflict={sync_result.get('conflict')}")
 
     if sync_result.get("conflict") and sync_result.get("rebase"):
@@ -297,6 +329,9 @@ def _run_fix_with_sync(
     repo_cfg: dict,
     cfg: dict,
     progress_callback: Callable[[str], None] | None,
+    *,
+    fork_session: bool = False,
+    fork_session_id: str | None = None,
 ) -> HandlerResult:
     """Pre-dispatch sync before /fix, then run the fix handler."""
     base_branch = task.get("base_branch", "main")
@@ -309,6 +344,8 @@ def _run_fix_with_sync(
         return err
     return coder.run_fix(
         task, guidance, repo_cfg, cfg, progress_callback=progress_callback, wt=wt,
+        fork_session=fork_session,
+        fork_session_id=fork_session_id,
     )
 
 
@@ -369,6 +406,70 @@ def _run_review_with_sync(
 
 _NON_REPLAYABLE_COMMANDS = frozenset(("/pr", "/sync", "/skip", "/abort", "/retry"))
 
+
+def _fork_session_for_retry(
+    task: dict,
+    repo_cfg: dict,
+    cfg: dict,
+    slug: str,
+) -> str | None:
+    """Decide whether a /fix retry forks from the last known-good session.
+
+    Forking is safe only when BOTH hold:
+      * the resolved fix backend advertises ``"session_fork"``, and
+      * the checkpoint (``last_good_session_id``) was produced by the SAME
+        backend. A mixed per-phase config (e.g. Codex ``plan_harness`` + Claude
+        ``fix_harness``) would otherwise hand a Codex session id to the Claude
+        SDK, which cannot resolve it. A missing/foreign checkpoint backend is
+        therefore treated as "no usable checkpoint" → fresh session.
+
+    Returns the *validated* checkpoint session id (str) when forking is safe,
+    or ``None`` (fresh/normal path) whenever a condition fails or the harness
+    cannot be resolved. Returning the id — not just a bool — lets the caller
+    hand the SDK the exact session this gate validated, so the gate and the
+    resumed value can never diverge (issue #173 F-15). Pure decision — no
+    handler branching on backend name.
+    """
+    checkpoint_id = task.get("last_good_session_id") or task.get("session_id")
+    if not checkpoint_id:
+        return None
+
+    try:
+        fix_harness = resolve_harness("fix", repo_cfg, cfg)
+    except Exception:
+        # Resolution failed (e.g. a bad harness profile name). Log it and
+        # degrade to the plain path rather than silently forcing Claude.
+        get_debug_logger().warning(
+            "retry: could not resolve fix harness for %s; not forking", slug,
+        )
+        return None
+
+    if not backend_has_capability(fix_harness, "session_fork"):
+        return None
+
+    # Provenance gate: only fork from a checkpoint the same backend produced.
+    # ``last_good_session_backend`` is always written alongside the checkpoint,
+    # so a real checkpoint always carries it. A None here means the checkpoint
+    # predates the field (or its backend was unresolvable) → don't risk a
+    # foreign-backend session id; start fresh instead.
+    checkpoint_backend = task.get("last_good_session_backend")
+    if checkpoint_backend is None:
+        get_debug_logger().warning(
+            "retry: checkpoint for %s has no recorded backend; "
+            "not forking (fresh session)", slug,
+        )
+        return None
+    if checkpoint_backend != fix_harness.get("backend"):
+        get_debug_logger().warning(
+            "retry: checkpoint backend %r != fix backend %r for %s; "
+            "not forking (fresh session)",
+            checkpoint_backend, fix_harness.get("backend"), slug,
+        )
+        return None
+
+    return checkpoint_id
+
+
 def _run_retry(
     action: Action,
     world: World,
@@ -403,7 +504,34 @@ def _run_retry(
     last_cmd = world.task.last_dispatched_command
     if last_cmd in _NON_REPLAYABLE_COMMANDS:
         last_cmd = "/fix"
+    # A /review watermark on a failed/error task must replay as /fix, not a
+    # review. Two ways it arises:
+    #   - A REFUSED /review (issue #192): the refusal emit writes
+    #     last_dispatched_command=refused_command ("/review"). Replaying it
+    #     would run a *review* whose passing verdict flips the task to `reviewed`
+    #     (→ /pr-shippable) even though the fix never succeeded.
+    #   - A STALE /review watermark: last_dispatched_command only updates on a
+    #     successful emit, so if a later dispatch (e.g. the /fix that addresses
+    #     a review_failed) infra-errors, the task lands in `error` while the
+    #     watermark still reads "/review". Here the user's failing intent was
+    #     that /fix (not a review), so replaying /fix is exactly right.
+    # /plan stays replayable: a failed plan is retried as a plan, not silently
+    # promoted to /fix.
+    if last_cmd == "/review" and world.task.status in ("failed", "error"):
+        last_cmd = "/fix"
     last_cmd = last_cmd or "/fix"
+
+    # Fork-on-retry: branch from the last known-good session on backends that
+    # support session forking (Claude), leaving the original intact for rollback.
+    # Backends without the capability (Codex) resume in place or start fresh —
+    # they ignore the flag. Decided here via the capability so handlers never
+    # branch on backend name. Only the /fix replay can fork: /plan always starts
+    # a fresh session (nothing to fork from) and /review is already throwaway.
+    # The gate returns the *validated* checkpoint id so the SDK resumes the
+    # exact session the gate checked (issue #173 F-15).
+    fork_session_id = _fork_session_for_retry(task, repo_cfg, cfg, world.task.slug) \
+        if last_cmd == "/fix" else None
+
     if last_cmd == "/plan":
         hr = _run_plan_with_sync(task, action.guidance, None, repo_cfg, cfg,
                                   progress_callback=progress_callback)
@@ -412,5 +540,7 @@ def _run_retry(
                                    progress_callback=progress_callback)
     else:
         hr = _run_fix_with_sync(task, action.guidance, repo_cfg, cfg,
-                                progress_callback=progress_callback)
+                                progress_callback=progress_callback,
+                                fork_session=fork_session_id is not None,
+                                fork_session_id=fork_session_id)
     return _to_dispatch(hr, task)

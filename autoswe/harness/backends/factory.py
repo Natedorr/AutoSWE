@@ -17,14 +17,23 @@ def get_backend(harness_cfg: dict) -> CodingBackend:
     The ``backend`` field in *harness_cfg* selects the implementation::
 
         {"backend": "claude_code", "model": "claude-sonnet-4-6"}
-        {"backend": "codex", "model": "gpt-5.4"}
+        {"backend": "codex", "model": "gpt-5.6-terra"}
 
-    Raises ``ValueError`` on unknown backend names.
+    Raises ``ValueError`` on unknown backend names, or when a ``codex``
+    profile omits the required ``model`` field (there is no Codex default).
     """
     backend_name = harness_cfg.get("backend", "claude_code").lower()
     if backend_name == "claude_code":
         return ClaudeCodeBackend()
     if backend_name == "codex":
+        # Codex has no built-in default model — a profile must name one.
+        model = str(harness_cfg.get("model") or "").strip()
+        if not model:
+            raise ValueError(
+                "Codex harness profile is missing required 'model'. "
+                "Set it to a current Codex model, e.g. 'gpt-5.6-sol', 'gpt-5.6-terra', "
+                "'gpt-5.6-luna', or 'gpt-5.5'."
+            )
         # Deferred import: only loads the codex submodule when a codex profile is configured,
         # avoiding ImportError on deploys that use claude_code exclusively.
         from autoswe.harness.backends.codex import CodexBackend

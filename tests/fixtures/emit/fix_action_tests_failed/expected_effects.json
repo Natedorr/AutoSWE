@@ -1,0 +1,35 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Test gate failed",
+      "marked done",
+      "test_half_ten_contract",
+      "assert 5.0 == 6.0",
+      "Commit: deadbeef",
+      "/pr` is blocked",
+      "Cost: $0.55",
+      "Duration: 2m0s",
+      "Session: session-fix-789",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "test_failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "test_failed",
+      "last_dispatched_command": "/fix",
+      "last_dispatched_command_id": 1,
+      "last_consumed_reply_id": 1,
+      "pending_command": null,
+      "session_id": "session-fix-789",
+      "last_phase": "fix",
+      "first_dispatched_at": null,
+      "rereview_after_fix": false
+    }
+  }
+]

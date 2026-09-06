@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 from pathlib import Path
+
+from autoswe.core.logging_utils import get_debug_logger
 
 # Expands ${VAR} and ${VAR:-default} inside JSON string values.
 
@@ -74,12 +75,14 @@ AUTOSWE_DIR = Path(os.environ.get("AUTOSWE_DIR", _REPO_ROOT))
 
 
 def _as_bool(value: str | None, default: str = "false") -> bool:
-    """Coerce a config value to bool via the ``.lower() == "true"`` idiom.
+    """Coerce a config value to bool.
 
-    Used by both the defaults dict and the file-override loop so the coercion
-    logic lives in one place.
+    Accepts the common truthy spellings ``true`` / ``1`` / ``yes`` / ``on``
+    (case-insensitive); everything else — including a blank that falls back to
+    *default* — is falsy. Used by both the defaults dict and the file-override
+    loop so the coercion logic lives in one place.
     """
-    return str(value or default).lower() == "true"
+    return str(value or default).strip().lower() in ("true", "1", "yes", "on")
 
 
 def _load_json_config(filepath: Path) -> dict:
@@ -99,6 +102,11 @@ WELCOME_FILE = AUTOSWE_DIR / "config" / "welcome_comment.txt"
 QUEUE_FILE = AUTOSWE_DIR / "data" / "queue.json"
 RUNNING_DIR = AUTOSWE_DIR / "running"
 LOGS_DIR = AUTOSWE_DIR / "logs"
+# Backend-neutral root for handler-owned artifacts (S6 / issue #169 F-10).
+# The reviewer persists its report under ARTIFACT_DIR / "reviews"; native
+# Claude-SDK plan files still live in the SDK's own ~/.claude/plans/ (owned by
+# the backend, not the handler).
+ARTIFACT_DIR = AUTOSWE_DIR / "artifacts"
 PLAN_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "plan.txt"
 FIX_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "fix.txt"
 REVIEW_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "review.txt"
@@ -132,29 +140,61 @@ def load_config() -> dict:
         "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
         "BOT_NAME": os.environ.get("BOT_NAME", "autoswe"),
         "ALLOWED_AUTHORS": os.environ.get("ALLOWED_AUTHORS", ""),
-        "LINK_BRANCH_TO_ISSUE": _as_bool(os.environ.get("LINK_BRANCH_TO_ISSUE"), "false"),
+        "LINK_BRANCH_TO_ISSUE": _as_bool(os.environ.get("LINK_BRANCH_TO_ISSUE"), "true"),
         "SYNC_STRATEGY": os.environ.get("SYNC_STRATEGY", "merge"),  # "merge" | "rebase"
         "PR_REQUIRE_SYNC": _as_bool(os.environ.get("PR_REQUIRE_SYNC"), "true"),
         "PR_REQUIRE_CI": _as_bool(os.environ.get("PR_REQUIRE_CI"), "true"),
         "AGENT_RETRY_ON_SUBTYPE": os.environ.get("AGENT_RETRY_ON_SUBTYPE", ""),
         "WORKTREE_ORPHAN_POLICY": os.environ.get("WORKTREE_ORPHAN_POLICY", "commit"),
+        "AUTO_PURGE_BRANCHES": _as_bool(os.environ.get("AUTO_PURGE_BRANCHES")),
+        "TEST_GATE": _as_bool(os.environ.get("TEST_GATE"), "true"),
+        "TEST_GATE_TIMEOUT": int(os.environ.get("TEST_GATE_TIMEOUT", 600)),
+        "TEST_COMMAND": os.environ.get("TEST_COMMAND", ""),
     }
     if CONFIG_FILE.exists():
+        # Snapshot the defaults before the file-parse loop overwrites the
+        # values — a coercion failure must fall back to these defaults.
+        int_defaults = {
+            int_key: cfg[int_key]
+            for int_key in (
+                "AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS",
+                "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES",
+                "TEST_GATE_TIMEOUT",
+            )
+        }
         for line in CONFIG_FILE.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, _, v = line.partition("=")
-                cfg[k.strip()] = v.strip()
-        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES"):
-            with contextlib.suppress(ValueError, TypeError):
-                cfg[int_key] = int(cfg.get(int_key, 0))
+                v = v.strip()
+                # Strip matched surrounding quotes so BOT_NAME="bot" -> bot.
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                    v = v[1:-1]
+                cfg[k.strip()] = v
+        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT"):
+            raw = cfg.get(int_key)
+            if raw is None:
+                continue
+            try:
+                cfg[int_key] = int(raw)
+            except (ValueError, TypeError):
+                # Malformed value (e.g. MAX_ATTEMPTS=thre): keep the default
+                # rather than a string that would blow up later in a compare.
+                default = int_defaults[int_key]
+                cfg[int_key] = default
+                get_debug_logger().warning(
+                    "config: %s=%r is not a valid integer, using default %r",
+                    int_key, raw, default,
+                )
         cfg["SILENT_REPORTING"] = _as_bool(cfg.get("SILENT_REPORTING"))
         cfg["MINIMAL_POSTING"] = _as_bool(cfg.get("MINIMAL_POSTING"))
         cfg["AUTO_ASSIGN"] = _as_bool(cfg.get("AUTO_ASSIGN"), "true")
         cfg["AUTO_CREATE_PR"] = _as_bool(cfg.get("AUTO_CREATE_PR"))
-        cfg["LINK_BRANCH_TO_ISSUE"] = _as_bool(cfg.get("LINK_BRANCH_TO_ISSUE"), "false")
+        cfg["LINK_BRANCH_TO_ISSUE"] = _as_bool(cfg.get("LINK_BRANCH_TO_ISSUE"), "true")
         cfg["PR_REQUIRE_SYNC"] = _as_bool(cfg.get("PR_REQUIRE_SYNC"), "true")
         cfg["PR_REQUIRE_CI"] = _as_bool(cfg.get("PR_REQUIRE_CI"), "true")
+        cfg["AUTO_PURGE_BRANCHES"] = _as_bool(cfg.get("AUTO_PURGE_BRANCHES"))
+        cfg["TEST_GATE"] = _as_bool(cfg.get("TEST_GATE"), "true")
     # Parse ALLOWED_AUTHORS as a set for O(1) lookup
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()
     cfg["ALLOWED_AUTHORS"] = {a.strip() for a in _raw.split(",") if a.strip()} if _raw else set()

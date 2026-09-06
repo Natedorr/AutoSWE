@@ -65,13 +65,45 @@ def tracker(ado_repo_cfg):
     return AzureTracker(ado_repo_cfg)
 
 
+# -- token key acceptance (issue #168 F-06 regression guard) --
+#
+# The MCP comment server (and other hand-built repo_cfg dicts) key the PAT as
+# "token" rather than "pat". AzureTracker must accept either, matching
+# AzureVCS, or Azure MCP comment posting 401s with an empty Basic-auth PAT.
+
+def test_azure_tracker_accepts_pat_under_pat_key():
+    tracker = AzureTracker({
+        "provider": "azure", "org": "o", "project": "p", "repo": "r",
+        "pat": "fake_pat",
+    })
+    assert tracker._pat == "fake_pat"
+
+
+def test_azure_tracker_accepts_pat_under_token_key():
+    """Guard for the F-06 MCP regression: a repo_cfg that keys the PAT as
+    "token" must still populate a non-empty PAT on AzureTracker."""
+    tracker = AzureTracker({
+        "provider": "azure", "org": "o", "project": "p", "repo": "r",
+        "token": "fake_pat",
+    })
+    assert tracker._pat == "fake_pat"
+
+
+def test_azure_tracker_pat_key_preferred_over_token():
+    tracker = AzureTracker({
+        "provider": "azure", "org": "o", "project": "p", "repo": "r",
+        "pat": "pat_wins", "token": "token_loses",
+    })
+    assert tracker._pat == "pat_wins"
+
+
 # -- list_open_issues --
 
 def test_list_open_issues_empty(tracker, mock_ado_request, ado_route_table):
     """Empty WIQL result returns no issues."""
     ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/wiql")] = {"workItems": []}
 
-    result = tracker.list_open_issues({})
+    result = tracker.list_open_issues()
     assert result == []
 
 
@@ -83,7 +115,7 @@ def test_list_open_issues(tracker, mock_ado_request, ado_route_table):
     ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/wiql")] = wiql_result
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems?ids=")] = batch_result
 
-    result = tracker.list_open_issues({})
+    result = tracker.list_open_issues()
 
     assert len(result) == 2
     assert result[0].number == 100
@@ -96,6 +128,99 @@ def test_list_open_issues(tracker, mock_ado_request, ado_route_table):
     assert result[1].status == "fixed"
 
 
+def test_list_open_issues_chunks_batch_gets(tracker, mock_ado_request, ado_route_table):
+    """Many WIQL ids are split into chunked batch GETs, merged, and sorted by id.
+
+    issue #127: ADO caps the number of ids per batch GET; a busy project with
+    2000 open items must not be sent in one request.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    ids = list(range(1000, 1250))  # 250 ids -> 3 chunks (100/100/50)
+    ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/wiql")] = {
+        "workItems": [{"id": i} for i in ids],
+    }
+
+    def fake_batch_get(method, path, pat, body):
+        query = parse_qs(urlparse(path).query)
+        chunk_ids = [int(x) for x in query["ids"][0].split(",")]
+        return {
+            "value": [
+                {
+                    "id": i,
+                    "fields": {
+                        "System.Title": f"Item {i}",
+                        "System.Description": "",
+                        "System.Tags": "",
+                        "System.State": "New",
+                    },
+                }
+                for i in chunk_ids
+            ]
+        }
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems?ids=")] = fake_batch_get
+
+    result = tracker.list_open_issues()
+
+    # Exactly 3 batch GETs (100 / 100 / 50); no call carries more than 100 ids.
+    get_calls = [c for c in mock_ado_request.calls if c["method"] == "GET"]
+    assert len(get_calls) == 3
+    for call in get_calls:
+        query = parse_qs(urlparse(call["path"]).query)
+        assert len(query["ids"][0].split(",")) <= 100
+
+    # Merged result: one issue per id, ascending order.
+    assert len(result) == 250
+    assert [issue.number for issue in result] == sorted(ids)
+
+
+def test_list_open_issues_dedupes_duplicate_ids(tracker, mock_ado_request, ado_route_table):
+    """Duplicate WIQL ids never appear in a request and are de-duped in output."""
+    from urllib.parse import parse_qs, urlparse
+
+    # 10 unique ids, duplicated/interleaved in the WIQL result.
+    unique = list(range(50, 60))
+    wiql_ids = [unique[i % len(unique)] for i in range(30)]
+    ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/wiql")] = {
+        "workItems": [{"id": i} for i in wiql_ids],
+    }
+
+    seen_request_ids: list[list[int]] = []
+
+    def fake_batch_get(method, path, pat, body):
+        query = parse_qs(urlparse(path).query)
+        chunk_ids = [int(x) for x in query["ids"][0].split(",")]
+        seen_request_ids.append(chunk_ids)
+        return {
+            "value": [
+                {
+                    "id": i,
+                    "fields": {
+                        "System.Title": f"Item {i}",
+                        "System.Description": "",
+                        "System.Tags": "",
+                        "System.State": "New",
+                    },
+                }
+                for i in chunk_ids
+            ]
+        }
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems?ids=")] = fake_batch_get
+
+    result = tracker.list_open_issues()
+
+    # No chunk request carries a duplicate id.
+    for chunk in seen_request_ids:
+        assert len(chunk) == len(set(chunk))
+    # Exactly one chunk — all 10 unique ids fit in the 100-id cap.
+    assert len(seen_request_ids) == 1
+
+    # Output is de-duped, one issue per id, ascending.
+    assert [issue.number for issue in result] == sorted(unique)
+
+
 # -- fetch_issue --
 
 def test_fetch_issue(tracker, mock_ado_request, ado_route_table):
@@ -105,7 +230,7 @@ def test_fetch_issue(tracker, mock_ado_request, ado_route_table):
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
     ado_route_table[("GET", "https://app.vssps.visualstudio.com/_apis/profile")] = profile
 
-    result = tracker.fetch_issue({}, 100)
+    result = tracker.fetch_issue(100)
 
     assert result.number == 100
     assert result.title == "Feature: add login page"
@@ -122,7 +247,11 @@ def test_fetch_comments_pending(tracker, mock_ado_request, ado_route_table):
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100/comments")] = raw
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = workitem
 
-    result = tracker.fetch_comments({}, 100)
+    result = tracker.fetch_comments(100)
+
+    # issue #125: comment reads must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in mock_ado_request.calls[0]["path"]
+    assert "preview" not in mock_ado_request.calls[0]["path"]
 
     assert len(result) == 2
     assert result[0].body == "/plan --branch develop"
@@ -138,7 +267,7 @@ def test_fetch_comments_empty(tracker, mock_ado_request, ado_route_table):
         "comments": []
     }
 
-    result = tracker.fetch_comments({}, 99)
+    result = tracker.fetch_comments(99)
     assert result == []
 
 
@@ -155,7 +284,7 @@ def test_fetch_comments_same_author_normalization(tracker, mock_ado_request, ado
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/70/comments")] = raw
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = workitem
 
-    result = tracker.fetch_comments({}, 70)
+    result = tracker.fetch_comments(70)
 
     assert len(result) == 3
     # Comment 1: "/plan" — user comment matching PAT owner → OWNER
@@ -193,7 +322,7 @@ def test_fetch_comments_bot_marker_takes_precedence(tracker, mock_ado_request, a
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/50/comments")] = raw
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = workitem
 
-    result = tracker.fetch_comments({}, 50)
+    result = tracker.fetch_comments(50)
 
     assert len(result) == 1
     assert result[0].author_login == "BOT"
@@ -228,7 +357,7 @@ def test_fetch_comments_auth_fallback_preserves_raw(tracker, mock_ado_request, a
 
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/50/comments")] = raw
 
-    result = tracker.fetch_comments({}, 50)
+    result = tracker.fetch_comments(50)
 
     assert len(result) == 2
     # Bot comment still detected via marker
@@ -268,7 +397,7 @@ def test_fetch_comments_decodes_html_entities_in_branch_flag(
         ("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")
     ] = workitem
 
-    result = tracker.fetch_comments({}, 100)
+    result = tracker.fetch_comments(100)
 
     assert len(result) == 1
     assert result[0].body == "/fix --branch test-branch-6"
@@ -300,7 +429,7 @@ def test_fetch_comments_decodes_named_html_entities(
         ("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")
     ] = workitem
 
-    result = tracker.fetch_comments({}, 100)
+    result = tracker.fetch_comments(100)
 
     assert result[0].body == "Fix bug & edge cases: handle <input> validation …"
 
@@ -331,7 +460,7 @@ def test_fetch_comments_plain_text_unchanged(
         ("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")
     ] = workitem
 
-    result = tracker.fetch_comments({}, 100)
+    result = tracker.fetch_comments(100)
 
     assert result[0].body == "/fix --branch develop"
 
@@ -367,13 +496,40 @@ def test_authenticated_user_cached(tracker, mock_ado_request, ado_route_table):
     profile = load_ado_fixture("profile_me.json")
     ado_route_table[("GET", "https://app.vssps.visualstudio.com/_apis/profile")] = profile
 
-    first = tracker.authenticated_user({})
-    second = tracker.authenticated_user({})
+    first = tracker.authenticated_user()
+    second = tracker.authenticated_user()
+
+    # issue #125: profile endpoint must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in mock_ado_request.calls[0]["path"]
+    assert "preview" not in mock_ado_request.calls[0]["path"]
 
     assert first == "natedorr@example.com"
     assert first == second
     # Should only call once — cached (Profile API succeeds, no fallback needed)
     assert len(mock_ado_request.calls) == 1
+
+
+def test_authenticated_user_prefers_documented_fields(tracker, mock_ado_request, ado_route_table):
+    """Documented profile fields (emailAddress) win over legacy principalName."""
+    ado_route_table[("GET", "https://app.vssps.visualstudio.com/_apis/profile")] = {
+        "id": "guid-doc",
+        "displayName": "Doc User",
+        "emailAddress": "doc@example.com",
+        "principalName": "legacy@example.com",
+    }
+
+    assert tracker.authenticated_user() == "doc@example.com"
+
+
+def test_authenticated_user_legacy_fallback(tracker, mock_ado_request, ado_route_table):
+    """Legacy ADO Server/TFS profile shapes (principalName/uniqueName) still resolve."""
+    ado_route_table[("GET", "https://app.vssps.visualstudio.com/_apis/profile")] = {
+        "id": "guid-legacy",
+        "principalName": "legacy@example.com",
+        "uniqueName": "legacy@example.com",
+    }
+
+    assert tracker.authenticated_user() == "legacy@example.com"
 
 
 # -- is_pull_request always False --
@@ -385,7 +541,7 @@ def test_is_pull_request_false(tracker, mock_ado_request, ado_route_table):
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
     ado_route_table[("GET", "https://app.vssps.visualstudio.com/_apis/profile")] = profile
 
-    result = tracker.fetch_issue({}, 100)
+    result = tracker.fetch_issue(100)
     assert result.is_pull_request is False
 
 
@@ -399,7 +555,7 @@ def test_author_association_owner(tracker, mock_ado_request, ado_route_table):
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
     ado_route_table[("GET", "https://app.vssps.visualstudio.com/_apis/profile")] = profile
 
-    _ = tracker.fetch_issue({}, 100)
+    _ = tracker.fetch_issue(100)
 
 
 # -- write methods (Stage 5) --
@@ -411,13 +567,16 @@ def test_post_comment(tracker, mock_ado_request, ado_route_table):
     comment_response = load_ado_fixture("comment_post_response.json")
     ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100/comments")] = comment_response
 
-    tracker.post_comment({}, 100, "This is a test comment")
+    tracker.post_comment(100, "This is a test comment")
 
     assert len(mock_ado_request.calls) == 1
     call = mock_ado_request.calls[0]
     assert call["method"] == "POST"
     assert "workitems/100/comments" in call["path"]
     assert "format=Markdown" in call["path"]
+    # issue #125: comment POST must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in call["path"]
+    assert "preview" not in call["path"]
     assert call["body"] == {"text": "This is a test comment"}
 
 
@@ -441,7 +600,7 @@ def test_post_comment_preserves_newlines_in_markdown(tracker, mock_ado_request, 
         "\n<!-- autoswe-bot -->"
     )
 
-    tracker.post_comment({}, 100, body)
+    tracker.post_comment(100, body)
 
     assert len(mock_ado_request.calls) == 1
     call = mock_ado_request.calls[0]
@@ -464,7 +623,7 @@ def test_set_status_preserves_non_autoswe_tags(tracker, mock_ado_request, ado_ro
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
     ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = patch_response
 
-    tracker.set_status({}, 100, "fixed")
+    tracker.set_status(100, "fixed")
 
     # Should do a GET (read tags) then a PATCH (write new tags)
     assert len(mock_ado_request.calls) == 2
@@ -476,7 +635,7 @@ def test_set_status_preserves_non_autoswe_tags(tracker, mock_ado_request, ado_ro
     assert patch_call["method"] == "PATCH"
     patch_body = patch_call["body"]
     assert len(patch_body) == 1
-    assert patch_body[0]["op"] == "replace"
+    assert patch_body[0]["op"] == "add"
     assert patch_body[0]["path"] == "/fields/System.Tags"
     # Should have feature; bug; autoswe:fixed (no autoswe:pending)
     new_tags = patch_body[0]["value"]
@@ -494,11 +653,11 @@ def test_set_status_no_existing_tags(tracker, mock_ado_request, ado_route_table)
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
     ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = patch_response
 
-    tracker.set_status({}, 100, "pending")
+    tracker.set_status(100, "pending")
 
     assert len(mock_ado_request.calls) == 2
     patch_call = mock_ado_request.calls[1]
-    assert patch_call["body"] == [{"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:pending"}]
+    assert patch_call["body"] == [{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending"}]
 
 
 def test_set_status_with_full_label_no_double_prefix(tracker, mock_ado_request, ado_route_table):
@@ -514,7 +673,7 @@ def test_set_status_with_full_label_no_double_prefix(tracker, mock_ado_request, 
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
     ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = patch_response
 
-    tracker.set_status({}, 100, "autoswe:pending")
+    tracker.set_status(100, "autoswe:pending")
 
     patch_call = mock_ado_request.calls[1]
     tag_value = patch_call["body"][0]["value"]
@@ -530,7 +689,7 @@ def test_set_status_full_label_replaces_old_full_label(tracker, mock_ado_request
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
     ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = patch_response
 
-    tracker.set_status({}, 100, "autoswe:fixing")
+    tracker.set_status(100, "autoswe:fixing")
 
     patch_call = mock_ado_request.calls[1]
     tag_value = patch_call["body"][0]["value"]
@@ -547,12 +706,12 @@ def test_assign_to_user_explicit_login(tracker, mock_ado_request, ado_route_tabl
     patch_response = load_ado_fixture("workitem_after_assign.json")
     ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = patch_response
 
-    tracker.assign_to_user({}, 100, "dev@example.com")
+    tracker.assign_to_user(100, "dev@example.com")
 
     assert len(mock_ado_request.calls) == 1
     call = mock_ado_request.calls[0]
     assert call["method"] == "PATCH"
-    assert call["body"] == [{"op": "replace", "path": "/fields/System.AssignedTo", "value": "dev@example.com"}]
+    assert call["body"] == [{"op": "add", "path": "/fields/System.AssignedTo", "value": "dev@example.com"}]
     # Should NOT call authenticated_user
     assert len([c for c in mock_ado_request.calls if "profile" in c["path"]]) == 0
 
@@ -565,7 +724,7 @@ def test_assign_to_user_resolves_authenticated(tracker, mock_ado_request, ado_ro
     ado_route_table[("GET", "https://app.vssps.visualstudio.com/_apis/profile")] = profile
     ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = patch_response
 
-    tracker.assign_to_user({}, 100, None)
+    tracker.assign_to_user(100, None)
 
     # Should call Profile API (authenticated_user) then PATCH
     assert len(mock_ado_request.calls) == 2
@@ -573,7 +732,7 @@ def test_assign_to_user_resolves_authenticated(tracker, mock_ado_request, ado_ro
     assert "profile" in mock_ado_request.calls[0]["path"]
     assert mock_ado_request.calls[1]["method"] == "PATCH"
     assert mock_ado_request.calls[1]["body"] == [
-        {"op": "replace", "path": "/fields/System.AssignedTo", "value": "natedorr@example.com"}
+        {"op": "add", "path": "/fields/System.AssignedTo", "value": "natedorr@example.com"}
     ]
 
 
@@ -586,7 +745,7 @@ def test_post_comment_bot_uses_markdown_format(tracker, mock_ado_request, ado_ro
     comment_response = load_ado_fixture("comment_post_response.json")
     ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100/comments")] = comment_response
 
-    tracker.post_comment({}, 100, "Bot message\n\n<!-- autoswe-bot -->")
+    tracker.post_comment(100, "Bot message\n\n<!-- autoswe-bot -->")
 
     assert len(mock_ado_request.calls) == 1
     call = mock_ado_request.calls[0]
@@ -600,7 +759,7 @@ def test_post_comment_non_bot_uses_markdown_format(tracker, mock_ado_request, ad
     comment_response = load_ado_fixture("comment_post_response.json")
     ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100/comments")] = comment_response
 
-    tracker.post_comment({}, 100, "Just a user comment, no bot marker here")
+    tracker.post_comment(100, "Just a user comment, no bot marker here")
 
     assert len(mock_ado_request.calls) == 1
     call = mock_ado_request.calls[0]
@@ -615,13 +774,16 @@ def test_update_comment_markdown(tracker, mock_ado_request, ado_route_table):
     patch_response = {"id": 42}
     ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100/comments/42")] = patch_response
 
-    tracker.update_comment({}, 100, 42, "Updated text, no bot marker")
+    tracker.update_comment(100, 42, "Updated text, no bot marker")
 
     assert len(mock_ado_request.calls) == 1
     call = mock_ado_request.calls[0]
     assert call["method"] == "PATCH"
     assert "workitems/100/comments/42" in call["path"]
     assert "format=Markdown" in call["path"]
+    # issue #125: comment PATCH must use stable 7.1, not a retired preview
+    assert "api-version=7.1" in call["path"]
+    assert "preview" not in call["path"]
     assert call["body"] == {"text": "Updated text, no bot marker"}
 
 
@@ -630,7 +792,7 @@ def test_update_comment_markdown_for_bot(tracker, mock_ado_request, ado_route_ta
     patch_response = {"id": 42}
     ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100/comments/42")] = patch_response
 
-    tracker.update_comment({}, 100, 42, "Bot update\n\n<!-- autoswe-bot -->")
+    tracker.update_comment(100, 42, "Bot update\n\n<!-- autoswe-bot -->")
 
     assert len(mock_ado_request.calls) == 1
     call = mock_ado_request.calls[0]
@@ -657,7 +819,7 @@ def test_update_comment_url_encodes_org_and_project():
             "project": "proj#1",
             "pat": "tok",
         })
-        tracker.update_comment({}, 5, 99, "body")
+        tracker.update_comment(5, 99, "body")
     finally:
         tracker_mod.ado_patch_json = original
 
@@ -691,10 +853,10 @@ def test_bot_comment_roundtrip(tracker, mock_ado_request, ado_route_table):
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = workitem
 
     # Post bot comment
-    tracker.post_comment({}, 100, "## Plan\n\nBot message\n\n<!-- autoswe-bot -->")
+    tracker.post_comment(100, "## Plan\n\nBot message\n\n<!-- autoswe-bot -->")
 
     # Fetch comments back
-    comments = tracker.fetch_comments({}, 100)
+    comments = tracker.fetch_comments(100)
 
     assert len(comments) == 1
     # BOT_MARKER re-appended by fetch_comments (ADO strips HTML comments)
@@ -728,7 +890,7 @@ def test_fetch_comments_mixed_html_and_markdown(tracker, mock_ado_request, ado_r
     }
     ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = workitem
 
-    comments = tracker.fetch_comments({}, 50)
+    comments = tracker.fetch_comments(50)
 
     assert len(comments) == 2
     # User comment: markdown, no marker → OWNER

@@ -4,16 +4,25 @@ Mirrors the provider parity pattern (test_fake_parity.py, test_tracker_parity.py
 assert both CodingBackend implementations obey the RunSpec→RunResult contract
 and advertise honest capability sets.
 
-Three parity dimensions:
-1. **Protocol conformance** — both classes have ``capabilities()`` and ``run()``.
-2. **RunResult shape** — both backends return dataclasses with identical fields.
+Parity dimensions:
+1. **Protocol conformance** — both classes have ``capabilities()``,
+   ``retryable_subtypes()`` and ``retryable_exceptions()`` and ``run()``.
+2. **RunResult shape** — both backends return the same dataclass, incl. the
+   normalized ``ok`` flag (S6 / issue #169 F-10).
 3. **Capability honesty** — advertised capabilities match what each backend
    actually supports (Claude = full feature set, Codex = resume + progress only).
+4. **Behavioral read-only** — a ``mode="plan"`` run cannot leave the worktree
+   dirty, asserted the same way for BOTH backends (S6 / issue #169 F-21).
 """
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 from dataclasses import asdict, fields
+from unittest.mock import patch
+
+import pytest
 
 from autoswe.harness.backends.base import CodingBackend, RunResult, RunSpec
 
@@ -53,6 +62,50 @@ class TestProtocolConformance:
             assert isinstance(cls.capabilities(), set), (
                 f"{cls.__name__}.capabilities() must return a set"
             )
+
+    def test_both_have_retryable_exceptions_classmethod(self):
+        """Both backends expose retryable_exceptions() returning a tuple.
+
+        S6 / issue #169 F-09: the exception-based twin of
+        ``retryable_subtypes()``.  Each backend declares its OWN retryable
+        exception set; runner.run() must not hard-code Claude's tuple.
+        """
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+        from autoswe.harness.backends.codex import CodexBackend
+
+        for cls in (ClaudeCodeBackend, CodexBackend):
+            assert hasattr(cls, "retryable_exceptions"), (
+                f"{cls.__name__} missing retryable_exceptions()"
+            )
+            ret = cls.retryable_exceptions()
+            assert isinstance(ret, tuple), (
+                f"{cls.__name__}.retryable_exceptions() must return a tuple"
+            )
+            for exc in ret:
+                assert isinstance(exc, type) and issubclass(exc, BaseException), (
+                    f"{cls.__name__}.retryable_exceptions() yielded non-exception {exc!r}"
+                )
+
+    def test_codex_retryable_exceptions_are_its_own(self):
+        """Codex retries on asyncio.TimeoutError / OSError, not on Claude's set.
+
+        A backend-specific exception in Codex's own set should not be in
+        Claude's set (and vice-versa for Claude's SDK exception types),
+        proving the retry loop can pick the resolved backend's tuple
+        without cross-contamination.
+        """
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+        from autoswe.harness.backends.codex import CodexBackend
+
+        codex_exc = CodexBackend.retryable_exceptions()
+        claude_exc = ClaudeCodeBackend.retryable_exceptions()
+        assert asyncio.TimeoutError in codex_exc
+        assert OSError in codex_exc
+        # Claude's exception set is SDK-specific and non-empty, distinct
+        # from Codex's transport-level set (both non-empty, and they do not
+        # share every member).
+        assert len(claude_exc) > 0
+        assert set(codex_exc) != set(claude_exc)
 
     def test_both_have_run_method(self):
         """Both backends have a run(spec) method returning an awaitable."""
@@ -113,7 +166,8 @@ class TestRunResultShape:
         """RunResult has the expected set of fields."""
         expected = {
             "text", "session_id", "subtype", "cost_usd", "duration_seconds",
-            "plan_file_path", "plan_posted", "question_posted", "plan_text",
+            "ok", "plan_file_path", "plan_posted", "question_posted", "plan_text",
+            "structured_output",
         }
         actual = {f.name for f in fields(RunResult)}
         assert actual == expected, f"RunResult fields drifted: {actual ^ expected}"
@@ -126,6 +180,18 @@ class TestRunResultShape:
         assert r.plan_file_path is None
         assert r.plan_posted is False
         assert r.question_posted is False
+        assert r.structured_output is None
+
+    def test_runresult_ok_resolved_from_subtype(self):
+        """When ``ok`` is not set, it falls back to subtype == 'success'."""
+        assert RunResult(text="", session_id=None, subtype="success").ok is True
+        assert RunResult(text="", session_id=None, subtype="error_max_turns").ok is False
+        assert RunResult(text="", session_id=None, subtype=None).ok is False
+
+    def test_runresult_ok_explicit_override(self):
+        """An explicit ``ok`` wins over the subtype-derived default."""
+        r = RunResult(text="", session_id=None, subtype="error_max_turns", ok=True)
+        assert r.ok is True
 
     def test_runresult_tuple_unpacking(self):
         """RunResult supports tuple-style 3-element unpacking (back-compat)."""
@@ -253,8 +319,10 @@ class TestCapabilityHonesty:
         "can_use_tool",
         "plan_permission",
         "resume",
+        "session_fork",
         "progress_stream",
         "plan_file",
+        "structured_output",
     })
 
     def test_claude_code_full_capabilities(self):
@@ -264,7 +332,8 @@ class TestCapabilityHonesty:
         caps = ClaudeCodeBackend.capabilities()
         expected = {
             "mode", "mcp", "can_use_tool", "plan_permission",
-            "resume", "progress_stream", "plan_file",
+            "resume", "session_fork", "progress_stream", "plan_file",
+            "structured_output",
         }
         assert caps == expected, (
             f"ClaudeCodeBackend capabilities changed: got {caps}"
@@ -274,13 +343,21 @@ class TestCapabilityHonesty:
         )
 
     def test_codex_phase4_capabilities(self):
-        """Codex (Phase 4) advertises mode, resume + progress_stream."""
+        """Codex (Phase 4) advertises resume + progress_stream only.
+
+        No "mode" (issue #166): Codex accepts RunSpec.mode for contract
+        parity but performs no read-only enforcement, so it must not claim
+        the capability. Plan/review rely on the post-run worktree backstop.
+        """
         from autoswe.harness.backends.codex import CodexBackend
 
         caps = CodexBackend.capabilities()
-        expected = {"mode", "resume", "progress_stream"}
+        expected = {"resume", "progress_stream"}
         assert caps == expected, (
             f"CodexBackend capabilities changed: got {caps}"
+        )
+        assert "mode" not in caps, (
+            "Codex must not advertise 'mode' without read-only enforcement (issue #166)"
         )
         assert caps.issubset(self.ALL_CAPABILITIES), (
             "CodexBackend advertises unknown capability"
@@ -291,8 +368,14 @@ class TestCapabilityHonesty:
         from autoswe.harness.backends.codex import CodexBackend
 
         caps = CodexBackend.capabilities()
-        # Phase 4: Codex does NOT support these (mode IS supported via _mode_to_sandbox)
-        claude_exclusives = {"mcp", "can_use_tool", "plan_permission", "plan_file"}
+        # Phase 4: Codex does NOT support these. 'mode' is Claude-exclusive
+        # (issue #166): Codex accepts RunSpec.mode for contract parity but has
+        # no read-only enforcement, so it must not claim the capability.
+        # session_fork is Claude-exclusive: Codex has no fork primitive (resume in place or fresh).
+        claude_exclusives = {
+            "mode", "mcp", "can_use_tool", "plan_permission",
+            "plan_file", "session_fork",
+        }
         overlap = caps & claude_exclusives
         assert not overlap, (
             f"Codex advertises Claude-exclusive capabilities: {overlap}. "
@@ -390,7 +473,7 @@ class TestFactoryParity:
         """Factory codex backend satisfies CodingBackend."""
         from autoswe.harness.backends.factory import get_backend
 
-        backend = get_backend({"backend": "codex"})
+        backend = get_backend({"backend": "codex", "model": "gpt-5.6-terra"})
         assert isinstance(backend, CodingBackend)
 
     def test_factory_default_is_claude_code(self):
@@ -406,7 +489,10 @@ class TestFactoryParity:
         from autoswe.harness.backends.factory import get_backend
 
         for backend_name in ("claude_code", "codex"):
-            backend = get_backend({"backend": backend_name})
+            cfg = {"backend": backend_name}
+            if backend_name == "codex":
+                cfg["model"] = "gpt-5.6-terra"
+            backend = get_backend(cfg)
             spec = RunSpec(prompt="test", cwd="/tmp")
             coro = backend.run(spec)
             assert asyncio.iscoroutine(coro), (
@@ -436,8 +522,9 @@ class TestRunnerDispatcherParity:
         """backend_has_capability returns correct values for Codex."""
         from autoswe.harness.runner import backend_has_capability
 
-        harness = {"backend": "codex"}
-        assert backend_has_capability(harness, "mode")
+        harness = {"backend": "codex", "model": "gpt-5.6-terra"}
+        # No "mode" (issue #166): Codex has no read-only enforcement.
+        assert not backend_has_capability(harness, "mode")
         assert not backend_has_capability(harness, "mcp")
         assert not backend_has_capability(harness, "can_use_tool")
         assert not backend_has_capability(harness, "plan_permission")
@@ -462,7 +549,9 @@ class TestModeTranslationParity:
     """Each backend translates RunSpec.mode to its own config correctly.
 
     Claude Code: mode → permission_mode + tool lists.
-    Codex: mode → --sandbox flag.
+    Codex: mode is accepted for contract parity but no longer maps to a
+    ``--sandbox`` flag (issue #129 — the per-mode sandbox was dead weight,
+    neutralized by the always-on bypass flag).
 
     Both must handle all three modes without raising.
     """
@@ -483,35 +572,117 @@ class TestModeTranslationParity:
             )
             assert len(tools) > 0, f"allowed_tools for {mode!r} should not be empty"
 
-    def test_codex_mode_sandbox_coverage(self):
-        """CodexBackend _MODE_SANDBOX covers all three modes."""
-        from autoswe.harness.backends.codex import _MODE_SANDBOX
+    def test_codex_has_no_sandbox_mapping(self):
+        """Since issue #129 Codex no longer maps mode → --sandbox.
 
-        for mode in ("plan", "read_only", "read_write"):
-            assert mode in _MODE_SANDBOX, (
-                f"CodexBackend missing mode translation for {mode!r}"
-            )
-            sandbox = _MODE_SANDBOX[mode]
-            assert sandbox in ("read-only", "workspace-write"), (
-                f"Unexpected sandbox value for {mode!r}: {sandbox!r}"
-            )
+        The per-mode sandbox mapping was dead weight (the always-on bypass
+        flag neutralized it). Confirm the module no longer exposes a
+        mode→sandbox table or helper.
+        """
+        import autoswe.harness.backends.codex as codex_mod
 
-    def test_mode_readonly_equivalence(self):
-        """plan and read_only both map to read-only sandbox for Codex."""
-        from autoswe.harness.backends.codex import _MODE_SANDBOX
+        assert not hasattr(codex_mod, "_MODE_SANDBOX")
+        assert not hasattr(codex_mod, "_mode_to_sandbox")
 
-        assert _MODE_SANDBOX["plan"] == "read-only"
-        assert _MODE_SANDBOX["read_only"] == "read-only"
 
-    def test_mode_readwrite_is_workspace(self):
-        """read_write mode maps to workspace-write sandbox for Codex."""
-        from autoswe.harness.backends.codex import _MODE_SANDBOX
+# ---------------------------------------------------------------------------
+# 8. Behavioral read-only guarantee (S6 / issue #169 F-21)
+# ---------------------------------------------------------------------------
 
-        assert _MODE_SANDBOX["read_write"] == "workspace-write"
 
-    def test_mode_none_defaults_safe(self):
-        """Unspecified mode defaults to read-only (safe) for Codex."""
-        from autoswe.harness.backends.codex import _mode_to_sandbox
+def _make_real_git_repo(root, file_content="hello\n"):
+    """Initialize a real git repo at *root* with one committed file.
 
-        assert _mode_to_sandbox(None) == "read-only"
-        assert _mode_to_sandbox("unknown_mode") == "read-only"
+    Returns the committed HEAD SHA.
+    """
+    root.joinpath("README.md").write_text(file_content, encoding="utf-8")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e", "GIT_EDITOR": ":"}
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True, capture_output=True, text=True, env=env,
+        )
+
+    git("init", "-q", "-b", "master")
+    git("add", "README.md")
+    git("commit", "-q", "-m", "init")
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _worktree_porcelain(root):
+    """Return git status --porcelain output for *root*."""
+    return subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+
+class TestReadOnlyBehavioralParity:
+    """The behavioral read-only guarantee, asserted identically on both backends.
+
+    S6 / issue #169 F-21: no test previously asserted the *behavioral*
+    property that a ``mode="plan"`` run cannot write to the worktree.  This
+    is the single canonical copy of that assertion (previously duplicated in
+    test_planner_readonly.py); it runs against BOTH backends because the
+    backstop — ``ensure_worktree_unchanged`` — is the actual guarantee and
+    runs regardless of which backend performed the (unforced) read-only phase.
+    """
+
+    @pytest.mark.parametrize("backend", ["codex", "claude_code"])
+    def test_plan_run_cannot_write_to_worktree(self, backend, tmp_path, mock_gh_post_comment):
+        """A mode="plan" run must not leave the worktree dirty, on either backend.
+
+        We simulate an agent that edits a file WITHOUT committing (the normal
+        case a HEAD-only compare misses) by having the fake ``runner.run``
+        write an untracked file into a REAL git worktree, then assert the real
+        ``ensure_worktree_unchanged`` backstop rolled it back.
+        """
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        head = _make_real_git_repo(wt)
+
+        # Prove the worktree starts clean.
+        assert _worktree_porcelain(wt) == ""
+
+        def fake_run(prompt, **kwargs):
+            # The agent edited a file but did not commit → worktree dirty, HEAD same.
+            assert kwargs["mode"] == "plan"
+            (wt / "agent_edit.py").write_text("x = 1\n", encoding="utf-8")
+            from autoswe.harness.runner import RunResult
+            return RunResult("<AUTOSWE_PLAN>\nPlan\n</AUTOSWE_PLAN>", "sess", "success")
+
+        task = {
+            "id": "o_r_1", "owner": "o", "repo": "r", "issue_number": 1,
+            "title": "Test", "body": "/plan", "base_branch": "master",
+            "session_id": None, "_token": "ghp_fake",
+        }
+        harness = (
+            {"backend": "codex", "model": "gpt-5.6-terra"}
+            if backend == "codex" else {"backend": "claude_code"}
+        )
+
+        with patch("autoswe.harness.planner.create_worktree", return_value=wt):
+            with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+                with patch("autoswe.tracking.api._fetch_comments", return_value=[]):
+                    with patch(
+                        "autoswe.harness.planner.resolve_harness", return_value=harness
+                    ):
+                        with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                            from autoswe.harness.planner import run_plan
+                            run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+        # The agent's uncommitted edit must have been rolled back — worktree clean.
+        assert _worktree_porcelain(wt) == "", (
+            f"[{backend}] plan run left the worktree dirty; backstop should roll back"
+        )
+        assert not (wt / "agent_edit.py").exists(), "agent edit must be removed"
+        # HEAD is unchanged
+        assert subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip() == head

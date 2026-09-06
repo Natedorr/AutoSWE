@@ -20,8 +20,9 @@
   "comments": [],
   "queue_task": null,
   "authenticated_user": {
-    "displayName": "Test Owner",
     "id": "1",
+    "displayName": "Test Owner",
+    "emailAddress": "testowner@devowner.com",
     "uniqueName": "testowner@devowner.com"
   },
   "claude_responses": [

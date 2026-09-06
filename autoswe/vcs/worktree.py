@@ -1,3 +1,5 @@
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -23,7 +25,7 @@ def get_remote_branch_sha(
     """
     repo_cfg = {"owner": owner, "repo": repo, "token": token, "provider": provider}
     try:
-        clone_url = get_vcs(repo_cfg).clone_url(repo_cfg)
+        clone_url = get_vcs(repo_cfg).clone_url()
     except Exception as e:  # VCS provider clone_url() can fail for missing token, bad provider, etc.
         dbg.debug("get_remote_branch_sha: clone_url failed: %s", e)
         return None
@@ -52,23 +54,18 @@ def _repo_dir(owner: str, repo: str, cfg: dict, provider: str = "github") -> Pat
     Paths are provider-prefixed: ``gh-owner_repo`` for GitHub,
     ``ado-org_proj_repo`` for Azure DevOps.
     """
-    parts = _provider_parts(provider, owner, repo)
+    parts = _worktree_parts(owner, repo, provider)
     joined = "_".join(parts)
     return _worktrees_root(cfg) / joined
 
 
-def _provider_parts(provider: str, owner: str, repo: str) -> tuple[str, ...]:
-    """Return slug parts for the given provider.
+def _worktree_parts(owner: str, repo: str, provider: str) -> tuple[str, ...]:
+    """Return worktree path parts via the provider (``worktree_path_parts``).
 
-    GitHub: (owner, repo)
-    Azure:  (org, proj, repo) — owner is "org/proj"
+    GitHub: (owner, repo); Azure: (org, project, repo) — resolved by the
+    provider itself, so a new provider supplies its own layout.
     """
-    if provider == "azure":
-        if "/" in owner:
-            org, _, proj = owner.partition("/")
-            return (org, proj, repo)
-        return (owner, repo)
-    return (owner, repo)
+    return get_vcs({"owner": owner, "repo": repo, "provider": provider}).worktree_path_parts()
 
 
 def main_clone_path(owner: str, repo: str, cfg: dict, provider: str = "github") -> Path:
@@ -128,7 +125,7 @@ def ensure_clone(
     """Ensure _main/ clone exists and is up to date."""
     main = main_clone_path(owner, repo, cfg, provider)
     repo_cfg = {"owner": owner, "repo": repo, "token": token, "provider": provider}
-    clone_url = get_vcs(repo_cfg).clone_url(repo_cfg)
+    clone_url = get_vcs(repo_cfg).clone_url()
     if not main.exists():
         main.parent.mkdir(parents=True, exist_ok=True)
         log(f"[WORKTREE] Cloning {owner}/{repo} -> {main}")
@@ -173,10 +170,173 @@ def is_dirty(wt: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def fetch_prune(main: Path) -> None:
+    """Prune the main clone's remote-tracking refs to match the remote.
+
+    After this call, ``refs/remotes/origin/<branch>`` exists iff the branch
+    still exists on the remote. This is what makes :func:`remote_branch_exists`
+    a cheap local check instead of a round-trip per branch.
+    """
+    _run(["git", "-C", str(main), "fetch", "--prune", "origin"], check=False)
+
+
+def remote_branch_exists(main: Path, branch: str) -> bool:
+    """Return True if ``origin/<branch>`` exists in the main clone.
+
+    Call :func:`fetch_prune` first so the local remote-tracking ref reflects
+    the remote's current branch set.
+    """
+    result = _run(
+        ["git", "-C", str(main), "show-ref", "--verify", "--quiet",
+         f"refs/remotes/origin/{branch}"],
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def remove_worktree(main: Path, wt: Path, branch: str) -> bool:
+    """Remove a worktree directory and its local branch.
+
+    Best-effort: every step uses ``check=False`` so a partial failure
+    (e.g. the worktree is already gone) does not raise. The local branch is
+    force-deleted even if unmerged, because the caller has already confirmed
+    the remote branch no longer exists.
+
+    Returns True if the worktree directory was removed.
+    """
+    _run(["git", "-C", str(main), "worktree", "remove", "--force", str(wt)], check=False)
+    _run(["git", "-C", str(main), "worktree", "prune"], check=False)
+    if wt.exists():
+        # ``worktree remove`` failed (stale metadata, locked files, etc.) —
+        # the directory is ours, so clear it directly.
+        shutil.rmtree(wt, ignore_errors=True)
+    _run(["git", "-C", str(main), "branch", "-D", branch], check=False)
+    return not wt.exists()
+
+
+def _worktree_issue_numbers(repo_dir: Path) -> list[int]:
+    """Issue numbers of the ``issue-<N>`` worktree directories under *repo_dir*."""
+    numbers: list[int] = []
+    for entry in repo_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        m = re.fullmatch(r"issue-(\d+)", entry.name)
+        if m:
+            numbers.append(int(m.group(1)))
+    return numbers
+
+
+def purge_gone_branches(
+    owner: str,
+    repo: str,
+    cfg: dict,
+    provider: str = "github",
+    skip_issue_numbers: set[int] | None = None,
+) -> list[str]:
+    """Remove local worktrees + branches whose remote branch no longer exists.
+
+    Returns the list of branch names that were removed. The caller decides
+    whether to log/report.
+
+    Safety model (loose — see the plan for issue #177):
+
+    - The **primary gate** is pure remote-branch absence: after a single
+      ``fetch --prune``, any ``issue-<N>`` worktree whose
+      ``origin/autoswe/issue-<N>`` no longer exists is a candidate.
+    - Two **non-configurable integrity guards** are always applied on top:
+      - skip if the issue number is in *skip_issue_numbers* (in-flight tasks —
+        live PID / running status — detected by the caller, which owns the
+        PID/lifecycle knowledge);
+      - skip if the worktree is dirty (uncommitted work we must not destroy).
+
+    A failure to ``fetch --prune`` means we cannot trust the remote-tracking
+    refs, so nothing is purged (no-op on stale refs).
+    """
+    main = main_clone_path(owner, repo, cfg, provider)
+    repo_dir = _repo_dir(owner, repo, cfg, provider)
+    if not main.exists() or not repo_dir.exists():
+        return []
+
+    skip = skip_issue_numbers or set()
+    try:
+        fetch_prune(main)
+    except Exception as e:  # fetch can raise (network, credentials) — treat as "no purge"
+        dbg.debug("purge_gone_branches: fetch --prune failed for %s/%s: %s", owner, repo, e)
+        return []
+
+    vcs = get_vcs({"owner": owner, "repo": repo, "provider": provider})
+    purged: list[str] = []
+    for issue_num in _worktree_issue_numbers(repo_dir):
+        branch = vcs.branch_name(issue_num)
+        if remote_branch_exists(main, branch):
+            continue
+        if issue_num in skip:
+            continue
+        wt = worktree_path(owner, repo, issue_num, cfg, provider)
+        try:
+            if is_dirty(wt):
+                dbg.debug(
+                    "purge_gone_branches: skipping dirty worktree %s/%s issue-%d",
+                    owner, repo, issue_num,
+                )
+                continue
+        except Exception as e:
+            dbg.debug("purge_gone_branches: is_dirty failed for %s: %s", wt, e)
+            continue
+        if remove_worktree(main, wt, branch):
+            purged.append(branch)
+            log(f"[PURGE] {owner}/{repo}: removed gone worktree+branch {branch}")
+        else:
+            dbg.debug("purge_gone_branches: failed to remove %s/%s issue-%d", owner, repo, issue_num)
+    return purged
+
+
 def reset_clean(wt: Path, branch: str) -> None:
     """Hard-reset to origin/<branch> and remove untracked files/dirs."""
     _run(["git", "-C", str(wt), "reset", "--hard", f"origin/{branch}"])
     _run(["git", "-C", str(wt), "clean", "-fd"])
+
+
+def ensure_worktree_unchanged(wt: Path, head_before: str | None) -> bool:
+    """Roll back any worktree changes a read-only agent session made.
+
+    A plan/review phase is read-only in intent, but a backend that does not
+    enforce read-only access (e.g. the Codex backend — issue #166) can still
+    let the agent edit files. This backstop detects and reverts those edits
+    after the run so they do not leak into the next phase.
+
+    Detects changes two ways (either triggers a rollback):
+
+    - ``HEAD`` moved from *head_before* (agent committed) — catches the
+      commit case a plain ``status`` check would miss.
+    - the worktree is dirty (``git status --porcelain`` non-empty) — catches
+      uncommitted modifications, deletions, and untracked files, the normal
+      "agent edited but did not commit" case that a HEAD-only compare misses.
+
+    Rollback targets *head_before* (not ``origin/<branch>``) so legitimate
+    unpushed commits the handler itself made are preserved; worktrees are
+    synced clean by the orchestrator before a phase, so anything found here
+    is an agent edit.
+
+    Returns True if a rollback was performed, False if the worktree was clean.
+    """
+    head_after = _run(
+        ["git", "-C", str(wt), "rev-parse", "HEAD"], check=False
+    ).stdout.strip()
+
+    head_moved = bool(head_before) and bool(head_after) and head_before != head_after
+    dirty = is_dirty(wt)
+
+    if not head_moved and not dirty:
+        return False
+
+    log(f"[WORKTREE] {wt} changed during read-only phase"
+        f"{' (HEAD moved)' if head_moved else ''}"
+        f"{' (dirty worktree)' if dirty else ''} — rolling back (issue #166)")
+    if head_before:
+        _run(["git", "-C", str(wt), "reset", "--hard", head_before], check=False)
+    _run(["git", "-C", str(wt), "clean", "-fd"], check=False)
+    return True
 
 
 def get_merge_conflict_files(wt: Path) -> list[str]:
@@ -341,7 +501,7 @@ def create_worktree(
         # Best-effort: link branch to issue in platform UI (Development sidebar).
         # Runs BEFORE the remote branch is pushed, so the GraphQL createLinkedBranch
         # mutation can create the ref. Reused branches (branch_exists=True) skip this.
-        if cfg.get("LINK_BRANCH_TO_ISSUE", False):
+        if cfg.get("LINK_BRANCH_TO_ISSUE", True):
             try:
                 full_sha_result = _run(
                     ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],

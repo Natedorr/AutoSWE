@@ -92,6 +92,59 @@ def test_capture_dispatch_error_includes_system_info():
     assert ctx.kernel_version != ""
 
 
+def test_capture_dispatch_error_system_memory_populated(tmp_path):
+    """system_memory and disk_usage must be populated (not just non-raising).
+
+    Regression test for issue #173 F-24: on the documented Windows host the
+    /proc/meminfo + os.statvfs path raised and both fields were silently
+    empty, so the System section dropped out of the error comment.
+    """
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        ctx = capture_dispatch_error(exc, "gh:owner_repo_1", str(worktree))
+
+    assert ctx.system_memory, "system_memory must be populated on this platform"
+    assert ctx.system_memory != "Memory: unavailable on this platform", (
+        f"system_memory fell back to the unavailable marker: {ctx.system_memory!r}"
+    )
+    assert ctx.disk_usage, "disk_usage must be populated when a worktree is given"
+    assert "Disk:" in ctx.disk_usage, f"unexpected disk_usage shape: {ctx.disk_usage!r}"
+    # The formatted comment should surface the populated System section.
+    body = format_error_comment(ctx)
+    assert "**System:**" in body
+
+
+def test_get_memory_info_always_populated():
+    """_get_memory_info must never return the empty string (issue #173 F-24)."""
+    from autoswe.core.error_utils import _get_memory_info
+
+    assert _get_memory_info() != ""
+
+
+def test_get_disk_usage_always_populated(tmp_path):
+    """_get_disk_usage must never return the empty string (issue #173 F-24)."""
+    from autoswe.core.error_utils import _get_disk_usage
+
+    assert _get_disk_usage(str(tmp_path)) != ""
+
+
+def test_get_disk_usage_unreadable_path_reports_unavailable(tmp_path, monkeypatch):
+    """When disk stats can't be read, the field still reports something."""
+    from autoswe.core import error_utils
+
+    def _boom(_):
+        raise OSError("no such filesystem")
+
+    monkeypatch.setattr("shutil.disk_usage", _boom)
+    out = error_utils._get_disk_usage("/definitely/not/here")
+    assert out != ""
+    assert "unavailable" in out
+
+
 # ---------------------------------------------------------------------------
 # format_error_comment
 # ---------------------------------------------------------------------------

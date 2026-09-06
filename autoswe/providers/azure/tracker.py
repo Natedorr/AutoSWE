@@ -10,22 +10,27 @@ import html
 import re
 from html.parser import HTMLParser
 
-from autoswe.core.redact import redact_worktree_paths
+from autoswe.core.redact import redact_outbound
 from autoswe.providers.azure.api import (
     _ado_api_version,
     _encode_path_segment,
+    _normalize_azure_parts,
     ado_get,
     ado_patch,
     ado_patch_json,
     ado_post,
     ado_post_patch,
-    dbg,
 )
-from autoswe.providers.base import IssueTracker, NormalizedComment, NormalizedIssue
+from autoswe.providers.base import NormalizedComment, NormalizedIssue
 from autoswe.tracking.comments import _BOT_CONTENT_PATTERNS, BOT_MARKER
 from autoswe.tracking.labels import _validate_status
 
 _PREFIX = "autoswe:"
+
+# ADO's batch work-item GET caps the number of ids per request (undocumented).
+# Keep well under that cap — docs/azure-devops-api/list-work-items.md,
+# Common Pitfalls #3 ("split into multiple requests").
+_BATCH_CHUNK_SIZE = 100
 
 
 def _is_bot_comment(body: str) -> bool:
@@ -75,7 +80,7 @@ def _strip_html(html: str) -> str:
     return p.get_text()
 
 
-class AzureTracker(IssueTracker):
+class AzureTracker:
     """Azure DevOps-backed issue tracker.
 
     ``repo_cfg`` must contain::
@@ -90,31 +95,16 @@ class AzureTracker(IssueTracker):
 
     def __init__(self, repo_cfg: dict):
         self._repo_cfg = repo_cfg
-        self._org = repo_cfg.get("org", "")
-        self._project = repo_cfg.get("project", "")
-        self._repo = repo_cfg.get("repo", "")
-        self._pat = repo_cfg.get("pat", "")
+        # Accept the PAT under either key so hand-built repo_cfg dicts (e.g. the
+        # MCP comment server, which keys it "token") authenticate correctly —
+        # mirrors AzureVCS. (issue #168 F-06 regression)
+        self._pat = repo_cfg.get("pat") or repo_cfg.get("token", "")
         self._authenticated_user: str | None = None
         self._resolved_repo_id: str | None = None
-
-        # Defensive fallback: when caller passes owner/repo instead of
-        # org/project (e.g. from build_repo_cfg or other callers), parse
-        # from those fields if they look like Azure 3-part components.
-        if not self._org or not self._project:
-            owner = repo_cfg.get("owner", "")
-            repo = repo_cfg.get("repo", "")
-            if "/" in owner and "/" not in repo:
-                org_part, _, proj_part = owner.partition("/")
-                if org_part and proj_part:
-                    self._org = org_part
-                    self._project = proj_part
-            elif "/" in repo:
-                proj_part, _, _repo_part = repo.partition("/")
-                if proj_part:
-                    self._org = owner
-                    self._project = proj_part
-                    if _repo_part:
-                        self._repo = _repo_part
+        # Single source of org/project/repo partition (issue #168 F-08):
+        # build_repo_cfg normalises the main path; _normalize_azure_parts
+        # covers inline throwaway repo_cfg dicts that skip build_repo_cfg.
+        self._org, self._project, self._repo = _normalize_azure_parts(repo_cfg)
 
         # URL-encode for safe use in request URLs
         self._org_enc = _encode_path_segment(self._org)
@@ -123,36 +113,24 @@ class AzureTracker(IssueTracker):
     # ---- Repo ID resolution ----
 
     def resolve_repo_id(self) -> str | None:
-        """Resolve the Git repository UUID for this repo.
+        """Resolve the Git repository UUID for this repo (delegates to AzureVCS).
 
-        Azure DevOps web URLs require the repo UUID (not the display name)
-        in the `_git/{repo-id}/...` path segment. This method queries the
-        repos API, finds the repo matching self._repo by name, and returns
-        its UUID. Result is cached on first successful call.
-
-        Returns the UUID string, or None if lookup fails.
+        The UUID lookup is VCS-side (``AzureVCS.resolve_repo_id``); this
+        delegation keeps tracker-side callers working.
         """
-        if self._resolved_repo_id is not None:
-            return self._resolved_repo_id
-        try:
-            repos_path = _ado_api_version(
-                f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories"
-            )
-            result = ado_get(repos_path, self._pat)
-            for repo_entry in result.get("value", []):
-                if repo_entry.get("name", "").lower() == self._repo.lower():
-                    self._resolved_repo_id = repo_entry.get("id", "")
-                    return self._resolved_repo_id
-        except (RuntimeError) as e:  # ADO API raises RuntimeError on HTTP error.
-            dbg.warning(
-                "resolve_repo_id: failed to resolve UUID for %s/%s: %s: %s",
-                self._org, self._project, type(e).__name__, e,
-            )
-        return None
+        # Deferred import: factory imports this module.
+        from autoswe.providers.factory import get_vcs
+        return get_vcs(self._repo_cfg).resolve_repo_id()
+
+    def slug_prefix(self) -> str:
+        return "ado"
+
+    def pid_prefix(self) -> str:
+        return "ado_"
 
     # ---- Protocol: IssueTracker ----
 
-    def list_open_issues(self, repo_cfg: dict) -> list[NormalizedIssue]:
+    def list_open_issues(self) -> list[NormalizedIssue]:
         """Return all open work items via WIQL + batch expand."""
         wiql = {
             "query": (
@@ -169,18 +147,39 @@ class AzureTracker(IssueTracker):
         if not work_items:
             return []
 
-        id_list = [w["id"] for w in work_items]
-        ids_param = ",".join(str(i) for i in id_list)
-        batch_path = _ado_api_version(
-            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems"
-            f"?ids={ids_param}&$expand=all"
-        )
-        batch_result = ado_get(batch_path, self._pat)
-        batch_items = batch_result.get("value", [])
+        # De-dup ids up front (first occurrence wins) so no chunk request
+        # carries duplicate IDs.
+        seen: set[int] = set()
+        id_list: list[int] = []
+        for w in work_items:
+            wid = w["id"]
+            if wid not in seen:
+                seen.add(wid)
+                id_list.append(wid)
 
-        return [self._to_normalized(item) for item in batch_items]
+        # ADO caps the number of ids a single batch GET can carry; split into
+        # chunks of _BATCH_CHUNK_SIZE and merge the responses.
+        merged: list[dict] = []
+        for start in range(0, len(id_list), _BATCH_CHUNK_SIZE):
+            chunk = id_list[start:start + _BATCH_CHUNK_SIZE]
+            ids_param = ",".join(str(i) for i in chunk)
+            batch_path = _ado_api_version(
+                f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems"
+                f"?ids={ids_param}&$expand=all"
+            )
+            batch_result = ado_get(batch_path, self._pat)
+            merged.extend(batch_result.get("value", []))
 
-    def fetch_issue(self, repo_cfg: dict, issue_number: int) -> NormalizedIssue:
+        # De-dup merged items by id (first occurrence wins) and sort by id so
+        # output ordering is deterministic regardless of chunk boundaries.
+        merged_by_id: dict[int, dict] = {}
+        for item in merged:
+            merged_by_id.setdefault(item["id"], item)
+        merged_sorted = sorted(merged_by_id.values(), key=lambda item: item["id"])
+
+        return [self._to_normalized(item) for item in merged_sorted]
+
+    def fetch_issue(self, issue_number: int) -> NormalizedIssue:
         """Fetch a single work item by number."""
         path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
@@ -189,7 +188,7 @@ class AzureTracker(IssueTracker):
         raw = ado_get(path, self._pat)
         return self._to_normalized(raw)
 
-    def fetch_comments(self, repo_cfg: dict, issue_number: int) -> list[NormalizedComment]:
+    def fetch_comments(self, issue_number: int) -> list[NormalizedComment]:
         """Fetch all comments on a work item.
 
         Normalizes ``author_login`` for each comment so that orchestrator code
@@ -199,16 +198,16 @@ class AzureTracker(IssueTracker):
         - User comments matching the PAT authenticated user → ``"OWNER"``
         - Everything else → raw ``uniqueName`` (email)
         """
-        preview_path = (
+        path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments?api-version=7.1-preview.4"
+            f"{issue_number}/comments"
         )
-        raw = ado_get(preview_path, self._pat)
+        raw = ado_get(path, self._pat)
         comments_raw = raw.get("comments", [])
 
         # Resolve the authenticated PAT owner for comparison
         try:
-            pat_owner = self.authenticated_user(repo_cfg)
+            pat_owner = self.authenticated_user()
         except RuntimeError:  # ADO API lookup failure is non-fatal; skip OWNER normalization.
             pat_owner = None
 
@@ -261,7 +260,7 @@ class AzureTracker(IssueTracker):
         """Extract autoswe status from labels (tags)."""
         return self._extract_status(issue.labels)
 
-    def authenticated_user(self, repo_cfg: dict) -> str:
+    def authenticated_user(self) -> str:
         """Return the email of the authenticated PAT owner.
 
         Primary: ADO Profile API (reliable, no dependency on work item existence).
@@ -272,13 +271,16 @@ class AzureTracker(IssueTracker):
 
         # Primary: Profile API — works regardless of work item existence
         try:
-            me_path = "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1-preview.1"
+            me_path = "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1"
             raw = ado_get(me_path, self._pat)
+            # Documented profile fields first (docs/azure-devops-api/get-current-user.md:
+            # displayName, publicAlias, emailAddress, coreRevision, timeStamp, id, revision);
+            # principalName/uniqueName are legacy ADO Server/TFS profile shapes.
             self._authenticated_user = (
-                raw.get("principalName", "")
-                or raw.get("uniqueName", "")
-                or raw.get("emailAddress", "")
+                raw.get("emailAddress", "")
                 or raw.get("displayName", "")
+                or raw.get("principalName", "")
+                or raw.get("uniqueName", "")
             )
             if self._authenticated_user:
                 return self._authenticated_user
@@ -300,7 +302,7 @@ class AzureTracker(IssueTracker):
 
     # ---- Write methods (Stage 5) ----
 
-    def post_comment(self, repo_cfg: dict, issue_number: int, body: str) -> int | None:
+    def post_comment(self, issue_number: int, body: str) -> int | None:
         """Post a comment on a work item. Returns comment ID or None.
 
         Always uses ``format=Markdown`` so ADO renders headings, lists,
@@ -308,20 +310,26 @@ class AzureTracker(IssueTracker):
         """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments?format=Markdown&api-version=7.1-preview.4"
+            f"{issue_number}/comments?format=Markdown&api-version=7.1"
         )
-        result = ado_post(path, self._pat, body={"text": redact_worktree_paths(body)})
+        result = ado_post(path, self._pat, body={"text": redact_outbound(body)})
         return result.get("id") if result else None
 
-    def update_comment(self, repo_cfg: dict, issue_number: int, comment_id: int, body: str) -> None:
-        """Edit a comment on a work item via PATCH."""
+    def update_comment(self, issue_number: int, comment_id: int, body: str) -> None:
+        """Edit a comment on a work item via PATCH.
+
+        ``PATCH .../comments/{id}`` has no refreshed reference page in
+        docs/azure-devops-api/; its availability at stable 7.1 is covered by
+        the live round-trip test in tests/test_azure_live.py (if it ever
+        regresses, re-introduce the preview version here — tracked in issue 022).
+        """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1-preview.4"
+            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1"
         )
-        ado_patch_json(path, self._pat, body={"text": redact_worktree_paths(body)})
+        ado_patch_json(path, self._pat, body={"text": redact_outbound(body)})
 
-    def create_issue(self, repo_cfg: dict, title: str, body: str) -> int:
+    def create_issue(self, title: str, body: str) -> int:
         """Create a new work item (Issue type) in Azure DevOps.
 
         Returns the work item ID (issue number).
@@ -336,7 +344,7 @@ class AzureTracker(IssueTracker):
         result = ado_post_patch(path, self._pat, body=payload)
         return result["id"]
 
-    def set_status(self, repo_cfg: dict, issue_number: int, status: str) -> None:
+    def set_status(self, issue_number: int, status: str) -> None:
         """Set the autoswe status tag on a work item (read-modify-write).
 
         GETs the current work item, strips existing autoswe:* tags,
@@ -366,24 +374,37 @@ class AzureTracker(IssueTracker):
         )
         ado_patch(
             patch_path, self._pat,
-            body=[{"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)}],
+            body=[{"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)}],
         )
 
-    def assign_to_user(self, repo_cfg: dict, issue_number: int, login: str | None) -> None:
+    def normalize_comment_body(self, comment: NormalizedComment) -> tuple[str, bool]:
+        """Return ``(body, is_bot)`` after provider-specific normalisation.
+
+        Azure DevOps wraps rich-text user comments in ``<div>`` tags and stores
+        HTML entities in the body, so decode entities and strip HTML tags
+        (preserving ``<AUTOSWE_*>`` markers). Bot detection is content-based
+        because ADO strips HTML comments from rendered bodies, so the
+        BOT_MARKER alone is not reliable.
+        """
+        body = html.unescape(comment.body or "")
+        body = _strip_html(body)
+        return body, _is_bot_comment(body)
+
+    def assign_to_user(self, issue_number: int, login: str | None) -> None:
         """Assign the work item to a user.
 
         If ``login`` is None, resolves to the authenticated PAT owner.
         Uses the email/UPN as the assigned-to value.
         """
         if login is None:
-            login = self.authenticated_user(repo_cfg)
+            login = self.authenticated_user()
 
         patch_path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
         )
         ado_patch(
             patch_path, self._pat,
-            body=[{"op": "replace", "path": "/fields/System.AssignedTo", "value": login}],
+            body=[{"op": "add", "path": "/fields/System.AssignedTo", "value": login}],
         )
 
     # ---- Internal helpers ----

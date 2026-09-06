@@ -13,6 +13,7 @@ from urllib import error as url_error
 from urllib import request
 
 from autoswe.core.config import AUTOSWE_DIR, REPOS_CONFIG_FILE
+from autoswe.core.constants import GH_API_VERSION
 from autoswe.core.logging_utils import mask_sensitive
 
 # ---------------------------------------------------------------------------
@@ -86,7 +87,7 @@ def _gh_verify(token: str) -> str | None:
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
+                "X-GitHub-Api-Version": GH_API_VERSION,
             },
         )
         with request.urlopen(req, timeout=10) as resp:
@@ -187,7 +188,7 @@ def _gh_default_branch(token: str, repo_path: str) -> str | None:
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
+                "X-GitHub-Api-Version": GH_API_VERSION,
             },
         )
         with request.urlopen(req, timeout=10) as resp:

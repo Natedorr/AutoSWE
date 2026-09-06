@@ -11,14 +11,16 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | Field | Required | Default | Description |
 |-------|----------|---------|-----------|
 | `backend` | **Yes** | — | Backend implementation: `"claude_code"` or `"codex"` |
-| `model` | No | `""` | Model ID (e.g. `"claude-opus-4-8"`, `"gpt-5"`) |
+| `model` | No for `claude_code`, **required** for `codex` | `""` | Model ID (e.g. `"claude-opus-5"`, `"gpt-5.6-terra"`). No default for `codex` — resolution fails if missing |
 | `timeout` | No | (from env) | Backend-specific timeout in seconds |
 | `cli_path` | No | (from env) | Path to the CLI binary (e.g. `claude` or `codex`) |
 | `codex_api_key` | No | — | API key for Codex backend (sets `CODEX_API_KEY` env var) |
 | `openai_api_key` | No | — | Alternative API key for Codex backend (sets `OPENAI_API_KEY` env var) |
+| `bypass_approvals` | No | `true` (Codex only) | Explicit switch for Codex's `--dangerously-bypass-approvals-and-sandbox` flag. `true` (default) grants full write + network access — intended for the dedicated isolated machine (see [safeguards.md](safeguards.md)). Set `false` to drop the flag on a shared host. Overridable via the `CODEX_BYPASS_APPROVALS_AND_SANDBOX` env var (see below) |
 | `anthropic_base_url` | No | (from env) | Custom API endpoint (Claude Code only) |
 | `anthropic_auth_token` | No | (from env) | Auth token (Claude Code only) |
 | `anthropic_api_key` | No | (from env) | API key (Claude Code only) |
+| `env` | No | — | Extra environment variables (a `{key: value}` map) merged into the backend's child process. Values override backend defaults; ``${VAR}``/``${VAR:-default}`` supported. See [Per-profile `env`](#per-profile-env) |
 
 String values support ``${VAR}`` and ``${VAR:-default}`` environment variable
 interpolation (expanded at load time from the current process environment).
@@ -39,15 +41,15 @@ Code path: `config.py:resolve_harness()`.
 {
   "claude-opus": {
     "backend": "claude_code",
-    "model": "claude-opus-4-8"
+    "model": "claude-opus-5"
   },
   "claude-sonnet": {
     "backend": "claude_code",
-    "model": "claude-sonnet-4-6"
+    "model": "claude-sonnet-5"
   },
-  "codex-gpt5": {
+  "codex-gpt56-terra": {
     "backend": "codex",
-    "model": "gpt-5",
+    "model": "gpt-5.6-terra",
     "codex_api_key": "${CODEX_API_KEY}"
   }
 }
@@ -60,7 +62,7 @@ Referenced in `repos.json`:
     "provider": "github",
     "pat": "ghp_...",
     "plan_harness": "claude-opus",
-    "fix_harness": "codex-gpt5",
+    "fix_harness": "codex-gpt56-terra",
     "review_harness": "claude-sonnet"
   }
 }
@@ -69,7 +71,7 @@ Referenced in `repos.json`:
 Or globally in `autoswe.env`:
 ```
 PLAN_HARNESS=claude-opus
-FIX_HARNESS=codex-gpt5
+FIX_HARNESS=codex-gpt56-terra
 ```
 
 ### Mixing Backends
@@ -87,62 +89,226 @@ Different phases can use different backends. Common patterns:
     "provider": "github",
     "pat": "ghp_...",
     "plan_harness": "codex-4o",
-    "fix_harness": "codex-gpt5",
+    "fix_harness": "codex-gpt56-terra",
     "review_harness": "claude-sonnet"
   }
 }
 ```
 
-### Backends
+### Per-profile `env`
+
+Every profile accepts an optional `env` map of extra environment variables,
+merged into the backend's child process. This is the hook for passing values
+that the backend itself does not model as named fields (e.g. pointing Codex at
+a self-hosted OpenAI-compatible endpoint via `OPENAI_API_BASE`).
+
+- **Claude Code** — merged into the SDK `env` option, so the variables reach the
+  spawned CLI only (never the poller's own process environment).
+- **Codex** — merged into the `codex exec` subprocess environment.
+
+**Precedence** (highest wins):
+
+| Claude Code | Codex |
+|-------------|-------|
+| 1. `spec.env_overrides` (internal) | 1. `spec.env_overrides` (internal) |
+| 2. profile `env` | 2. profile `env` |
+| 3. backend defaults (e.g. `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, Anthropic creds) | 3. api-key fields (`OPENAI_API_KEY` / `CODEX_API_KEY`) |
+| 4. inherited `os.environ` | 4. inherited `os.environ` |
+
+So a profile `env` value overrides a backend default but loses to the internal
+`env_overrides` seam. `${VAR}` / `${VAR:-default}` expansion is applied to `env`
+values at load time, like every other profile string.
+
+```json
+{
+  "claude-custom": {
+    "backend": "claude_code",
+    "model": "claude-opus-4-8",
+    "env": { "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" }
+  },
+  "codex-custom": {
+    "backend": "codex",
+    "model": "custom-model",
+    "env": { "OPENAI_API_BASE": "http://localhost:8080" }
+  }
+}
+```
 
 #### `claude_code` (current default)
 
 Runs the Claude Agent SDK. Supports all capabilities: MCP servers, AskUserQuestion interception, plan file capture, progress streaming, session resume.
 
-**Profile fields:** `backend`, `model`, `cli_path`, `anthropic_base_url`, `anthropic_auth_token`, `anthropic_api_key`, `timeout`.
+**Profile fields:** `backend`, `model`, `cli_path`, `anthropic_base_url`, `anthropic_auth_token`, `anthropic_api_key`, `timeout`, `env`.
 
-**Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `progress_stream`.
+**Task-tracking tools (default opt-in):** the backend sets
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` on the spawned CLI by default (via the SDK
+`env` option). On Agent SDK ≥ 0.2.139 the task-tracking tools
+(`TodoWrite`, `TaskCreate`, `TaskGet`, `TaskUpdate`, `TaskList`) are *not*
+provided by default on the newer model families (Opus 4.8, Sonnet 5, …); this
+opt-in restores them (honored when the CLI is ≥ v2.1.233). They are the
+planner/coder's only live feedback — the sticky progress comment renders from
+them. The tools also remain listed in the backend's tool lists as
+belt-and-braces. A profile `env` entry can override the default (e.g.
+`"env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "0"}` to disable).
 
-**Retryable subtypes:** `set()` — Claude Code retries on SDK exceptions (`_get_retryable_exceptions`), not return-value subtypes.
+**Capabilities:** `mode`, `mcp`, `can_use_tool`, `plan_permission`, `resume`, `session_fork`, `progress_stream`, `plan_file`, `structured_output`.
+
+**Structured output (issue #159).** When the installed Agent SDK is new enough
+for `output_format` (≥ 0.2.137 — the same floor as `fork_session`), a plan or
+review run can request a JSON-Schema-validated payload (`RunSpec.output_format`).
+The validated data is delivered on `RunResult.structured_output` and the planner
+/reviewer prefer it over free-text pattern parsing; when the SDK returned no
+validated data (e.g. `error_max_structured_output_retries`), they fall back to
+the text-pattern path. On a known-old SDK the option is skipped so the run
+degrades to plain text output.
+
+**Retryable subtypes:** `set()` — Claude Code retries on SDK exceptions (`retryable_exceptions()`, backed by the module's `_get_retryable_exceptions()`), not return-value subtypes.
+
+**Retryable exceptions:** `retryable_exceptions()` returns the SDK exception tuple (`asyncio.TimeoutError`, `ProcessError`, `CLIConnectionError`, `ClaudeSDKError` — or just `asyncio.TimeoutError` when the SDK import fails). The runner uses the *resolved backend's* tuple, not a hard-coded one (S6 / issue #169 F-09).
+
+**CanUseToolShadowedWarning suppression (issue #190).** When a run registers a `can_use_tool` callback, the SDK emits an advisory `CanUseToolShadowedWarning` because the mode-derived tool lists statically shadow it (the fixer's `bypassPermissions` mode auto-approves every tool, and plan/review list whole-tool allow entries). The shadowing is intentional and the advisory is a false positive for the capability autoSWE relies on: the CLI routes user-interaction tools (`AskUserQuestion`) to the callback regardless of allow rules or permission mode, so the AskUserQuestion → pause → `autoswe:waiting` path works even under `bypassPermissions` (verified against CLI 2.1.252; docs/claude-agent-sdk/agent-sdk/permissions.md, "Ask rules"). The backend therefore filters the advisory around the query loop (`_can_use_tool_shadowing_suppressed`, active only when a callback is registered) instead of letting one warning line into `poller.log` per dispatch.
+
+<a id="retry-semantics"></a>
+**Retry semantics (fork-on-retry).** The Claude Agent SDK supports
+`fork_session` / `resume_session_at` — a `/retry` can *branch* from the last
+known-good session into a new session, leaving the original intact so a failed
+retry can roll back to it. autoSWE maps the uniform `RunSpec.fork_session` flag
+to this:
+
+- **Checkpoint.** `emit()` records the run's `session_id` into the queue's
+  `last_good_session_id` on every **non-failed** run that persists a session,
+  **and** `last_good_session_backend` with the backend that produced it
+  (the resolved phase harness's `backend`, e.g. `claude_code` / `codex`).
+  Unlike `session_id`, it is **never cleared on `FAILED`** (the `FAILED` path
+  nulls `session_id` so we don't resume a broken session). So the most recent
+  good session — and which backend made it — always survives a failure.
+- **Fork.** `_run_retry` replays the last substantive command. For a `/fix`
+  replay it sets `fork_session=True` **iff** all three hold: the fix backend
+  advertises `"session_fork"`, a checkpoint exists (`last_good_session_id` or
+  `session_id`), and the checkpoint's recorded backend
+  (`last_good_session_backend`) **matches the fix backend**. The last condition
+  is the provenance gate: in a mixed per-phase config (e.g. Codex
+  `plan_harness` + Claude `fix_harness`) a Codex plan's session id would
+  otherwise be handed to the Claude SDK, which cannot resolve a foreign-backend
+  session — so a mismatch (or a missing tag) falls back to a fresh session.
+  `coder.run_fix` then resumes from `last_good_session_id` (not `session_id`,
+  which is `None` after a failure) with `fork_session=True`, so the SDK opens
+  a **new** session whose id becomes the new `session_id` while the original
+  checkpoint stays resumable. With no usable checkpoint yet (first-ever
+  failure) there is nothing to fork from → a fresh session.
+- **Auto-restore.** Because the fork never mutates the original and a failed
+  forked retry leaves `last_good_session_id` untouched, a repeated `/retry`
+  keeps forking from the same good checkpoint until one succeeds — rollback is
+  automatic and zero-effort.
+- **SDK floor.** `fork_session` requires Agent SDK ≥ 0.2.137. The backend reads
+  the installed distribution version and, on an older SDK, logs a warning and
+  degrades to a plain in-place `resume` instead of passing an unknown option.
+  The capability is still advertised; the guard is the runtime safety net.
+- **Follow-up (out of scope here).** `resume_session_at` branches from an
+  *earlier message*, not the whole session. That needs per-message
+  "known-good" bookkeeping the queue schema does not track yet, so only
+  fork-from-whole-session is wired now; the `"session_fork"` capability covers
+  both.
+
+**System prompt:** runs with the `claude_code` system-prompt preset
+(`system_prompt={"type": "preset", "preset": "claude_code"}`), set in
+`ClaudeCodeBackend`'s `options_kwargs` for every run. Without it the Agent SDK
+falls back to a minimal prompt that covers tool calling but omits the preset's
+tool-usage guidance, security/safety instructions, and working-directory /
+environment context — all of which the plan/fix/review workflow implicitly
+assumes. The **bare** preset is intentionally used (no `append`, no
+`exclude_dynamic_sections`). Cache note: the preset embeds per-worktree context
+(cwd, git status, platform) in the system prompt, so each fresh per-issue
+worktree misses the prompt-cache prefix. Setting
+`exclude_dynamic_sections: True` would make the system prompt static and let
+consecutive issues share the cache prefix, at the cost of moving that context
+into the first user message (marginally less authoritative). That lever is
+deferred to a follow-up and is not enabled here.
+
+**Repo content loading (MCP / hooks / skills).** The backend passes autoSWE's injected `mcp_servers` (the comment servers built by `autoswe/harness/mcp_config.py`) to `ClaudeAgentOptions` but leaves `strict_mcp_config` and `setting_sources` at their SDK defaults (`False` / all sources). The practical effect: inside a target repo's worktree, the SDK **also loads** the repo's `.mcp.json` servers, `.claude/settings.json` hooks, and `.claude/` skills/agents/commands — alongside autoSWE's own servers. This is by design (autoSWE runs on a dedicated, isolated machine; see [safeguards.md](safeguards.md#repo-supplied-mcp-servers-hooks-skills-and-tools-load-by-design)). autoSWE's injected servers are programmatic and therefore highest-precedence — a repo cannot shadow `autoswe_comment` / `autoswe_inline_comment`. No per-repo opt-out is currently exposed; if ever needed it would be `strict_mcp_config=True` + `setting_sources` without `"project"`.
 
 #### `codex` (Phase 4)
 
-Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--sandbox`, `--model`, `--cd`, `--ask-for-approval`). Parses the JSONL event stream into a `RunResult`.
+Shells out to `codex exec --json`. Maps `RunSpec` to Codex flags (`--model`, `-C`, `--output-last-message`, and — when enabled by the `bypass_approvals` profile flag, default on — `--dangerously-bypass-approvals-and-sandbox`). Parses the JSONL event stream into a `RunResult`, sourcing `RunResult.text` from the assistant's final message written via `--output-last-message` (falling back to the accumulated JSONL `agent_message` chunks when the file is absent or empty).
+
+**Item/event types parsed** (issue #118): the current CLI emits `thread.started`, `turn.started`/`completed`/`failed`, and `item.*`/`turn.plan.updated` events. Item types handled: `agent_message`/`agentMessage` (primary `RunResult.text` source), `plan` (authoritative text → `RunResult.plan_text`), `reasoning`, `command_execution`, `file_change`, `mcp_tool_call`, `web_search` (progress only). `turn.plan.updated` and plan/reasoning deltas render as live progress. The parser normalizes names defensively so both snake_case and camelCase item types, and both dot/slash event spellings, are accepted regardless of CLI version. The legacy `todo_list`/`summary_output` items and the `item.delta`/`item.updated` events no longer exist in the current CLI and are no longer emitted.
 
 **Requirements:** `codex` CLI on PATH (`npm i -g @openai/codex`). API key via `codex_api_key`, `openai_api_key`, or environment variable. For local providers (Ollama), configure via `~/.codex/config.toml` — no API key needed.
 
 **Profile fields:**
 - `backend`: `"codex"` (required)
-- `model`: Codex model ID (e.g. `"gpt-5"`, `"gpt-4o"`, `"qwen3.6:27b"` for Ollama)
+- `model`: **required** Codex model ID (e.g. `"gpt-5.6-sol"`, `"gpt-5.6-terra"`, `"gpt-5.6-luna"`, `"gpt-5.5"`, `"qwen3.6:27b"` for Ollama). There is no built-in default — a missing `model` fails resolution with a `ValueError`
 - `codex_api_key` or `openai_api_key`: API key for the provider (optional for local providers)
 - `timeout`: Override the default timeout (optional)
+- `env`: Extra environment variables (a `{key: value}` map) merged into the `codex exec` subprocess (optional). User values win over the api-key fields; see [Per-profile `env`](#per-profile-env)
+- `bypass_approvals`: Explicit switch (boolean, **default `true`**) for the `--dangerously-bypass-approvals-and-sandbox` flag. autoSWE's intended deployment is a dedicated, isolated machine, so the default grants full write + network access to every phase. Set it to `false` on a shared host to drop the flag. Precedence: this profile field → `CODEX_BYPASS_APPROVALS_AND_SANDBOX` env var → default `true`. The env var is parsed case-insensitively; `"1"`/`"true"`/`"yes"`/`"on"` (surrounding whitespace ignored) are truthy, anything else is falsy.
 
-**Capabilities (Phase 4, core run only):** `mode`, `resume`, `progress_stream`.
+**Capabilities (Phase 4, core run only):** `resume`, `progress_stream`.
 
-**Capabilities (not yet supported):** `mcp` (no MCP comment posting), `can_use_tool` (no per-tool gating), `plan_permission` (no dedicated plan mode). Handlers degrade gracefully when these are unavailable — e.g. the planner falls back to text parsing instead of MCP plan posting.
+**No `mode` (issue #166).** Codex does NOT advertise the `mode` capability: it accepts `RunSpec.mode` for contract parity but performs no read-only enforcement (no `--sandbox` mapping, no per-tool gating). A plan or review phase that resolves to a Codex profile therefore has no sandbox, no tool allowlist, and no Bash file-mutation guard. Handlers detect this via `has_read_only_enforcement` (no `mode` AND no `can_use_tool`) and **loudly degrade** — a prominent warning log — then rely on the post-run `ensure_worktree_unchanged` backstop (see [Sandbox / bypass policy](#codex-phase-4)) to roll back any edits the agent made. The same gap also disables the WAITING flow on Codex: AskUserQuestion interception lives entirely in the `can_use_tool` callback, so a Codex plan session can never ask the user a question.
 
-**Retryable subtypes:** `{"error", "killed"}` — Codex failure is return-value-driven (non-zero exit or `turn.failed`), not exception-driven. The runner inspects `RunResult.subtype` and retries when `AGENT_RETRY_ON_FAILURE > 0`. Override with `AGENT_RETRY_ON_SUBTYPE`.
+**Capabilities (not yet supported):** `mode` (no read-only enforcement — see [No `mode`](#codex-phase-4) above), `mcp` (no MCP comment posting), `can_use_tool` (no per-tool gating), `plan_permission` (no dedicated plan mode), `session_fork` (no fork primitive), `structured_output` (Codex has no JSON-Schema-validated structured output, so `RunSpec.output_format` is ignored and the planner/reviewer fall back to their text-pattern paths). Handlers degrade gracefully when these are unavailable — e.g. the planner falls back to text parsing instead of MCP plan posting, and a plan/review phase without read-only enforcement loudly degrades and rolls back edits post-run (issue #166).
 
-**Mode → sandbox mapping:**
-- `plan` / `read_only` → `--sandbox read-only`
-- `read_write` → `--sandbox workspace-write`
+**Retry semantics (resume-in-place or fresh — no fork).** `codex exec resume
+<id>` *continues* the existing session in place; Codex has no fork primitive
+(analogous to the Claude SDK's `fork_session`). So a Codex `/retry` either
+resumes the same session (mutating it) or starts a fresh one — it cannot
+branch from a checkpoint while leaving the original intact. The backend does
+not advertise `"session_fork"`, so `_run_retry`'s capability gate leaves
+`fork_session` off and `RunSpec.fork_session` is ignored. See
+[harnesses.md#retry-semantics](#retry-semantics) for the Claude fork-on-retry
+contrast.
+
+**Retryable subtypes:** `{"error", "killed"}` — Codex failure is mostly return-value-driven (non-zero exit or `turn.failed`). The runner inspects `RunResult.subtype` and retries when `AGENT_RETRY_ON_FAILURE > 0`. Override with `AGENT_RETRY_ON_SUBTYPE`. **Retryable exceptions:** `retryable_exceptions()` returns `(asyncio.TimeoutError, OSError)` — transport-level failures that surface as exceptions rather than a `subtype`.
+
+**Sandbox / bypass policy (issue #129):** the Codex backend does **not** map `RunSpec.mode` to a `--sandbox` value. It previously did (`plan`/`read_only` → `--sandbox read-only`, `read_write` → `--sandbox workspace-write`), but that was dead weight — the `--dangerously-bypass-approvals-and-sandbox` flag was appended unconditionally and neutralized whatever `--sandbox` was set, so plan/review runs got full access regardless of the mapping. The mapping and the `--sandbox` emission have been removed; the emitted flag set now matches the documented intent. `RunSpec.mode` is still accepted (contract parity with `claude_code`) but has no effect on the Codex CLI flags.
+
+Access is instead controlled by a single explicit switch, `bypass_approvals` (profile field, **default `true`**):
+
+- **Default (`true`)** — every run (fresh and resume) emits `--dangerously-bypass-approvals-and-sandbox`: full write + network, no approvals. This is the "dedicated isolated machine" posture autoSWE targets (see [safeguards.md](safeguards.md#deployment-model-the-first-safeguard)); the Codex docs' safety tip reserves bypass for exactly that.
+- **`false`** — the flag is omitted. Codex then applies its default sandbox/approval policy (workspace-write / on-request) from `~/.codex/config.toml`. Use this on a shared host where you don't want unconditional full access.
 
 **Command mapping:**
-- Fresh run: `codex exec --json --sandbox <mode> --model <model> -C <cwd> -- <prompt>` (session persisted)
-- Resume: `codex exec resume <session_id> --json --model <model>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`)
+- Fresh run: `codex exec --json [--dangerously-bypass-approvals-and-sandbox] --model <model> -C <cwd> --output-last-message <tmp> -- <prompt>` (session persisted; the bypass flag is present when `bypass_approvals` is on; no `--sandbox` — see [Sandbox / bypass policy](#codex-phase-4) above)
+- Resume: `codex exec resume <session_id> --json [--dangerously-bypass-approvals-and-sandbox] --model <model> --output-last-message <tmp>` (subprocess cwd set to worktree, as `-C` is unsupported by `codex exec resume`; `--sandbox` is not supported by `codex exec resume` at all)
+
+**Final-message capture (`--output-last-message`, issue #128).** Each run allocates a private temp file (`mkstemp`) and passes it as `--output-last-message`, which Codex writes the assistant's final message to. After the subprocess exits, that file is read back as the authoritative `RunResult.text` — more robust than assembling `agent_message` chunks from the JSONL stream, which is fragile across item-type renames. If the file is absent or whitespace-only (older CLI, a run that failed or was killed before emitting a final message), the backend falls back to the accumulated chunks, preserving the original behavior. The temp file is always cleaned up (including the timeout/kill path).
 
 **Known limitations:**
+- ``RunSpec.max_turns`` is **not honored** — Codex `exec` exposes no turn cap (the old `agent.max_turns` config key was removed; live-verified on codex-cli 0.150.1, where `-c agent.max_turns=N` is rejected under `--strict-config` and silently ignored otherwise). The effective anti-runaway guard is the wall-clock timeout (`timeout` profile field / `AGENT_TIMEOUT`).
+- **No system-prompt knob (asymmetry with `claude_code`):** Codex always uses its built-in system prompt; there is no equivalent of Claude Code's `claude_code` preset to select. The nearest levers (`AGENTS.md`, rules) are intentionally disabled via `--ignore-rules` / `--ignore-user-config` for reproducibility, so autoSWE cannot steer the Codex system prompt the way it can for Claude.
+- **No read-only enforcement for plan/review (issue #166):** because Codex does not advertise `mode` (and has no `can_use_tool`), a plan or review phase running on a Codex profile has no sandbox/allowlist/Bash guard. The planner and reviewer detect this via `has_read_only_enforcement`, log a prominent warning, and then call `ensure_worktree_unchanged` after the run, which reverts any worktree changes the agent made (`git status --porcelain` dirty check + `git reset --hard <head_before>` + `git clean -fd`). This backstop catches the "agent edited but did not commit" case that the old HEAD-only compare missed. It does not prevent the agent from writing mid-run — it only guarantees the worktree is clean when the next phase starts.
 - ``cost_usd`` is an **estimate** from a maintained price table (`codex_pricing.py`). Returns ``None`` for unknown models — never guesses.
-- ``plan_file_path`` is always ``None`` — Codex doesn't write to `~/.claude/plans/`.
+- ``plan_file_path`` is always ``None`` — Codex doesn't write a native plan file (Claude Code's `~/.claude/plans/` is reached via `claude_code.plan_file_dir()`; Codex has no equivalent).
 - ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting yet.
 - Duration is tracked via ``time.monotonic()`` locally.
 
-### Factory
+### Shared RunSpec → RunResult contract (backends/base.py)
+
+Both backends implement the `CodingBackend` protocol and share two cross-cutting
+behaviors, exercised identically in the runner's retry loop:
+
+- **`retryable_subtypes()`** — the set of return-value `subtype` strings that
+  trigger a retry (empty for `claude_code`; `{"error", "killed"}` for `codex`).
+- **`retryable_exceptions()`** — the tuple of exception types that trigger a
+  retry (S6 / issue #169 F-09). The runner uses the *resolved backend's* tuple,
+  so each backend retries on its own failure modes: `claude_code` on its SDK
+  exceptions, `codex` on `asyncio.TimeoutError`/`OSError`. A backend missing the
+  method gets an empty tuple (no exception-based retry) — `runner.run()` never
+  hard-codes Claude's set.
+
+`RunResult` carries a **normalized `ok: bool`** (S6 / issue #169 F-10) so
+handlers gate success on a backend-neutral flag instead of comparing
+`subtype == "success"` to a literal. When `ok` is omitted it resolves to
+`subtype == "success"` in `RunResult.__post_init__` (positional back-compat);
+an explicit `ok=` wins.
 
 Backend instances are created by `autoswe/harness/backends/factory.py:get_backend(harness_cfg)`. Dispatch on `harness_cfg["backend"]` field. Mirrors the provider factory pattern (`providers/factory.py`).
 
-Unknown backend names raise `ValueError`. Case-insensitive matching.
+Unknown backend names raise `ValueError`. A `codex` profile without `model` also raises `ValueError` (no default model). Case-insensitive matching.
 
 ### Backward Compatibility
 
 With **no** `harnesses.json` and **no** `{phase}_harness` keys, a full plan→fix→review cycle is byte-for-byte equivalent to the legacy path. `resolve_harness()` synthesizes `{"backend": "claude_code", "model": <existing_model>}` so the `PLAN_MODEL`/`FIX_MODEL`/`REVIEW_MODEL` resolution chain keeps working.
+
+For the `codex` backend, a profile that omits `bypass_approvals` gets the **default `true`** (full bypass) — so an existing `codex` profile keeps its current full-access behavior with no config change. Operators on shared hosts should add `"bypass_approvals": false` to opt out.

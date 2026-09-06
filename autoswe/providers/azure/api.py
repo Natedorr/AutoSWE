@@ -38,6 +38,34 @@ def _ado_api_version(path: str) -> str:
     return f"{path}{sep}api-version=7.1"
 
 
+def _normalize_azure_parts(repo_cfg: dict) -> tuple[str, str, str]:
+    """Return ``(org, project, repo)`` for an Azure repo_cfg.
+
+    Single source of the owner/repo → org/project/repo partition used by the
+    Azure provider classes (issue #168 F-08). ``build_repo_cfg`` normalises
+    the main path; this helper covers throwaway repo_cfg dicts built inline
+    (worktree ops, ship, prompt helpers) that skip ``build_repo_cfg``.
+
+    Recognised shapes:
+      - explicit ``org`` + ``project`` keys (authoritative — used as-is)
+      - ``owner="org/project"``, ``repo="repo"``
+      - ``owner="org"``, ``repo="project/repo"``
+    """
+    org = repo_cfg.get("org", "")
+    project = repo_cfg.get("project", "")
+    repo = repo_cfg.get("repo", "")
+    if org and project:
+        return org, project, repo
+    owner = repo_cfg.get("owner", "")
+    if "/" in owner and "/" not in repo:
+        org_part, _, proj_part = owner.partition("/")
+        return org_part, proj_part, repo
+    if "/" in repo:
+        proj_part, _, repo_part = repo.partition("/")
+        return owner, proj_part, repo_part
+    return org, project, repo
+
+
 def _ado_request(
     method: str,
     path: str,

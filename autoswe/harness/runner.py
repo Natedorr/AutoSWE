@@ -12,14 +12,14 @@ from autoswe.core.logging_utils import get_debug_logger, log
 
 # Re-export everything so existing importers need zero changes.
 from autoswe.harness.backends.base import (  # noqa: F401
-    AGENT_TASK_TOOLS,
-    PROGRESS_TOOLS,
     HandlerResult,
     Mode,
     RunResult,
     RunSpec,
 )
 from autoswe.harness.backends.claude_code import (  # noqa: F401
+    AGENT_TASK_TOOLS,
+    PROGRESS_TOOLS,
     ClaudeCodeBackend,
     ProgressState,
     _extract_plan_file_path,
@@ -30,15 +30,17 @@ from autoswe.harness.backends.claude_code import (  # noqa: F401
 dbg = get_debug_logger()
 
 
-def _get_retryable_exceptions() -> tuple:
-    """Lazily build the tuple of SDK exception types to retry on.
+def _retryable_exceptions(backend) -> tuple:
+    """Return the resolved backend's retryable-exception tuple (S6 / #169 F-09).
 
-    Deferred import: avoids pulling in backend internals at module load time;
-    runner delegates, so it only loads when a handler actually calls this path.
+    The exception set is owned by the backend that will actually run — the
+    runner binds ``except`` to *this* backend's tuple, not Claude's. Falls back
+    to an empty tuple (no exception-based retry) for backends that predate the
+    ``retryable_exceptions()`` protocol method.
     """
-    from autoswe.harness.backends.claude_code import _get_retryable_exceptions as _backend_get
-
-    return _backend_get()
+    if hasattr(backend, "retryable_exceptions"):
+        return backend.retryable_exceptions()
+    return ()
 
 
 def backend_has_capability(harness_cfg: dict, capability: str) -> bool:
@@ -58,6 +60,26 @@ def backend_has_capability(harness_cfg: dict, capability: str) -> bool:
     else:
         backend = ClaudeCodeBackend()
     return capability in backend.capabilities()
+
+
+def has_read_only_enforcement(harness_cfg: dict) -> bool:
+    """Return True if the backend for *harness_cfg* enforces read-only phases.
+
+    A backend enforces read-only access when it advertises either:
+    - ``"mode"`` — translates ``RunSpec.mode`` ("plan"/"read_only") into
+      permission-mode / sandbox configuration, or
+    - ``"can_use_tool"`` — supports the per-tool runtime callback that blocks
+      Write/Edit/file-mutating Bash calls.
+
+    Handlers run a read-only phase (plan, review) regardless, but use this
+    check to loudly degrade (issue #166): when neither capability is
+    advertised, the handler logs a prominent warning and relies on the
+    post-run ``ensure_worktree_unchanged`` backstop to roll back any edits.
+    """
+    return (
+        backend_has_capability(harness_cfg, "mode")
+        or backend_has_capability(harness_cfg, "can_use_tool")
+    )
 
 
 # ---------- Backward-compatible shim ----------
@@ -87,6 +109,7 @@ async def _run_async(
     progress_callback=None,
     can_use_tool=None,
     state: dict | None = None,
+    output_format: dict | None = None,
 ):
     """Backward-compatible wrapper around ClaudeCodeBackend._run_async().
 
@@ -111,6 +134,7 @@ async def _run_async(
         progress_callback=progress_callback,
         can_use_tool=can_use_tool,
         state=state,
+        output_format=output_format,
     )
     backend = ClaudeCodeBackend()
     return await backend._run_async(spec)
@@ -124,6 +148,7 @@ def run(
     cfg: dict,
     repo_cfg: dict | None = None,
     resume: str | None = None,
+    fork_session: bool = False,
     # Phase 3: generic intent (preferred)
     mode: str | None = None,
     extra_tools: list | None = None,
@@ -141,6 +166,7 @@ def run(
     can_use_tool=None,
     state: dict | None = None,
     harness_cfg: dict | None = None,
+    output_format: dict | None = None,
 ):
     """Synchronous wrapper. Returns a RunResult dataclass.
 
@@ -163,9 +189,20 @@ def run(
 
     # Thread harness_cfg into spec.state so the backend can read
     # backend-specific fields (cli_path, anthropic_api_key, etc.).
+    #
+    # The caller's state dict must stay the SAME object the backend sees
+    # (issue #184): the AskUserQuestion callback writes
+    # state["asked_question_md"], and the backend's stream loop gates progress
+    # updates, the early break, and the final question re-assert on that key.
+    # Copying the dict here made the key invisible to the backend — the agent
+    # kept running to the SDK-internal StructuredOutput tool after posting a
+    # question, and that tool event clobbered the coalesced question in the
+    # sticky progress comment. (Callers create a fresh dict per session, so
+    # adding _harness_cfg in place is safe.)
     effective_state = state
     if harness_cfg is not None:
-        effective_state = dict(state) if state else {}
+        if effective_state is None:
+            effective_state = {}
         effective_state["_harness_cfg"] = harness_cfg
 
     spec = RunSpec(
@@ -173,6 +210,7 @@ def run(
         cwd=cwd,
         model=model,
         resume=resume,
+        fork_session=fork_session,
         mode=mode,
         extra_tools=extra_tools,
         disallowed_tools_override=disallowed_tools_override,
@@ -187,6 +225,7 @@ def run(
         progress_callback=progress_callback,
         can_use_tool=can_use_tool,
         state=effective_state,
+        output_format=output_format,
     )
 
     if harness_cfg is not None:
@@ -203,7 +242,9 @@ def run(
             timeout=timeout,
         )
 
-    retryable = _get_retryable_exceptions()
+    # Retryable exceptions are owned by the resolved backend (S6 / issue #169
+    # F-09) — no longer a Claude-specific tuple shared by every backend.
+    retryable = _retryable_exceptions(backend)
 
     # Resolve retryable subtypes: config override takes precedence over backend default.
     if raw_subtype_override:

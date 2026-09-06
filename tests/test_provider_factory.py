@@ -4,9 +4,38 @@ import pytest
 from autoswe.providers.azure.tracker import AzureTracker
 from autoswe.providers.azure.vcs import AzureVCS
 from autoswe.providers.base import IssueTracker, VCSProvider
-from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
+from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs, provider_names
 from autoswe.providers.github.tracker import GitHubTracker
 from autoswe.providers.github.vcs import GitHubVCS
+
+
+def test_provider_names_lists_registered_providers():
+    """provider_names() is the registry key set (used for CLI choices)."""
+    names = provider_names()
+    assert set(names) == {"github", "azure"}
+    assert names == sorted(names)
+
+
+def test_concrete_classes_satisfy_protocols_structurally():
+    """F-07: classes satisfy (not inherit) the Protocols; isinstance still works.
+
+    The runtime_checkable Protocols are kept only for structural isinstance
+    checks — a concrete provider that omits a protocol method would now raise
+    AttributeError at call time rather than silently return None. The concrete
+    classes merely *satisfy* the Protocols: the Protocol is not a base class in
+    their MRO (so there is no inherited empty-body method shadowing an
+    implementation), but structural isinstance() still passes.
+    """
+    tracker = get_tracker({"owner": "o", "repo": "r", "provider": "github"})
+    vcs = get_vcs({"owner": "o", "repo": "r", "provider": "github"})
+    # Structural isinstance works (the point of keeping the Protocol).
+    assert isinstance(tracker, IssueTracker)
+    assert isinstance(vcs, VCSProvider)
+    # But the Protocol is NOT in the concrete class's MRO — no inheritance.
+    # (issubclass() is useless here: runtime_checkable protocols answer True
+    # for any structural match, so check the actual base-class chain instead.)
+    assert IssueTracker not in GitHubTracker.__mro__
+    assert VCSProvider not in GitHubVCS.__mro__
 
 
 def test_get_tracker_defaults_to_github():
@@ -206,6 +235,6 @@ def test_build_repo_cfg_azure_vcs_produces_valid_clone_url():
     }
     rcfg = build_repo_cfg("natedorr", "testProject/testProject", cfg, repos_cfg)
     vcs = get_vcs(rcfg)
-    url = vcs.clone_url(rcfg)
+    url = vcs.clone_url()
     assert "dev.azure.com///_git/" not in url
     assert url == "https://autoswe:ado_pat_123@dev.azure.com/natedorr/testProject/_git/testProject"

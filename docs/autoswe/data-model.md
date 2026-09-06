@@ -24,6 +24,7 @@ This file is **the source of truth for what autoSWE runs**. The poll loop writes
 | `synced` | Sync completed | No |
 | `shipped` | PR created | No |
 | `reviewed` | Review completed | No |
+| `test_failed` | Fix committed/pushed, but the post-fix test gate found the branch suite red — needs `/fix` | No |
 | `waiting` | Claude asked a question; waiting for a reply | No |
 | `failed` | Handler errored, or a limit guard tripped | No |
 | `error` | Infrastructure error (dispatch crash, OOM, unhandled exception) | No |
@@ -49,11 +50,13 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `fix_prompt` | `str` | Custom fix prompt path from `repos.json` (optional, resolved against AUTOSWE_DIR) |
 | `review_prompt` | `str` | Custom review prompt path from `repos.json` (optional, resolved against AUTOSWE_DIR) |
 | `conflict_resolution_prompt` | `str` | Custom conflict resolution prompt path from `repos.json` (optional, resolved against AUTOSWE_DIR) |
-| `plan_branch` | `str` | Override branch from `/plan --branch <name>` (set once; later `--branch` flags ignored) |
+| `plan_branch` | `str` | The branch this task's work is cut from and kept in sync with — the fork base. Set once by `/plan --branch <name>`; a `--branch` on any *later* command (`/fix`, `/sync`, …) does not move it (issue #196). It drives worktree creation, `/sync`, review diffs, and the pre-PR sync. It is **not** the PR target: `/pr` and the auto-create-PR path always target `base_branch` (the repo's configured default), so a `develop` plan can't route the PR into `develop`. |
 | `provider` | `str` | `"github"` or `"azure"` |
 | `autoswe_status` | `str \| None` | Run-state enum (see above). **Source of truth.** |
-| `session_id` | `str` | Agent session ID (Claude Code or Codex); used to resume the planner/coder session |
-| `attempt_count` | `int` | Dispatch attempts; incremented by `decide()` on each restart; reset to 1 by `/retry` |
+| `session_id` | `str` | Agent session ID (Claude Code or Codex); used to resume the planner/coder session. **Cleared on `FAILED`** so the next dispatch does not resume a broken session |
+| `last_good_session_id` | `str \| None` | Last known-good session checkpoint. Set by `emit()` on every non-failed run that persists a `session_id`; **never cleared on `FAILED`** (unlike `session_id`). This is the session `/retry` forks from on backends that advertise the `"session_fork"` capability, so a failed retry leaves the checkpoint intact and the next `/retry` re-forks from the same good session. See [harnesses.md](harnesses.md#retry-semantics) |
+| `last_good_session_backend` | `str \| None` | The coding backend (`claude_code` / `codex`) that produced `last_good_session_id`. Written by `emit()` alongside the checkpoint; **never cleared on `FAILED`**. `_run_retry` only forks when this matches the resolved fix backend, so a mixed per-phase config (e.g. Codex `plan_harness` + Claude `fix_harness`) can't hand a foreign-backend session id to the fix backend's SDK. See [harnesses.md](harnesses.md#retry-semantics) |
+| `attempt_count` | `int` | Retry budget. Restarting from a successful rest (completed status, `review_failed`/`review_blocked`, or `test_failed`) starts a fresh budget (`decide()` sets the next action's `attempt_count` to 1, issue #186); restarting from a failing/neutral rest (`failed`/`error`/`skipped`/`aborted`) or from `planned` carries `task.attempt_count + 1` forward (floored at 1 so a legacy task with a stored `0` doesn't jump to 2 on its first real dispatch); `/retry` always resets to 1. When the next carry-forward restart would exceed `MAX_ATTEMPTS`, `decide()` trips the `MAX_ATTEMPTS` guard (`mark_failed_limit`, `limit_reason="attempts"`) |
 | `first_dispatched_at` | `str` | ISO 8601; set on first dispatch, reset on terminal status (wall-clock guard anchor) |
 | `last_dispatched_command` | `str \| None` | The slash command string last dispatched (e.g. `/plan`) |
 | `last_dispatched_command_id` | `int \| None` | Comment ID of the slash command last dispatched |
@@ -63,9 +66,10 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `welcome_comment_id` | `int \| None` | Comment ID of the welcome message (if posted) |
 | `progress_comment_id` | `int \| None` | Sticky progress comment ID for the in-flight dispatch. Cleared on any clean return (finalize), so it lingers **only** after a crash — a `/retry` from the `error` state re-uses this comment instead of posting a new one. See [handlers.md](handlers.md). |
 | `bot_comment_ids` | `list[int]` | Every comment ID autoSWE has posted on this issue |
-| `pr_number` | `int \| None` | Cached PR number |
+| `pr_number` | `int \| None` | Cached PR number. Persisted at ship time (both the explicit `/pr` path and the `AUTO_CREATE_PR` path) so consumers can reference the PR without re-querying the provider |
+| `pr_url` | `str \| None` | Cached PR web URL, persisted alongside `pr_number` at ship time |
 | `fix_summary` | `str \| None` | Extracted from `DONE_SUMMARY` on fix/retry completion; persisted in the queue so PR creation can include it in the body |
-| `rereview_after_fix` | `bool` | Set by `emit()` when a `/fix` dispatched from `review_failed`/`review_blocked` completes. `decide()` then auto-dispatches `/review` on the next poll (and `emit()` clears it when the review runs) so the gating verdict is re-checked before `/pr`. |
+| `rereview_after_fix` | `bool` | Set by `emit()` when a `/fix` dispatched from `review_failed`/`review_blocked` completes. `decide()` then auto-dispatches `/review` on the next poll (and `emit()` clears it when the review runs) so the gating verdict is re-checked before `/pr`. It is also cleared by any other completion that lands in a terminal status — a `/sync`→`synced` or `/pr`→`shipped` that follows a flagged fix — so a shipped/synced task never carries a live re-review (issue #195). |
 | `gh_closed` | `bool` | True once the issue is observed closed; cleared if it's reopened; task is never auto-purged |
 | `created_at` | `str` | ISO 8601; when the task was first created |
 | `last_synced` | `str` | ISO 8601; last poll time |
@@ -79,8 +83,8 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `pending_command` | `str` | The slash command to run next, derived from comments. Absent (None) ⇒ nothing to run unless `pending_user_reply` is set. |
 | `pending_guidance` | `str` | Guidance text from `/fix with <guidance>` |
 | `pending_user_reply` | `str` | The user's plain-text reply on a `waiting`/`planned` task. |
-| `plan_file_path` | `str` | Absolute path to the native `~/.claude/plans/*.md` file written by the planner. Set by `planner.run_plan()` on `PLAN_READY`; consumed (popped) by `coder.run_fix()` on first use. |
-| `review_file_path` | `str` | Absolute path to the `~/.claude/reviews/<slug>.md` file written by the reviewer. Set by `reviewer.run_review()` on `REVIEW_READY`; consumed (popped) by `build_fix_prompt()` / `build_plan_prompt()` on first use (pop-after-first-use lifecycle). |
+| `plan_file_path` | `str` | Absolute path to the native plan-file `.md` written by the planner (on Claude Code, the SDK writes it natively to `~/.claude/plans/*.md` — read via `claude_code.plan_file_dir()`). Set by `planner.run_plan()` on `PLAN_READY`; consumed (popped) by `coder.run_fix()` on first use. |
+| `review_file_path` | `str` | Absolute path to the review-report `.md` the reviewer writes to `<ARTIFACT_DIR>/reviews/<slug>.md` (a backend-neutral directory, S6 / #169 F-10). Set by `reviewer.run_review()` on `REVIEW_READY`; consumed (popped) by `build_fix_prompt()` / `build_plan_prompt()` on first use (pop-after-first-use lifecycle). |
 | `_token` | `str` | GitHub or Azure PAT; injected at dispatch time, never written to disk |
 | `_guard_blocked` | `bool` | Set when a limit guard trips; suppresses comment re-scans until a new command appears |
 | `_comment_id` | `int` | Progress comment ID for the current in-flight dispatch (runtime mirror of the persisted `progress_comment_id`, passed to the MCP comment server as `AUTOSWE_COMMENT_ID`) |
@@ -97,7 +101,6 @@ All orchestrator types are **frozen dataclasses** — immutable snapshots at eac
 class ApiState:
     issue: NormalizedIssue
     comments: tuple[NormalizedComment, ...]
-    open_pr_numbers: tuple[int, ...] = ()
     comments_fetched: bool = True
 ```
 
@@ -125,6 +128,8 @@ class TaskState:
     last_dispatched_command_id: int | None
     last_consumed_reply_id: int | None
     session_id: str | None
+    last_good_session_id: str | None
+    last_good_session_backend: str | None
     pr_number: int | None
     guard_blocked: bool
     gh_closed: bool
@@ -145,6 +150,7 @@ class TaskState:
     review_file_path: str | None = None
     fix_summary: str = ""
     rereview_after_fix: bool = False
+    pr_url: str | None = None
 ```
 
 Built from the queue entry by `TaskState.from_queue(slug, entry)` using the `TASK_FIELDS` registry in `types.py`. The registry is the single source of truth for field ↔ queue key ↔ default mappings — the drift test (`tests/test_no_field_drift.py`) fails CI if a field is added to one without the other. Transient fields (`_token`, `_comment_id`) are excluded — they belong in the dispatch runtime, not the decision boundary.
@@ -170,7 +176,7 @@ class Action:
     kind: Literal["plan", "fix", "ship_pr", "sync_branch",
                   "retry", "skip", "abort", "noop",
                   "post_welcome", "advance_watermark",
-                  "mark_failed_limit",
+                  "mark_failed_limit", "refused",
                   "review"]
     slug: str
     plan_branch: str | None = None
@@ -180,9 +186,10 @@ class Action:
     triggering_comment_id: int | None = None
     user_reply_text: str | None = None
     limit_reason: Literal["attempts", "time"] | None = None
+    refused_command: str | None = None
 ```
 
-Provider-agnostic. Cached at the test seam between Layer A (decide) and Layer B (run) / Layer C (emit). `limit_reason` is set only on `kind="mark_failed_limit"` to record which guard tripped (attempt count vs. wall-clock).
+Provider-agnostic. Cached at the test seam between Layer A (decide) and Layer B (run) / Layer C (emit). `limit_reason` is set only on `kind="mark_failed_limit"` to record which guard tripped (attempt count vs. wall-clock). `refused_command` is set on `kind="refused"` to record which slash command was refused (`/pr`, `/review`, or `/sync` on a `failed`/`error` task, or a non-`/retry` command on a guard-blocked task) so `emit()` can pick the right feedback comment (issue #192). The message also keys on `task.guard_blocked`: on a limit-blocked task every refusal points at `/retry`, since even `/fix` is refused there.
 
 ### `Effect` — What to write back (Layer C output)
 
@@ -256,7 +263,9 @@ What `planner` / `coder` / `reviewer` / `ship` return after interpreting a `RunR
 
 ### `RunSpec` — backend invocation intent
 
-`runner.run(...)` packs its kwargs into a `RunSpec` (also in `backends/base.py`) and dispatches to the resolved backend. The key field is **`mode`** — a generic intent string (`"plan"`, `"read_only"`, `"read_write"`) that each backend translates into its own configuration (Claude Code permission modes/tool sets, Codex `--sandbox` flags). It supersedes the legacy `permission_mode` + `allowed_tools` + `disallowed_tools` triple.
+`runner.run(...)` packs its kwargs into a `RunSpec` (also in `backends/base.py`) and dispatches to the resolved backend. The key field is **`mode`** — a generic intent string (`"plan"`, `"read_only"`, `"read_write"`) that each backend translates into its own configuration (Claude Code permission modes/tool sets; Codex accepts it for contract parity but does not map it to a `--sandbox` flag — see [harnesses.md](harnesses.md#codex-phase-4)). It supersedes the legacy `permission_mode` + `allowed_tools` + `disallowed_tools` triple.
+
+**`fork_session` (retry semantics).** `RunSpec.fork_session: bool` (default `False`) is the uniform retry-semantics surface. When `True` **and** `resume` is set, backends that advertise the `"session_fork"` capability branch from `resume` into a *new* session instead of continuing it in place (Claude Agent SDK `fork_session=True`); the original stays intact for rollback. Backends without the capability (Codex) ignore it. Set only by `_run_retry`, gated on `backend_has_capability(harness, "session_fork")` — so handlers never branch on backend name. See [harnesses.md](harnesses.md#retry-semantics).
 
 ## Normalized Dataclasses (`autoswe/providers/base.py`)
 

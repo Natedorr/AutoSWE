@@ -111,6 +111,38 @@ def test_parse_unknown_command_returns_none():
     assert parse_slash_command("/unknown") is None
 
 
+def test_parse_command_prefix_is_not_a_command():
+    """A slash command must be followed by a boundary (issue #173 F-14).
+
+    Without a trailing anchor, ``/fixture`` matches ``/fix``, ``/prod-notes``
+    matches ``/pr``, and ``/planning`` matches ``/plan``.
+    """
+    assert parse_slash_command("/fixture") is None
+    assert parse_slash_command("/prod-notes") is None
+    assert parse_slash_command("/planning") is None
+    assert parse_slash_command("/prerelease") is None
+    assert parse_slash_command("/synchronize") is None
+    assert parse_slash_command("/abortive") is None
+    assert parse_slash_command("/reviewer") is None
+
+
+def test_parse_command_at_end_of_line_still_matches():
+    """The trailing boundary is whitespace, end-of-line, or a backtick."""
+    assert parse_slash_command("/fix") == ("/fix", None, None)
+    assert parse_slash_command("/plan\n") == ("/plan", None, None)
+    assert parse_slash_command("/fix\nsecond line") == ("/fix", None, None)
+
+
+def test_parse_command_with_guidance_and_branch_still_match():
+    """Valid commands still parse with and without guidance/branch."""
+    assert parse_slash_command("/pr with guidance") == ("/pr", "guidance", None)
+    assert parse_slash_command("/plan --branch develop") == ("/plan", None, "develop")
+    assert parse_slash_command("/sync") == ("/sync", None, None)
+    cmd, guidance, branch = parse_slash_command("/fix with x --branch main")
+    assert cmd == "/fix"
+    assert branch == "main"
+
+
 # ---------------------------------------------------------------------------
 # _is_autoswe_bot_comment
 # ---------------------------------------------------------------------------
@@ -261,6 +293,102 @@ def test_parse_plan_branch_with_hyphens():
     cmd, _, branch = parse_slash_command("/plan --branch feature/my-feature")
     assert cmd == "/plan"
     assert branch == "feature/my-feature"
+
+
+def test_parse_plan_branch_trailing_period_repaired():
+    """Regression (issue #184): `/plan --branch docs.  what was the question`
+    parsed plan_branch as "docs." (trailing sentence period swallowed), which
+    git rejects. The token must stop at whitespace and the trailing dot
+    repaired to a valid branch."""
+    cmd, guidance, branch = parse_slash_command("/plan --branch docs.  what was the question")
+    assert cmd == "/plan"
+    assert branch == "docs"
+    assert guidance == "what was the question"
+
+
+def test_parse_plan_branch_trailing_period_end_of_line():
+    """A trailing-period token at end of line is repaired too."""
+    cmd, guidance, branch = parse_slash_command("/plan --branch docs.")
+    assert cmd == "/plan"
+    assert branch == "docs"
+    assert guidance is None
+
+
+def test_parse_plan_branch_multiple_trailing_dots():
+    """Multiple trailing dots are stripped before validation."""
+    cmd, _, branch = parse_slash_command("/plan --branch docs...")
+    assert cmd == "/plan"
+    assert branch == "docs"
+
+
+def test_parse_plan_branch_surrounding_quotes_tolerated():
+    """`--branch "docs"` captures the quoted token; the quotes are stripped
+    (the old character-class capture happened to do the same)."""
+    cmd, guidance, branch = parse_slash_command('/plan --branch "docs"')
+    assert cmd == "/plan"
+    assert branch == "docs"
+    assert guidance is None
+
+    from autoswe.commands.parser import _sanitize_branch_token
+
+    assert _sanitize_branch_token('"docs"') == "docs"
+    assert _sanitize_branch_token("'docs'") == "docs"
+    assert _sanitize_branch_token('"docs."') == "docs"
+    # A lone leading quote is not surrounding-quote repair…
+    assert _sanitize_branch_token('"docs') is None
+
+
+def test_parse_plan_branch_invalid_token_ignored():
+    """A branch token git rejects that can't be repaired (e.g. double dot)
+    is ignored — branch stays None and the rest is guidance."""
+    cmd, guidance, branch = parse_slash_command("/plan --branch foo..bar with focus")
+    assert cmd == "/plan"
+    assert branch is None
+    assert guidance == "focus"
+
+
+def test_parse_plan_branch_leading_dash_rejected():
+    """git rejects branch names starting with `-` — token is ignored."""
+    cmd, guidance, branch = parse_slash_command("/plan --branch -bad")
+    assert cmd == "/plan"
+    assert branch is None
+    assert guidance is None
+
+
+def test_parse_plan_branch_lock_suffix_rejected():
+    """Names ending in .lock are rejected by git check-ref-format."""
+    cmd, guidance, branch = parse_slash_command("/plan --branch docs.lock")
+    assert cmd == "/plan"
+    assert branch is None
+
+
+def test_is_valid_branch_name_rules():
+    """_is_valid_branch_name approximates git check-ref-format --branch."""
+    from autoswe.commands.parser import _is_valid_branch_name, _sanitize_branch_token
+
+    assert _is_valid_branch_name("develop")
+    assert _is_valid_branch_name("feature/v1.2-hotfix")
+    assert not _is_valid_branch_name("")
+    assert not _is_valid_branch_name("docs.")
+    assert not _is_valid_branch_name(".hidden")
+    assert not _is_valid_branch_name("-flag")
+    assert not _is_valid_branch_name("a..b")
+    assert not _is_valid_branch_name("a//b")
+    assert not _is_valid_branch_name("a@{b}")
+    assert not _is_valid_branch_name("a lock")
+    assert not _is_valid_branch_name("docs.lock")
+    assert not _is_valid_branch_name("a?b")
+    assert not _is_valid_branch_name("a*b")
+    assert not _is_valid_branch_name("a:b")
+    assert not _is_valid_branch_name('a"b')
+    assert not _is_valid_branch_name("a'b")
+
+    assert _sanitize_branch_token("docs.") == "docs"
+    assert _sanitize_branch_token("develop") == "develop"
+    assert _sanitize_branch_token("..") is None
+    assert _sanitize_branch_token("-x") is None
+    assert _sanitize_branch_token('"docs"') == "docs"
+    assert _sanitize_branch_token("'docs'") == "docs"
 
 
 def test_parse_command_in_multiline():

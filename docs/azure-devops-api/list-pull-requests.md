@@ -1,6 +1,6 @@
 # List pull requests
 
-Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull%20requests/get%20pull%20requests
+Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-requests/get-pull-requests?view=azure-devops-rest-7.1
 
 ## List pull requests
 

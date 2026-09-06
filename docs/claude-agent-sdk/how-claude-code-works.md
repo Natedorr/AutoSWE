@@ -8,13 +8,15 @@
 
 Claude Code is an agentic assistant that runs in your terminal. While it excels at coding, it can help with anything you can do from the command line: writing docs, running builds, searching files, researching topics, and more.
 
-This guide covers the core architecture, built-in capabilities, and [tips for working effectively](#work-effectively-with-claude-code). For step-by-step walkthroughs, see [Common workflows](/en/common-workflows). For extensibility features like skills, MCP, and hooks, see [Extend Claude Code](/en/features-overview).
+This guide covers the core architecture, built-in capabilities, and [tips for working effectively](#work-effectively-with-claude-code). For step-by-step walkthroughs, see [Common workflows](/docs/en/common-workflows). For extensibility features like skills, MCP, and hooks, see [Extend Claude Code](/docs/en/features-overview).
 
 ## The agentic loop
 
 When you give Claude a task, it works through three phases: **gather context**, **take action**, and **verify results**. These phases blend together. Claude uses tools throughout, whether searching files to understand your code, editing to make changes, or running tests to check its work.
 
-<img src="https://mintcdn.com/claude-code/c5r9_6tjPMzFdDDT/images/agentic-loop.svg?fit=max&auto=format&n=c5r9_6tjPMzFdDDT&q=85&s=5f1827dec8539f38adee90ead3a85a38" alt="The agentic loop: Your prompt leads to Claude gathering context, taking action, verifying results, and repeating until task complete. You can interrupt at any point." width="720" height="280" data-path="images/agentic-loop.svg" />
+<img src="https://mintcdn.com/claude-code/ikqp3_70mqIahteV/images/agentic-loop.svg?fit=max&auto=format&n=ikqp3_70mqIahteV&q=85&s=4a30fb7ce2815012a9f27c955e2c6bb0" className="dark:hidden" alt="Diagram of the agentic loop: Your prompt leads to Claude gathering context, taking action, verifying results, and repeating until task complete. You can interrupt at any point." width="720" height="280" data-path="images/agentic-loop.svg" />
+
+<img src="https://mintcdn.com/claude-code/_xqph1dUOslCOwsj/images/agentic-loop-dark.svg?fit=max&auto=format&n=_xqph1dUOslCOwsj&q=85&s=75e1d55ed76857a952f9a2dffbab02df" className="hidden dark:block" alt="Diagram of the agentic loop: Your prompt leads to Claude gathering context, taking action, verifying results, and repeating until task complete. You can interrupt at any point." width="720" height="280" data-path="images/agentic-loop-dark.svg" />
 
 The loop adapts to what you ask. A question about your codebase might only need context gathering. A bug fix cycles through all three phases repeatedly. A refactor might involve extensive verification. Claude decides what each step requires based on what it learned from the previous step, chaining dozens of actions together and course-correcting along the way.
 
@@ -26,7 +28,7 @@ The agentic loop is powered by two components: [models](#models) that reason and
 
 Claude Code uses Claude models to understand your code and reason about tasks. Claude can read code in any language, understand how components connect, and figure out what needs to change to accomplish your goal. For complex tasks, it breaks work into steps, executes them, and adjusts based on what it learns.
 
-[Multiple models](/en/model-config) are available with different tradeoffs. Sonnet handles most coding tasks well. Opus provides stronger reasoning for complex architectural decisions. Switch with `/model` during a session or start with `claude --model <name>`.
+[Multiple models](/docs/en/model-config) are available with different tradeoffs. Sonnet handles most coding tasks well. Opus provides stronger reasoning for complex architectural decisions. Switch with `/model` during a session or start with `claude --model <name>`.
 
 When this guide says "Claude chooses" or "Claude decides," it's the model doing the reasoning.
 
@@ -42,9 +44,9 @@ The built-in tools generally fall into five categories, each representing a diff
 | **Search**            | Find files by pattern, search content with regex, explore codebases                                                                                           |
 | **Execution**         | Run shell commands, start servers, run tests, use git                                                                                                         |
 | **Web**               | Search the web, fetch documentation, look up error messages                                                                                                   |
-| **Code intelligence** | See type errors and warnings after edits, jump to definitions, find references (requires [code intelligence plugins](/en/discover-plugins#code-intelligence)) |
+| **Code intelligence** | See type errors and warnings after edits, jump to definitions, find references (requires [code intelligence plugins](/docs/en/discover-plugins#code-intelligence)) |
 
-These are the primary capabilities. Claude also has tools for spawning subagents, asking you questions, and other orchestration tasks. See [Tools available to Claude](/en/tools-reference) for the complete list.
+These are the primary capabilities. Claude also has tools for spawning subagents, asking you questions, and other orchestration tasks. See [Tools available to Claude](/docs/en/tools-reference) for the complete list.
 
 Claude chooses which tools to use based on your prompt and what it learns along the way. When you say "fix the failing tests," Claude might:
 
@@ -57,20 +59,18 @@ Claude chooses which tools to use based on your prompt and what it learns along 
 
 Each tool use gives Claude new information that informs the next step. This is the agentic loop in action.
 
-**Extending the base capabilities:** The built-in tools are the foundation. You can extend what Claude knows with [skills](/en/skills), connect to external services with [MCP](/en/mcp), automate workflows with [hooks](/en/hooks), and offload tasks to [subagents](/en/sub-agents). These extensions form a layer on top of the core agentic loop. See [Extend Claude Code](/en/features-overview) for guidance on choosing the right extension for your needs.
+**Extending the base capabilities:** The built-in tools are the foundation. You can extend what Claude knows with [skills](/docs/en/skills), connect to external services with [MCP](/docs/en/mcp), automate workflows with [hooks](/docs/en/hooks), and offload tasks to [subagents](/docs/en/sub-agents). These extensions form a layer on top of the core agentic loop. See [Extend Claude Code](/docs/en/features-overview) for guidance on choosing the right extension for your needs.
 
 ## What Claude can access
-
-This guide focuses on the terminal. Claude Code also runs in [VS Code](/en/vs-code), [JetBrains IDEs](/en/jetbrains), and other environments.
 
 When you run `claude` in a directory, Claude Code gains access to:
 
 * **Your project.** Files in your directory and subdirectories, plus files elsewhere with your permission.
 * **Your terminal.** Any command you could run: build tools, git, package managers, system utilities, scripts. If you can do it from the command line, Claude can too.
 * **Your git state.** Current branch, uncommitted changes, and recent commit history.
-* **Your [CLAUDE.md](/en/memory).** A markdown file where you store project-specific instructions, conventions, and context that Claude should know every session.
-* **[Auto memory](/en/memory#auto-memory).** Learnings Claude saves automatically as you work, like project patterns and your preferences. The first 200 lines or 25KB of MEMORY.md, whichever comes first, load at the start of each session.
-* **Extensions you configure.** [MCP servers](/en/mcp) for external services, [skills](/en/skills) for workflows, [subagents](/en/sub-agents) for delegated work, and [Claude in Chrome](/en/chrome) for browser interaction.
+* **Your [CLAUDE.md](/docs/en/memory).** A markdown file where you store project-specific instructions, conventions, and context that Claude should know every session.
+* **[Auto memory](/docs/en/memory#auto-memory).** Learnings Claude saves automatically as you work, like your preferences. The first 200 lines or 25KB of MEMORY.md, whichever comes first, load at the start of each session.
+* **Extensions you configure.** [MCP servers](/docs/en/mcp) for external services, [skills](/docs/en/skills) for workflows, [subagents](/docs/en/sub-agents) for delegated work, and [Claude in Chrome](/docs/en/chrome) for browser interaction.
 
 Because Claude sees your whole project, it can work across it. When you ask Claude to "fix the authentication bug," it searches for relevant files, reads multiple files to understand context, makes coordinated edits across them, runs tests to verify the fix, and commits the changes if you ask. This is different from inline code assistants that only see the current file.
 
@@ -82,43 +82,45 @@ The agentic loop, tools, and capabilities described above are the same everywher
 
 Claude Code runs in three environments, each with different tradeoffs for where your code executes.
 
-| Environment        | Where code runs                         | Use case                                                   |
-| ------------------ | --------------------------------------- | ---------------------------------------------------------- |
-| **Local**          | Your machine                            | Default. Full access to your files, tools, and environment |
-| **Cloud**          | Anthropic-managed VMs                   | Offload tasks, work on repos you don't have locally        |
-| **Remote Control** | Your machine, controlled from a browser | Use the web UI while keeping everything local              |
+| Environment        | Where code runs                                                                                               | Use case                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| **Local**          | Your machine                                                                                                  | Default. Full access to your files, tools, and environment |
+| **Cloud**          | Anthropic-managed VMs, or [self-hosted environments](/docs/en/self-hosted-environments) your organization operates | Offload tasks, work on repos you don't have locally        |
+| **Remote Control** | Your machine, controlled from a browser                                                                       | Use the web UI while execution and your files stay local   |
 
 ### Interfaces
 
-You can access Claude Code through the terminal, the [desktop app](/en/desktop), [IDE extensions](/en/vs-code), [claude.ai/code](https://claude.ai/code), [Remote Control](/en/remote-control), [Slack](/en/slack), and [CI/CD pipelines](/en/github-actions). The interface determines how you see and interact with Claude, but the underlying agentic loop is identical. See [Use Claude Code everywhere](/en/overview#use-claude-code-everywhere) for the full list.
+You can access Claude Code through the terminal, the [desktop app](/docs/en/desktop), [IDE extensions](/docs/en/vs-code), [claude.ai/code](https://claude.ai/code), [Remote Control](/docs/en/remote-control), [Slack](/docs/en/slack), and [CI/CD pipelines](/docs/en/github-actions). The interface determines how you see and interact with Claude, but the underlying agentic loop is identical. See [Use Claude Code everywhere](/docs/en/overview#use-claude-code-everywhere) for the full list.
 
 ## Work with sessions
 
-Claude Code saves your conversation locally as you work. Each message, tool use, and result is written to a plaintext JSONL file under `~/.claude/projects/`, which enables [rewinding](#undo-changes-with-checkpoints), [resuming, and forking](#resume-or-fork-sessions) sessions. Before Claude makes code changes, it also snapshots the affected files so you can revert if needed. For paths, retention, and how to clear this data, see [application data in `~/.claude`](/en/claude-directory#application-data).
+Claude Code saves your conversation locally as you work. Each message, tool use, and result is written to a plaintext JSONL file under `~/.claude/projects/`, which enables [rewinding](#undo-changes-with-checkpoints), [resuming, and forking](#resume-or-fork-sessions) sessions. Before Claude makes code changes, it also snapshots the affected files so you can revert if needed. For paths, retention, and how to clear this data, see [application data in `~/.claude`](/docs/en/claude-directory#application-data).
 
-**Sessions are independent.** Each new session starts with a fresh context window, without the conversation history from previous sessions. Claude can persist learnings across sessions using [auto memory](/en/memory#auto-memory), and you can add your own persistent instructions in [CLAUDE.md](/en/memory).
+**Sessions are independent.** Each new session starts with a fresh context window, without the conversation history from previous sessions. Claude can persist learnings across sessions using [auto memory](/docs/en/memory#auto-memory), and you can add your own persistent instructions in [CLAUDE.md](/docs/en/memory).
 
 ### Work across branches
 
-Each Claude Code conversation is a session tied to your current directory. The `/resume` picker shows sessions from the current worktree by default, with keyboard shortcuts to widen the list to other worktrees or projects. See [Manage sessions](/en/sessions#use-the-session-picker) for the full list of picker shortcuts and how name resolution works.
+Each Claude Code conversation is a session tied to your current directory. The `/resume` picker shows sessions from the current worktree by default, with keyboard shortcuts to widen the list to other worktrees or projects. See [Manage sessions](/docs/en/sessions#use-the-session-picker) for the full list of picker shortcuts and how name resolution works.
 
 Claude sees your current branch's files. When you switch branches, Claude sees the new branch's files, but your conversation history stays the same. Claude remembers what you discussed even after switching.
 
-Since sessions are tied to directories, you can run parallel Claude sessions by using [git worktrees](/en/worktrees), which create separate directories for individual branches.
+Since sessions are tied to directories, you can run parallel Claude sessions by using [git worktrees](/docs/en/worktrees), which create separate directories for individual branches.
 
 ### Resume or fork sessions
 
 Resuming a session with `claude --continue` or `claude --resume` reopens it under the same session ID and appends new messages to the existing conversation. Forking with `--fork-session` or `/branch` copies the history into a new session ID, leaving the original unchanged.
 
-<img src="https://mintcdn.com/claude-code/c5r9_6tjPMzFdDDT/images/session-continuity.svg?fit=max&auto=format&n=c5r9_6tjPMzFdDDT&q=85&s=fa41d12bfb57579cabfeece907151d30" alt="Session continuity: resume continues the same session, fork creates a new branch with a new ID." width="560" height="280" data-path="images/session-continuity.svg" />
+<img src="https://mintcdn.com/claude-code/ikqp3_70mqIahteV/images/session-continuity.svg?fit=max&auto=format&n=ikqp3_70mqIahteV&q=85&s=04ed0984a58e4127e05b3640265241a3" className="dark:hidden" alt="Diagram of session continuity: resume continues the same session, fork creates a new branch with a new ID." width="560" height="280" data-path="images/session-continuity.svg" />
 
-For the resume flags, the `/resume` picker, naming, and what happens when the same session is open in two terminals, see [Manage sessions](/en/sessions).
+<img src="https://mintcdn.com/claude-code/_xqph1dUOslCOwsj/images/session-continuity-dark.svg?fit=max&auto=format&n=_xqph1dUOslCOwsj&q=85&s=886a384bce8298594e43f124617ea665" className="hidden dark:block" alt="Diagram of session continuity: resume continues the same session, fork creates a new branch with a new ID." width="560" height="280" data-path="images/session-continuity-dark.svg" />
+
+For the resume flags, the `/resume` picker, naming, and what happens when the same session is open in two terminals, see [Manage sessions](/docs/en/sessions).
 
 ### The context window
 
-Claude's context window holds your conversation history, file contents, command outputs, [CLAUDE.md](/en/memory), [auto memory](/en/memory#auto-memory), loaded skills, and system instructions. As you work, context fills up. Claude compacts automatically, but instructions from early in the conversation can get lost. Put persistent rules in CLAUDE.md, and run `/context` to see what's using space.
+Claude's context window holds your conversation history, file contents, command outputs, [CLAUDE.md](/docs/en/memory), [auto memory](/docs/en/memory#auto-memory), loaded skills, and system instructions. As you work, context fills up. Claude compacts automatically, but instructions from early in the conversation can get lost. Put persistent rules in CLAUDE.md, and run `/context` to see what's using space.
 
-For an interactive walkthrough of what loads and when, see [Explore the context window](/en/context-window).
+For an interactive walkthrough of what loads and when, see [Explore the context window](/docs/en/context-window).
 
 #### When context fills up
 
@@ -126,19 +128,19 @@ Claude Code manages context automatically as you approach the limit. It clears o
 
 To control what's preserved during compaction, add a "Compact Instructions" section to CLAUDE.md or run `/compact` with a focus (like `/compact focus on the API changes`).
 
-If a single file or tool output is so large that context refills immediately after each summary, Claude Code stops auto-compacting after a few attempts and shows an error instead of looping. See [Auto-compaction stops with a thrashing error](/en/troubleshooting#auto-compaction-stops-with-a-thrashing-error) for recovery steps.
+If a single file or tool output is so large that context refills immediately after each summary, Claude Code stops auto-compacting after a few attempts and shows an error instead of looping. See [Auto-compaction stops with a thrashing error](/docs/en/troubleshooting#auto-compaction-stops-with-a-thrashing-error) for recovery steps.
 
-Run `/context` to see what's using space. MCP tool definitions are deferred by default and loaded on demand via [tool search](/en/mcp#scale-with-mcp-tool-search), so only tool names consume context until Claude uses a specific tool. Run `/mcp` to check per-server costs.
+Run `/context` to see what's using space. MCP tool definitions are deferred by default and loaded on demand via [tool search](/docs/en/mcp#scale-with-mcp-tool-search), so only tool names and server instructions consume context until Claude uses a specific tool.
 
 #### Manage context with skills and subagents
 
 Beyond compaction, you can use other features to control what loads into context.
 
-[Skills](/en/skills) load on demand. Claude sees skill descriptions at session start, but the full content only loads when a skill is used. For skills you invoke manually, set `disable-model-invocation: true` to keep descriptions out of context until you need them. For skills you didn't write, use [`skillOverrides`](/en/skills#override-skill-visibility-from-settings) to do the same from settings.
+[Skills](/docs/en/skills) load on demand. Claude sees skill descriptions at session start, but the full content only loads when a skill is used. For skills you invoke manually, set `disable-model-invocation: true` to keep descriptions out of context until you need them. For skills you didn't write, use [`skillOverrides`](/docs/en/skills#override-skill-visibility-from-settings) to do the same from settings.
 
-[Subagents](/en/sub-agents) get their own fresh context, completely separate from your main conversation. Their work doesn't bloat your context. When done, they return a summary. This isolation is why subagents help with long sessions.
+[Subagents](/docs/en/sub-agents) work in their own context window. A subagent starts fresh unless it's a [fork](/docs/en/sub-agents#fork-the-current-conversation), which starts with a copy of your conversation so far. Either way, the subagent's tool calls stay out of your context, and Claude gets back a summary when the subagent finishes.
 
-See [context costs](/en/features-overview#understand-context-costs) for what each feature costs, and [reduce token usage](/en/costs#reduce-token-usage) for tips on managing context.
+See [context costs](/docs/en/features-overview#understand-context-costs) for what each feature costs, and [reduce token usage](/docs/en/costs#reduce-token-usage) for tips on managing context.
 
 ## Stay safe with checkpoints and permissions
 
@@ -146,26 +148,26 @@ Claude has two safety mechanisms: checkpoints let you undo file changes, and per
 
 ### Undo changes with checkpoints
 
-**Every file edit is reversible.** Before Claude edits any file, it snapshots the current contents. If something goes wrong, press `Esc` twice to rewind to a previous state, or ask Claude to undo.
+**File edits are reversible.** Before Claude edits a file, it snapshots the current contents. If something goes wrong, press `Esc` twice to rewind to a previous state, or ask Claude to undo.
 
-Checkpoints are local to your session, separate from git. They only cover file changes. Actions that affect remote systems (databases, APIs, deployments) can't be checkpointed, which is why Claude asks before running commands with external side effects.
+Checkpoints are separate from git and remain available when you resume a conversation. They only cover file changes, and a restore [skips symlinked and hard-linked files](/docs/en/checkpointing#symlinked-and-hard-linked-paths-not-restored). Actions that affect remote systems (databases, APIs, deployments) can't be checkpointed. You control those with your permission mode and permission rules.
 
 ### Control what Claude can do
 
-Press `Shift+Tab` to cycle through permission modes:
+Choose a permission mode to set what Claude can do without asking you. Press `Shift+Tab` to cycle through the permission modes:
 
-* **Default**: Claude asks before file edits and shell commands
-* **Auto-accept edits**: Claude edits files and runs common filesystem commands like `mkdir` and `mv` without asking, still asks for other commands
-* **Plan mode**: Claude uses read-only tools only, creating a plan you can approve before execution
-* **Auto mode**: Claude evaluates all actions with background safety checks. Currently a research preview
+* **Auto**: a classifier reviews most actions in the background and blocks the risky ones instead of asking you. On Pro, Max, and Team plans, it's the [built-in starting permission mode](/docs/en/permission-modes#which-mode-a-session-starts-in) for interactive terminal and VS Code sessions
+* **Manual**: Claude asks before file edits and shell commands
+* **Accept edits**: Claude edits files and runs common filesystem commands like `mkdir` and `mv` without asking, still asks for other commands
+* **Plan**: Claude explores and proposes a plan without editing your source files
 
-You can also allow specific commands in `.claude/settings.json` so Claude doesn't ask each time. This is useful for trusted commands like `npm test` or `git status`. Settings can be scoped from organization-wide policies down to personal preferences. See [Permissions](/en/permissions) for details.
+You can also allow specific commands in `.claude/settings.json` so Claude doesn't ask each time. This is useful for trusted commands like `npm test` or `git status`. Settings can be scoped from organization-wide policies down to personal preferences. See [Permissions](/docs/en/permissions) for details.
 
 ***
 
 ## Work effectively with Claude Code
 
-These tips help you get better results from Claude Code.
+These tips help you get better results from Claude Code. For more on specific prompts, verification, and planning, see [Best practices](/docs/en/best-practices).
 
 ### Ask Claude Code for help
 
@@ -174,8 +176,7 @@ Claude Code can teach you how to use it. Ask questions like "how do I set up hoo
 Built-in commands also guide you through setup:
 
 * `/init` walks you through creating a CLAUDE.md for your project
-* `/agents` helps you configure custom subagents
-* `/doctor` diagnoses common issues with your installation
+* `/doctor` runs a setup checkup that diagnoses installation and configuration issues and can fix them
 
 ### It's a conversation
 
@@ -199,42 +200,8 @@ When the first attempt isn't right, you don't start over. You iterate.
 
 You can redirect Claude at any point without waiting for the turn to finish or starting over:
 
-* **Press `Esc`** to stop Claude immediately. The running tool call is canceled and Claude waits for your next instruction.
+* **Press `Esc`** to stop Claude immediately. The running tool call is canceled and Claude waits for your next instruction. If you have messages queued, Claude Code [sends them next](/docs/en/interactive-mode#queue-messages-while-claude-works).
 * **Type a correction and press `Enter`** to send it without stopping the running tool. Claude reads it as soon as the current action completes and adjusts before deciding its next step.
-
-### Be specific upfront
-
-The more precise your initial prompt, the fewer corrections you'll need. Reference specific files, mention constraints, and point to example patterns.
-
-```text theme={null}
-The checkout flow is broken for users with expired cards.
-Check src/payments/ for the issue, especially token refresh.
-Write a failing test first, then fix it.
-```
-
-Vague prompts work, but you'll spend more time steering. Specific prompts like the one above often succeed on the first attempt.
-
-### Give Claude something to verify against
-
-Claude performs better when it can check its own work. Include test cases, paste screenshots of expected UI, or define the output you want.
-
-```text theme={null}
-Implement validateEmail. Test cases: 'user@example.com' → true,
-'invalid' → false, 'user@.com' → false. Run the tests after.
-```
-
-For visual work, paste a screenshot of the design and ask Claude to compare its implementation against it.
-
-### Explore before implementing
-
-For complex problems, separate research from coding. Use plan mode (`Shift+Tab` twice) to analyze the codebase first:
-
-```text theme={null}
-Read src/auth/ and understand how we handle sessions.
-Then create a plan for adding OAuth support.
-```
-
-Review the plan, refine it through conversation, then let Claude implement. This two-phase approach produces better results than jumping straight to code.
 
 ### Delegate, don't dictate
 
@@ -250,11 +217,11 @@ You don't need to specify which files to read or what commands to run. Claude fi
 ## What's next
 
 <CardGroup cols={2}>
-  <Card title="Extend with features" icon="puzzle-piece" href="/en/features-overview">
-    Add Skills, MCP connections, and custom commands
+  <Card title="Extend with features" icon="puzzle-piece" href="/docs/en/features-overview">
+    Add skills and MCP connections
   </Card>
 
-  <Card title="Common workflows" icon="graduation-cap" href="/en/common-workflows">
+  <Card title="Common workflows" icon="graduation-cap" href="/docs/en/common-workflows">
     Step-by-step guides for typical tasks
   </Card>
 </CardGroup>

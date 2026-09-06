@@ -44,6 +44,26 @@ FETCH_COMMENTS_PATCH = patch("autoswe.tracking.api._fetch_comments", return_valu
 
 
 # ---------------------------------------------------------------------------
+# reviews dir is backend-neutral (S6 / issue #169 F-10)
+# ---------------------------------------------------------------------------
+
+
+def test_reviews_dir_is_backend_neutral(isolated_autoswe_dir):
+    """_get_reviews_dir() writes under <ARTIFACT_DIR>/reviews, not a vendor dir.
+
+    The reviewer's artifact location must be backend-neutral so the reviews
+    survive across backends and are not tied to ~/.claude/reviews.
+    """
+    from autoswe.core import config
+    from autoswe.harness.reviewer import _get_reviews_dir
+
+    d = _get_reviews_dir()
+    assert d == config.ARTIFACT_DIR / "reviews"
+    assert ".claude" not in d.parts
+    assert d.is_dir()
+
+
+# ---------------------------------------------------------------------------
 # run_review return values
 # ---------------------------------------------------------------------------
 
@@ -136,6 +156,43 @@ def test_run_review_is_read_only(tmp_path, mock_gh_post_comment):
     )
 
 
+def test_run_review_rolls_back_worktree_after_run(tmp_path, mock_gh_post_comment):
+    """run_review captures HEAD before the run and calls the read-only backstop
+    after it (issue #166). Previously review had no rollback at all — an agent
+    that edited files would leak those edits into the next phase."""
+    ensure_calls = []
+
+    def fake_ensure(wt, head_before):
+        ensure_calls.append((str(wt), head_before))
+        return True
+
+    def fake_head(wt):
+        return "deadbeef"
+
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.reviewer._run_git", return_value="stat"):
+            with FETCH_COMMENTS_PATCH:
+                with patch(
+                    "autoswe.harness.reviewer._get_git_head", side_effect=fake_head
+                ):
+                    with patch(
+                        "autoswe.harness.reviewer.ensure_worktree_unchanged",
+                        side_effect=fake_ensure,
+                    ):
+                        with patch("autoswe.harness.runner.run", return_value=_r("LGTM")):
+                            from autoswe.harness.reviewer import run_review
+                            run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert len(ensure_calls) == 1
+    wt_arg, head_arg = ensure_calls[0]
+    # head_before captured before the run and threaded into the backstop
+    assert head_arg == "deadbeef"
+    # The backstop ran against the review worktree
+    assert str(tmp_path) in wt_arg
+
+
 def test_run_review_includes_diff_in_prompt(tmp_path, mock_gh_post_comment):
     """run_review prompt contains the git diff."""
     diff_text = "diff --git a/file.py b/file.py\n+new line"
@@ -155,6 +212,57 @@ def test_run_review_includes_diff_in_prompt(tmp_path, mock_gh_post_comment):
                     run_review(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert "new line" in run_calls[0]
+
+
+def test_run_review_diffs_against_plan_branch(tmp_path, mock_gh_post_comment):
+    """With /plan --branch docs pinned, the review diff must be computed
+    against origin/docs (the branch the work was forked from), not
+    origin/master — the repo default — or the prompt carries the whole
+    docs↔master divergence (issue #187)."""
+    run_calls = []
+    git_calls = []
+
+    def fake_run(prompt, **kwargs):
+        run_calls.append(prompt)
+        return _r("LGTM")
+
+    task = make_task()
+    task["plan_branch"] = "docs"
+
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.reviewer._run_git",
+                   side_effect=lambda wt, args: git_calls.append(args) or "stat"):
+            with FETCH_COMMENTS_PATCH:
+                with patch("autoswe.harness.runner.run", side_effect=fake_run):
+                    from autoswe.harness.reviewer import run_review
+                    run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    diff_args = [a for a in git_calls if "diff" in a]
+    assert len(diff_args) == 2
+    assert all("origin/docs...HEAD" in a for a in diff_args), \
+        f"diff must be against origin/docs, got: {diff_args}"
+    # The prompt's base-branch reference must match the diff base too.
+    assert "origin/docs" in run_calls[0]
+    assert "origin/master" not in run_calls[0]
+
+
+def test_run_review_diffs_against_base_branch_without_plan_branch(tmp_path, mock_gh_post_comment):
+    """No pinned --branch → the review diff falls back to the repo default
+    base branch (issue #187)."""
+    git_calls = []
+    task = make_task()  # base_branch=master, no plan_branch
+
+    with _patch_worktree(tmp_path):
+        with patch("autoswe.harness.reviewer._run_git",
+                   side_effect=lambda wt, args: git_calls.append(args) or "stat"):
+            with FETCH_COMMENTS_PATCH:
+                with patch("autoswe.harness.runner.run", return_value=_r("LGTM")):
+                    from autoswe.harness.reviewer import run_review
+                    run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    diff_args = [a for a in git_calls if "diff" in a]
+    assert len(diff_args) == 2
+    assert all("origin/master...HEAD" in a for a in diff_args)
 
 
 def test_run_review_includes_plan_from_comments(tmp_path, mock_gh_post_comment):
@@ -519,7 +627,7 @@ def test_build_poll_task_includes_review_file_path():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
 
     pt = _build_poll_task(queue, slug, api, {}, {})
 
@@ -541,7 +649,7 @@ def test_build_task_dict_includes_review_file_path_from_task_state():
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
     task = TaskState(
         slug="gh:owner_repo_1",
         owner="owner",
@@ -622,7 +730,9 @@ def test_full_review_injection_flow(tmp_path):
         repo="repo",
         state="open",
     )
-    api = ApiState(issue=issue, comments=(), open_pr_numbers=())
+    api = ApiState(issue=issue, comments=())
+
+    api = ApiState(issue=issue, comments=())
 
     # 3. Build TaskState via _build_poll_task (loop layer)
     pt = _build_poll_task(queue, slug, api, {}, {"pat": "tok"})

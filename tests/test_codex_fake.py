@@ -17,13 +17,13 @@ def _make_spec(cwd: str = "/tmp") -> RunSpec:
     return RunSpec(
         prompt="test prompt",
         cwd=cwd,
-        model="gpt-5.4",
+        model="gpt-5.6-terra",
         resume=None,
         mode="read_only",
         extra_tools=[],
         max_turns=200,
         timeout=30,
-        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.4"}},
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra"}},
     )
 
 
@@ -32,13 +32,13 @@ def _make_resume_spec(session_id: str, cwd: str = "/tmp") -> RunSpec:
     return RunSpec(
         prompt="resume prompt",
         cwd=cwd,
-        model="gpt-5.4",
+        model="gpt-5.6-terra",
         resume=session_id,
         mode="read_write",
         extra_tools=[],
         max_turns=200,
         timeout=30,
-        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.4"}},
+        state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra"}},
     )
 
 
@@ -128,6 +128,50 @@ class TestCodexFakeFidelity:
         assert "Fix login" in result.text
         assert result.subtype == "success"
 
+    def test_plan_item_run_result(self):
+        """script_plan_item → real backend: plan_text captured, tag-free text."""
+        fake = CodexFake()
+        fake.script_plan_item("Refactor auth", message_text="Done.", session_id="s-pi")
+
+        spec = _make_spec()
+        from autoswe.harness.backends.codex import CodexBackend
+
+        async def _run():
+            with fake:
+                backend = CodexBackend()
+                return await backend.run(spec)
+
+        result = _run_async(_run())
+
+        # Authoritative plan item drives plan_text.
+        assert result.plan_text == "Refactor auth"
+        # RunResult.text is the agent message, not the plan item.
+        assert result.text == "Done."
+        assert "Refactor auth" not in result.text
+        assert result.subtype == "success"
+
+    def test_script_plan_sets_both_tags_and_plan_text(self):
+        """script_plan keeps the <AUTOSWE_PLAN> tag in text AND sets plan_text."""
+        fake = CodexFake()
+        fake.script_plan("1. Fix login\n2. Add tests", session_id="s-plan2")
+
+        spec = _make_spec()
+        from autoswe.harness.backends.codex import CodexBackend
+
+        async def _run():
+            with fake:
+                backend = CodexBackend()
+                return await backend.run(spec)
+
+        result = _run_async(_run())
+
+        # Legacy tag path still intact...
+        assert "<AUTOSWE_PLAN>" in result.text
+        assert "Fix login" in result.text
+        # ...and the new plan item populates plan_text.
+        assert result.plan_text == "1. Fix login\n2. Add tests"
+        assert result.subtype == "success"
+
     def test_question_tags_in_text(self):
         """CodexFake questions response preserves AUTOSWE_QUESTIONS tags."""
         fake = CodexFake()
@@ -147,21 +191,25 @@ class TestCodexFakeFidelity:
         assert "What framework?" in result.text
         assert result.subtype == "success"
 
-    def test_sandbox_from_mode(self):
-        """CodexFake records sandbox flag from mode translation."""
+    def test_bypass_default_on(self):
+        """CodexFake records the bypass flag (default on), no --sandbox emitted.
+
+        Since issue #129 the backend no longer maps mode to a sandbox value;
+        the default is full bypass and ``--sandbox`` is never emitted.
+        """
         fake = CodexFake()
         fake.script_response("ok", session_id="s1")
 
         spec = RunSpec(
             prompt="plan prompt",
             cwd="/tmp",
-            model="gpt-5.4",
+            model="gpt-5.6-terra",
             resume=None,
             mode="plan",
             extra_tools=[],
             max_turns=200,
             timeout=30,
-            state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.4"}},
+            state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra"}},
         )
 
         from autoswe.harness.backends.codex import CodexBackend
@@ -175,24 +223,29 @@ class TestCodexFakeFidelity:
 
         assert len(fake.calls) == 1
         call = fake.calls[0]
-        assert call["sandbox"] == "read-only"
+        assert call["bypass"] is True
+        assert "sandbox" not in call  # --sandbox no longer emitted
         assert not call["is_resume"]
 
-    def test_read_write_sandbox(self):
-        """mode='read_write' → sandbox='workspace-write'."""
+    def test_read_write_bypass(self):
+        """mode='read_write' → bypass on by default, no --sandbox emitted.
+
+        Since issue #129 the mode no longer picks a sandbox; every mode gets
+        the (default-on) bypass flag and never a ``--sandbox`` value.
+        """
         fake = CodexFake()
         fake.script_response("ok", session_id="s1")
 
         spec = RunSpec(
             prompt="fix prompt",
             cwd="/tmp",
-            model="gpt-5.4",
+            model="gpt-5.6-terra",
             resume=None,
             mode="read_write",
             extra_tools=[],
             max_turns=200,
             timeout=30,
-            state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.4"}},
+            state={"_harness_cfg": {"backend": "codex", "model": "gpt-5.6-terra"}},
         )
 
         from autoswe.harness.backends.codex import CodexBackend
@@ -204,7 +257,8 @@ class TestCodexFakeFidelity:
 
         _run_async(_run())
 
-        assert fake.calls[0]["sandbox"] == "workspace-write"
+        assert fake.calls[0]["bypass"] is True
+        assert "sandbox" not in fake.calls[0]
 
     def test_resume_mode(self):
         """Resume mode → call recorded with session_id, no sandbox."""
@@ -227,8 +281,9 @@ class TestCodexFakeFidelity:
         assert len(fake.calls) == 1
         assert fake.calls[0]["is_resume"]
         assert fake.calls[0]["resume"] == "session-123"
-        # Resume mode should NOT have sandbox
+        # Resume mode should NOT have sandbox, but keeps default-on bypass
         assert "sandbox" not in fake.calls[0]
+        assert fake.calls[0]["bypass"] is True
 
     def test_multiple_responses(self):
         """Multiple scripted responses are consumed in order."""

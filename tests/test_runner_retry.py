@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import patch
 
+import pytest
+
 from autoswe.harness.backends.base import RunResult, RunSpec
 
 # ---------------------------------------------------------------------------
@@ -264,3 +266,104 @@ def test_runner_exhausts_retries_returns_last_result():
     # 3 attempts (initial + 2 retries), final result is returned not raised
     assert result.subtype == "error"
     assert len(calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# Exception-based retry — each backend owns its retryable set (S6 / #169 F-09)
+# ---------------------------------------------------------------------------
+
+
+class _CustomError(Exception):
+    """A backend-specific retryable exception not in Claude's SDK set."""
+
+
+class _RaisingBackend:
+    """Backend whose ``run`` raises on the first attempt, then succeeds.
+
+    Its ``retryable_exceptions()`` is a CUSTOM set (``_CustomError``) — proving
+    runner.run() retries on the resolved backend's OWN exception tuple, not a
+    hard-coded Claude one.
+    """
+
+    def __init__(self):
+        self.attempts = 0
+
+    @classmethod
+    def capabilities(cls) -> set[str]:
+        return {"resume", "progress_stream"}
+
+    @classmethod
+    def retryable_subtypes(cls) -> set[str]:
+        return set()
+
+    @classmethod
+    def retryable_exceptions(cls) -> tuple:
+        return (_CustomError,)
+
+    def run(self, spec: RunSpec):
+        async def _go():
+            self.attempts += 1
+            if self.attempts == 1:
+                raise _CustomError("transient")
+            return _make_result("success")
+        return _go()
+
+
+def test_runner_retries_on_backend_own_exception():
+    """A member of the backend's retryable_exceptions() tuple is retried."""
+    from autoswe.harness import runner
+
+    backend = _RaisingBackend()
+    with patch("autoswe.harness.runner.ClaudeCodeBackend", return_value=backend):
+        result = runner.run("test", cwd="/tmp", cfg=_cfg(retries=1))
+
+    assert result.subtype == "success", "backend-specific exception should be retried"
+    assert backend.attempts == 2, f"Expected 2 attempts, got {backend.attempts}"
+
+
+def test_runner_does_not_retry_on_foreign_exception():
+    """An exception NOT in the backend's set is raised, not retried.
+
+    Guard against the F-09 regression: runner must use the resolved
+    backend's tuple, so a foreign exception type must not be swallowed.
+    """
+    from autoswe.harness import runner
+
+    backend = _RaisingBackend()
+
+    def raise_foreign(spec):
+        async def _go():
+            backend.attempts += 1
+            raise OSError("disk fault")
+        return _go()
+
+    backend.run = raise_foreign
+    with patch("autoswe.harness.runner.ClaudeCodeBackend", return_value=backend):
+        with pytest.raises(OSError):
+            runner.run("test", cwd="/tmp", cfg=_cfg(retries=1))
+
+    assert backend.attempts == 1, "foreign exception must not be retried"
+
+
+def test_runner_retryable_exceptions_fallback_when_missing():
+    """A backend lacking retryable_exceptions() gets an empty retry set.
+
+    runner._retryable_exceptions() falls back to () — no exception is treated
+    as retryable, so the very first exception propagates.
+    """
+    from autoswe.harness import runner
+
+    class _NoRetryBackend(_SequenceBackend):
+        @classmethod
+        def retryable_exceptions(cls) -> tuple:
+            return ()
+
+        def run(self, spec: RunSpec):
+            async def _go():
+                raise ValueError("boom")
+            return _go()
+
+    backend = _NoRetryBackend(["success"])
+    with patch("autoswe.harness.runner.ClaudeCodeBackend", return_value=backend):
+        with pytest.raises(ValueError):
+            runner.run("test", cwd="/tmp", cfg=_cfg(retries=1))

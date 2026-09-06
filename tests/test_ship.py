@@ -35,6 +35,9 @@ def _mock_vcs(pr_url=None, pr_num=None, raise_exc=None, existing_pr=None):
     """Build a mock VCS provider for open_pr tests."""
     mock = MagicMock()
     mock.find_existing_pr.return_value = existing_pr
+    # branch_name is now provider-owned (issue #168 F-05); ship.py derives the
+    # head branch from it, so the mock must return a real string.
+    mock.branch_name.side_effect = lambda n: f"autoswe/issue-{n}"
     if raise_exc is not None:
         mock.open_pull_request.side_effect = raise_exc
     else:
@@ -51,6 +54,144 @@ def _mock_tracker(post_raise=None):
     if post_raise is not None:
         mock.post_comment.side_effect = post_raise
     return mock
+
+
+# ---------------------------------------------------------------------------
+# open_pr — PR identity persisted on the task dict (issue #193)
+# ---------------------------------------------------------------------------
+
+def test_open_pr_new_pr_records_pr_number_and_url(mock_gh_post_comment):
+    """New-PR path caches pr_number/pr_url on the task dict for run() to lift."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(pr_url="https://github.com/o/r/pull/42", pr_num=42)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")
+    assert task["pr_number"] == 42
+    assert task["pr_url"] == "https://github.com/o/r/pull/42"
+
+
+def test_open_pr_new_pr_falls_back_to_url_when_number_missing(mock_gh_post_comment):
+    """Providers that return PRResult(number=None) still yield a cached number
+    parsed from the URL (GitHub gh-CLI create path, issue #193)."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(pr_url="https://github.com/o/r/pull/77", pr_num=None)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert task["pr_number"] == 77
+    assert task["pr_url"] == "https://github.com/o/r/pull/77"
+
+
+def test_open_pr_new_pr_parses_azure_url_when_number_missing(mock_gh_post_comment):
+    """Azure pullrequest URL shape also parses to a number."""
+    task = make_task()
+    url = "https://dev.azure.com/org/proj/_git/repo/pullrequest/12"
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(pr_url=url, pr_num=None)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert task["pr_number"] == 12
+
+
+def test_open_pr_new_pr_hash_url_keeps_explicit_number(mock_gh_post_comment):
+    """A '#N'-style URL keeps the provider-supplied number; no URL parsing needed."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(pr_url="#88", pr_num=88)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert task["pr_number"] == 88
+    assert task["pr_url"] == "#88"
+
+
+def test_open_pr_existing_pr_records_pr_number_and_url(mock_gh_post_comment):
+    """Existing-PR path (idempotent re-ship) also caches the identity."""
+    task = make_task()
+    existing = PRResult(url="https://github.com/o/r/pull/15", number=15)
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(existing_pr=existing)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert task["pr_number"] == 15
+    assert task["pr_url"] == "https://github.com/o/r/pull/15"
+
+
+def test_open_pr_existing_pr_url_fallback_parses_number(mock_gh_post_comment):
+    """Existing PR with empty URL: number from PRResult, URL kept as '#N'."""
+    task = make_task()
+    existing = PRResult(url="", number=99)
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(existing_pr=existing)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert task["pr_number"] == 99
+    assert task["pr_url"] == "#99"
+
+
+def test_open_pr_failure_preserves_stale_pr_number(mock_gh_post_comment):
+    """A failed ship leaves a stale cached pr_number alone (and never sets pr_url)."""
+    task = make_task(pr_number=3)
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(raise_exc=RuntimeError("API error"))
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("FAILED:")
+    assert task["pr_number"] == 3  # untouched
+    assert "pr_url" not in task
+
+
+def test_open_pr_failure_does_not_touch_pr_fields(mock_gh_post_comment):
+    """FAILED paths never record a PR identity on the task dict."""
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(raise_exc=RuntimeError("API error"))
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("FAILED:")
+    assert task["pr_number"] is None
+    assert "pr_url" not in task
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +270,16 @@ def test_open_pr_uses_correct_branch_and_base(mock_gh_post_comment):
     assert call_kwargs[1]["base"] == "develop"
 
 
-def test_open_pr_uses_plan_branch_over_base(mock_gh_post_comment):
-    """plan_branch should override base_branch as PR target."""
+def test_open_pr_uses_base_branch_not_plan_branch(mock_gh_post_comment):
+    """PR target is the configured base_branch even when plan_branch is set.
+
+    plan_branch is the branch the work was forked from (/plan --branch);
+    the PR must still land in the repo's configured base, so /plan --branch
+    develop never routes a PR into develop (issue #196).
+    """
     task = make_task()
     task["base_branch"] = "main"
-    task["plan_branch"] = "feature-branch"
+    task["plan_branch"] = "develop"
 
     with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
          patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
@@ -145,7 +291,9 @@ def test_open_pr_uses_plan_branch_over_base(mock_gh_post_comment):
         open_pr(task, {"GITHUB_TOKEN": "tok"})
 
     call_kwargs = mock_vcs.open_pull_request.call_args
-    assert call_kwargs[1]["base"] == "feature-branch"
+    assert call_kwargs[1]["base"] == "main"
+    # The head is still the autoswe work branch (cut from plan_branch).
+    assert call_kwargs[1]["branch"] == "autoswe/issue-1"
 
 
 def test_open_pr_comment_includes_footer(mock_gh_post_comment):
@@ -161,7 +309,7 @@ def test_open_pr_comment_includes_footer(mock_gh_post_comment):
         open_pr(task, {"GITHUB_TOKEN": "tok"})
 
     call_args = mock_get_tracker.return_value.post_comment.call_args
-    body = call_args[0][2]
+    body = call_args[0][1]
     assert "<!-- autoswe-bot -->" in body
 
 
@@ -192,7 +340,7 @@ def test_open_pr_existing_pr_returns_done(mock_gh_post_comment):
     mock_get_vcs.return_value.find_existing_pr.assert_called_once()
     # Comment posted about existing PR
     mock_get_tracker.return_value.post_comment.assert_called_once()
-    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][2]
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
     assert "Pull request already exists" in comment_body
     assert "pull/15" in comment_body
 
@@ -356,7 +504,7 @@ def test_open_pr_comment_includes_full_url():
         from autoswe.vcs.ship import open_pr
         open_pr(task, {"GITHUB_TOKEN": "tok"})
 
-    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][2]
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
     assert "https://github.com/o/r/pull/42" in comment_body
 
 

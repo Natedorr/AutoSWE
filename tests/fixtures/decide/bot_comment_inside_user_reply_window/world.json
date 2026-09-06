@@ -30,8 +30,7 @@
         "id": 30,
         "is_bot": false
       }
-    ],
-    "open_pr_numbers": []
+    ]
   },
   "task": {
     "slug": "gh:owner_repo_15",
@@ -50,7 +49,10 @@
     "last_dispatched_command_id": 10,
     "last_consumed_reply_id": 10,
     "welcome_comment_id": null,
-    "bot_comment_ids": [10, 20]
+    "bot_comment_ids": [
+      10,
+      20
+    ]
   },
   "cfg": {},
   "repo_cfg": {}

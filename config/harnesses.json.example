@@ -2,13 +2,15 @@
   "_comment": "Named harness profiles for coding phases (plan, fix, review). Copy to harnesses.json (gitignored) and edit. Reference a profile from repos.json using plan_harness, fix_harness, or review_harness. Keys starting with _ are skipped.",
 
   "claude-opus": {
+    "_comment": "The Claude backend sets CLAUDE_CODE_ENABLE_TODO_TOOLS=1 by default (enables the task-tracking tools that render the sticky progress comment on newer models). Override via per-profile `env` — user values win over backend defaults; `${VAR}` supported.",
     "backend": "claude_code",
-    "model": "claude-opus-4-8"
+    "model": "claude-opus-5",
+    "env": { "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" }
   },
 
   "claude-sonnet": {
     "backend": "claude_code",
-    "model": "claude-sonnet-4-6"
+    "model": "claude-sonnet-5"
   },
 
   "claude-haiku": {
@@ -24,17 +26,18 @@
     "anthropic_auth_token": "ollama"
   },
 
-  "codex-gpt5": {
-    "_comment": "OpenAI Codex with GPT-5 — requires 'codex' CLI on PATH and CODEX_API_KEY (or openai_api_key as fallback)",
+  "codex-gpt56-terra": {
+    "_comment": "OpenAI Codex with GPT-5.6 Terra — requires 'codex' CLI on PATH and CODEX_API_KEY (or openai_api_key as fallback). Codex runs target a dedicated isolated machine, so the bypass-approvals-and-sandbox flag is on by default; set bypass_approvals to false to drop it (e.g. on a shared host).",
     "backend": "codex",
-    "model": "gpt-5",
-    "codex_api_key": "${CODEX_API_KEY}"
+    "model": "gpt-5.6-terra",
+    "codex_api_key": "${CODEX_API_KEY}",
+    "bypass_approvals": true
   },
 
   "codex-gpt5-codex": {
     "_comment": "Alternative: use codex_api_key instead of openai_api_key (maps to CODEX_API_KEY env var)",
     "backend": "codex",
-    "model": "gpt-5-codex",
+    "model": "gpt-5.6-sol",
     "codex_api_key": "${CODEX_API_KEY}"
   },
 
@@ -52,10 +55,11 @@
   },
 
   "codex-custom": {
-    "_comment": "Codex with custom model, timeout, and API base — for self-hosted OpenAI-compatible endpoints",
+    "_comment": "Codex with custom model, timeout, and API base — for self-hosted OpenAI-compatible endpoints. Per-profile `env` is merged into the `codex exec` subprocess environment (user values win over the api-key fields above; `${VAR}` supported).",
     "backend": "codex",
     "model": "custom-model",
     "openai_api_key": "${CUSTOM_API_KEY}",
-    "timeout": 3600
+    "timeout": 3600,
+    "env": { "OPENAI_API_BASE": "http://your-openai-compatible-endpoint" }
   }
 }

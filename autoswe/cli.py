@@ -9,7 +9,7 @@ from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.core.queue_store import _atomic_write, _load_json
 from autoswe.core.slug import make_slug
 from autoswe.orch.loop import poll as orch_poll
-from autoswe.providers.factory import build_repo_cfg, get_tracker
+from autoswe.providers.factory import build_repo_cfg, get_tracker, provider_names
 
 dbg = get_debug_logger()
 
@@ -44,7 +44,7 @@ def main():
     p_pr.add_argument("--dry-run", action="store_true",
                       help="List tasks that would be pruned without deleting")
 
-    p_st.add_argument("--provider", choices=["github", "azure"], default="github",
+    p_st.add_argument("--provider", choices=provider_names(), default="github",
                       help="Provider for slug resolution (default: github)")
 
     args = parser.parse_args()
@@ -109,7 +109,7 @@ def _cmd_queue_list(args, cfg):
                 if "provider" in t:
                     repo_cfg["provider"] = t["provider"]
                 tracker = get_tracker(repo_cfg)
-                issue = tracker.fetch_issue(repo_cfg, t["issue_number"])
+                issue = tracker.fetch_issue(t["issue_number"])
                 status = tracker.get_status(issue) or "none"
                 if status == args.status:
                     filtered.append(t)
@@ -128,7 +128,7 @@ def _cmd_queue_list(args, cfg):
                 repo_cfg["provider"] = t["provider"]
             if repo_cfg.get("pat"):
                 tracker = get_tracker(repo_cfg)
-                issue = tracker.fetch_issue(repo_cfg, t["issue_number"])
+                issue = tracker.fetch_issue(t["issue_number"])
                 label_status = tracker.get_status(issue) or "-"
         except (RuntimeError, KeyError):  # Best-effort status lookup per row; fall back to "-".
 
@@ -160,7 +160,7 @@ def _cmd_queue_status(args, cfg):
         repo_cfg["provider"] = provider
         if repo_cfg.get("pat"):
             tracker = get_tracker(repo_cfg)
-            issue = tracker.fetch_issue(repo_cfg, args.issue)
+            issue = tracker.fetch_issue(args.issue)
             label_status = tracker.get_status(issue) or "-"
     except (RuntimeError, KeyError):  # Best-effort status lookup; fall back to "-".
 

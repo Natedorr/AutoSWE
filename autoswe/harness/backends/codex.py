@@ -4,24 +4,54 @@ Shells out to the Codex CLI subprocess (no alpha SDK), maps a
 harness-agnostic ``RunSpec`` to CLI flags, and parses the JSONL event
 stream into a ``RunResult``.
 
-**Capabilities (Phase 4, core run only):** ``mode``, ``resume``, ``progress_stream``.
+**Capabilities (Phase 4, core run only):** ``resume``, ``progress_stream``.
+This backend does NOT advertise ``"mode"``: it accepts ``RunSpec.mode`` for
+contract parity but performs no read-only enforcement (no ``--sandbox``
+mapping, no per-tool gating) — see issue #166. Plan/review phases that run
+on a Codex profile rely on the handler's post-run worktree rollback
+(``ensure_worktree_unchanged``) as the backstop against agent edits.
 
 Progress streaming uses ``asyncio.create_subprocess_exec`` with async
-line-reading so that ``progress_callback`` fires with live todo/command
+line-reading so that ``progress_callback`` fires with live plan/command
 updates while the Codex CLI is running (not just after it finishes).
+
+**Wire format — both casings accepted.** The refreshed Codex CLI emits
+item types in snake_case (``agent_message``, ``command_execution``) while the
+app-server item reference names the same types in camelCase
+(``agentMessage``, ``commandExecution``) and uses slash-style event names
+(``item/plan/delta``, ``turn/plan/updated``). The parser normalizes event and
+item names defensively so that either spelling (and both dot/slash event
+forms) is handled, regardless of CLI version. ``agent_message``/``agentMessage``
+remains the primary source for ``RunResult.text``; the authoritative ``plan``
+item populates ``RunResult.plan_text``. The legacy ``todo_list``,
+``summary_output`` items and the ``item.delta`` / ``item.updated`` events no
+longer exist in the current CLI and are no longer emitted.
 
 Future phases may add ``mcp`` (MCP comment posting) and structured
 AskUserQuestion handling.  Until then those features degrade gracefully
 — handlers fall back to text parsing when ``"mcp"`` is not advertised.
+
+**Retry semantics (no fork):** ``codex exec resume <id>`` *continues* the
+existing session in place — Codex has no fork primitive (unlike the Claude
+Agent SDK's ``fork_session``). So a Codex ``/retry`` either resumes the same
+session (mutating it) or starts a fresh one; it can never branch from a prior
+checkpoint while leaving the original intact. This backend therefore does NOT
+advertise the ``session_fork`` capability, and handlers gate fork-on-retry on
+``backend_has_capability(harness, "session_fork")`` — which is False here.
+``RunSpec.fork_session`` is ignored by this backend. See
+docs/autoswe/harnesses.md ("Retry semantics").
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import subprocess
+import tempfile
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from autoswe.core.logging_utils import log
 from autoswe.harness.backends.base import RunResult, RunSpec
@@ -32,6 +62,52 @@ from autoswe.harness.backends.codex_pricing import estimate_cost
 # Linux) and unbounded memory growth when the child process produces
 # pathological output.
 _MAX_STREAM_BYTES = 16 * 1024 * 1024  # 16 MB
+
+# Whether the installed Codex CLI supports --output-last-message.
+# None = unprobed; True/False = result of _probe_output_last_message_support().
+# Cached for the process lifetime: a single `codex exec --help` probe is
+# negligible vs. the wall-clock cost of a full agent run, and re-probing
+# on every run would add a subprocess hop to the hot path.
+#
+# Why probe instead of pinning a CLI floor: autoSWE's Codex path already
+# degrades to chunk accumulation when the last-message file is absent
+# (see _read_last_message_file), so an older CLI is a graceful-degradation
+# case, not a hard error. A floor would permanently pin users to a CLI
+# version; a probe self-heals when the user upgrades.
+_OUTPUT_LAST_MESSAGE_SUPPORTED: bool | None = None
+
+
+def _probe_output_last_message_support() -> bool:
+    """Detect whether the installed codex CLI supports --output-last-message.
+
+    Runs ``codex exec --help`` once per process and inspects the output.
+    Result is cached in :data:`_OUTPUT_LAST_MESSAGE_SUPPORTED`.
+
+    On probe failure (CLI missing from PATH, timeout, OSError) we default
+    to True to preserve the current behavior — the flag is verified on
+    codex-cli 0.150.1, and a probe failure (e.g., sandboxed CI without
+    network) should not silently degrade us to chunk accumulation when
+    the flag would have worked.
+    """
+    global _OUTPUT_LAST_MESSAGE_SUPPORTED
+    if _OUTPUT_LAST_MESSAGE_SUPPORTED is not None:
+        return _OUTPUT_LAST_MESSAGE_SUPPORTED
+    try:
+        result = subprocess.run(
+            ["codex", "exec", "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # Help text is emitted on stdout; some CLIs also echo to stderr.
+        # Accept either the long or the short form.
+        text = (result.stdout or "") + (result.stderr or "")
+        _OUTPUT_LAST_MESSAGE_SUPPORTED = (
+            "--output-last-message" in text or "\n-o " in text
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        log(f"[CODEX] could not probe codex CLI for --output-last-message: "
+            f"{e}; assuming supported (default True)")
+        _OUTPUT_LAST_MESSAGE_SUPPORTED = True
+    return _OUTPUT_LAST_MESSAGE_SUPPORTED
 
 
 # ---------- Streaming accumulator ----------
@@ -49,28 +125,91 @@ class _CodexAccumulator:
     session_id: str | None = None
     turn_failed: bool = False
     usage: list[dict] = field(default_factory=list)
+    # Authoritative plan item text (last item.completed plan item wins).
+    # Populated onto RunResult.plan_text; never mixed into text_chunks so it
+    # does not pollute RunResult.text (the planner's tag/prose parsing runs on
+    # result.text).
+    plan_text: str | None = None
+    # Per-item-id streaming agent-message text (item/agentMessage/delta).
+    # Used only as a fallback when the item.completed carries empty text.
+    _agent_delta_by_id: dict[str, str] = field(default_factory=dict)
+    # Per-item-id cumulative character position streamed so far (delta progress
+    # throttling; see _fire_delta_progress).
+    _delta_streamed: dict[str, int] = field(default_factory=dict)
+    # Per-item-id cumulative position at which delta progress last fired.
+    _delta_fired_at: dict[str, int] = field(default_factory=dict)
 
 
-# ---------- Mode → Codex sandbox mapping ----------
+# ---------- Name normalization (both-casing tolerance) ----------
 
-# RunSpec.mode → Codex --sandbox value
-_MODE_SANDBOX = {
-    "plan": "read-only",
-    "read_only": "read-only",
-    "read_write": "workspace-write",
-}
-
-# Matches RunSpec.max_turns default — only emit -c flag when the caller
-# requests a value different from the default, keeping the command minimal.
-_DEFAULT_MAX_TURNS = 200
+# The CLI emits snake_case item/event types while the app-server reference
+# uses camelCase item names and slash-style event names. Normalizing to a
+# single canonical form lets one comparison table cover every spelling.
 
 
-def _mode_to_sandbox(mode: str | None) -> str:
-    """Translate a RunSpec mode string to a Codex sandbox flag value."""
-    if mode is None:
-        # Default: read-only (safe default for unspecified intent)
-        return "read-only"
-    return _MODE_SANDBOX.get(mode, "read-only")
+def _norm_event_type(etype: str) -> str:
+    """Normalize an event type: lowercase, slashes → dots, drop underscores.
+
+    Stripping underscores makes ``item.agent_message.delta`` ≡
+    ``item.agentMessage.delta`` ≡ ``item.agentmessage.delta``.  So
+    ``item/plan/delta`` → ``item.plan.delta`` and
+    ``event.turn.plan.updated`` → ``turn.plan.updated``.
+    """
+    s = etype.strip().lower().replace("/", ".").replace("_", "")
+    if s.startswith("event."):
+        s = s[len("event."):]
+    return s
+
+
+def _norm_item_type(itype: str) -> str:
+    """Normalize an item type: lowercase, drop underscores.
+
+    So ``agent_message`` ≡ ``agentMessage`` ≡ ``agentmessage`` and
+    ``command_execution`` ≡ ``commandExecution``.
+    """
+    return itype.strip().lower().replace("_", "")
+
+
+# ---------- Bypass approvals / sandbox ----------
+
+# Codex runs on autoSWE target a dedicated, isolated machine (see
+# docs/autoswe/safeguards.md), so the default posture is full bypass. The
+# bypass is no longer implicit: it is derived from an explicit profile flag
+# (``bypass_approvals``, default true) with an environment-variable override,
+# so the "full access" intent is intentional rather than buried in the flag
+# list.
+#
+# RunSpec.mode is still accepted (contract parity with claude_code) but no
+# longer maps to a ``--sandbox`` value. Emitting a per-mode ``--sandbox`` was
+# dead weight: the bypass flag always neutralized it, so plan/review runs got
+# full access regardless. With the mapping removed, the emitted flag set now
+# matches the documented intent.
+#
+# Consequently this backend does NOT advertise the ``"mode"`` capability
+# (issue #166): advertising it would claim read-only enforcement that does
+# not exist. Handlers running a read-only phase on a backend with neither
+# ``"mode"`` enforcement nor ``"can_use_tool"`` loudly degrade (warning log)
+# and roll back any worktree edits via ``ensure_worktree_unchanged``.
+_BYPASS_APPROVALS_AND_SANDBOX = "--dangerously-bypass-approvals-and-sandbox"
+# Env override for operators who want to disable the bypass on a shared host.
+_BYPASS_ENV_VAR = "CODEX_BYPASS_APPROVALS_AND_SANDBOX"
+
+
+def _bypass_approvals(harness_cfg: dict | None) -> bool:
+    """Resolve whether to emit the bypass-approvals-and-sandbox flag.
+
+    Precedence (highest wins):
+    1. Profile ``bypass_approvals`` (explicit bool from harnesses.json)
+    2. ``CODEX_BYPASS_APPROVALS_AND_SANDBOX`` env var ("1"/"true" → True,
+       "0"/"false" → False, case-insensitive; unset → fall through)
+    3. Default: ``True`` (dedicated isolated machine — see safeguards.md).
+    """
+    if harness_cfg and "bypass_approvals" in harness_cfg:
+        return bool(harness_cfg["bypass_approvals"])
+    env_val = os.environ.get(_BYPASS_ENV_VAR)
+    if env_val is not None:
+        return env_val.strip().lower() in ("1", "true", "yes", "on")
+    return True
 
 
 # ---------- JSONL line parser ----------
@@ -95,7 +234,7 @@ def _parse_jsonl_line(
         # Non-JSON line (stderr leak, progress) — skip
         return
 
-    etype = event.get("type", "")
+    etype = _norm_event_type(event.get("type", ""))
 
     if etype == "thread.started":
         tid = event.get("thread_id")
@@ -104,46 +243,98 @@ def _parse_jsonl_line(
 
     elif etype == "item.started":
         item = event.get("item", {})
-        item_type = item.get("type", "")
-        # item.started is the "in progress" signal — fire progress
-        if callback and item_type in ("agent_message", "command_execution", "summary_output"):
-            info = item.get("text", item.get("command", ""))
-            if info:
-                callback(f"Working: {info[:120]}")
+        item_type = _norm_item_type(item.get("type", ""))
+        # item.started is the "in progress" signal — fire progress.  The
+        # deltas (plan / reasoning / agentMessage) handle their own progress,
+        # so no progress fires for plan/reasoning starts here.
+        if callback:
+            if item_type in ("agentmessage", "commandexecution"):
+                info = item.get("text") or item.get("command", "")
+                if info:
+                    callback(f"Working: {info[:120]}")
+            elif item_type == "filechange":
+                paths = _file_change_paths(item)
+                if paths:
+                    callback(f"Working: {paths[:120]}")
+            elif item_type == "mcptoolcall":
+                server = item.get("server", "")
+                tool = item.get("tool", "")
+                label = f"{server}.{tool}" if server or tool else "tool"
+                callback(f"MCP: {label[:120]}")
+            elif item_type == "websearch":
+                query = item.get("query", "")
+                if query:
+                    callback(f"Searching: {query[:120]}")
 
     elif etype == "item.completed":
         item = event.get("item", {})
-        item_type = item.get("type", "")
+        item_type = _norm_item_type(item.get("type", ""))
+        item_id = item.get("id", "")
 
-        if item_type in ("agent_message", "summary_output"):
-            text = item.get("text", "")
+        if item_type == "agentmessage":
+            # Primary RunResult.text source. Prefer the completed item's
+            # authoritative text; fall back to the streamed deltas only when
+            # the completed item carries empty text (the docs warn that the
+            # final item may not exactly equal the concatenated deltas).
+            text = item.get("text", "") or ""
+            if not text and item_id:
+                text = acc._agent_delta_by_id.pop(item_id, "")
+            else:
+                acc._agent_delta_by_id.pop(item_id, None)
             if text:
                 acc.text_chunks.append(text)
-                # Fire progress with the latest agent message
                 if callback:
                     callback(f"Agent: {text[:120]}")
-        elif item_type == "todo_list":
-            # Render todo items as progress
-            items = item.get("items", [])
-            if callback and items:
-                _fire_todo_progress(callback, items)
 
-    elif etype == "item.updated":
-        item = event.get("item", {})
-        item_type = item.get("type", "")
-        if item_type == "todo_list" and callback:
-            items = item.get("items", [])
-            if items:
-                _fire_todo_progress(callback, items)
+        elif item_type == "plan":
+            # Authoritative plan item — capture onto RunResult.plan_text
+            # (last completion wins per docs).  Never appended to
+            # text_chunks so it does not pollute RunResult.text.
+            text = item.get("text", "") or ""
+            if text:
+                acc.plan_text = text
+                if callback:
+                    callback(f"📝 Plan: {text[:120]}")
 
-    elif etype == "item.delta":
-        # Incremental content — append to last chunk if available
-        delta = event.get("delta", "")
-        if delta:
-            if acc.text_chunks:
-                acc.text_chunks[-1] += delta
-            else:
-                acc.text_chunks.append(delta)
+        elif item_type == "reasoning":
+            summary = (item.get("summary") or "")
+            if summary and callback:
+                callback(f"💭 {summary[:120]}")
+
+        elif item_type == "commandexecution":
+            exit_code = item.get("exitCode", item.get("exit_code"))
+            if callback and exit_code is not None:
+                command = item.get("command", "")
+                label = f"{command[:80]}" if command else "command"
+                callback(f"⌨ {label} (exit {exit_code})")
+
+    elif etype == "turn.plan.updated":
+        # turn/plan/updated — render the plan step list as progress.
+        if callback:
+            _fire_plan_progress(
+                callback,
+                event.get("plan", []),
+                explanation=event.get("explanation"),
+            )
+
+    elif etype == "item.agentmessage.delta" or etype == "item.delta":
+        # Incremental agent-message text.  item/agentMessage/delta carries the
+        # item-scoped id/type; a bare item.delta falls back to the same.
+        item_id = _delta_item_id(event)
+        delta = _delta_payload(event)
+        if delta and item_id:
+            acc._agent_delta_by_id[item_id] = acc._agent_delta_by_id.get(item_id, "") + delta
+
+    elif etype == "item.plan.delta":
+        # Plan text stream — progress only, no RunResult impact.
+        _fire_delta_progress(acc, callback, event, "📝 ")
+
+    elif etype in ("item.reasoning.summarytextdelta", "item.reasoning.textdelta"):
+        # Reasoning summary stream — progress only.
+        _fire_delta_progress(acc, callback, event, "💭 ")
+
+    # item.commandExecution.outputDelta / item.fileChange.outputDelta are
+    # intentionally ignored (high-volume, no progress value).
 
     elif etype == "turn.failed":
         # error field is a dict with "message" key (live-verified)
@@ -163,13 +354,115 @@ def _parse_jsonl_line(
         log(f"[CODEX] error event: {error}")
 
 
-def _fire_todo_progress(callback, items: list[dict]) -> None:
-    """Render a todo_list item array into a progress callback string."""
+def _delta_payload(event: dict) -> str:
+    """Extract the text delta from a delta event (either casing)."""
+    delta = event.get("delta")
+    if isinstance(delta, str):
+        return delta
+    # Some delta events carry the text under a nested "text" key.
+    return event.get("text", "") or ""
+
+
+def _delta_item_id(event: dict) -> str:
+    """Resolve the item id a delta event belongs to.
+
+    Prefers an explicit ``itemId``/``item_id``; falls back to the id inside a
+    nested ``item`` object; otherwise returns "" (delta ignored).
+    """
+    item_id = event.get("itemId") or event.get("item_id") or ""
+    if item_id:
+        return item_id
+    item = event.get("item")
+    if isinstance(item, dict):
+        return item.get("id", "")
+    return ""
+
+
+def _file_change_paths(item: dict) -> str:
+    """Render a file_change item's changed paths as a compact label."""
+    changes = item.get("changes", [])
+    paths: list[str] = []
+    for c in changes:
+        if isinstance(c, dict):
+            p = c.get("path")
+            if p:
+                paths.append(p)
+    return ", ".join(paths)
+
+
+# turn.plan.updated step status → progress icon (shared by _fire_plan_progress).
+_PLAN_STATUS_ICON = {"completed": "✅", "inprogress": "▶", "pending": "☐"}
+
+
+def _fire_plan_progress(callback, plan: list[dict], explanation: str | None = None) -> None:
+    """Render a turn.plan.updated step list into a progress callback string.
+
+    Status mapping: completed → ✅, inProgress → ▶, pending → ☐.  An optional
+    *explanation* prefixes the line.
+    """
+    if not plan:
+        return
     parts = []
-    for ti in items:
-        status = "✅" if ti.get("completed") else "☐"
-        parts.append(f"{status} {ti.get('text', '')}")
-    callback("📋 " + " | ".join(parts))
+    for step in plan:
+        if not isinstance(step, dict):
+            continue
+        icon = _PLAN_STATUS_ICON.get(str(step.get("status", "")).strip().lower(), "☐")
+        parts.append(f"{icon} {step.get('step', step.get('text', ''))}")
+    if not parts:
+        return
+    prefix = f"📝 {explanation} — " if explanation else "📋 "
+    callback(prefix + " | ".join(parts))
+
+
+def _fire_delta_progress(acc: _CodexAccumulator, callback, event: dict, prefix: str) -> None:
+    """Fire throttled progress for a plan/reasoning delta event.
+
+    Progress lines are fire-and-forget; bounding output matters.  Fires on the
+    first delta for an item and again once the accumulated text has grown by
+    ~80 chars since the last fire.
+    """
+    if not callback:
+        return
+    item_id = _delta_item_id(event)
+    if not item_id:
+        return
+    delta = _delta_payload(event)
+    if not delta:
+        return
+    # Throttle on cumulative growth: re-fire once ~80 chars have streamed
+    # since the last progress line for this item.  Track two positions:
+    #   _delta_streamed — total chars streamed so far (running total)
+    #   _delta_fired_at — the streamed position at which progress last fired
+    # Firing when (streamed - fired_at) >= 80 means small deltas (the common
+    # case) still surface progress as they accumulate, instead of only when a
+    # single delta happens to be >= 80 chars.
+    streamed = acc._delta_streamed.get(item_id, 0) + len(delta)
+    acc._delta_streamed[item_id] = streamed
+    fired_at = acc._delta_fired_at.get(item_id, -1)
+    if fired_at < 0 or streamed - fired_at >= 80:
+        acc._delta_fired_at[item_id] = streamed
+        callback(f"{prefix}{delta[:120]}")
+
+
+def _read_last_message_file(path: str) -> str | None:
+    """Return the assistant's final message Codex wrote to ``-o`` *path*.
+
+    ``codex exec --output-last-message <file>`` writes the final natural-
+    language message to the file — the authoritative source for
+    ``RunResult.text``.  This is more robust than accumulating
+    ``agent_message`` chunks from the JSONL stream, which is fragile across
+    item-type renames (see issue #128 / #003).
+
+    Returns ``None`` when the file is absent or whitespace-only so the caller
+    can fall back to chunk accumulation (older CLI without ``-o``, a run that
+    failed before emitting a final message, or a killed process).
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, OSError):
+        return None
+    text = text.strip()
+    return text or None
 
 
 # ---------- CodexBackend ----------
@@ -187,7 +480,10 @@ class CodexBackend:
     guesses. Duration is tracked via ``time.monotonic()``.
     """
 
-    CAPABILITIES: set[str] = {"mode", "resume", "progress_stream"}
+    # No "mode": RunSpec.mode is accepted for contract parity but performs no
+    # read-only enforcement (see issue #166). Plan/review on a Codex profile
+    # rely on the handler's post-run worktree rollback instead.
+    CAPABILITIES: set[str] = {"resume", "progress_stream"}
     RETRYABLE_SUBTYPES: set[str] = {"error", "killed"}
 
     @classmethod
@@ -198,6 +494,16 @@ class CodexBackend:
     def retryable_subtypes(cls) -> set[str]:
         return cls.RETRYABLE_SUBTYPES.copy()
 
+    @classmethod
+    def retryable_exceptions(cls) -> tuple:
+        # Codex has no SDK; its failure surface is the subprocess boundary.
+        # asyncio.TimeoutError is the runner's wall-clock timeout (wait_for);
+        # OSError covers spawn-time failures from create_subprocess_exec
+        # (PermissionError, a missing/incompatible executable, etc.). A
+        # FileNotFoundError is an OSError subclass, so both are covered.
+        # (S6 / issue #169 F-09: previously Codex inherited Claude's SDK tuple.)
+        return (asyncio.TimeoutError, OSError)
+
     def run(self, spec: RunSpec) -> Awaitable[RunResult]:
         """Execute the spec via Codex CLI.
 
@@ -207,12 +513,48 @@ class CodexBackend:
         fires with live updates while the Codex CLI is running.  The runner
         wraps this in ``asyncio.wait_for`` for timeouts.
         """
-        return self._run_async(spec)
+        # Allocate a per-run scratch file for the assistant's final message
+        # (written by codex via ``--output-last-message``).  mkstemp gives a
+        # unique, user-controlled path (no injection) and the file is removed
+        # in the finally so nothing leaks under load.  Close the fd immediately:
+        # codex — not us — writes to the file.
+        last_message_fd, last_message_path = tempfile.mkstemp(
+            prefix="autoswe-codex-lastmsg-", suffix=".txt"
+        )
+        os.close(last_message_fd)
 
-    async def _run_async(self, spec: RunSpec) -> RunResult:
-        """Run Codex CLI subprocess with streaming JSONL. Returns RunResult."""
-        sandbox = _mode_to_sandbox(spec.mode)
-        model = spec.model or "gpt-5.4"
+        async def _wrapped() -> RunResult:
+            try:
+                return await self._run_async(spec, last_message_path)
+            finally:
+                try:
+                    os.unlink(last_message_path)
+                except OSError:
+                    # Best-effort cleanup: a stray temp file is harmless and the
+                    # OS reclaims it; never let cleanup break the run result.
+                    pass
+
+        return _wrapped()
+
+    async def _run_async(self, spec: RunSpec, last_message_path: str = "") -> RunResult:
+        """Run Codex CLI subprocess with streaming JSONL. Returns RunResult.
+
+        ``last_message_path`` (issue #128) is the file the Codex CLI writes the
+        assistant's final message to via ``--output-last-message``.  When it
+        holds non-whitespace content it is the authoritative source for
+        ``RunResult.text``; otherwise we fall back to the accumulated JSONL
+        chunks (see ``_read_last_message_file``).
+        """
+        # Codex has no built-in default model — a profile/spec must name one.
+        # The factory enforces this at resolution time; this guard protects
+        # direct CodexBackend().run(spec) calls that bypass the factory.
+        model = str(spec.model or "").strip()
+        if not model:
+            raise ValueError(
+                "Codex harness profile is missing required 'model'. "
+                "Set it to a current Codex model, e.g. 'gpt-5.6-sol', 'gpt-5.6-terra', "
+                "'gpt-5.6-luna', or 'gpt-5.5'."
+            )
         resume = bool(spec.resume)
 
         # Resolve auth early (needed for command-building below).
@@ -222,6 +564,9 @@ class CodexBackend:
         has_api_key = bool(harness_cfg.get("openai_api_key") or harness_cfg.get("codex_api_key")
                            or os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"))
         needs_ignore_user_config = has_api_key
+
+        # Explicit bypass decision (default on — dedicated isolated machine).
+        bypass = _bypass_approvals(harness_cfg)
 
         # Build the command
         cmd: list[str] = ["codex", "exec"]
@@ -237,28 +582,38 @@ class CodexBackend:
             cmd.extend(["--json"])
             if needs_ignore_user_config:
                 cmd.append("--ignore-user-config")
-            cmd.extend([
-                "--ignore-rules",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--model", model,
-            ])
+            cmd.extend(["--ignore-rules"])
+            if bypass:
+                cmd.append(_BYPASS_APPROVALS_AND_SANDBOX)
+            cmd.extend(["--model", model])
         else:
             # Fresh exec — full flag set
             cmd.extend(["--json"])
             if needs_ignore_user_config:
                 cmd.append("--ignore-user-config")
-            cmd.extend([
-                "--ignore-rules",
-                "--sandbox", sandbox,
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--model", model,
-                "-C", spec.cwd,
-            ])
+            cmd.extend(["--ignore-rules"])
+            if bypass:
+                cmd.append(_BYPASS_APPROVALS_AND_SANDBOX)
+            cmd.extend(["--model", model, "-C", spec.cwd])
             # Persist session files so resume (codex exec resume <id>) can restore context.
 
-        # Limit turns to prevent runaway sessions (only add flag when non-default)
-        if spec.max_turns and spec.max_turns != _DEFAULT_MAX_TURNS:
-            cmd.extend(["-c", f"agent.max_turns={spec.max_turns}"])
+        # --output-last-message writes the assistant's final message to a file we
+        # read back as the authoritative RunResult.text (issue #128).  Supported by
+        # both `codex exec` and `codex exec resume` (verified on codex-cli 0.150.1).
+        # The flag is gated on a one-time CLI capability probe: on a CLI that
+        # predates it, passing the flag makes codex reject the whole command
+        # up front, which the chunk-accumulation fallback cannot recover from.
+        # When unsupported we skip the flag and the chunk fallback engages
+        # (last_message_path stays allocated but empty → _read_last_message_file
+        # returns None).
+        if last_message_path and _probe_output_last_message_support():
+            cmd.extend(["--output-last-message", last_message_path])
+
+        # No turn cap is emitted: `codex exec` has no max_turns key (live-verified
+        # on codex-cli 0.150.1 — `-c agent.max_turns=N` errors under
+        # --strict-config and is silently ignored otherwise). RunSpec.max_turns
+        # is a no-op for this backend; the anti-runaway guard is the wall-clock
+        # timeout applied below (spec.timeout).
 
         # Append the prompt behind `--` so prompts starting with `-` are safe
         cmd.extend(["--", spec.prompt])
@@ -269,11 +624,15 @@ class CodexBackend:
             env["OPENAI_API_KEY"] = harness_cfg["openai_api_key"]
         if harness_cfg.get("codex_api_key"):
             env["CODEX_API_KEY"] = harness_cfg["codex_api_key"]
+        # Per-harness-profile `env` override (Part B): user values win over the
+        # harness api-key fields above (precedence: os.environ < api-key fields
+        # < profile "env" < spec.env_overrides).
+        env.update(harness_cfg.get("env") or {})
         # Apply explicit env overrides (take precedence)
         if spec.env_overrides:
             env.update(spec.env_overrides)
 
-        log(f"[CODEX] running model={model} sandbox={sandbox} "
+        log(f"[CODEX] running model={model} bypass={bypass} "
             f"resume={'NEW' if not resume else spec.resume[:8]} "
             f"auth={'local' if not has_api_key else 'api_key'}")
 
@@ -401,13 +760,26 @@ class CodexBackend:
         # Estimate cost from accumulated token usage
         estimated_cost = estimate_cost(model, acc.usage)
 
+        # Authoritative final message (issue #128): prefer the -o file over the
+        # accumulated JSONL chunks, which are fragile across item-type renames.
+        last_message = _read_last_message_file(last_message_path) if last_message_path else None
+        if last_message is not None:
+            text = last_message
+            source = "-o file"
+        else:
+            text = "\n".join(acc.text_chunks)
+            source = "chunk fallback"
+        log(f"[CODEX] RunResult.text from {source} ({len(text)} chars)")
+
         return RunResult(
-            text="\n".join(acc.text_chunks),
+            text=text,
             session_id=acc.session_id,
             subtype=subtype,
+            ok=(subtype == "success"),
             cost_usd=estimated_cost,
             duration_seconds=duration,
             plan_file_path=None,
             plan_posted=False,
             question_posted=False,
+            plan_text=acc.plan_text,
         )

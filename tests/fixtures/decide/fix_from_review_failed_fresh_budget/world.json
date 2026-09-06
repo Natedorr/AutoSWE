@@ -1,0 +1,57 @@
+{
+  "api": {
+    "issue": {
+      "number": 42,
+      "title": "Test issue",
+      "body": "",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open",
+      "base_branch": "main"
+    },
+    "comments": [
+      {
+        "body": "## Review\n\n[Medium] planned-path time guard untested.\n\n## Verdict\n\nNeeds changes\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T01:00:00Z",
+        "author_login": "owner",
+        "id": 1,
+        "is_bot": true
+      },
+      {
+        "body": "/fix",
+        "created_at": "2026-01-01T02:00:00Z",
+        "author_login": "owner",
+        "id": 2,
+        "is_bot": false
+      }
+    ]
+  },
+  "task": {
+    "slug": "gh:owner_repo_42",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 42,
+    "title": "Test issue",
+    "body": "",
+    "status": "review_failed",
+    "plan_branch": "main",
+    "base_branch": "main",
+    "attempt_count": 3,
+    "first_dispatched_at": null,
+    "last_dispatched_command": "/review",
+    "last_dispatched_command_id": 1,
+    "last_consumed_reply_id": 1,
+    "session_id": "s-fix-prev",
+    "pr_number": null,
+    "guard_blocked": false,
+    "gh_closed": false,
+    "pending_command": null,
+    "pending_guidance": null,
+    "pending_user_reply": null,
+    "suppress_welcome": false
+  },
+  "cfg": {
+    "MAX_ATTEMPTS": 3
+  },
+  "repo_cfg": {}
+}

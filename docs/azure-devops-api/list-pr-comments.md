@@ -1,6 +1,6 @@
 # List pull request threads (comments)
 
-Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/comments/get%20threads
+Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/list?view=azure-devops-rest-7.1
 
 ## List pull request threads
 

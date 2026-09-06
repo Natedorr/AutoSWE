@@ -1,7 +1,7 @@
 # List Projects
 
 > Grounding reference for Azure DevOps Core API
-> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/core/projects/list
+> Source: https://learn.microsoft.com/en-us/rest/api/azure/devops/core/projects/list?view=azure-devops-rest-7.1
 
 ---
 
