@@ -627,6 +627,57 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "failed_retry_replays_fix_not_review",
+        "description": (
+            "Failed task whose last_dispatched_command is /review — the watermark a "
+            "refused /review persists on this failed task (issue #192). /retry must "
+            "re-run the actual work as /fix, NOT replay a review: a passing review "
+            "verdict would wrongly flip the task to `reviewed` (→ /pr-shippable) even "
+            "though the fix never succeeded. The fix completes to `fixed`, so the "
+            "outcome uniquely pins the /fix path (a review would end `reviewed`)."
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/review",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed on retry\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command", "Fixed on retry"],
+        },
+    },
+    {
         "name": "done_then_new_fix",
         "description": "Fixed task; new /fix from user → re-dispatches",
         "start": {

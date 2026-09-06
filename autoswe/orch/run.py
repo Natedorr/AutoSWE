@@ -489,6 +489,15 @@ def _run_retry(
     last_cmd = world.task.last_dispatched_command
     if last_cmd in _NON_REPLAYABLE_COMMANDS:
         last_cmd = "/fix"
+    # A refused /review on a failed/error task persists "/review" in
+    # last_dispatched_command (the emit writes action.refused_command).
+    # Replaying it would run a *review*, not the failed work — and a passing
+    # verdict could flip the task to `reviewed` (→ /pr-shippable) even though
+    # the fix never succeeded. Fall back to /fix so /retry re-runs the actual
+    # work (issue #192). /plan stays replayable: a failed plan is retried as
+    # a plan, not silently promoted to /fix.
+    if last_cmd == "/review" and world.task.status in ("failed", "error"):
+        last_cmd = "/fix"
     last_cmd = last_cmd or "/fix"
 
     # Fork-on-retry: branch from the last known-good session on backends that

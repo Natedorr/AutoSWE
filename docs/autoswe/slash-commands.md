@@ -56,6 +56,8 @@ When `/retry` action is run (`orch/run.py:_run_retry()`):
 2. `run()` looks at `last_dispatched_command` for the last substantive command (not `/pr`, `/sync`, `/retry`, `/skip`, or `/abort`)
 3. Replays that command via the appropriate planner/coder/ship handler
 
+A refusal advances the watermark (`last_dispatched_command`) so the same command isn't re-refused every tick (see [data-model.md](data-model.md)). That means a refused `/review` on a `failed`/`error` task leaves `last_dispatched_command = "/review"`. To keep `/retry` re-running the *work* — not a review that could flip the task to `reviewed` → shippable despite a failed fix — `_run_retry()` falls back to `/fix` when `last_dispatched_command` is `/review` and the task is still `failed`/`error` (issue #192). `/plan` is *not* subject to this fallback: a failed plan is retried as a plan.
+
 Note: `MAX_ATTEMPTS` is a **retry budget** — it bounds re-runs of work that keeps failing, not the number of phases an issue goes through. Restarting from a *successful* rest (`fixed`/`synced`/`shipped`/`reviewed`, or `review_failed`/`review_blocked`) starts a fresh budget, so the follow-up `/fix` after a review verdict, or `/pr` after a `fixed` task, never burns attempts even after a long healthy lifecycle.
 
 ### Restarting a `failed`/`error` task
