@@ -214,8 +214,9 @@ class TestMergeConflict:
 class TestGuardRetryEdgeCases:
     """Edge cases for guard blocking and retry."""
 
-    def test_guard_blocked_skips_fix(self):
-        """A guard-blocked task should skip /fix (noop)."""
+    def test_guard_blocked_refuses_fix(self):
+        """A guard-blocked task refuses /fix with a 'post /retry' action
+        (issue #192) — the old silent noop. /retry, /skip, /abort still work."""
         comments = [
             _bot_comment("Max attempts (3) reached.\n<!-- autoswe-bot -->", 1),
             _user_comment("/fix", 2),
@@ -229,7 +230,8 @@ class TestGuardRetryEdgeCases:
             last_dispatched_command_id=1,
         )
         action = decide(world)
-        assert action.kind == "noop"
+        assert action.kind == "refused"
+        assert action.refused_command == "/fix"
 
     def test_guard_blocked_allows_retry(self):
         """A guard-blocked task should allow /retry."""

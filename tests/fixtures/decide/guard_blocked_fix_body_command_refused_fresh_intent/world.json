@@ -1,0 +1,56 @@
+{
+  "api": {
+    "issue": {
+      "number": 42,
+      "title": "Guard-blocked issue",
+      "body": "Add a docstring.\n\n/fix",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open",
+      "base_branch": "main",
+      "creator_login": "owner"
+    },
+    "comments": [
+      {
+        "body": "Max attempts (3) reached. Post `/retry` to continue.\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T01:00:00Z",
+        "author_login": "owner",
+        "id": 1,
+        "is_bot": true
+      },
+      {
+        "body": "can you try again?",
+        "created_at": "2026-01-01T05:00:00Z",
+        "author_login": "owner",
+        "id": 2,
+        "is_bot": false
+      }
+    ]
+  },
+  "task": {
+    "slug": "gh:owner_repo_42",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 42,
+    "title": "Guard-blocked issue",
+    "body": "Add a docstring.\n\n/fix",
+    "status": "failed",
+    "plan_branch": null,
+    "base_branch": "main",
+    "attempt_count": 3,
+    "first_dispatched_at": null,
+    "last_dispatched_command": "/fix",
+    "last_dispatched_command_id": 0,
+    "last_consumed_reply_id": null,
+    "session_id": null,
+    "pr_number": null,
+    "guard_blocked": true,
+    "gh_closed": false,
+    "pending_command": null,
+    "pending_guidance": null,
+    "pending_user_reply": null,
+    "suppress_welcome": true
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}
