@@ -174,9 +174,26 @@ def apply_effect(
                     body_parts.append(f"**Fix Summary:**\n\n{fix_summary}")
                 body_parts.append("\nOpened by autoSWE.")
                 body = "\n\n".join(body_parts)
-            vcs.open_pull_request(
+            pr = vcs.open_pull_request(
                 branch=branch,
                 base=effect.pr_base or "main",
                 title=effect.pr_title or "",
                 body=body,
             )
+            if task_entry is not None and pr is not None:
+                # Persist the PR identity in the same cycle that created it
+                # (issue #193) — the patch_queue effect already advanced the
+                # status; this write lands in the same queue dict and is
+                # saved by the cycle's save_queue().
+                if pr.number is not None:
+                    task_entry["pr_number"] = pr.number
+                if pr.url:
+                    task_entry["pr_url"] = pr.url
+        elif task_entry is not None:
+            # Idempotent skip: the PR already exists but the queue entry lost
+            # its cached identity (e.g. a crash between create and save).
+            # Re-cache it so consumers see pr_number without re-querying.
+            if existing.number is not None:
+                task_entry["pr_number"] = existing.number
+            if existing.url:
+                task_entry["pr_url"] = existing.url
