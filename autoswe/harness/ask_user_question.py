@@ -225,6 +225,9 @@ def make_can_use_tool(
     replies. The handler then checks ``state["asked_question_md"]`` to detect
     and return WAITING; ``state["asked_question_posted"]`` records whether
     the standalone post landed so the handler can fall back to posting it.
+    A re-fire of ``AskUserQuestion`` in the same dispatch (issue #194) is a
+    no-op for posting: it re-pauses without a second comment and leaves
+    ``asked_question_md`` pinned to the question that was actually posted.
     All other tools are allowed through.
 
     Args:
@@ -273,6 +276,29 @@ def make_can_use_tool(
         if not _is_valid_question_input(input_data):
             return PermissionResultDeny(
                 message="AskUserQuestion input had no real questions — provide at least one question with options.",
+            )
+
+        # Idempotent re-fire guard (issue #194): this callback can fire more
+        # than once for a single question round — the agent may re-issue
+        # AskUserQuestion after the deny, or runner.run's retry re-invokes the
+        # backend with the same shared state dict. A previous firing that
+        # already landed the post set asked_question_posted=True, which also
+        # makes the finalize fallback a true no-op. On a re-fire we re-pause
+        # WITHOUT posting a second time, and we do it before touching
+        # asked_question_md so the state stays pinned to the question that was
+        # actually posted — even if the re-fire carries different content.
+        if state.get("asked_question_posted") is True:
+            posted_body = (state.get("asked_question_md") or "") + BOT_MARKER
+            if on_post is not None:
+                try:
+                    freeze_progress_on_post(on_post, posted_body)
+                except Exception:  # Progress notification is best-effort.
+                    pass
+            return PermissionResultDeny(
+                message=(
+                    "Questions were already posted to the issue as a comment. "
+                    "Your session is paused — it will resume when the user replies."
+                ),
             )
 
         md = format_ask_user_question(input_data)
