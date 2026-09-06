@@ -186,3 +186,28 @@ warning and no reliance on `ensure_worktree_unchanged` rollback for plan/review.
 | 4 | `PiFake` + `test_pi_backend.py` + `test_pi_fake.py` | Phase 3 (part A) | 2 |
 | 5 | Extend parity/capabilities/factory/config tests + scenario axis | Phase 3 (part B) | 4 |
 | 6 | `docs/autoswe` updates for the pi backend | Phase 4 | 2, 3 |
+
+GitHub issues: #203–#208 in that order (label `backend-pi`).
+
+## Dispatch protocol (this workstream) — read by the poller operator
+
+Config: `MAX_CONCURRENT=1` in `config/autoswe.env` (poller lets exactly ONE
+issue through at a time; no parallel worktrees).
+
+Per-issue sequence (Nate, 2026-09-06: review on every step):
+
+1. Post `/fix` on the issue.
+2. Wait for terminal status `autoswe:fixed` (commit pushed to `autoswe/issue-N`).
+3. Review the diff (Megi does this, not the pipeline).
+4. Post `/pr` on the issue → PR opens targeting `pi` (base_branch in `config/repos.json`).
+5. Post `/review` on the issue → reviewer harness posts findings.
+6. Merge the PR into `pi` only on a clean review (or apply review fixes first via a follow-up `/fix` guidance comment).
+7. Only then: post `/fix` on the next issue. Never two commands on two issues concurrently.
+
+Order: #203 → #204 → #205 → #206 → #207 → #208.
+
+### After all six are merged into `pi` (post-workstream steps, Nate)
+
+1. Merge `pi` → `master`; set `config/repos.json` `Natedorr/AutoSWE.base_branch` back to `master`.
+2. Point `Natedorr/testProject` at the pi backend: add live `pi` profiles to `config/harnesses.json` (backend=pi, model/provider/api_key per the profile fields in Phase 2) and set testProject's `plan_harness`/`fix_harness`/`review_harness` to the pi profile.
+3. Start testing: E2E smoke test on `Natedorr/testProject` (seed issue + `/fix`), watch the poller log, verify the pi backend actually runs (first live use — no live fixture exists yet, so this also generates the canonical `--mode json` fixture).
