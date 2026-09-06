@@ -194,15 +194,42 @@ GitHub issues: #203–#208 in that order (label `backend-pi`).
 Config: `MAX_CONCURRENT=1` in `config/autoswe.env` (poller lets exactly ONE
 issue through at a time; no parallel worktrees).
 
-Per-issue sequence (Nate, 2026-09-06: review on every step):
+Self-driving loop (Nate, 2026-09-06: the periodic task reviews the chain, does
+the PR, updates/merges, and keeps moving to the next issue — no manual nudging).
 
-1. Post `/fix` on the issue.
-2. Wait for terminal status `autoswe:fixed` (commit pushed to `autoswe/issue-N`).
-3. Review the diff (Megi does this, not the pipeline).
-4. Post `/pr` on the issue → PR opens targeting `pi` (base_branch in `config/repos.json`).
-5. Post `/review` on the issue → reviewer harness posts findings.
-6. Merge the PR into `pi` only on a clean review (or apply review fixes first via a follow-up `/fix` guidance comment).
-7. Only then: post `/fix` on the next issue. Never two commands on two issues concurrently.
+The operator's periodic task (≈ every 10 min) advances the chain as far as it
+can on every cycle. Each cycle: inspect chain state — queue status
+(`autoswe.py queue status`), issue labels, open PRs, CI on the head branch —
+then execute the FIRST applicable transition:
+
+- **T1 — nothing in flight:** post `/fix` on the next open issue in order
+  (`autoswe:pending` or no autoswe status yet).
+- **T2 — issue at `autoswe:fixed`:** review the diff for real — read
+  `autoswe/issue-N` vs `pi`, check acceptance criteria, run the issue's gate
+  commands in the worktree. Clean → post `/pr`. Not clean → post
+  `/fix with <specific correction>` (correction pass; counts against attempt
+  limits) and do NOT post `/pr`.
+- **T3 — PR open, CI green, review verdict clean:** merge into `pi` (squash),
+  verify the merged commit on `pi`, confirm `autoswe:shipped`.
+- **T4 — issue done (shipped/merged):** post `/fix` on the next issue in order.
+
+Rules:
+- One issue in flight at a time (`MAX_CONCURRENT=1`). Never two commands on two
+  issues in the same cycle; the poller picks up one new command per issue per
+  cycle anyway.
+- The review is real, never a rubber stamp: read the diff, run the gate
+  (ruff/pytest per the issue), and treat the `/review` harness verdict as input
+  — a verdict that disagrees with what the diff actually does means STOP and
+  flag, not merge.
+- Merge into `pi` only when review verdict is clean (no CRITICAL/MEDIUM)
+  **and** CI is green. Only workstream issue PRs merge to `pi`; the `pi` →
+  `master` merge happens only after all six issues (post-workstream, below).
+- Stall handling: `guard_blocked`, `autoswe:failed`/`error`, review-vs-diff
+  disagreement, or 2 consecutive cycles with no state change → stop, flag Nate
+  with the diagnosis (logs, queue entry, last command), and wait for direction.
+  Do not `/retry` past `MAX_ATTEMPTS`.
+- Log each transition (time, issue, transition, verdict) to
+  `memory/YYYY-MM-DD.md` so the chain is resumable from any cycle.
 
 Order: #203 → #204 → #205 → #206 → #207 → #208.
 
