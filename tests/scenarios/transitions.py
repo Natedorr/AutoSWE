@@ -499,8 +499,12 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "failed_plain_command_ignored",
-        "description": "Failed task; plain /fix (not /retry) → ignored",
+        "name": "failed_then_fix_restarts",
+        "description": (
+            "Failed task; a new /fix (not /retry) now RESTARTS it (issue #192) — "
+            "the old silent no-op. Carries the attempt counter forward and "
+            "re-dispatches /fix to completion."
+        ),
         "start": {
             "issue": {"body": "/fix"},
             "labels": ["autoswe:failed"],
@@ -529,9 +533,148 @@ TRANSITIONS: list[dict[str, Any]] = [
                 "provider": "github",
             },
         },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "attempt_count": 2,
+            "comment_contains": ["Completed with command"],
+        },
+    },
+    {
+        "name": "failed_pr_refused",
+        "description": (
+            "Failed task; /pr is refused (nothing ready to ship) — posts a "
+            "'not accepted' comment, stays failed, no Claude call (issue #192)"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
         "expect": {
             "autoswe_status": "failed",
             "no_claude_calls": True,
+            "comment_contains": ["not accepted", "/fix", "/retry"],
+        },
+    },
+    {
+        "name": "failed_review_refused",
+        "description": (
+            "Failed task; /review is refused (no completed work to review) — "
+            "posts a 'not accepted' comment, stays failed, no Claude call "
+            "(issue #192 M-1: removing the broad gate would otherwise let "
+            "/review re-run and flip a failed task to `reviewed`)"
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/review",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "autoswe_status": "failed",
+            "no_claude_calls": True,
+            "comment_contains": ["not accepted", "no completed work", "/fix"],
+        },
+    },
+    {
+        "name": "failed_retry_replays_fix_not_review",
+        "description": (
+            "Failed task whose last_dispatched_command is /review — the watermark a "
+            "refused /review persists on this failed task (issue #192). /retry must "
+            "re-run the actual work as /fix, NOT replay a review: a passing review "
+            "verdict would wrongly flip the task to `reviewed` (→ /pr-shippable) even "
+            "though the fix never succeeded. The fix completes to `fixed`, so the "
+            "outcome uniquely pins the /fix path (a review would end `reviewed`)."
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: error\n\nPost `/retry` to try again.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/review",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed on retry\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command", "Fixed on retry"],
         },
     },
     {
@@ -1048,7 +1191,7 @@ TRANSITIONS: list[dict[str, Any]] = [
     # ---- Batch 11: Multi-turn workflow scenarios ----
     {
         "name": "attempt_limit_hit",
-        "description": "Guard-blocked task with /fix (not /retry) → stays blocked, requires /retry",
+        "description": "Guard-blocked task with /fix (not /retry) → refused with a 'post /retry' comment, stays blocked (issue #192)",
         "start": {
             "issue": {"body": "/fix"},
             "labels": ["autoswe:failed"],
@@ -1081,6 +1224,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "autoswe_status": "failed",
             "no_claude_calls": True,
+            "comment_contains": ["blocked after hitting its limits", "/retry"],
         },
     },
     {
@@ -2082,6 +2226,7 @@ CODEX_TRANSITIONS: list[str] = [
     "planned_then_review_blocked",   # Review verdict gating (Blocked → review_blocked)
     "retry_forks_from_last_good_session",  # /retry: Codex lacks session_fork → degrades to fresh/resume, still reaches fixed
     "attempts_guard_fires_on_restart",     # MAX_ATTEMPTS guard fires (decide-level, backend-agnostic)
+    "failed_then_fix_restarts",            # /fix on a failed task re-dispatches (issue #192)
     "fix_red_suite_marks_test_failed",     # Post-fix test gate red → test_failed (backend-agnostic gate in _finalize_fix)
 ]
 
