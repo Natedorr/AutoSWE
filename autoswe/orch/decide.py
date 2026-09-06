@@ -310,9 +310,50 @@ def _check_restart_or_guard(
     comments = api.comments
     status = task.status
 
-    # Guard-blocked tasks skip the entire restart cycle unless /retry, /skip, or /abort
+    # Guard-blocked tasks skip the entire restart cycle unless /retry, /skip, or
+    # /abort. When a slash command arrives that can't unblock it, refuse it with
+    # a "post /retry" feedback instead of the old silent noop (issue #192): the
+    # task is already at its limit, so a /fix or /plan must not re-dispatch (or
+    # log a restart that won't happen), and /pr can't ship a limit-blocked task.
+    # slash_cmd is guaranteed non-None here: for a terminal task with no slash
+    # command, decide() returns a plain noop (before calling this function), so
+    # the guard-blocked path always has a concrete command to refuse or run.
     if task.guard_blocked and slash_cmd not in ("/retry", "/skip", "/abort"):
-        return Action(kind="noop", slug=task.slug)
+        # Refuse each distinct command ONCE. This branch runs BEFORE the shared
+        # dedup guard further down, so dedup here via the dispatch watermark: if
+        # this exact command was already refused (last_dispatched_command_id
+        # advanced by the prior refusal's emit), noop instead of re-posting the
+        # same "post /retry" comment every tick.
+        last_cmd = task.last_dispatched_command
+        last_dispatch_id = task.last_dispatched_command_id or 0
+        if (
+            cmd_id
+            and cmd_id > 0
+            and last_cmd == slash_cmd
+            and cmd_id <= last_dispatch_id
+        ):
+            return Action(kind="noop", slug=task.slug)
+        # Body-sourced commands (cmd_id==0) have no comment ID for the guard above
+        # to dedup on, so a /fix left in the issue body would re-fire this "post
+        # /retry" refusal on EVERY tick (issue #192: unbounded comment spam on a
+        # guard-blocked task whose trigger is a body command). Gate body commands
+        # on whether the user posted a *newer* command since the last bot comment:
+        # a stale body command (nothing newer than the last bot comment) noops —
+        # the mark_failed_limit comment already told the user to post /retry, so
+        # re-refusing adds no information. When a body command DOES re-fire (a
+        # fresh user command landed), the refusal's bot comment advances the
+        # last-bot watermark, so the very next tick self-dedups. Comment-sourced
+        # commands (cmd_id>0) keep using the watermark dedup above.
+        if not (cmd_id and cmd_id > 0):
+            if not _has_new_user_comment_after(comments, _find_last_bot_comment_id(comments)):
+                return Action(kind="noop", slug=task.slug)
+        log(f"[DECIDE] {task.slug} {slash_cmd} refused: task is guard-blocked (post /retry)")
+        return Action(
+            kind="refused",
+            slug=task.slug,
+            triggering_comment_id=cmd_id,
+            refused_command=slash_cmd,
+        )
 
     # Review gating: a review that found problems blocks shipping. Refuse /pr
     # until the user posts /fix (which triggers an automatic re-review). The
@@ -404,6 +445,34 @@ def _check_restart_or_guard(
 
     # New user intent on a restartable command
     if has_new_user and slash_cmd not in ("/skip", "/abort"):
+        # ---- Refusals, checked BEFORE the attempt-count bump ----
+        # A command that will not actually run must never log a misleading
+        # "attempt_count X->Y (restart ...)" line (issue #192: a /fix swallowed
+        # by the failed-task gate logged a restart that never happened).
+
+        # Only /fix and /plan re-dispatch a failed/error task (issue #192). The
+        # other restart-cycle commands must NOT fall through to dispatch: /pr
+        # can't ship a task whose work never completed, /review can't meaningfully
+        # review a failed run (a passing verdict would flip the task to `reviewed`
+        # and make it /pr-shippable despite the failed fix), and /sync just
+        # re-pulls a branch with no completed work to advance. Refuse each with
+        # "post /fix first" feedback instead of the old silent noop.
+        if status in ("failed", "error") and slash_cmd in ("/pr", "/review", "/sync"):
+            log(
+                f"[DECIDE] {task.slug} {slash_cmd} refused in {status} state "
+                f"(post /fix to complete the work first)"
+            )
+            return Action(
+                kind="refused",
+                slug=task.slug,
+                triggering_comment_id=cmd_id,
+                refused_command=slash_cmd,
+            )
+
+        # Note: guard-blocked tasks are refused at the top of this function
+        # (before the attempt-count bump) for every command except /retry,
+        # /skip, and /abort; /retry falls through here to reset the budget.
+
         # Calculate attempt count (used for limit checks and dispatch).
         # Restarting from a *successful* rest (a completed status, or a
         # review verdict) starts a fresh MAX_ATTEMPTS budget: the previous
@@ -424,7 +493,7 @@ def _check_restart_or_guard(
         else:
             attempt_count = _next_attempt(task, f"restart cmd={slash_cmd}, max={max_attempts}")
 
-        # Guard: max attempts (checked before failed-task gate)
+        # Guard: max attempts
         if attempt_count > max_attempts and not task.guard_blocked:
             log(f"[LIMIT] {task.slug} guard fired: attempt_count={attempt_count} > MAX_ATTEMPTS={max_attempts}, first_dispatched_at={task.first_dispatched_at}")
             return Action(
@@ -449,9 +518,11 @@ def _check_restart_or_guard(
                     limit_reason="time",
                 )
 
-        # Failed and error issues only restart on explicit /retry
-        if status in ("failed", "error") and slash_cmd != "/retry":
-            return Action(kind="noop", slug=task.slug)
+        # /fix and /plan on a failed/error task now RESTART it here instead of
+        # the old silent noop (issue #192): the attempt counter has already
+        # carried forward above, the /pr-on-failed case was refused earlier,
+        # and the limit guards fired first, so reaching this line means a
+        # real dispatch. /retry remains the explicit budget reset.
 
         plan_branch = branch or task.plan_branch
 

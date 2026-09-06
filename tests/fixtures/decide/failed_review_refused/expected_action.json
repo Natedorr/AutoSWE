@@ -1,0 +1,6 @@
+{
+  "kind": "refused",
+  "slug": "gh:owner_repo_42",
+  "triggering_comment_id": 11,
+  "refused_command": "/review"
+}

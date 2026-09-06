@@ -317,6 +317,62 @@ def emit(
             ),
         )
 
+    if kind == "refused":
+        # A command was refused (e.g. /pr on a failed/error task, or any
+        # non-/retry command on a guard-blocked task). Post clear feedback
+        # instead of the old silent noop, and advance the dispatch watermark
+        # so the shared dedup guard suppresses a re-refusal of the same
+        # command on the next tick (issue #192).
+        rest = task.status or "failed"
+        # Every refusal message opens with "Your `…` was not accepted" or
+        # "This task is blocked…" — never a bare backtick-slash command at line
+        # start. The slash parser strips one leading backtick and matches
+        # commands at line start, and _find_slash_command scans the bot's OWN
+        # comments; a line-leading "`/pr`…" would re-parse as a fresh command on
+        # the next tick and re-trigger this very refusal (issue #192 "spam
+        # trap"). Opening with "Your"/"This" keeps command references mid-line.
+        if task.guard_blocked:
+            # The task is already at its limit; /retry is the ONLY command that
+            # can unblock it, so every refusal — including /pr, /review, /sync,
+            # and /fix — points at /retry. Telling a limit-blocked user to "post
+            # /fix" would be wrong, because /fix is itself refused here.
+            msg = (
+                f"This task is blocked after hitting its limits. Post `/retry` "
+                f"to restart it.{BOT_MARKER}"
+            )
+        elif action.refused_command == "/pr":
+            # /pr on a plain failed/error task (not limit-blocked): there is
+            # nothing ready to ship; /fix restarts the work, /retry resets the
+            # attempt budget.
+            msg = (
+                f"Your `/pr` was not accepted — the task is in `{rest}` state "
+                f"and there is nothing ready to ship. Post `/fix` to finish the "
+                f"work (or `/retry` to restart).{BOT_MARKER}"
+            )
+        else:
+            # /review or /sync on a plain failed/error task: no completed work
+            # to review or sync yet.
+            cmd = action.refused_command or "/review"
+            msg = (
+                f"Your `{cmd}` was not accepted — the task is in `{rest}` state "
+                f"and has no completed work to operate on. Post `/fix` to "
+                f"complete the work first.{BOT_MARKER}"
+            )
+        return (
+            Effect(kind="post_comment", body=msg),
+            Effect(kind="set_status", status=rest),
+            Effect(
+                kind="patch_queue",
+                queue_patch={
+                    "autoswe_status": rest,
+                    "last_dispatched_command": action.refused_command,
+                    "last_dispatched_command_id": action.triggering_comment_id,
+                    "last_consumed_reply_id": action.triggering_comment_id,
+                    "first_dispatched_at": None,
+                },
+            ),
+        )
+
     # --- Claude actions (result should be DispatchResult) ---
 
     if result is None:
