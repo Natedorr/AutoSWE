@@ -46,6 +46,11 @@ class DispatchResult:
     # HandlerResult through _to_dispatch so emit() can drive the status gate
     # off the schema-validated field instead of the markdown regex.
     verdict: str | None = None
+    # PR identity cached at ship time (issue #193): ship.open_pr records
+    # pr_number/pr_url on the task dict; run() lifts them here so emit() can
+    # persist them on the shipped queue entry. None for every other kind.
+    pr_number: int | None = None
+    pr_url: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +124,16 @@ def run(
 
     if kind == "ship_pr":
         done = ship.open_pr(task, cfg, rc, progress_callback=progress_callback)
+        if done.startswith("DONE"):
+            # open_pr cached the PR identity on the task dict (issue #193);
+            # lift it into the result so emit() persists it on the shipped
+            # queue entry. Only on DONE — a FAILED ship must not carry a
+            # (possibly stale) cached PR number into the result.
+            return DispatchResult(
+                done_content=done,
+                pr_number=task.get("pr_number"),
+                pr_url=task.get("pr_url"),
+            )
         return DispatchResult(done_content=done)
 
     if kind == "sync_branch":

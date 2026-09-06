@@ -842,6 +842,9 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "label_after": "autoswe:shipped",
             "autoswe_status": "shipped",
+            # issue #193: /pr must persist the created PR's number in the queue
+            # (the API fake assigns the first PR number = 1).
+            "pr_number": 1,
             "comment_contains": ["Completed with command", "/pr"],
         },
     },
@@ -1017,6 +1020,9 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "label_after": "autoswe:shipped",
             "autoswe_status": "shipped",
+            # issue #193: /pr must persist the created PR's number in the queue
+            # (the API fake assigns the first PR number = 1).
+            "pr_number": 1,
             "comment_contains": ["Completed with command", "/pr"],
         },
     },

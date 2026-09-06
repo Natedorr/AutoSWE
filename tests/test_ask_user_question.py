@@ -159,6 +159,122 @@ def test_make_can_use_tool_denies_ask_and_sets_state():
         assert "<!-- autoswe-bot -->" in body
 
 
+def test_make_can_use_tool_posts_once_per_question_round():
+    """A second AskUserQuestion firing in the same dispatch (same shared state)
+    re-pauses WITHOUT re-posting — exactly one user-visible question post per
+    question round (issue #194: the sticky intercept could fire twice, e.g. the
+    agent re-asking after the deny or runner.run retrying, and post the
+    byte-identical question a second time ~1 minute later)."""
+    import asyncio
+
+    from autoswe.harness.ask_user_question import make_can_use_tool
+
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+    repo_cfg = {"provider": "github"}
+    state = {}
+
+    input_data = {
+        "questions": [
+            {
+                "header": "H",
+                "question": "Question?",
+                "options": [{"label": "X", "description": ""}],
+                "multiSelect": False,
+            }
+        ]
+    }
+
+    callback = make_can_use_tool(task, repo_cfg, state)
+
+    with patch("autoswe.harness.ask_user_question.get_tracker") as mock_get:
+        mock_tracker = MagicMock()
+        mock_get.return_value = mock_tracker
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        # First firing: posts the standalone question comment.
+        first = asyncio.run(callback("AskUserQuestion", input_data, None))
+        assert isinstance(first, PermissionResultDeny)
+        assert state["asked_question_posted"] is True
+
+        # Second firing, same shared state (agent re-ask / runner retry):
+        # still denies, but must NOT post again.
+        second = asyncio.run(callback("AskUserQuestion", input_data, None))
+        assert isinstance(second, PermissionResultDeny)
+
+    # Exactly one user-visible question post for the whole question round.
+    mock_tracker.post_comment.assert_called_once()
+    assert state["asked_question_posted"] is True
+
+
+def test_make_can_use_tool_refire_keeps_posted_question_in_state():
+    """A re-fire carrying DIFFERENT content does not re-post and does not
+    clobber the posted question in state (issue #194, review MEDIUM): the guard
+    must stay pinned to the question that was actually posted. It also
+    re-freezes the sticky on the already-posted body (exercises the on_post
+    re-freeze branch the basic regression test skips via on_post=None)."""
+    import asyncio
+
+    from autoswe.harness.ask_user_question import make_can_use_tool
+
+    task = {"owner": "o", "repo": "r", "issue_number": 1, "_token": "tok"}
+    repo_cfg = {"provider": "github"}
+    state = {}
+
+    q1 = {
+        "questions": [
+            {
+                "header": "H1",
+                "question": "First question?",
+                "options": [{"label": "A", "description": ""}],
+                "multiSelect": False,
+            }
+        ]
+    }
+    q2 = {
+        "questions": [
+            {
+                "header": "H2",
+                "question": "Second question?",
+                "options": [{"label": "B", "description": ""}],
+                "multiSelect": False,
+            }
+        ]
+    }
+
+    frozen = []
+
+    def on_post(body):
+        frozen.append(body)
+
+    callback = make_can_use_tool(task, repo_cfg, state, on_post=on_post)
+
+    with patch("autoswe.harness.ask_user_question.get_tracker") as mock_get:
+        mock_tracker = MagicMock()
+        mock_get.return_value = mock_tracker
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        # First firing posts the standalone Q1.
+        first = asyncio.run(callback("AskUserQuestion", q1, None))
+        assert isinstance(first, PermissionResultDeny)
+        assert "First question?" in state["asked_question_md"]
+
+        # Second firing with DIFFERENT content: re-pause, no re-post, and
+        # asked_question_md must STILL hold the posted Q1.
+        second = asyncio.run(callback("AskUserQuestion", q2, None))
+        assert isinstance(second, PermissionResultDeny)
+
+    mock_tracker.post_comment.assert_called_once()
+    # State stays pinned to the question that was actually posted.
+    assert "First question?" in state["asked_question_md"]
+    assert "Second question?" not in state["asked_question_md"]
+    # The sticky re-freeze (on_post) used the already-posted Q1 body, not Q2.
+    assert len(frozen) == 2
+    assert "First question?" in frozen[1]
+    assert "Second question?" not in frozen[1]
+
+
 def test_make_can_use_tool_denies_ask_via_on_post():
     """AskUserQuestion denies, posts a standalone comment via the tracker,
     and notifies on_post with the full body (issue #184: the question must be
