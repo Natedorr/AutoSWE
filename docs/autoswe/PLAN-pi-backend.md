@@ -202,8 +202,11 @@ can on every cycle. Each cycle: inspect chain state — queue status
 (`autoswe.py queue status`), issue labels, open PRs, CI on the head branch —
 then execute the FIRST applicable transition:
 
-- **T1 — nothing in flight:** post `/fix` on the next open issue in order
-  (`autoswe:pending` or no autoswe status yet).
+- **T1 — nothing in flight:** post `/fix --branch pi` on the next open issue
+  in order (`autoswe:pending` or no autoswe status yet). Every fresh-issue
+  dispatch carries `--branch pi` so the work branch is cut from — and its PR
+  targets — `pi`, even if the config ever drifts. Correction passes on the
+  same issue (`/fix with ...`) don't take the flag; the base is already locked.
 - **T2 — issue at `autoswe:fixed`:** review the diff for real — read
   `autoswe/issue-N` vs `pi`, check acceptance criteria, run the issue's gate
   commands in the worktree. Clean → post `/pr`. Not clean → post
@@ -211,7 +214,8 @@ then execute the FIRST applicable transition:
   limits) and do NOT post `/pr`.
 - **T3 — PR open, CI green, review verdict clean:** merge into `pi` (squash),
   verify the merged commit on `pi`, confirm `autoswe:shipped`.
-- **T4 — issue done (shipped/merged):** post `/fix` on the next issue in order.
+- **T4 — issue done (shipped/merged):** post `/fix --branch pi` on the next
+  issue in order.
 
 Rules:
 - One issue in flight at a time (`MAX_CONCURRENT=1`). Never two commands on two
