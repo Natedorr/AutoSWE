@@ -509,6 +509,18 @@ def emit(
         effects.append(Effect(kind="post_comment", body=comment))
         effects.append(Effect(kind="set_status", status=new_status))
 
+        # Persist the PR identity at ship time (issue #193): the shipped
+        # status transition and the queue patch that carry it are one and
+        # the same patch, so pr_number/pr_url land in the queue entry in the
+        # same write that marks the task shipped. Each field is guarded
+        # independently — a provider can supply the URL without the number
+        # and vice versa.
+        if kind == "ship_pr":
+            if result.pr_number is not None:
+                queue_patch["pr_number"] = result.pr_number
+            if result.pr_url:
+                queue_patch["pr_url"] = result.pr_url
+
         # Persist fix_summary from DONE_SUMMARY for PR body enrichment.
         # Mirrors _build_completion_comment's rfind pattern so tabs inside
         # the LLM-generated summary are preserved (the last tab separates
@@ -522,10 +534,16 @@ def emit(
 
         # Auto re-review: a /fix dispatched from a review_failed/review_blocked
         # state must be re-reviewed before it can ship. Flag it so decide()
-        # auto-dispatches /review on the next poll; otherwise clear any stale flag.
+        # auto-dispatches /review on the next poll; otherwise clear any stale
+        # flag. This must cover EVERY completion that lands in a COMPLETED
+        # status (fix/retry -> fixed, sync_branch -> synced, ship_pr ->
+        # shipped), not just fix/retry: a /sync or /pr that follows a flagged
+        # fix would otherwise leave rereview_after_fix live on a synced/shipped
+        # task — a latent re-review one poll away (issue #195). A re-review is
+        # pending only when the just-finished run is a fix/retry that started
+        # from a review-gating state; /pr and /sync never are.
         rereview_pending = kind in ("fix", "retry") and old_status in REVIEW_BLOCKING_STATUSES
-        if kind in ("fix", "retry"):
-            queue_patch["rereview_after_fix"] = rereview_pending
+        queue_patch["rereview_after_fix"] = rereview_pending
 
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 

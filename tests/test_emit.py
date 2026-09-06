@@ -146,6 +146,8 @@ def _load_result(path: Path) -> DispatchResult | None:
         cost_usd=raw.get("cost_usd"),
         duration_seconds=raw.get("duration_seconds", 0.0),
         session_id=raw.get("session_id"),
+        pr_number=raw.get("pr_number"),
+        pr_url=raw.get("pr_url"),
     )
 
 
@@ -607,6 +609,56 @@ def test_ship_pr_does_not_clobber_checkpoint_backend():
     )
 
 
+def test_ship_pr_success_persists_pr_number_and_url():
+    """The shipped queue patch carries pr_number/pr_url from the DispatchResult
+    (issue #193): the PR identity lands in the same write that marks the task
+    shipped."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="ship_pr",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="DONE: PR https://github.com/o/r/pull/7",
+        pr_number=7,
+        pr_url="https://github.com/o/r/pull/7",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "ship_pr must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("autoswe_status") == "shipped"
+    assert patch.get("pr_number") == 7, (
+        "the shipped queue patch must persist pr_number (issue #193)"
+    )
+    assert patch.get("pr_url") == "https://github.com/o/r/pull/7"
+
+
+def test_ship_pr_failure_does_not_persist_pr_fields():
+    """A FAILED /pr must not write pr_number/pr_url into the queue patch."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="ship_pr",
+        slug=world.task.slug,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(done_content="FAILED: could not create PR: boom")
+
+    effects = emit(action, result, world)
+    for e in effects:
+        if e.kind == "patch_queue" and e.queue_patch:
+            assert "pr_number" not in e.queue_patch
+            assert "pr_url" not in e.queue_patch
+
+
 def test_review_preserves_status_only_emits_queue_patch():
     """A review action transitions to 'reviewed' status and emits
     post_comment + set_status + patch_queue."""
@@ -991,7 +1043,9 @@ def test_review_does_not_overwrite_queue_session_id():
 # ---------------------------------------------------------------------------
 
 
-def _review_emit_world(status: str = "planned", *, pr_number=None):
+def _review_emit_world(status: str = "planned", *, pr_number=None,
+                       rereview_after_fix: bool = False,
+                       last_dispatched_command: str = "/review"):
     from autoswe.orch.types import ApiState, TaskState, World
     from autoswe.providers.base import NormalizedIssue
 
@@ -1003,10 +1057,11 @@ def _review_emit_world(status: str = "planned", *, pr_number=None):
         slug="gh:owner_repo_42", owner="owner", repo="repo", issue_number=42,
         title="Test", body="Body", status=status, plan_branch="autoswe/issue-42",
         base_branch="main", attempt_count=1, first_dispatched_at="2026-01-01T00:00:00Z",
-        last_dispatched_command="/review", last_dispatched_command_id=1,
+        last_dispatched_command=last_dispatched_command, last_dispatched_command_id=1,
         last_consumed_reply_id=1, session_id="fix-session", pr_number=pr_number,
         guard_blocked=False, gh_closed=False, pending_command=None,
         pending_guidance=None, pending_user_reply=None,
+        rereview_after_fix=rereview_after_fix,
     )
     return World(api=api, task=task, cfg=_default_cfg(), repo_cfg={"pat": "tok"})
 
@@ -1075,6 +1130,82 @@ def test_fix_from_normal_state_clears_rereview_flag():
     result = DispatchResult(
         done_content="DONE_SUMMARY\tImplemented feature\tabc1234",
         cost_usd=1.0, duration_seconds=60, session_id="fix-session",
+    )
+
+    effects = emit(action, result, world)
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["rereview_after_fix"] is False
+
+
+# ---------------------------------------------------------------------------
+# rereview_after_fix must not survive terminal transitions (issue #195)
+# ---------------------------------------------------------------------------
+#
+# A /fix dispatched from review_failed/review_blocked sets rereview_after_fix
+# and lands the task at "fixed". If the user posts /pr *before* the auto
+# re-review fires, the /pr (ship_pr) — or a /sync (sync_branch) — completes
+# into a terminal COMPLETED status while the flag is still live. Those
+# completions must clear the flag so a shipped/synced task is never one poll
+# away from a stray review dispatch.
+
+
+def test_ship_pr_clears_stale_rereview_flag():
+    """/pr on a task carrying rereview_after_fix -> shipped clears the flag."""
+    world = _review_emit_world(
+        status="fixed",
+        rereview_after_fix=True,
+        last_dispatched_command="/fix",
+    )
+    action = Action(kind="ship_pr", slug="gh:owner_repo_42", triggering_comment_id=9)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tPR created\thttps://github.com/owner/repo/pull/5",
+        cost_usd=0.05, duration_seconds=30, session_id="session-pr-42",
+    )
+
+    effects = emit(action, result, world)
+    set_status = next(e for e in effects if e.kind == "set_status")
+    assert set_status.status == "shipped"
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["rereview_after_fix"] is False, (
+        "shipped must clear any pending re-review flag (issue #195)"
+    )
+    assert patch["autoswe_status"] == "shipped"
+
+
+def test_sync_branch_clears_stale_rereview_flag():
+    """/sync on a task carrying rereview_after_fix -> synced clears the flag."""
+    world = _review_emit_world(
+        status="fixed",
+        rereview_after_fix=True,
+        last_dispatched_command="/fix",
+    )
+    action = Action(kind="sync_branch", slug="gh:owner_repo_42", triggering_comment_id=9)
+    result = DispatchResult(
+        done_content="DONE: branch up to date — 0 commits ahead",
+        cost_usd=0.01, duration_seconds=5,
+    )
+
+    effects = emit(action, result, world)
+    set_status = next(e for e in effects if e.kind == "set_status")
+    assert set_status.status == "synced"
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["rereview_after_fix"] is False, (
+        "synced must clear any pending re-review flag (issue #195)"
+    )
+    assert patch["autoswe_status"] == "synced"
+
+
+def test_ship_pr_without_flag_stays_false():
+    """/pr on a task without the flag -> shipped keeps it False (no re-review)."""
+    world = _review_emit_world(
+        status="fixed",
+        rereview_after_fix=False,
+        last_dispatched_command="/fix",
+    )
+    action = Action(kind="ship_pr", slug="gh:owner_repo_42", triggering_comment_id=9)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tPR created\thttps://github.com/owner/repo/pull/5",
+        cost_usd=0.05, duration_seconds=30, session_id="session-pr-42",
     )
 
     effects = emit(action, result, world)
