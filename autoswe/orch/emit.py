@@ -551,7 +551,9 @@ def emit(
         # re-review is pending — the gating verdict has not cleared yet).
         if kind in ("fix", "retry") and cfg.get("AUTO_CREATE_PR") and task.pr_number is None and not rereview_pending:
             pr_head = _resolve_branch(task.owner, task.repo, task.issue_number, None, task.provider)
-            pr_base = task.plan_branch or task.base_branch
+            # PR target = the repo's configured base_branch, never plan_branch.
+            # plan_branch is the branch the work was forked from (issue #196).
+            pr_base = task.base_branch
             # Build PR body from task data for context
             body_parts = [f"Fixes #{task.issue_number}"]
             issue_body = task.body or ""

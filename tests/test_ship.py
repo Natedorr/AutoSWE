@@ -270,11 +270,16 @@ def test_open_pr_uses_correct_branch_and_base(mock_gh_post_comment):
     assert call_kwargs[1]["base"] == "develop"
 
 
-def test_open_pr_uses_plan_branch_over_base(mock_gh_post_comment):
-    """plan_branch should override base_branch as PR target."""
+def test_open_pr_uses_base_branch_not_plan_branch(mock_gh_post_comment):
+    """PR target is the configured base_branch even when plan_branch is set.
+
+    plan_branch is the branch the work was forked from (/plan --branch);
+    the PR must still land in the repo's configured base, so /plan --branch
+    develop never routes a PR into develop (issue #196).
+    """
     task = make_task()
     task["base_branch"] = "main"
-    task["plan_branch"] = "feature-branch"
+    task["plan_branch"] = "develop"
 
     with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
          patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
@@ -286,7 +291,9 @@ def test_open_pr_uses_plan_branch_over_base(mock_gh_post_comment):
         open_pr(task, {"GITHUB_TOKEN": "tok"})
 
     call_kwargs = mock_vcs.open_pull_request.call_args
-    assert call_kwargs[1]["base"] == "feature-branch"
+    assert call_kwargs[1]["base"] == "main"
+    # The head is still the autoswe work branch (cut from plan_branch).
+    assert call_kwargs[1]["branch"] == "autoswe/issue-1"
 
 
 def test_open_pr_comment_includes_footer(mock_gh_post_comment):

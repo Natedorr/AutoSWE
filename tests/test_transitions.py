@@ -107,7 +107,7 @@ def test_transition(
     # Queue task assertions
     queue_fields = {}
     for key in ("autoswe_status", "session_id", "pending_command", "attempt_count",
-                "rereview_after_fix", "pr_number"):
+                "plan_branch", "rereview_after_fix", "pr_number"):
         if key in expect:
             queue_fields[key] = expect[key]
 
@@ -220,7 +220,7 @@ def test_transition_codex(
     # Queue task assertions
     queue_fields = {}
     for key in ("autoswe_status", "session_id", "pending_command", "attempt_count",
-                "rereview_after_fix", "pr_number"):
+                "plan_branch", "rereview_after_fix", "pr_number"):
         if key in expect:
             queue_fields[key] = expect[key]
 
