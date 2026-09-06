@@ -118,6 +118,16 @@ def test_run_mark_failed_limit_returns_none():
     assert run(action, world) is None
 
 
+def test_run_refused_returns_none():
+    """refused is a pure action — no Claude run (issue #192)."""
+    world = _make_world()
+    action = Action(
+        kind="refused", slug=world.task.slug,
+        refused_command="/pr", triggering_comment_id=11,
+    )
+    assert run(action, world) is None
+
+
 # ------ Plan action routes to planner ------
 
 
