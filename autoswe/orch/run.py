@@ -489,13 +489,19 @@ def _run_retry(
     last_cmd = world.task.last_dispatched_command
     if last_cmd in _NON_REPLAYABLE_COMMANDS:
         last_cmd = "/fix"
-    # A refused /review on a failed/error task persists "/review" in
-    # last_dispatched_command (the emit writes action.refused_command).
-    # Replaying it would run a *review*, not the failed work — and a passing
-    # verdict could flip the task to `reviewed` (→ /pr-shippable) even though
-    # the fix never succeeded. Fall back to /fix so /retry re-runs the actual
-    # work (issue #192). /plan stays replayable: a failed plan is retried as
-    # a plan, not silently promoted to /fix.
+    # A /review watermark on a failed/error task must replay as /fix, not a
+    # review. Two ways it arises:
+    #   - A REFUSED /review (issue #192): the refusal emit writes
+    #     last_dispatched_command=refused_command ("/review"). Replaying it
+    #     would run a *review* whose passing verdict flips the task to `reviewed`
+    #     (→ /pr-shippable) even though the fix never succeeded.
+    #   - A STALE /review watermark: last_dispatched_command only updates on a
+    #     successful emit, so if a later dispatch (e.g. the /fix that addresses
+    #     a review_failed) infra-errors, the task lands in `error` while the
+    #     watermark still reads "/review". Here the user's failing intent was
+    #     that /fix (not a review), so replaying /fix is exactly right.
+    # /plan stays replayable: a failed plan is retried as a plan, not silently
+    # promoted to /fix.
     if last_cmd == "/review" and world.task.status in ("failed", "error"):
         last_cmd = "/fix"
     last_cmd = last_cmd or "/fix"

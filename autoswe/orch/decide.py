@@ -333,6 +333,20 @@ def _check_restart_or_guard(
             and cmd_id <= last_dispatch_id
         ):
             return Action(kind="noop", slug=task.slug)
+        # Body-sourced commands (cmd_id==0) have no comment ID for the guard above
+        # to dedup on, so a /fix left in the issue body would re-fire this "post
+        # /retry" refusal on EVERY tick (issue #192: unbounded comment spam on a
+        # guard-blocked task whose trigger is a body command). Gate body commands
+        # on whether the user posted a *newer* command since the last bot comment:
+        # a stale body command (nothing newer than the last bot comment) noops —
+        # the mark_failed_limit comment already told the user to post /retry, so
+        # re-refusing adds no information. When a body command DOES re-fire (a
+        # fresh user command landed), the refusal's bot comment advances the
+        # last-bot watermark, so the very next tick self-dedups. Comment-sourced
+        # commands (cmd_id>0) keep using the watermark dedup above.
+        if not (cmd_id and cmd_id > 0):
+            if not _has_new_user_comment_after(comments, _find_last_bot_comment_id(comments)):
+                return Action(kind="noop", slug=task.slug)
         log(f"[DECIDE] {task.slug} {slash_cmd} refused: task is guard-blocked (post /retry)")
         return Action(
             kind="refused",
