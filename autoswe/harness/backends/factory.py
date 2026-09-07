@@ -18,9 +18,12 @@ def get_backend(harness_cfg: dict) -> CodingBackend:
 
         {"backend": "claude_code", "model": "claude-sonnet-4-6"}
         {"backend": "codex", "model": "gpt-5.6-terra"}
+        {"backend": "pi", "model": "claude-sonnet-4-5"}
 
-    Raises ``ValueError`` on unknown backend names, or when a ``codex``
-    profile omits the required ``model`` field (there is no Codex default).
+    Raises ``ValueError`` on unknown backend names, or when a ``codex`` or
+    ``pi`` profile omits the required ``model`` field (neither CLI has a
+    built-in default model — pi would silently pick a settings default,
+    unacceptable for reproducibility).
     """
     backend_name = harness_cfg.get("backend", "claude_code").lower()
     if backend_name == "claude_code":
@@ -39,8 +42,23 @@ def get_backend(harness_cfg: dict) -> CodingBackend:
         from autoswe.harness.backends.codex import CodexBackend
 
         return CodexBackend()
+    if backend_name == "pi":
+        # pi resolves a settings default model when none is given — the profile
+        # must name one so a run is reproducible (same contract as Codex).
+        model = str(harness_cfg.get("model") or "").strip()
+        if not model:
+            raise ValueError(
+                "pi harness profile is missing required 'model'. "
+                "Set it to a model id or 'provider/model' pattern, e.g. "
+                "'claude-sonnet-4-5', 'anthropic/claude-opus-4-8', or 'gpt-5.6-sol'."
+            )
+        # Deferred import: only loads the pi submodule when a pi profile is configured,
+        # avoiding ImportError on deploys that use claude_code exclusively.
+        from autoswe.harness.backends.pi import PiBackend
+
+        return PiBackend()
 
     raise ValueError(
         f"Unknown coding backend: '{backend_name}'. "
-        "Supported backends: claude_code, codex"
+        "Supported backends: claude_code, codex, pi"
     )

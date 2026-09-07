@@ -276,10 +276,22 @@ def _build_argv(
     else:
         cmd.extend(["--session-id", session_id])
 
-    # Append to the system prompt (another Codex gap closed by pi).
+    # System prompt: --system-prompt replaces the default prompt entirely
+    # (context files and skills are still appended); --append-system-prompt
+    # adds to it.  Both are another Codex gap closed by pi.
+    system_prompt = str(harness_cfg.get("system_prompt") or "").strip()
+    if system_prompt:
+        cmd.extend(["--system-prompt", system_prompt])
     append_prompt = str(harness_cfg.get("append_system_prompt") or "").strip()
     if append_prompt:
         cmd.extend(["--append-system-prompt", append_prompt])
+
+    # Session storage directory (overrides the PI_CODING_AGENT_SESSION_DIR
+    # env var, which the runner builds from the agent_dir / session_dir
+    # profile fields below).
+    session_dir = str(harness_cfg.get("session_dir") or "").strip()
+    if session_dir:
+        cmd.extend(["--session-dir", session_dir])
 
     # Prompt always behind -- so prompts starting with '-' are safe.
     cmd.extend(["--", spec.prompt])
@@ -551,13 +563,23 @@ class PiBackend:
         pi_path, prefix_args = _resolve_pi_executable(spec.cli_path)
         cmd = _build_argv(spec, harness_cfg, pi_path, prefix_args, pinned_id)
 
-        # Build environment.  Precedence identical to the other backends:
-        # os.environ < profile "env" < spec.env_overrides.  The API key is NOT
-        # injected as an env var here: pi's ``--api-key`` flag (emitted above
-        # from the same harness_cfg) already carries it and "overrides
-        # environment variables" (docs/pi/usage.md), so guessing a
-        # provider-specific env var name would be redundant and unverified.
+        # Build environment.  Precedence identical in spirit to the other
+        # backends: os.environ < named profile fields < profile "env" <
+        # spec.env_overrides.  Two notes that make pi's chain slightly
+        # different:
+        #   - The API key is NOT injected as an env var: pi's ``--api-key``
+        #     flag (emitted above from the same harness_cfg) already carries
+        #     it and "overrides environment variables" (docs/pi/usage.md), so
+        #     guessing a provider-specific env var name would be redundant
+        #     and unverified.
+        #   - The agent_dir profile field IS a named env field: it maps to
+        #     PI_CODING_AGENT_DIR (pi's config-directory override; default
+        #     ~/.pi/agent).  It sits below profile "env", so an operator can
+        #     still redirect pi's config via ``"env": {"PI_CODING_AGENT_DIR": …}``.
         env = dict(os.environ)
+        agent_dir = str(harness_cfg.get("agent_dir") or "").strip()
+        if agent_dir:
+            env["PI_CODING_AGENT_DIR"] = agent_dir
         env.update(harness_cfg.get("env") or {})
         if spec.env_overrides:
             env.update(spec.env_overrides)
