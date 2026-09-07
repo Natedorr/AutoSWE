@@ -19,6 +19,26 @@ CONFLICT_RESOLUTION_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "conflict
 BOT_MARKER = "\n<!-- autoswe-bot -->"
 
 
+def _comment_tool_name(names: dict | None, role: str) -> str:
+    """Resolve one MCP tool name from the backend's tool-names dict.
+
+    PLAN-pi-mcp.md Phase 3: prompts name the tools the way the resolved
+    backend's adapter exposes them (``{{POST_PLAN_TOOL}}`` etc.). The dict comes
+    from ``CodingBackend.comment_tool_names()`` (via
+    ``runner.comment_tool_names``); when it is missing a role — or the whole
+    dict is None for a caller that predates the parameter — fall back to the
+    Claude Code spelling so a prompt always renders to a concrete tool name and
+    existing custom prompt files that hardcode the Claude names keep working.
+    """
+    if names:
+        value = names.get(role)
+        if value:
+            return value
+    from autoswe.harness.backends.base import CLAUDE_COMMENT_TOOL_NAMES
+
+    return CLAUDE_COMMENT_TOOL_NAMES[role]
+
+
 # Mapping of repos.json keys to the bundled prompt file constants
 _PROMPT_KEY_MAP = {
     "plan_prompt": PLAN_PROMPT_FILE,
@@ -92,7 +112,7 @@ def load_plan_prompt(repo_cfg: dict | None = None) -> str:
         "{{GUIDANCE_BLOCK}}\n{{REVIEW_BLOCK}}\n"
         "Repo is checked out at the current working directory on branch {{BASE_BRANCH}}.\n"
         "Read the relevant code to understand the issue.\n\n"
-        "When you have a plan, call the `mcp__autoswe_comment__post_plan` tool with the plan as markdown.\n"
+        "When you have a plan, call the `{{POST_PLAN_TOOL}}` tool with the plan as markdown.\n"
         "When you need clarification before proceeding, call the `AskUserQuestion` tool with\n"
         "structured questions. autoSWE will post them as a comment, end your turn,\n"
         "and resume this session when the user replies.\n\n"
@@ -126,8 +146,16 @@ def load_fix_prompt(repo_cfg: dict | None = None) -> str:
 def build_plan_prompt(
     task: dict, repo_root: str | None = None, comments: list[NormalizedComment] | None = None,
     repo_cfg: dict | None = None, guidance: str | None = None,
+    tool_names: dict | None = None,
 ) -> str:
-    """Build the plan prompt from template + task data."""
+    """Build the plan prompt from template + task data.
+
+    *tool_names* (PLAN-pi-mcp.md Phase 3) is the resolved backend's
+    ``comment_tool_names()`` dict; it drives the ``{{POST_PLAN_TOOL}}`` /
+    ``{{POST_QUESTION_TOOL}}`` / ``{{UPDATE_PROGRESS_TOOL}}`` placeholders so
+    the agent is told to call the tools the way this backend's adapter exposes
+    them. When omitted, the Claude Code names are used (the default).
+    """
     # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
     from autoswe.providers.factory import get_tracker
 
@@ -159,6 +187,9 @@ def build_plan_prompt(
         "{{GUIDANCE_BLOCK}}": guidance_block,
         "{{BASE_BRANCH}}": base_branch,
         "{{REVIEW_BLOCK}}": review_block,
+        "{{POST_PLAN_TOOL}}": _comment_tool_name(tool_names, "post_plan"),
+        "{{POST_QUESTION_TOOL}}": _comment_tool_name(tool_names, "post_question"),
+        "{{UPDATE_PROGRESS_TOOL}}": _comment_tool_name(tool_names, "update_progress"),
     }
     prompt = template
     for k, v in replacements.items():
@@ -201,9 +232,16 @@ def _find_plan_in_comments(comments: list[NormalizedComment] | None) -> str:
 def build_fix_prompt(
     task: dict, guidance: str | None = None, repo_root: str | None = None,
     comments: list[NormalizedComment] | None = None, repo_cfg: dict | None = None,
-    plan_text: str | None = None,
+    plan_text: str | None = None, tool_names: dict | None = None,
 ) -> str:
-    """Build the fix prompt from template + task data."""
+    """Build the fix prompt from template + task data.
+
+    *tool_names* (PLAN-pi-mcp.md Phase 3) is the resolved backend's
+    ``comment_tool_names()`` dict; it drives the ``{{UPDATE_PROGRESS_TOOL}}``
+    placeholder so the agent updates the sticky progress comment with the tool
+    name this backend's adapter exposes. When omitted, the Claude Code name is
+    used (the default).
+    """
     # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
     from autoswe.providers.factory import get_tracker, get_vcs
 
@@ -242,6 +280,9 @@ def build_fix_prompt(
         "{{PLAN}}": plan_block,
         "{{REVIEW_BLOCK}}": review_block,
         "{{BRANCH}}": branch,
+        "{{POST_PLAN_TOOL}}": _comment_tool_name(tool_names, "post_plan"),
+        "{{POST_QUESTION_TOOL}}": _comment_tool_name(tool_names, "post_question"),
+        "{{UPDATE_PROGRESS_TOOL}}": _comment_tool_name(tool_names, "update_progress"),
     }
     prompt = template
     for k, v in replacements.items():

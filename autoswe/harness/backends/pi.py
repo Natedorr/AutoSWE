@@ -52,7 +52,12 @@ from dataclasses import dataclass, field
 
 from autoswe.core.logging_utils import log
 from autoswe.harness.backends.base import RunResult, RunSpec
-from autoswe.harness.mcp_config import autoswe_repo_root, pi_mcp_comment_server, pi_mcp_json_path
+from autoswe.harness.mcp_config import (
+    autoswe_repo_root,
+    pi_mcp_cache_path,
+    pi_mcp_comment_server,
+    pi_mcp_json_path,
+)
 
 # Max bytes allowed on stdout/stderr pipes before we truncate and flag the
 # turn as failed.  Prevents pipe-buffer deadlock (~64KB on Linux) and
@@ -258,6 +263,163 @@ def _write_pi_mcp_json(agent_dir: str) -> None:
         log(f"[PI] wrote autoswe_comment config to {path}")
     except OSError as e:
         log(f"[PI] could not write mcp.json at {path}: {e}")
+
+
+def _pi_mcp_cache_warm(agent_dir: str) -> bool:
+    """True when the pi-mcp-adapter cache has a usable ``autoswe_comment`` entry.
+
+    Phase 4 of ``docs/autoswe/PLAN-pi-mcp.md``: the adapter only exposes the
+    direct ``mcp__autoswe_comment_*`` tools when its metadata cache
+    (``<agent dir>/mcp-cache.json``) has a ``autoswe_comment`` entry with a
+    non-empty tool list; on a cold start it serves the generic proxy shapes
+    instead. This check is read-only and best-effort — a missing, corrupt, or
+    unreadable cache simply reports "cold" and lets the caller log the warning.
+    """
+    path = pi_mcp_cache_path(agent_dir)
+    try:
+        with open(path, encoding="utf-8") as f:
+            cache = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(cache, dict):
+        return False
+    servers = cache.get("servers")
+    entry = servers.get("autoswe_comment") if isinstance(servers, dict) else None
+    if not isinstance(entry, dict):
+        return False
+    # A usable entry names at least one tool; an empty tools list means the
+    # direct tools did not register and the run will fall back to proxies.
+    tools = entry.get("tools")
+    return bool(isinstance(tools, (list, dict)) and tools)
+
+
+def pi_warmup_targets(harnesses: dict) -> list[tuple[str, dict]]:
+    """The harnesses.json profiles that need a pi-mcp warm-up.
+
+    Phase 4 of ``docs/autoswe/PLAN-pi-mcp.md``. Returns ``(profile_name,
+    harness_cfg)`` for each profile that (a) uses the ``pi`` backend and (b) names
+    an ``agent_dir`` — the only profiles that have an agent-dir ``mcp-cache.json``
+    to populate. Claude Code and Codex profiles, and pi profiles without an
+    agent_dir, are skipped. Pure (reads only the *harnesses* dict) so it can be
+    unit-tested without spawning pi.
+    """
+    targets: list[tuple[str, dict]] = []
+    for name, cfg in (harnesses or {}).items():
+        if not isinstance(cfg, dict):
+            continue
+        if str(cfg.get("backend", "")).lower() != "pi":
+            continue
+        if not str(cfg.get("agent_dir") or "").strip():
+            continue
+        targets.append((name, cfg))
+    return targets
+
+
+async def warm_up_mcp_cache(harness_cfg: dict, *, timeout: float = 60.0) -> bool:
+    """Populate the pi-mcp-adapter cache for a profile's agent dir.
+
+    Phase 4 of ``docs/autoswe/PLAN-pi-mcp.md``: on a cold start the adapter has
+    no ``autoswe_comment`` cache entry, so the first real run serves the generic
+    proxy shapes instead of the direct ``mcp__autoswe_comment_*`` tools. This
+    warm-up stages the agent-dir ``mcp.json`` and runs pi once against a trivial
+    prompt with the comment server named; the pi-mcp-adapter connects at startup
+    (a pure MCP-stdio handshake — no LLM turn is required to reach it) and writes
+    the ``autoswe_comment`` metadata cache entry as part of that connect.
+
+    Runs are best-effort: a missing ``agent_dir``, an unspawnable pi, or a
+    provider/model that cannot complete a turn all leave the cache cold and are
+    logged, not raised. Returns True when the cache ends up warm. Intended to be
+    awaited from a top-level CLI command (``python autoswe.py warmup`` / the
+    setup scripts), not from a handler in the dispatch loop.
+    """
+    agent_dir = str(harness_cfg.get("agent_dir") or "").strip()
+    if not agent_dir:
+        log("[WARN][PI-WARMUP] harness profile has no 'agent_dir'; cannot stage mcp.json or populate the MCP cache. Set an autoSWE-owned agent dir in harnesses.json.")
+        return False
+
+    # Stage the autoswe_comment server config into the agent dir first, so the
+    # connect has something to cache.
+    _write_pi_mcp_json(agent_dir)
+
+    pi_path, prefix_args = _resolve_pi_executable(str(harness_cfg.get("cli_path") or ""))
+
+    # A minimal read_only spec that names the comment server: _tools_for_spec
+    # then adds the three mcp__autoswe_comment_* names to --tools (pi's --tools
+    # is a hard allowlist), so the adapter registers the direct tools on connect.
+    # The spec.mcp_servers value is otherwise unused here — the real server
+    # command lives in the staged mcp.json.
+    spec = RunSpec(
+        prompt="Ready.",
+        cwd=autoswe_repo_root(),
+        model=str(harness_cfg.get("model") or "").strip() or None,
+        mode="read_only",
+        mcp_servers={"autoswe_comment": {}},
+    )
+    cmd = _build_argv(spec, harness_cfg, pi_path, prefix_args, str(uuid.uuid4()))
+
+    # Same env chain as a real run (os.environ < profile env < agent_dir):
+    # the agent dir override is what points pi (and thus the adapter) at the
+    # mcp.json we just staged.
+    env = dict(os.environ)
+    env["PI_CODING_AGENT_DIR"] = agent_dir
+    env.update(harness_cfg.get("env") or {})
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=autoswe_repo_root(),
+        )
+    except FileNotFoundError:
+        log("[PI-WARMUP] pi executable not found on PATH. Install with: npm i -g @earendil-works/pi-coding-agent")
+        return False
+    except (PermissionError, OSError) as e:
+        log(f"[PI-WARMUP] failed to spawn pi executable: {e}")
+        return False
+
+    async def _drain(stream) -> None:
+        """Read a pipe to EOF, discarding data, bounded so a runaway stream
+        cannot deadlock the warm-up on a full pipe buffer."""
+        if stream is None:
+            return
+        total = 0
+        while True:
+            chunk = await stream.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_STREAM_BYTES:
+                while await stream.read(64 * 1024):
+                    pass
+                break
+
+    try:
+        async def _run_and_drain() -> None:
+            await asyncio.gather(_drain(process.stdout), _drain(process.stderr), process.wait())
+
+        await asyncio.wait_for(_run_and_drain(), timeout=timeout)
+    except asyncio.TimeoutError:
+        # The MCP connect (and thus the cache write) happens at pi's startup,
+        # well before a long LLM turn would finish; a hang on the turn is not a
+        # warm-up failure. Kill and check the cache anyway.
+        log(f"[PI-WARMUP] pi did not finish within {timeout:.0f}s; killing (MCP connect may already be complete)")
+        process.kill()
+        await process.wait()
+
+    warm = _pi_mcp_cache_warm(agent_dir)
+    if warm:
+        log(f"[PI-WARMUP] populated {pi_mcp_cache_path(agent_dir)} for autoswe_comment — subsequent runs use the direct mcp__autoswe_comment_* tools")
+    else:
+        log(
+            f"[WARN][PI-WARMUP] cache still cold after warm-up — no autoswe_comment "
+            f"entry in {pi_mcp_cache_path(agent_dir)}. The first real run will fall "
+            f"back to the adapter's proxy tool shapes; check the pi provider/model "
+            f"and that the comment server answers tools/list."
+        )
+    return warm
 
 
 def _resolve_pi_executable(cli_path: str | None) -> tuple[str, list[str]]:
@@ -734,6 +896,20 @@ class PiBackend:
         return cls.CAPABILITIES.copy()
 
     @classmethod
+    def comment_tool_names(cls) -> dict[str, str]:
+        """The autoswe_comment tool names, keyed by logical role.
+
+        Derived from ``_MCP_COMMENT_TOOL_NAMES`` (the names the allowlist and
+        the event parser both recognize) so the names the agent is granted, the
+        names the stream parser matches, and the names the prompt references can
+        never drift apart. The pi-mcp-adapter names tools with a single
+        underscore after the server name: ``mcp__autoswe_comment_post_plan``
+        (toolPrefix ``"mcp"`` + ``_`` + server + ``_`` + tool).
+        """
+        prefix = "mcp__autoswe_comment_"
+        return {tool[len(prefix):]: tool for tool in _MCP_COMMENT_TOOL_NAMES}
+
+    @classmethod
     def retryable_subtypes(cls) -> set[str]:
         return cls.RETRYABLE_SUBTYPES.copy()
 
@@ -840,6 +1016,23 @@ class PiBackend:
             if isinstance(server_env, dict):
                 env.update(server_env)
             _write_pi_mcp_json(agent_dir)
+
+            # Phase 4 cold-start preflight: when the agent-dir cache lacks a
+            # usable autoswe_comment entry, THIS run will fall back to the
+            # adapter's generic proxy shapes instead of the direct
+            # mcp__autoswe_comment_* tools, so plan/question detection leans on
+            # the proxy parse path. Log it loudly — this is the run that is
+            # likely to degrade. The cache populates on the adapter's own first
+            # connect, so the *next* run against the same agent dir is warm.
+            if agent_dir and not _pi_mcp_cache_warm(agent_dir):
+                log(
+                    f"[WARN][PI] cold MCP cache: no autoswe_comment entry in "
+                    f"{pi_mcp_cache_path(agent_dir)} — this run will use the "
+                    f"adapter's proxy tool shapes, not the direct "
+                    f"mcp__autoswe_comment_* tools. Run the pi-mcp warm-up "
+                    f"(see docs/autoswe/PLAN-pi-mcp.md Phase 4) to populate the "
+                    f"cache so subsequent runs use the direct tools."
+                )
 
         log(
             f"[PI] running model={model} "

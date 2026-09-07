@@ -176,6 +176,122 @@ class TestProtocolConformance:
         a.add("__tamper__")
         assert "__tamper__" not in b
 
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_have_comment_tool_names(self, backend):
+        """Every backend exposes comment_tool_names() returning a role-keyed dict.
+
+        Phase 3 (PLAN-pi-mcp.md): the single source of truth for MCP tool naming.
+        The keys are the stable logical roles; the values are the full,
+        backend-specific tool names the agent actually calls.
+        """
+        cls = _backend_class(backend)
+        assert hasattr(cls, "comment_tool_names"), (
+            f"{cls.__name__} missing comment_tool_names()"
+        )
+        names = cls.comment_tool_names()
+        assert isinstance(names, dict), (
+            f"{cls.__name__}.comment_tool_names() must return a dict"
+        )
+        expected_roles = {"post_plan", "post_question", "update_progress"}
+        assert expected_roles <= set(names), (
+            f"{cls.__name__}.comment_tool_names() missing roles: "
+            f"{expected_roles - set(names)}"
+        )
+        for role, full in names.items():
+            assert isinstance(full, str) and full, (
+                f"{cls.__name__}.comment_tool_names()[{role!r}] must be a non-empty str"
+            )
+
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_comment_tool_names_returns_copy(self, backend):
+        """comment_tool_names() returns a fresh dict so callers can't mutate it."""
+        cls = _backend_class(backend)
+        a = cls.comment_tool_names()
+        b = cls.comment_tool_names()
+        assert a is not b, "comment_tool_names() should return a new dict each call"
+        a["__tamper__"] = "x"
+        assert "__tamper__" not in b
+
+
+# ---------------------------------------------------------------------------
+# 1b. comment_tool_names value parity (Phase 3, PLAN-pi-mcp.md)
+# ---------------------------------------------------------------------------
+
+
+class TestCommentToolNamesParity:
+    """Each backend names the autoswe_comment tools the way its adapter does.
+
+    The names come from each backend's own allowlist constant, so the names the
+    agent is granted, the names the stream parser matches, and the names the
+    prompt references can never drift. This pins the *values* so a silent
+    rename of an allowlist entry (which would break prompt rendering and/or
+    stream detection) fails loudly here.
+    """
+
+    def test_claude_code_double_underscore_names(self):
+        """Claude Code prefixes each tool with a double underscore."""
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+
+        assert ClaudeCodeBackend.comment_tool_names() == {
+            "post_plan": "mcp__autoswe_comment__post_plan",
+            "post_question": "mcp__autoswe_comment__post_question",
+            "update_progress": "mcp__autoswe_comment__update_progress",
+        }
+
+    def test_pi_single_underscore_names(self):
+        """pi's adapter uses toolPrefix 'mcp' + a single underscore."""
+        from autoswe.harness.backends.pi import PiBackend
+
+        assert PiBackend.comment_tool_names() == {
+            "post_plan": "mcp__autoswe_comment_post_plan",
+            "post_question": "mcp__autoswe_comment_post_question",
+            "update_progress": "mcp__autoswe_comment_update_progress",
+        }
+
+    def test_codex_returns_claude_default(self):
+        """Codex (no MCP) returns the Claude default so prompts render concretely."""
+        from autoswe.harness.backends.base import CLAUDE_COMMENT_TOOL_NAMES
+        from autoswe.harness.backends.codex import CodexBackend
+
+        assert CodexBackend.comment_tool_names() == CLAUDE_COMMENT_TOOL_NAMES
+
+    def test_pi_names_differ_from_claude(self):
+        """The whole point of Phase 3: pi and Claude spell the names differently."""
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+        from autoswe.harness.backends.pi import PiBackend
+
+        assert PiBackend.comment_tool_names() != ClaudeCodeBackend.comment_tool_names()
+
+    def test_names_match_backend_allowlists(self):
+        """The returned names must each be the backend's own allowlist spelling.
+
+        Guards against the returned dict drifting from the allowlist constant the
+        parser/allowlist actually use (the two must stay in lockstep).
+        """
+        from autoswe.harness.backends.claude_code import _MCP_COMMENT_TOOLS, ClaudeCodeBackend
+        from autoswe.harness.backends.pi import _MCP_COMMENT_TOOL_NAMES, PiBackend
+
+        assert set(ClaudeCodeBackend.comment_tool_names().values()) == set(_MCP_COMMENT_TOOLS)
+        assert set(PiBackend.comment_tool_names().values()) == set(_MCP_COMMENT_TOOL_NAMES)
+
+    def test_runner_dispatch_returns_backend_names(self):
+        """runner.comment_tool_names() resolves through the factory per backend."""
+        from autoswe.harness.runner import comment_tool_names
+
+        assert comment_tool_names({"backend": "claude_code"})[
+            "post_plan"
+        ] == "mcp__autoswe_comment__post_plan"
+        assert comment_tool_names(
+            {"backend": "pi", "model": "claude-sonnet-4-5"}
+        )["post_plan"] == "mcp__autoswe_comment_post_plan"
+
+    def test_runner_dispatch_defaults_to_claude(self):
+        """With no harness cfg, runner.comment_tool_names() gives the Claude default."""
+        from autoswe.harness.backends.base import CLAUDE_COMMENT_TOOL_NAMES
+        from autoswe.harness.runner import comment_tool_names
+
+        assert comment_tool_names(None) == CLAUDE_COMMENT_TOOL_NAMES
+
 
 # ---------------------------------------------------------------------------
 # 2. RunResult shape parity

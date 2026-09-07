@@ -23,13 +23,6 @@ from autoswe.vcs.worktree import (
 dbg = get_debug_logger()
 
 
-_MCP_COMMENT_TOOL_PREFIX = "mcp__autoswe_comment__"
-_MCP_COMMENT_TOOLS = [
-    f"{_MCP_COMMENT_TOOL_PREFIX}update_progress",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_plan",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_question",
-]
-
 _MCP_INLINE_COMMENT_TOOLS = [
     "mcp__autoswe_inline_comment__post_inline_comment",
 ]
@@ -312,7 +305,15 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
             dbg.warning("FIX: plan file %s unreadable (%s); recovering plan from comments", plan_file_path, e)
             use_fresh_session = True
 
-    prompt = build_fix_prompt(task, guidance, repo_root=str(wt), plan_text=plan_text_override, repo_cfg=rc)
+    # Phase 3 (PLAN-pi-mcp.md): name the MCP comment tools the way this
+    # backend's adapter exposes them (the prompt's {{UPDATE_PROGRESS_TOOL}} /
+    # {{POST_PLAN_TOOL}} / {{POST_QUESTION_TOOL}} placeholders render from this),
+    # rather than hardcoding the Claude Code spelling in the prompt files.
+    harness = resolve_harness("fix", rc, cfg or {})
+    prompt = build_fix_prompt(
+        task, guidance, repo_root=str(wt), plan_text=plan_text_override, repo_cfg=rc,
+        tool_names=runner.comment_tool_names(harness),
+    )
 
     if conflict_files:
         files_block = "\n".join(f"  - {f}" for f in conflict_files)

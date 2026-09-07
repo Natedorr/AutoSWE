@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from autoswe.core.logging_utils import log
-from autoswe.harness.backends.base import RunResult, RunSpec
+from autoswe.harness.backends.base import CLAUDE_COMMENT_TOOL_NAMES, RunResult, RunSpec
 from autoswe.harness.backends.codex_pricing import estimate_cost
 
 # Max bytes allowed on stdout/stderr pipes before we truncate and
@@ -489,6 +489,20 @@ class CodexBackend:
     @classmethod
     def capabilities(cls) -> set[str]:
         return cls.CAPABILITIES.copy()
+
+    @classmethod
+    def comment_tool_names(cls) -> dict[str, str]:
+        """The autoswe_comment tool names, keyed by logical role.
+
+        Codex has no MCP server (the ``mcp`` capability is not advertised), so
+        it returns the Claude default names. A prompt rendered against them
+        names a tool Codex cannot call — the agent simply falls back to the
+        text-block path (``<AUTOSWE_PLAN>`` / ``<AUTOSWE_QUESTIONS>``), which
+        is how Codex plan/question detection already works. Returning the
+        concrete Claude spelling (rather than an empty placeholder) keeps the
+        prompt self-consistent and avoids a dangling ``{{POST_PLAN_TOOL}}``.
+        """
+        return dict(CLAUDE_COMMENT_TOOL_NAMES)
 
     @classmethod
     def retryable_subtypes(cls) -> set[str]:

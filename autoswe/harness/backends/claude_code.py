@@ -507,6 +507,19 @@ class ClaudeCodeBackend:
         return cls.CAPABILITIES.copy()
 
     @classmethod
+    def comment_tool_names(cls) -> dict[str, str]:
+        """The autoswe_comment tool names, keyed by logical role.
+
+        Derived from ``_MCP_COMMENT_TOOLS`` (the allowlist entries) by stripping
+        the ``mcp__autoswe_comment__`` prefix, so the tool names the agent is
+        granted and the names the prompt template references can never drift
+        apart. Claude Code's adapter prefixes each tool with a double
+        underscore (``mcp__autoswe_comment__post_plan``).
+        """
+        prefix = "mcp__autoswe_comment__"
+        return {tool[len(prefix):]: tool for tool in _MCP_COMMENT_TOOLS}
+
+    @classmethod
     def retryable_subtypes(cls) -> set[str]:
         # Claude retries via SDK exceptions (retryable_exceptions), not subtypes.
         return set()

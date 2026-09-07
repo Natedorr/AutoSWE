@@ -451,9 +451,16 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
     dbg.debug("PLAN: model=%s guidance=%s", plan_model or "default", guidance)
     label = f"session=NEW model={plan_model or 'default'} guidance_len={len(guidance or '')}"
 
+    # Phase 3 (PLAN-pi-mcp.md): thread the backend's comment tool names into the
+    # prompt so the {{POST_PLAN_TOOL}} / {{POST_QUESTION_TOOL}} placeholders
+    # render to the tools this backend's adapter actually exposes.
+    tool_names = runner.comment_tool_names(harness)
+
     return _plan_session(
         task, repo_cfg, cfg or {},
-        prompt_factory=lambda wt: build_plan_prompt(task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance),
+        prompt_factory=lambda wt: build_plan_prompt(
+            task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance, tool_names=tool_names,
+        ),
         resume_session_id=None,
         label=label,
         timeout_msg="timeout during plan phase",
@@ -471,10 +478,17 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
     """
     session_id = task.get("session_id")
 
+    # Phase 3 (PLAN-pi-mcp.md): name the post_plan tool the way this backend's
+    # adapter exposes it rather than hardcoding the Claude Code spelling.
+    harness = resolve_harness("plan", repo_cfg, cfg or {})
+    post_plan_tool = runner.comment_tool_names(harness).get(
+        "post_plan", "mcp__autoswe_comment__post_plan"
+    )
+
     resume_prompt = (
         f"The user replied to your last question(s):\n\n{user_text}\n\n"
         "Continue planning. If you now have enough information, call the "
-        "`mcp__autoswe_comment__post_plan` tool with your plan.\n\n"
+        f"`{post_plan_tool}` tool with your plan.\n\n"
         "If you need clarification, use the `AskUserQuestion` tool — "
         "the user will reply via an issue comment and your session will resume.\n\n"
         "Fallback (only if MCP tools are unavailable): output a <AUTOSWE_PLAN> or "
