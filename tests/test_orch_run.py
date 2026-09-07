@@ -463,6 +463,38 @@ def test_fork_session_false_for_codex_fix_backend():
         assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") is None
 
 
+def test_fork_session_true_for_pi_checkpoint_with_pi_fix_backend():
+    """A pi checkpoint produced by a pi fix backend (which advertises
+    session_fork) → the gate returns the checkpoint id. This is the pi ≠
+    codex divergence: pi's --fork primitive makes the provenance gate accept
+    a pi checkpoint, whereas a codex checkpoint is never forked by codex."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-pi-plan",
+        "last_good_session_backend": "pi",
+    }
+    cfg = {"FIX_HARNESS": "pi_profile"}
+    with patch("autoswe.orch.run.resolve_harness", return_value={
+        "backend": "pi", "model": "claude-sonnet-4-5",
+    }):
+        assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") == "s-pi-plan"
+
+
+def test_fork_session_false_when_pi_checkpoint_codex_fix_backend():
+    """A pi checkpoint must NOT be forked by a codex fix backend: codex lacks
+    session_fork, so a foreign pi session id is unusable → fresh session."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-pi-plan",
+        "last_good_session_backend": "pi",
+    }
+    cfg = {"FIX_HARNESS": "codex_profile"}
+    with patch("autoswe.orch.run.resolve_harness", return_value={
+        "backend": "codex", "model": "gpt-5.6-terra",
+    }):
+        assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") is None
+
+
 def test_fork_session_returns_session_id_when_no_last_good():
     """When only session_id is set (no last_good_session_id yet), the gate
     returns that session id as the checkpoint to fork from."""
