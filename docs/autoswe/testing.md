@@ -398,7 +398,7 @@ The fakes monkeypatch these internal functions:
 | `_gh_request` | `autoswe.tracking.api` | `GitHubFake` |
 | `_ado_request` | `autoswe.providers.azure.api` | `AzureFake` |
 | `runner.run` | `autoswe.harness.runner` | `ClaudeFake` |
-| `asyncio.create_subprocess_exec` | `asyncio` | `CodexFake` |
+| `asyncio.create_subprocess_exec` | `asyncio` | `CodexFake` / `PiFake` |
 | `worktree.*` | `autoswe.vcs.worktree` | `GitFake` |
 | `gh_post_comment` | `autoswe.tracking.api` + import sites | harness |
 
@@ -427,18 +427,38 @@ fake.script_killed(session_id="s-kill")
 
 **Fidelity guard:** `tests/test_codex_fake.py` feeds CodexFake JSONL through the real `CodexBackend` and asserts the resulting `RunResult`. This pins the fake to the real parser — if the JSONL format changes, the fidelity test fails before transitions do.
 
+### PiFake — Subprocess-Level Fake
+
+`tests/fakes/pi_fake.py` replaces `asyncio.create_subprocess_exec` with a stub returning a `FakeProcess` that feeds `--mode json` event lines (session header, agent/turn lifecycle, `message_start`/`update`/`end`, `tool_execution_*`, `agent_end`, cumulative `usage`). Like CodexFake, it lets the **real** factory → `PiBackend` → JSONL parser → `RunResult` path run unmodified — the same fidelity contract as CodexFake.
+
+**Builder API** (mirrors `ClaudeFake`/`CodexFake` so existing transition-row response dicts work verbatim):
+
+```python
+fake = PiFake()
+fake.script_response("text", session_id="s1", subtype="success")
+fake.script_plan("1. Fix it", session_id="s-plan")
+fake.script_questions("What?", session_id="s-plan")
+fake.script_fix("DONE_SUMMARY\t...\t<sha>", session_id="s-fix")
+fake.script_fail(session_id="s-err", error_msg="timeout")
+fake.script_killed(session_id="s-kill")
+```
+
+**`.calls` tracking:** Each pi command is parsed and recorded for flag/session/tool assertions (e.g. the `--tools` allowlist, the `--session`/`--session-id`/`--fork` session flags).
+
+**Fidelity guard:** `tests/test_pi_fake.py` feeds PiFake `--mode json` lines through the real `PiBackend` and asserts the resulting `RunResult`. This pins the fake to the real parser — if the pi stream shape changes, the fidelity test fails before transitions do.
+
 ### Backend Axis in Scenario Harness
 
-The `patched_world()` context manager accepts a `backend` parameter (`"claude_code"` or `"codex"`). When set to `"codex"`:
+The `patched_world()` context manager accepts a `backend` parameter (`"claude_code"`, `"codex"`, or `"pi"`). When set to `"codex"` or `"pi"`:
 
-- A `CodexFake` is created (not `ClaudeFake`) and patched at the subprocess level.
-- `config/harnesses.json` is written with a `"codex"` profile.
-- Config `PLAN_HARNESS`, `FIX_HARNESS`, `REVIEW_HARNESS` are set to `"codex"` so `resolve_harness()` returns CodexBackend for all phases.
+- A `CodexFake` / `PiFake` (not `ClaudeFake`) is created and patched at the subprocess level (both patch `asyncio.create_subprocess_exec` so the real CLI backend runs end-to-end).
+- `config/harnesses.json` is written with a `"codex"` / `"pi"` profile (pi, like codex, requires a `model`).
+- Config `PLAN_HARNESS`, `FIX_HARNESS`, `REVIEW_HARNESS` are set to that backend so `resolve_harness()` returns the matching backend for all phases.
 - The `_harnesses_config` cache is cleared to pick up the test-specific config.
 
-The `HarnessWorld` exposes `hw.codex` (the `CodexFake` instance) and `hw.backend` (`"codex"`). Use `assert_codex_calls(hw.codex, [{"sandbox": "read-only"}])` for per-backend assertions.
+The `HarnessWorld` exposes `hw.codex` / `hw.pi` (the fake instance) and `hw.backend`. Use `assert_codex_calls(hw.codex, [{"sandbox": "read-only"}])` / `assert_pi_calls(hw.pi, [...])` for per-backend assertions.
 
-The transition test suite runs `CODEX_TRANSITIONS` (a curated subset of `TRANSITIONS`) against the Codex backend via `test_transition_codex`. Azure is excluded (GitHub-only) to keep the matrix manageable.
+The transition test suite runs `CODEX_TRANSITIONS` (a curated subset of `TRANSITIONS`) against the Codex backend via `test_transition_codex`, and `PI_TRANSITIONS` (a curated subset that exercises the paths where pi diverges from codex — plan/review **with** read-only enforcement, and a `/retry` that forks from a checkpoint) against the pi backend via `test_transition_pi`. Azure is excluded (GitHub-only) to keep the matrix manageable.
 
 ## Three-Layer Test Fixtures
 

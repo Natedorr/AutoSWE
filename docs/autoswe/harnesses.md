@@ -4,14 +4,14 @@
 
 Loaded by `core/config.py:load_harnesses_config()`. Keys starting with `_` are skipped.
 
-A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its model and any auth/runtime settings. Phases (`plan`, `fix`, `review`) reference a profile by name via `plan_harness`, `fix_harness`, or `review_harness` in `repos.json` (or `PLAN_HARNESS`, `FIX_HARNESS`, `REVIEW_HARNESS` in `autoswe.env`).
+A **harness profile** bundles a coding backend (`claude_code`, `codex`, `pi`) with its model and any auth/runtime settings. Phases (`plan`, `fix`, `review`) reference a profile by name via `plan_harness`, `fix_harness`, or `review_harness` in `repos.json` (or `PLAN_HARNESS`, `FIX_HARNESS`, `REVIEW_HARNESS` in `autoswe.env`).
 
 ### Profile Schema
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-----------|
-| `backend` | **Yes** | — | Backend implementation: `"claude_code"` or `"codex"` |
-| `model` | No for `claude_code`, **required** for `codex` | `""` | Model ID (e.g. `"claude-opus-5"`, `"gpt-5.6-terra"`). No default for `codex` — resolution fails if missing |
+| `backend` | **Yes** | — | Backend implementation: `"claude_code"`, `"codex"`, or `"pi"` |
+| `model` | No for `claude_code`, **required** for `codex` and `pi` | `""` | Model ID (e.g. `"claude-opus-5"`, `"gpt-5.6-terra"`, `"claude-sonnet-4-5"`). No default for `codex` or `pi` — resolution fails if missing (pi would otherwise silently pick a settings default, unacceptable for reproducibility) |
 | `timeout` | No | (from env) | Backend-specific timeout in seconds |
 | `cli_path` | No | (from env) | Path to the CLI binary (e.g. `claude` or `codex`) |
 | `codex_api_key` | No | — | API key for Codex backend (sets `CODEX_API_KEY` env var) |
@@ -20,6 +20,14 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | `anthropic_base_url` | No | (from env) | Custom API endpoint (Claude Code only) |
 | `anthropic_auth_token` | No | (from env) | Auth token (Claude Code only) |
 | `anthropic_api_key` | No | (from env) | API key (Claude Code only) |
+| `provider` | No | — | Model provider (pi only): e.g. `"anthropic"`, `"openai"`, `"ollama"`. Emits `--provider` (pi resolves a settings default when unset) |
+| `api_key` | No | — | API key (pi only): emitted via `--api-key`, which overrides environment variables per the pi docs. The key is *not* also injected as an env var |
+| `thinking` | No | — | Reasoning effort level (pi only): emitted via `--thinking` |
+| `agent_dir` | No | — | pi config directory (pi only): maps to the `PI_CODING_AGENT_DIR` env var (pi's config-directory override; default `~/.pi/agent`). Sits below profile `env` in precedence |
+| `session_dir` | No | — | pi session storage directory (pi only): emitted via `--session-dir` (overrides `PI_CODING_AGENT_SESSION_DIR`) |
+| `approve_project` | No | `true` (pi only) | Trust the project. Non-interactive pi modes ignore project-local resources unless `--approve` is passed (the dedicated-machine posture is to trust). Set `false` on a shared host to drop the flag |
+| `system_prompt` | No | — | Replaces pi's system prompt entirely (pi only, `--system-prompt`); context files and skills are still appended |
+| `append_system_prompt` | No | — | Appended to pi's system prompt (pi only, `--append-system-prompt`) |
 | `env` | No | — | Extra environment variables (a `{key: value}` map) merged into the backend's child process. Values override backend defaults; ``${VAR}``/``${VAR:-default}`` supported. See [Per-profile `env`](#per-profile-env) |
 
 String values support ``${VAR}`` and ``${VAR:-default}`` environment variable
@@ -105,15 +113,19 @@ a self-hosted OpenAI-compatible endpoint via `OPENAI_API_BASE`).
 - **Claude Code** — merged into the SDK `env` option, so the variables reach the
   spawned CLI only (never the poller's own process environment).
 - **Codex** — merged into the `codex exec` subprocess environment.
+- **pi** — merged into the `pi --mode json` subprocess environment. The named
+  `agent_dir` field (`PI_CODING_AGENT_DIR`) sits *below* `env`, so `env` can
+  still redirect pi's config directory. The API key is *not* injected as an env
+  var — the `api_key` field is carried on the `--api-key` flag instead.
 
 **Precedence** (highest wins):
 
-| Claude Code | Codex |
-|-------------|-------|
-| 1. `spec.env_overrides` (internal) | 1. `spec.env_overrides` (internal) |
-| 2. profile `env` | 2. profile `env` |
-| 3. backend defaults (e.g. `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, Anthropic creds) | 3. api-key fields (`OPENAI_API_KEY` / `CODEX_API_KEY`) |
-| 4. inherited `os.environ` | 4. inherited `os.environ` |
+| Claude Code | Codex | pi |
+|-------------|-------|----|
+| 1. `spec.env_overrides` (internal) | 1. `spec.env_overrides` (internal) | 1. `spec.env_overrides` (internal) |
+| 2. profile `env` | 2. profile `env` | 2. profile `env` |
+| 3. backend defaults (e.g. `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, Anthropic creds) | 3. api-key fields (`OPENAI_API_KEY` / `CODEX_API_KEY`) | 3. named fields (`agent_dir` → `PI_CODING_AGENT_DIR`) |
+| 4. inherited `os.environ` | 4. inherited `os.environ` | 4. inherited `os.environ` |
 
 So a profile `env` value overrides a backend default but loses to the internal
 `env_overrides` seam. `${VAR}` / `${VAR:-default}` expansion is applied to `env`
@@ -283,19 +295,137 @@ Access is instead controlled by a single explicit switch, `bypass_approvals` (pr
 - ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting yet.
 - Duration is tracked via ``time.monotonic()`` locally.
 
+#### `pi`
+
+Shells out to `pi --mode json` (the pi CLI subprocess — the official SDK is
+TypeScript-only, so the CLI is the transport, the same shape as Codex). Maps
+`RunSpec` to pi flags (`--model`, `--provider`, `--thinking`, a mode-derived
+`--tools` allowlist, `--exclude-tools`, `--approve`, `--api-key`, and the
+session flags below) and parses the JSON event stream (one JSON object per line
+on stdout) into a `RunResult`. `RunResult.text` is sourced from the last
+assistant `message_end`'s text blocks (falling back to the accumulated
+`text_delta` chunks — keyed by `contentIndex` — when a run is killed before
+`message_end`).
+
+**Requirements:** `pi` CLI on PATH (`npm i -g @earendil-works/pi-coding-agent`).
+The provider/model/API key come from the `provider`, `model`, and `api_key`
+profile fields (the key is passed via `--api-key`, which overrides environment
+variables; for local providers such as Ollama, configure the model via
+`~/.pi/agent/models.json` and no key is needed).
+
+**Profile fields:**
+- `backend`: `"pi"` (required)
+- `model`: **required** model id or `provider/model` pattern (e.g. `"claude-sonnet-4-5"`, `"anthropic/claude-opus-4-8"`, `"gpt-5.6-sol"`, `"qwen3.6:27b"` for Ollama). There is no built-in default — a missing `model` fails resolution with a `ValueError` (pi would otherwise silently pick a settings default, unacceptable for reproducibility)
+- `provider`: Model provider (e.g. `"anthropic"`, `"openai"`, `"ollama"`) — emits `--provider`
+- `api_key`: API key, emitted via `--api-key` (overrides environment variables). Not injected as an env var
+- `thinking`: Reasoning effort level — emits `--thinking`
+- `agent_dir`: pi config directory (maps to the `PI_CODING_AGENT_DIR` env var; default `~/.pi/agent`). Sits below profile `env` in precedence
+- `session_dir`: pi session storage directory — emits `--session-dir` (overrides `PI_CODING_AGENT_SESSION_DIR`)
+- `approve_project`: Trust the project (boolean, **default `true`**). Non-interactive pi modes ignore project-local resources unless `--approve` is passed; the dedicated-machine posture is to trust. Set it to `false` on a shared host to drop the flag
+- `system_prompt` / `append_system_prompt`: replace / append to pi's system prompt (`--system-prompt` / `--append-system-prompt`) — a knob Codex lacks
+- `timeout`: Override the default timeout (optional)
+- `cli_path`: Path to the pi binary (optional; otherwise resolved via `shutil.which("pi")`, with a Windows `.cmd`/`.bat` shim invoked through `cmd /c`)
+- `env`: Extra environment variables (a `{key: value}` map) merged into the `pi --mode json` subprocess (optional). User values win over the named fields (e.g. `PI_CODING_AGENT_DIR` from `agent_dir`); see [Per-profile `env`](#per-profile-env)
+
+**Capabilities:** `mode`, `resume`, `session_fork`, `progress_stream`.
+
+**Real read-only enforcement (the big difference from Codex).** pi *does*
+advertise the `mode` capability: a tool **allowlist** (`--tools`) over the
+built-in tools is derived from `RunSpec.mode`, so a plan/review phase is
+restricted at the CLI level. Because `mode` is advertised,
+`has_read_only_enforcement` is `True` — plan/review keep their read-only
+guarantees instead of loudly degrading and relying on the post-run
+`ensure_worktree_unchanged` rollback backstop Codex needs (see [No
+`mode`](#codex-phase-4)). `ask_question` is always excluded from every run
+(appended to `--exclude-tools` unconditionally) because there is no per-tool
+approval callback in `--mode json` — a non-interactive run could otherwise block
+on it indefinitely.
+
+**Mode → tools mapping:**
+
+| `RunSpec.mode` | `--tools` allowlist |
+|---|---|
+| `plan` / `read_only` | `read,grep,find,ls` (the documented read-only recipe) |
+| `read_write` | `read,bash,edit,write,grep,find,ls` (+ `powershell` on a Windows host) |
+| *(unset)* | the `read_write` set (a `/fix` run is a full-work phase) |
+
+`spec.extra_tools` appends to the allowlist; `spec.disallowed_tools_override`
+adds to the `--exclude-tools` denylist.
+
+**Capabilities (not yet supported):** `mcp` (no MCP comment posting — the pi MCP
+flag on this build comes from a third-party proxy that hides tool names, so the
+planner falls back to text parsing), `can_use_tool` (no per-tool runtime
+callback), `plan_permission` (no dedicated plan mode), `plan_file` (no native
+plan file — the planner's `~/.claude/plans` filesystem-scan fallback stays
+skipped), `structured_output` (pi has no JSON-Schema-validated output, so
+`RunSpec.output_format` is ignored and the planner/reviewer fall back to their
+text-pattern paths). The same gap disables the WAITING flow: AskUserQuestion
+interception lives entirely in the `can_use_tool` callback, so a pi plan session
+can never ask the user a question. Handlers degrade gracefully when these are
+unavailable.
+
+**Retry semantics (fork — unlike Codex's resume-in-place).** pi *does* have a
+fork primitive: `--fork <id> --session-id <new>`. So a pi `/retry` can *branch*
+from the last known-good session into a **new** session, leaving the original
+intact for rollback — the same fork-on-retry behavior as Claude Code (see
+[harnesses.md#retry-semantics](#retry-semantics)), and unlike Codex, which
+only resumes in place or starts fresh (it does not advertise
+`"session_fork"`). The backend advertises `"session_fork"`, so when
+`_run_retry`'s capability gate + checkpoint provenance gate pass
+(`last_good_session_backend` matches `pi`), `RunSpec.fork_session` is set and
+pi forks from the checkpoint; the forked run's new session id becomes the new
+`session_id` while the original checkpoint stays resumable. Because pi forks
+from an *exact* session id (not an earlier message), the "branch from a
+known-good message" follow-up is not applicable here.
+
+**Command mapping:**
+- Fresh run: `pi --mode json [--model <model>] [--provider <p>] [--thinking <lvl>] --tools <derived> [--exclude-tools ask_question,...] [--approve] [--api-key <k>] [--system-prompt <t>] [--append-system-prompt <t>] [--session-dir <d>] --session-id <uuid4> -- <prompt>` (subprocess `cwd` set to the worktree — pi has no `-C`)
+- Resume: same, with `--session <spec.resume>` in place of `--session-id`
+- Fork: same, with `--fork <spec.resume> --session-id <new uuid4>` (only when `spec.fork_session` and `spec.resume` are both set)
+
+**Session identity.** pi is pinned to an exact session id (`--session-id` for
+fresh/fork, `--session` for resume). The accumulator is **pre-seeded** with the
+id the backend passes, so even if the process dies before emitting the `session`
+header, `RunResult.session_id` is the id requested — strictly better than
+Codex's parse-only path, which returns `None` in that case. If the header does
+arrive with a *different* id, the header wins (it reflects the session pi
+really used) and the mismatch is logged.
+
+**Retryable subtypes:** `{"error", "killed"}` — pi failure is return-value-driven
+(rc 0 with an in-stream error → `error`; negative rc / signal-killed → `killed`).
+The runner inspects `RunResult.subtype` and retries when `AGENT_RETRY_ON_FAILURE > 0`.
+Override with `AGENT_RETRY_ON_SUBTYPE`. **Retryable exceptions:**
+`retryable_exceptions()` returns `(asyncio.TimeoutError, OSError)` —
+transport-level failures that surface as exceptions rather than a `subtype`
+(pi has no SDK; its failure surface is the subprocess boundary, same as Codex).
+
+**Cost is reported, not estimated.** `cost_usd` is sourced from the stream's
+`usage.cost.total` (USD, provider-reported) — the latest value carried on any
+event with a usage block, finalized by the last `message_end` / `agent_end`.
+There is no price table analogous to `codex_pricing.py`.
+
+**Known limitations:**
+- `RunSpec.max_turns` is **not honored** — pi has no turn cap (the guard is the wall-clock timeout, `timeout` profile field / `AGENT_TIMEOUT`).
+- **Any `isError` tool result flips the run to `error`.** A tool-result event with `isError: true` sets the run's error flag (mirroring how `extension_error` does), so a rc-0 run that tripped a failing tool — even a routine one like a `grep` that matched nothing — returns `subtype="error"` rather than `"success"`. Accepted per the spec ("`extension_error` and `isError` set the error flag"); the tradeoff is that a run that completed its work but had a nonzero tool exit can be marked failed.
+- **No MCP / AskUserQuestion / structured output** (see the "Capabilities (not yet supported)" bullet above) — plan/review keep their read-only guarantee via the tool allowlist, but comment posting and structured verdicts fall back to the text-pattern paths.
+- ``plan_file_path`` is always ``None`` — pi doesn't write a native plan file (the planner's `~/.claude/plans/` scan stays skipped; the `plan_file` capability is not advertised).
+- ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting.
+- Duration is tracked via ``time.monotonic()`` locally.
+
 ### Shared RunSpec → RunResult contract (backends/base.py)
 
-Both backends implement the `CodingBackend` protocol and share two cross-cutting
+All backends implement the `CodingBackend` protocol and share two cross-cutting
 behaviors, exercised identically in the runner's retry loop:
 
 - **`retryable_subtypes()`** — the set of return-value `subtype` strings that
-  trigger a retry (empty for `claude_code`; `{"error", "killed"}` for `codex`).
+  trigger a retry (empty for `claude_code`; `{"error", "killed"}` for `codex`
+  and `pi`).
 - **`retryable_exceptions()`** — the tuple of exception types that trigger a
   retry (S6 / issue #169 F-09). The runner uses the *resolved backend's* tuple,
   so each backend retries on its own failure modes: `claude_code` on its SDK
-  exceptions, `codex` on `asyncio.TimeoutError`/`OSError`. A backend missing the
-  method gets an empty tuple (no exception-based retry) — `runner.run()` never
-  hard-codes Claude's set.
+  exceptions, `codex` and `pi` on `asyncio.TimeoutError`/`OSError`. A backend
+  missing the method gets an empty tuple (no exception-based retry) —
+  `runner.run()` never hard-codes Claude's set.
 
 `RunResult` carries a **normalized `ok: bool`** (S6 / issue #169 F-10) so
 handlers gate success on a backend-neutral flag instead of comparing
@@ -305,7 +435,7 @@ an explicit `ok=` wins.
 
 Backend instances are created by `autoswe/harness/backends/factory.py:get_backend(harness_cfg)`. Dispatch on `harness_cfg["backend"]` field. Mirrors the provider factory pattern (`providers/factory.py`).
 
-Unknown backend names raise `ValueError`. A `codex` profile without `model` also raises `ValueError` (no default model). Case-insensitive matching.
+Unknown backend names raise `ValueError`. A `codex` or `pi` profile without `model` also raises `ValueError` (neither CLI has a default model). Case-insensitive matching.
 
 ### Backward Compatibility
 
