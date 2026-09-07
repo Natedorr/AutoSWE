@@ -240,11 +240,13 @@ class RunResult:
     cost_usd: float | None = None
     duration_seconds: float = 0.0
     plan_file_path: str | None = None
-    plan_posted: bool = False        # MCP post_plan fired (Claude Code only)
-    question_posted: bool = False    # MCP post_question fired (Claude Code only)
+    plan_posted: bool = False        # MCP post_plan fired (Claude Code / pi)
+    question_posted: bool = False    # MCP post_question fired (Claude Code / pi)
 ```
 
 What a `CodingBackend.run(spec)` returns — the unparsed result of one agent run. Supports tuple unpacking (`text, session_id, subtype = result`) for legacy callers. `plan_posted` / `question_posted` are only meaningful when the backend advertises the `"mcp"` capability; handlers gate on `runner.backend_has_capability(harness, "mcp")` before trusting them and fall back to text parsing otherwise.
+
+**Question>plan precedence.** The planner checks `question_posted` *before* `plan_posted` (so a run that posted both lands on `waiting`, not `planned`). The pi backend enforces this at the source: once `post_question` is observed in a run, any later `post_plan` is ignored and `plan_posted` stays `False` (a "question-terminal" run), so `question_posted` remains authoritative even if the model continues past its own question (issue #230).
 
 ### `HandlerResult` — interpreted handler output
 

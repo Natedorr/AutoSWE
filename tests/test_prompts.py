@@ -262,6 +262,83 @@ def test_build_plan_prompt_uses_custom_template(isolated_autoswe_dir, monkeypatc
     assert "Issue body" in prompt
 
 
+def _bundled_plan_prompt_path() -> Path:
+    """Path to the bundled plan.txt that ships with the repo under test.
+
+    Resolved relative to this test file rather than through
+    ``load_plan_prompt``/``AUTOSWE_DIR``: the deployment pins ``AUTOSWE_DIR`` to
+    the installed checkout, which may differ from the worktree being tested, so
+    the direct path is the deterministic source of the shipped prompt.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    return repo_root / "config" / "prompts" / "plan.txt"
+
+
+def _bundled_plan_prompt() -> str:
+    """The text of the bundled plan.txt (see _bundled_plan_prompt_path)."""
+    return _bundled_plan_prompt_path().read_text(encoding="utf-8")
+
+
+def test_bundled_plan_prompt_enforces_stop_after_question():
+    """Regression for issue #230: the plan prompt must key its stop rule to the
+    MCP question tool, not only to `AskUserQuestion`.
+
+    The pi backend (no AskUserQuestion; ask_question is excluded) routes
+    clarifications through the `{{POST_QUESTION_TOOL}}` tool. Before the fix the
+    stop rule only mentioned `AskUserQuestion`, so a pi run that posted a
+    question had no instruction to stop — it self-answered and posted a plan.
+    """
+    tpl = _bundled_plan_prompt()
+    # The stop rule is keyed to the question tool (the placeholder the backends
+    # render), and still names the native tool for backends that expose it.
+    assert "{{POST_QUESTION_TOOL}}" in tpl
+    assert "AskUserQuestion" in tpl
+    # The rule explicitly says: stop, end the turn, don't self-answer, and
+    # don't post a plan in the same run.
+    assert "STOP immediately and end your turn" in tpl
+    assert "do not answer your own question" in tpl
+    assert "in the same run" in tpl
+    assert "{{POST_PLAN_TOOL}}" in tpl
+
+
+def test_bundled_plan_prompt_renders_stop_rule_for_backend_tool_name():
+    """The stop rule renders the backend's actual question-tool name and leaves
+    no un-substituted placeholders (issue #230).
+
+    Renders the bundled template (via the ``plan_prompt`` override, so it is
+    independent of ``AUTOSWE_DIR``) with the pi tool names and asserts the
+    question tool reaches the stop rule and no placeholder leaks.
+    """
+    from autoswe.harness.prompts import build_plan_prompt
+
+    task = {
+        "owner": "o",
+        "repo": "r",
+        "issue_number": 230,
+        "title": "T",
+        "body": "B",
+        "base_branch": "main",
+        "_token": "tok",
+    }
+    tool_names = {
+        "post_question": "mcp__autoswe_comment_post_question",
+        "post_plan": "mcp__autoswe_comment_post_plan",
+        "update_progress": "mcp__autoswe_comment_update_progress",
+    }
+    prompt = build_plan_prompt(
+        task,
+        comments=[],
+        repo_cfg={"plan_prompt": str(_bundled_plan_prompt_path())},
+        guidance=None,
+        tool_names=tool_names,
+    )
+    # The question tool name appears in the "how to ask" guidance AND in the
+    # stop rule; no placeholder leaks through.
+    assert prompt.count("mcp__autoswe_comment_post_question") >= 2
+    assert "STOP immediately and end your turn" in prompt
+    assert "{{" not in prompt
+
+
 def test_build_fix_prompt_uses_custom_template(isolated_autoswe_dir, monkeypatch):
     """build_fix_prompt should use a custom fix template from repo_cfg."""
     prompt_dir = isolated_autoswe_dir / "config" / "prompts"

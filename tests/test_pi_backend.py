@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -1833,6 +1834,73 @@ def test_run_mcp_post_question_event_sets_question_posted():
     result = asyncio.run(_run())
     assert result.question_posted is True
     assert result.plan_posted is False
+
+
+def test_parse_post_plan_after_post_question_is_ignored():
+    """A post_plan following a post_question in the same run must not set plan_posted.
+
+    Regression for issue #230: the plan model posted a question, then continued
+    and posted a plan on its own (no user reply). The run is question-terminal,
+    so question_posted stays authoritative and the late post_plan is dropped at
+    the source (mirrors the planner's question>plan precedence).
+    """
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolCallId": "t1",
+        "toolName": "mcp__autoswe_comment_post_question",
+        "args": {"body": "Which semantics?"},
+    }), acc, Mock())
+    assert acc.question_posted is True
+    assert acc.plan_posted is False
+
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolCallId": "t2",
+        "toolName": "mcp__autoswe_comment_post_plan",
+        "args": {"body": "## Plan\nSemantics per user decisions."},
+    }), acc, Mock())
+    # The question is still authoritative; the late plan did not flip it.
+    assert acc.question_posted is True
+    assert acc.plan_posted is False
+
+
+def test_parse_post_plan_before_post_question_sets_plan_posted():
+    """Contrast: a post_plan that precedes any question still sets plan_posted.
+
+    Only a plan that lands *after* a question in the same run is suppressed, so
+    the ordinary "model plans without asking" path is unchanged.
+    """
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp__autoswe_comment_post_plan",
+        "args": {"body": "## Plan"},
+    }), acc, Mock())
+    assert acc.plan_posted is True
+    assert acc.question_posted is False
+
+
+def test_run_regression_230_question_then_plan_fixture():
+    """End-to-end: a transcript with post_question then post_plan (issue #230).
+
+    Feeds the captured regression fixture through the real PiBackend parser and
+    asserts the run reports question_posted=True and plan_posted=False — the
+    late post_plan is ignored so question_posted stays authoritative.
+    """
+    fixture = Path(__file__).parent / "fixtures" / "pi_regressions" / "question_then_plan_230.jsonl"
+    events = fixture.read_text(encoding="utf-8").strip()
+    proc = _mock_process(stdout=events, returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await PiBackend().run(_spec_with_comment_mcp(mode="plan"))
+
+    result = asyncio.run(_run())
+    assert result.question_posted is True
+    assert result.plan_posted is False
+    assert result.ok is True
 
 
 def test_run_mcp_update_progress_fires_callback_with_body():

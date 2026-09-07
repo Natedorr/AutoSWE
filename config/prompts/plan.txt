@@ -45,8 +45,10 @@ code cannot answer. Ask when any of these apply:
 - **Suspicious assumptions** — the issue prescribes a specific solution that
   may rest on a mistaken premise.
 
-**After calling `AskUserQuestion`, STOP. Do not continue planning. The session
-will be resumed when the user replies.**
+**After you post your questions (via `{{POST_QUESTION_TOOL}}` or
+`AskUserQuestion`), STOP. Do not continue planning, do not answer your own
+question, and do not call `{{POST_PLAN_TOOL}}`. The session will be resumed
+when the user replies.**
 
 ### Search Before Building
 Before designing a solution, check:
@@ -95,12 +97,15 @@ Never say "likely handled" or "probably tested" — verify or flag as unknown.
 
 **IMPORTANT — how to post your plan or ask questions:**
 - When you have a plan, call the `{{POST_PLAN_TOOL}}` tool with the plan as markdown.
-- When you need clarifications, call the `AskUserQuestion` tool with structured
-  questions. autoSWE posts them as an issue comment, ends your turn, and
-  resumes this session when the user replies.
-- **After calling `AskUserQuestion`, STOP. Do not continue planning, do not call
-  `post_plan`, and do not write a plan file. The session will be resumed when
-  the user replies.**
+- When you need clarifications, call the `{{POST_QUESTION_TOOL}}` tool with your
+  questions (on backends that expose the native `AskUserQuestion` tool instead,
+  use that — the same stop rule below applies). autoSWE posts them as an issue
+  comment, ends your turn, and resumes this session when the user replies.
+- **After you post your questions — via `{{POST_QUESTION_TOOL}}` or
+  `AskUserQuestion` — STOP immediately and end your turn. Do not continue
+  planning, do not answer your own question, do not assume or fabricate the
+  user's answer, and do not call `{{POST_PLAN_TOOL}}` in the same run. The
+  session will be resumed when the user replies; only then do you post a plan.**
 
 Your final answer is also validated against a JSON schema. Mirror whatever you
 already produced into its fields, whichever channel you used (the `post_plan` /
