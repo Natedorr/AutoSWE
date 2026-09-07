@@ -132,14 +132,17 @@ def _jsonl(*events: dict) -> str:
 
 
 def test_pi_capabilities():
-    """PiBackend advertises mode + resume + session_fork + progress_stream."""
+    """PiBackend advertises mode + resume + session_fork + progress_stream + mcp."""
     caps = PiBackend.capabilities()
     assert "mode" in caps
     assert "resume" in caps
     assert "session_fork" in caps
     assert "progress_stream" in caps
-    # No MCP in phase 1; no native tool-approval callback; no plan-file output.
-    assert "mcp" not in caps
+    # Phase 2: pi reaches the autoswe_comment MCP server via the
+    # pi-mcp-adapter and parses its tool_execution_start events, so it now
+    # advertises the "mcp" capability (turns on planner.py's has_mcp branch).
+    assert "mcp" in caps
+    # No native per-tool-approval callback; no plan-file output.
     assert "can_use_tool" not in caps
     assert "plan_permission" not in caps
     assert "plan_file" not in caps
@@ -346,6 +349,56 @@ def test_tools_unknown_mode_falls_back_to_default(monkeypatch):
     """An unrecognized mode string falls back to the default (read_write) set."""
     monkeypatch.setattr(_pi_mod.os, "name", "posix")
     assert _tools_for_spec(_spec(mode="bogus_mode")) == list(_DEFAULT_TOOLS)
+
+
+def _spec_with_comment_mcp(mode="read_write", **overrides):
+    """A spec whose mcp_servers names autoswe_comment (the Phase 2 trigger)."""
+    return _spec(
+        mode=mode,
+        mcp_servers={"autoswe_comment": {"command": sys.executable, "env": {}}},
+        **overrides,
+    )
+
+
+def test_tools_mcp_comment_adds_three_names(monkeypatch):
+    """Naming autoswe_comment adds the three tool names to the allowlist.
+
+    pi's --tools is a hard allowlist, so the MCP direct tools must be listed
+    to be visible at all — and they must be listed for EVERY mode, including
+    the read-only plan/read_only sets.
+    """
+    monkeypatch.setattr(_pi_mod.os, "name", "posix")
+    for mode in ("plan", "read_only", "read_write", None):
+        tools = _tools_for_spec(_spec_with_comment_mcp(mode=mode))
+        for name in _pi_mod._MCP_COMMENT_TOOL_NAMES:
+            assert name in tools, (mode, tools)
+
+
+def test_tools_mcp_comment_not_added_without_server(monkeypatch):
+    """Without the autoswe_comment server, the MCP tool names stay out."""
+    monkeypatch.setattr(_pi_mod.os, "name", "posix")
+    tools = _tools_for_spec(_spec(mode="plan"))
+    for name in _pi_mod._MCP_COMMENT_TOOL_NAMES:
+        assert name not in tools
+
+
+def test_tools_mcp_comment_other_server_does_not_add(monkeypatch):
+    """A different MCP server is not a trigger; no comment tools are added."""
+    monkeypatch.setattr(_pi_mod.os, "name", "posix")
+    spec = _spec(
+        mode="plan",
+        mcp_servers={"some_other": {"command": "x", "env": {}}},
+    )
+    for name in _pi_mod._MCP_COMMENT_TOOL_NAMES:
+        assert name not in _tools_for_spec(spec)
+
+
+def test_tools_mcp_comment_dedupes_extra_tools(monkeypatch):
+    """MCP tool names already in extra_tools are not duplicated."""
+    monkeypatch.setattr(_pi_mod.os, "name", "posix")
+    name = _pi_mod._MCP_COMMENT_TOOL_NAMES[0]
+    tools = _tools_for_spec(_spec_with_comment_mcp(extra_tools=[name]))
+    assert tools.count(name) == 1
 
 
 # ---------- Excluded tools ----------
@@ -770,6 +823,117 @@ def test_parse_agent_end_sets_marker_and_cost():
     }), acc, None)
     assert acc.agent_end is True
     assert acc.cost_usd == 1.5
+
+
+# ---------- MCP tool_execution_start classification (Phase 2) ----------
+
+
+def test_parse_mcp_post_plan_direct_sets_flag():
+    """A direct mcp__autoswe_comment_post_plan start sets plan_posted."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolCallId": "chatcmpl-tool-x",
+        "toolName": "mcp__autoswe_comment_post_plan",
+        "args": {"body": "1. Do the thing"},
+    }), acc, Mock())
+    assert acc.plan_posted is True
+    assert acc.question_posted is False
+
+
+def test_parse_mcp_post_question_direct_sets_flag():
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp__autoswe_comment_post_question",
+        "args": {"body": "Which DB?"},
+    }), acc, Mock())
+    assert acc.question_posted is True
+    assert acc.plan_posted is False
+
+
+def test_parse_mcp_update_progress_direct_fires_progress():
+    """update_progress fires the progress callback with its body."""
+    acc = _PiAccumulator()
+    cb = Mock()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp__autoswe_comment_update_progress",
+        "args": {"body": "Running: pytest tests/"},
+    }), acc, cb)
+    # The body is forwarded as a progress line (plus the generic Tool: line).
+    assert any(c[0][0].startswith("Running: pytest") for c in cb.call_args_list)
+    assert not acc.plan_posted
+    assert not acc.question_posted
+
+
+def test_parse_mcp_post_plan_generic_proxy_sets_flag():
+    """The generic `mcp` proxy ({tool, args}) sets plan_posted too."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp",
+        "args": {"tool": "post_plan", "args": {"body": "P"}},
+    }), acc, Mock())
+    assert acc.plan_posted is True
+
+
+def test_parse_mcp_post_question_namespace_proxy_sets_flag():
+    """The mcp__autoswe_comment namespace proxy ({tool, args}) sets question_posted."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp__autoswe_comment",
+        "args": {"tool": "post_question", "args": {"body": "Q"}},
+    }), acc, Mock())
+    assert acc.question_posted is True
+
+
+def test_parse_mcp_proxy_fully_qualified_tool_value_sets_flag():
+    """A proxy whose `tool` is the fully-qualified name still classifies."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp",
+        "args": {"tool": "mcp__autoswe_comment_post_plan",
+                 "args": {"body": "P"}},
+    }), acc, Mock())
+    assert acc.plan_posted is True
+
+
+def test_parse_mcp_proxy_json_string_args_sets_flag():
+    """A proxy with a JSON-string `args` (the documented shape) is tolerated."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp__autoswe_comment",
+        "args": {"tool": "post_plan", "args": json.dumps({"body": "P"})},
+    }), acc, Mock())
+    assert acc.plan_posted is True
+
+
+def test_parse_mcp_unknown_proxy_tool_sets_no_flag():
+    """A proxy calling a non-comment tool leaves the flags clear."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp",
+        "args": {"tool": "bash", "args": {"command": "ls"}},
+    }), acc, Mock())
+    assert not acc.plan_posted
+    assert not acc.question_posted
+
+
+def test_parse_non_mcp_tool_execution_sets_no_flag():
+    """An ordinary built-in tool start does not touch the MCP flags."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "read",
+        "args": {"path": "/etc/hosts"},
+    }), acc, Mock())
+    assert not acc.plan_posted
+    assert not acc.question_posted
 
 
 def test_parse_extension_error_sets_flag():
@@ -1559,8 +1723,12 @@ def test_run_progress_callback_fires_tool_and_agent_lines():
     assert result.text == "did it"
 
 
-def test_run_result_mcp_fields_always_false_or_none():
-    """pi has no plan-file / MCP output: plan_posted, question_posted, plan_file_path."""
+def test_run_result_mcp_fields_default_false():
+    """Without autoswe_comment tool calls, the MCP flags stay False.
+
+    (plan_posted/question_posted now come from the stream when the comment
+    server is active; a run that never calls those tools reports them False.)
+    """
     from tests.fakes.pi_fake import PiFake
 
     fake = PiFake()
@@ -1571,6 +1739,114 @@ def test_run_result_mcp_fields_always_false_or_none():
     assert result.question_posted is False
     assert result.plan_file_path is None
     assert result.structured_output is None
+
+
+def test_run_mcp_post_plan_event_sets_plan_posted():
+    """End-to-end: a direct post_plan event on the stream sets RunResult.plan_posted."""
+    events = _jsonl(
+        {"type": "session", "id": "s", "version": 3},
+        {"type": "tool_execution_start",
+         "toolCallId": "chatcmpl-tool-1",
+         "toolName": "mcp__autoswe_comment_post_plan",
+         "args": {"body": "1. Do the thing"}},
+        {"type": "message_end",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}},
+        {"type": "agent_end"},
+    )
+    proc = _mock_process(stdout=events, returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await PiBackend().run(_spec_with_comment_mcp(mode="plan"))
+
+    result = asyncio.run(_run())
+    assert result.plan_posted is True
+    assert result.question_posted is False
+    assert result.ok is True
+
+
+def test_run_mcp_post_question_event_sets_question_posted():
+    """End-to-end: a proxy post_question event sets RunResult.question_posted."""
+    events = _jsonl(
+        {"type": "session", "id": "s", "version": 3},
+        {"type": "tool_execution_start",
+         "toolName": "mcp__autoswe_comment",
+         "args": {"tool": "post_question", "args": {"body": "Which DB?"}}},
+        {"type": "agent_end"},
+    )
+    proc = _mock_process(stdout=events, returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await PiBackend().run(_spec_with_comment_mcp(mode="plan"))
+
+    result = asyncio.run(_run())
+    assert result.question_posted is True
+    assert result.plan_posted is False
+
+
+def test_run_mcp_update_progress_fires_callback_with_body():
+    """End-to-end: update_progress forwards its body to the progress callback."""
+    events = _jsonl(
+        {"type": "session", "id": "s", "version": 3},
+        {"type": "tool_execution_start",
+         "toolName": "mcp__autoswe_comment_update_progress",
+         "args": {"body": "Editing: src/foo.py"}},
+        {"type": "agent_end"},
+    )
+    proc = _mock_process(stdout=events, returncode=0)
+    cb = Mock()
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        spec = _spec_with_comment_mcp(progress_callback=cb)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await PiBackend().run(spec)
+
+    asyncio.run(_run())
+    fired = [c[0][0] for c in cb.call_args_list]
+    assert any("Editing: src/foo.py" in line for line in fired)
+
+
+def test_run_mcp_tools_in_allowlist_when_server_named(monkeypatch):
+    """When the server is named, the three tools are on the --tools allowlist."""
+    monkeypatch.setattr(_pi_mod.os, "name", "posix")
+    events = _jsonl({"type": "session", "id": "s", "version": 3}, {"type": "agent_end"})
+    proc = _mock_process(stdout=events, returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await PiBackend().run(_spec_with_comment_mcp(mode="plan"))
+        argv = mock_exec.call_args[0]
+        return argv[argv.index("--tools") + 1]
+
+    tools_val = asyncio.run(_run())
+    tools = tools_val.split(",")
+    for name in _pi_mod._MCP_COMMENT_TOOL_NAMES:
+        assert name in tools
+    # The read-only plan base set is still present (MCP tools are additive).
+    assert "read" in tools
+
+
+def test_run_mcp_tools_absent_when_server_not_named(monkeypatch):
+    """Without the server, the MCP tools are not on the allowlist."""
+    monkeypatch.setattr(_pi_mod.os, "name", "posix")
+    events = _jsonl({"type": "session", "id": "s", "version": 3}, {"type": "agent_end"})
+    proc = _mock_process(stdout=events, returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await PiBackend().run(_spec(mode="plan"))
+        argv = mock_exec.call_args[0]
+        return argv[argv.index("--tools") + 1].split(",")
+
+    tools = asyncio.run(_run())
+    for name in _pi_mod._MCP_COMMENT_TOOL_NAMES:
+        assert name not in tools
 
 
 def test_run_multiple_responses_in_order():

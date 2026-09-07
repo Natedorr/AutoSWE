@@ -1251,6 +1251,32 @@ def test_run_plan_returns_plan_ready_on_post_plan_tool_use(tmp_path, mock_gh_pos
     assert result.done_content == "PLAN_READY"
 
 
+def test_run_plan_pi_mcp_plan_posted_returns_plan_ready_no_tag(tmp_path, mock_gh_post_comment):
+    """pi advertises the ``mcp`` capability, so a ``tool_execution_start``
+    ``post_plan`` event on the RunResult (``plan_posted=True``) makes the planner
+    return PLAN_READY even when the final assistant text carries no
+    ``<AUTOSWE_PLAN>`` tag — the plan already went out as an issue comment via the
+    comment MCP server, so the tag-scrape fallback must not fire (issue #216)."""
+    task = make_task()
+    tag_free_text = "Posted the plan to the issue."  # no <AUTOSWE_PLAN> tag
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.planner.resolve_harness",
+                       return_value={"backend": "pi", "model": "claude-sonnet-4-5"}):
+                with patch("autoswe.harness.runner.run",
+                           return_value=RunResult(
+                               tag_free_text, "sess-1", "success", plan_posted=True,
+                           )):
+                    from autoswe.harness.planner import run_plan
+                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    # The plan is already on the thread via MCP — the tag-scrape path must not
+    # post a second comment from the tag-free assistant text.
+    assert len(mock_gh_post_comment.posted) == 0
+
+
 def test_run_plan_returns_waiting_on_post_question_tool_use(tmp_path, mock_gh_post_comment):
     """When RunResult has question_posted=True, run_plan should return WAITING: questions."""
     task = make_task()

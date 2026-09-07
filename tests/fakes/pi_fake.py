@@ -66,19 +66,62 @@ def _usage(cost_total: float | None) -> dict | None:
     return {"input": 10, "output": 5, "cost": {"total": cost_total}}
 
 
+def _tool_execution_start(tool_name: str, body: str,
+                          tool_call_id: str = "chatcmpl-tool-1") -> dict:
+    """A canonical ``tool_execution_start`` event (spike-pi-mcp.md, fact 1/3).
+
+    ``args`` carries ``body`` verbatim — the direct autoswe_comment tool shape.
+    """
+    return {
+        "type": "tool_execution_start",
+        "toolCallId": tool_call_id,
+        "toolName": tool_name,
+        "args": {"body": body},
+    }
+
+
+def _mcp_comment_tool_event(tool: str, body: str, proxy: str = "direct") -> dict:
+    """A ``tool_execution_start`` for the autoswe_comment *tool* in *proxy* shape.
+
+    ``proxy``:
+      * ``"direct"``    → toolName is ``mcp__autoswe_comment_<tool>``, args = {body}
+      * ``"generic"``   → toolName is ``"mcp"``, args = {tool, args: {body}}
+      * ``"namespace"`` → toolName is ``"mcp__autoswe_comment"``, args = {tool, args: {body}}
+
+    All three are the shapes the real parser must classify as the same call
+    (Phase 2 of PLAN-pi-mcp.md).
+    """
+    if proxy == "direct":
+        return _tool_execution_start(f"mcp__autoswe_comment_{tool}", body)
+    tool_name = "mcp" if proxy == "generic" else "mcp__autoswe_comment"
+    return {
+        "type": "tool_execution_start",
+        "toolCallId": "chatcmpl-tool-1",
+        "toolName": tool_name,
+        "args": {"tool": tool, "args": {"body": body}},
+    }
+
+
 def _build_success_jsonl(session_id: str, text: str,
-                         cost_total: float | None = None) -> list[str]:
+                         cost_total: float | None = None,
+                         tool_event: dict | None = None) -> list[str]:
     """``--mode json`` lines for a successful run yielding *text*.
 
     Mirrors the canonical stream (docs/pi/json.md Output Format):
     session header → agent_start → turn_start → message_start →
     message_update (delta-only, carries cumulative usage) → message_end
     (authoritative message) → turn_end → agent_end.
+
+    When *tool_event* is given, it is emitted as a ``tool_execution_start``
+    (the Phase 2 autoswe_comment shape) right before the message blocks, so
+    the real parser sets the plan_posted / question_posted flags from it.
     """
     lines: list[str] = []
     lines.append(_event(_session_header(session_id)))
     lines.append(_event({"type": "agent_start"}))
     lines.append(_event({"type": "turn_start"}))
+    if tool_event is not None:
+        lines.append(_event(tool_event))
     lines.append(_event({
         "type": "message_start",
         "message": {"role": "assistant", "content": []},
@@ -155,10 +198,11 @@ def _build_killed_jsonl(session_id: str, partial_text: str = "") -> list[str]:
 
 def _build_text_jsonl(session_id: str, text: str, subtype: str,
                       cost_total: float | None = None,
-                      error_msg: str = "error") -> list[str]:
+                      error_msg: str = "error",
+                      tool_event: dict | None = None) -> list[str]:
     """Route to the success or error builder based on *subtype*."""
     if subtype == "success":
-        return _build_success_jsonl(session_id, text, cost_total)
+        return _build_success_jsonl(session_id, text, cost_total, tool_event)
     # error, error_max_turns, permission_denied → in-stream error, exit 0
     return _build_error_jsonl(session_id, error_msg)
 
@@ -323,6 +367,9 @@ class PiFake:
     def __init__(self):
         # (text, session_id, subtype, cost_total, error_msg)
         self._scripts: list[tuple[str, str, str, float | None, str]] = []
+        # Per-script optional tool_execution_start event (Phase 2 MCP shapes).
+        # Aligned with _scripts by index; None means no tool event.
+        self._tool_events: list[dict | None] = []
         self._call_index = 0
         self.calls: list[dict[str, Any]] = []
         self._killed: list[bool] = []  # per-script: True → returncode -9
@@ -344,10 +391,49 @@ class PiFake:
     def script_response(self, text: str, session_id: str = "s1",
                         subtype: str = "success",
                         cost_total: float | None = None,
-                        error_msg: str = "error") -> None:
-        """Add a response to the script.  Order matters — each pi run consumes the next."""
+                        error_msg: str = "error",
+                        tool_event: dict | None = None) -> None:
+        """Add a response to the script.  Order matters — each pi run consumes the next.
+
+        *tool_event* is an optional ``tool_execution_start`` dict emitted
+        alongside the response (the Phase 2 autoswe_comment shape) so the real
+        parser sets plan_posted / question_posted from it.
+        """
         self._scripts.append((text, session_id, subtype, cost_total, error_msg))
         self._killed.append(False)
+        self._tool_events.append(tool_event)
+
+    def script_mcp_plan(self, plan_body: str, session_id: str = "s1",
+                        proxy: str = "direct", text: str = "") -> None:
+        """Add a plan response that calls the autoswe_comment post_plan tool.
+
+        The plan body is carried on the ``tool_execution_start`` event (the
+        comment is posted via MCP, so the assistant text may be empty). *proxy*
+        selects the tool-calling shape: ``"direct"`` (the
+        ``mcp__autoswe_comment_post_plan`` name), ``"generic"`` (the ``mcp``
+        proxy with ``{tool, args}``), or ``"namespace"`` (the
+        ``mcp__autoswe_comment`` namespace proxy).
+        """
+        self.script_response(
+            text, session_id=session_id,
+            tool_event=_mcp_comment_tool_event("post_plan", plan_body, proxy),
+        )
+
+    def script_mcp_question(self, question_body: str, session_id: str = "s1",
+                            proxy: str = "direct", text: str = "") -> None:
+        """Add a plan response that calls the autoswe_comment post_question tool."""
+        self.script_response(
+            text, session_id=session_id,
+            tool_event=_mcp_comment_tool_event("post_question", question_body, proxy),
+        )
+
+    def script_mcp_update_progress(self, body: str, session_id: str = "s1",
+                                   text: str = "") -> None:
+        """Add a response that calls the autoswe_comment update_progress tool."""
+        self.script_response(
+            text, session_id=session_id,
+            tool_event=_mcp_comment_tool_event("update_progress", body, "direct"),
+        )
 
     def script_plan(self, plan_text: str, session_id: str = "s1") -> None:
         """Add a plan-phase response.
@@ -398,13 +484,16 @@ class PiFake:
         text, session_id, subtype, cost_total, error_msg = self._scripts[self._call_index]
         is_killed = (self._call_index < len(self._killed)
                      and self._killed[self._call_index])
+        tool_event = (self._tool_events[self._call_index]
+                      if self._call_index < len(self._tool_events) else None)
 
         if is_killed:
             lines = _build_killed_jsonl(session_id, text)
             return lines, -9
 
         lines = _build_text_jsonl(session_id, text, subtype,
-                                  cost_total=cost_total, error_msg=error_msg)
+                                  cost_total=cost_total, error_msg=error_msg,
+                                  tool_event=tool_event)
         return lines, 0
 
     # -- Patch plumbing --
