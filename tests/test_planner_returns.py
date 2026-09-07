@@ -1,6 +1,7 @@
 """Tests for autoswe.harness.planner handler return values."""
 
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 from autoswe.harness.runner import RunResult
@@ -585,6 +586,94 @@ def test_extract_plan_output_unit():
         comment, done, used_file = _extract_plan_output("<AUTOSWE_QUESTIONS>\n1. Q?\n</AUTOSWE_QUESTIONS>")
         assert done == "WAITING: questions"
         assert "Q?" in comment
+        assert used_file is None
+
+
+# ---------------------------------------------------------------------------
+# Fallback tag regexes tolerate stray whitespace inside the brackets
+# (regression: pi E2E 2026-09-07, qwen3.8:27b emitted "< AUTOSWE_PLAN>")
+# ---------------------------------------------------------------------------
+
+def test_plan_tags_tolerate_interior_whitespace():
+    """Whitespace inside the brackets must not escape detection.
+
+    Some backends (qwen3.8:27b via pi) emit "< AUTOSWE_PLAN>" with a space
+    after the opening bracket. These tags are the *fallback* for backends
+    without the MCP comment server, so any small model quirk must still be
+    detected — and clean tags keep matching unchanged.
+    """
+    from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
+
+    # Opening-tag variants: clean / one space / multiple spaces
+    for tag in ["<AUTOSWE_PLAN>", "< AUTOSWE_PLAN>", "<  AUTOSWE_PLAN>"]:
+        m = _PLAN_RE.search(tag + "\nBody\n</AUTOSWE_PLAN>")
+        assert m, f"opening tag not matched: {tag!r}"
+        assert m.group(1) == "\nBody\n", f"group(1) changed for {tag!r}"
+
+    # Closing-tag variants
+    for tag in ["</AUTOSWE_PLAN>", "</ AUTOSWE_PLAN>", "</  AUTOSWE_PLAN>"]:
+        m = _PLAN_RE.search("<AUTOSWE_PLAN>Body" + tag)
+        assert m, f"closing tag not matched: {tag!r}"
+        assert m.group(1) == "Body", f"group(1) changed for {tag!r}"
+
+    # Whitespace on both ends at once
+    m = _PLAN_RE.search("< AUTOSWE_PLAN>Both</ AUTOSWE_PLAN>")
+    assert m and m.group(1) == "Both"
+
+    # QUESTIONS gets the same treatment
+    for tag in ["<AUTOSWE_QUESTIONS>", "< AUTOSWE_QUESTIONS>"]:
+        m = _QUESTIONS_RE.search(tag + "1. Q?</AUTOSWE_QUESTIONS>")
+        assert m, f"questions tag not matched: {tag!r}"
+        assert m.group(1) == "1. Q?"
+
+    # Not so tolerant that wrong names match: no space *inside* the tag name
+    assert _PLAN_RE.search("<AUTOSWE PLAN>body</AUTOSWE PLAN>") is None
+    assert _PLAN_RE.search("<AUTOSWEPLAN>body</AUTOSWEPLAN>") is None
+    assert _QUESTIONS_RE.search("<AUTOSWE QUESTIONS>body</AUTOSWE QUESTIONS>") is None
+
+
+def test_regression_pi_6f4cb4a0_plan_classifies_plan_ready():
+    """The exact 5275-char plan from pi session 6f4cb4a0 (2026-09-07 E2E)
+    must classify as PLAN_READY, not fall through to the raw fallback.
+
+    The session (Natedorr/testProject#96, qwen3.8:27b) emitted the opening
+    fallback tag as '< AUTOSWE_PLAN>' — a space after the bracket — which the
+    old regexes missed, sending a complete plan to 'WAITING: see comment'.
+    """
+    from autoswe.harness.planner import _extract_plan_output
+
+    fixture = Path(__file__).parent / "fixtures" / "pi_regressions" / "plan_6f4cb4a0.txt"
+    text = fixture.read_text(encoding="utf-8")
+    assert len(text) == 5275
+    assert text.lstrip().startswith("< AUTOSWE_PLAN>")  # the stray-space tag
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(text)
+        assert done == "PLAN_READY", f"expected PLAN_READY, got {done!r}"
+        assert "## Plan" in comment
+        assert "sliding-window moving average" in comment
+        assert "## Claude's response" not in comment  # must not use raw fallback
+        assert used_file is None
+
+
+def test_regression_pi_6f4cb4a0_questions_tag_matched():
+    """First-run questions in the same session also used '< AUTOSWE_QUESTIONS>'.
+
+    Before the fix the tag failed to match and the issue only reached WAITING
+    via the raw fallback — which happened to produce the right label and
+    masked the bug. The questions path must match directly.
+    """
+    from autoswe.harness.planner import _extract_plan_output
+
+    text = ("< AUTOSWE_QUESTIONS>\n"
+            "1. Before I plan the sliding-window moving-average helper for "
+            "`src/toolbox.py`, which semantics should I use?\n"
+            "</AUTOSWE_QUESTIONS>")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(text)
+        assert done == "WAITING: questions", f"expected WAITING: questions, got {done!r}"
+        assert "## Questions" in comment
         assert used_file is None
 
 
