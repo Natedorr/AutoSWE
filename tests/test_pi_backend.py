@@ -867,6 +867,54 @@ def test_parse_mcp_update_progress_direct_fires_progress():
     assert not acc.question_posted
 
 
+def test_parse_mcp_update_progress_empty_body_suppresses_progress():
+    """An empty body suppresses the progress line (only the generic Tool: line fires).
+
+    This is the AUTOSWE_SUPPRESS_POSTING boundary: when the comment server is in
+    minimal-posting mode the model's update_progress carries no meaningful body,
+    so the parser must NOT forward an empty progress line to the operator.
+    """
+    acc = _PiAccumulator()
+    cb = Mock()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp__autoswe_comment_update_progress",
+        "args": {"body": ""},
+    }), acc, cb)
+    # No progress line derived from the (empty) body — only the generic
+    # "Tool:" line fires (the callback is present).
+    assert [c[0][0] for c in cb.call_args_list] == ["Tool: mcp__autoswe_comment_update_progress"]
+    assert not acc.plan_posted
+    assert not acc.question_posted
+
+
+def test_parse_mcp_update_progress_absent_body_suppresses_progress():
+    """update_progress with no body key suppresses the progress line."""
+    acc = _PiAccumulator()
+    cb = Mock()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp__autoswe_comment_update_progress",
+        "args": {},
+    }), acc, cb)
+    # Only the generic "Tool:" line fires; no body-derived progress line.
+    assert [c[0][0] for c in cb.call_args_list] == ["Tool: mcp__autoswe_comment_update_progress"]
+
+
+def test_parse_mcp_update_progress_no_callback_suppresses_silently():
+    """With no callback, update_progress fires nothing (both lines are guarded)."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp__autoswe_comment_update_progress",
+        "args": {"body": "Status: halfway"},
+    }), acc, None)
+    # Nothing to assert on the callback (it's None) — the parse must not raise,
+    # and the body must NOT leak into plan/question flags.
+    assert not acc.plan_posted
+    assert not acc.question_posted
+
+
 def test_parse_mcp_post_plan_generic_proxy_sets_flag():
     """The generic `mcp` proxy ({tool, args}) sets plan_posted too."""
     acc = _PiAccumulator()

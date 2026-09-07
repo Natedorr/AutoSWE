@@ -14,7 +14,7 @@ import asyncio
 
 from autoswe.harness.backends.base import RunSpec
 from autoswe.harness.backends.pi import PiBackend
-from tests.fakes.pi_fake import PiFake
+from tests.fakes.pi_fake import PiFake, _mcp_comment_tool_event, _tool_execution_start
 
 MODEL = "anthropic/claude-sonnet-4-5"
 
@@ -284,3 +284,133 @@ class TestPiFakeCalls:
         result = _run(_spec(), fake)
 
         assert result.session_id == "echo-123"
+
+
+class TestPiFakeMcpFixtures:
+    """Canonical ``tool_execution_start`` fixture shapes (Phase 0 spike).
+
+    These pin the raw fixture lines PiFake emits for the three autoswe_comment
+    tools — the shapes observed in the Phase 0 spike (spike-pi-mcp.md) that the
+    real parser must classify.  If a fixture drifts from the observed
+    ``--mode json`` shape, these fail before any RunResult assertion does.
+    """
+
+    def test_tool_execution_start_direct_shape(self):
+        """The direct tool shape carries the body verbatim in args."""
+        ev = _tool_execution_start("mcp__autoswe_comment_post_plan", "PLAN BODY")
+        assert ev == {
+            "type": "tool_execution_start",
+            "toolCallId": "chatcmpl-tool-1",
+            "toolName": "mcp__autoswe_comment_post_plan",
+            "args": {"body": "PLAN BODY"},
+        }
+
+    def test_mcp_comment_tool_event_direct(self):
+        """post_plan direct → fully-qualified toolName, body verbatim."""
+        ev = _mcp_comment_tool_event("post_plan", "The plan", proxy="direct")
+        assert ev["toolName"] == "mcp__autoswe_comment_post_plan"
+        assert ev["args"] == {"body": "The plan"}
+        assert ev["type"] == "tool_execution_start"
+
+    def test_mcp_comment_tool_event_generic_proxy(self):
+        """Generic `mcp` proxy → args = {tool, args: {body}}."""
+        ev = _mcp_comment_tool_event("post_question", "Which DB?", proxy="generic")
+        assert ev["toolName"] == "mcp"
+        assert ev["args"] == {"tool": "post_question", "args": {"body": "Which DB?"}}
+
+    def test_mcp_comment_tool_event_namespace_proxy(self):
+        """Namespace proxy → toolName mcp__autoswe_comment, args = {tool, args: {body}}."""
+        ev = _mcp_comment_tool_event("update_progress", "halfway", proxy="namespace")
+        assert ev["toolName"] == "mcp__autoswe_comment"
+        assert ev["args"] == {"tool": "update_progress", "args": {"body": "halfway"}}
+
+    def test_mcp_comment_tool_event_empty_body(self):
+        """An empty body still produces a well-formed event (suppression case)."""
+        ev = _mcp_comment_tool_event("update_progress", "", proxy="direct")
+        assert ev["args"] == {"body": ""}
+
+
+class TestPiFakeMcpFidelity:
+    """Feed PiFake MCP builders through the real PiBackend and assert RunResult.
+
+    Pins the end-to-end path (PiFake → real parser → RunResult) for the three
+    autoswe_comment tools: the tool_execution_start event drives the
+    plan_posted / question_posted flags and the update_progress body drives the
+    progress callback — the same contract the planner's has_mcp branch relies on.
+    """
+
+    def test_script_mcp_plan_sets_plan_posted(self):
+        """script_mcp_plan → RunResult.plan_posted=True, text is tag-free."""
+        fake = PiFake()
+        fake.script_mcp_plan("The plan body.", session_id="pi-plan",
+                             text="Posted the plan to the issue.")
+
+        result = _run(_spec(), fake)
+
+        assert result.plan_posted is True
+        assert result.question_posted is False
+        assert result.session_id == "pi-plan"
+        assert result.text == "Posted the plan to the issue."
+
+    def test_script_mcp_plan_generic_proxy_sets_plan_posted(self):
+        """The generic `mcp` proxy shape also drives plan_posted."""
+        fake = PiFake()
+        fake.script_mcp_plan("The plan body.", session_id="pi-plan-g",
+                             proxy="generic")
+
+        result = _run(_spec(), fake)
+
+        assert result.plan_posted is True
+
+    def test_script_mcp_plan_namespace_proxy_sets_plan_posted(self):
+        """The mcp__autoswe_comment namespace proxy also drives plan_posted."""
+        fake = PiFake()
+        fake.script_mcp_plan("The plan body.", session_id="pi-plan-n",
+                             proxy="namespace")
+
+        result = _run(_spec(), fake)
+
+        assert result.plan_posted is True
+
+    def test_script_mcp_question_sets_question_posted(self):
+        """script_mcp_question → RunResult.question_posted=True."""
+        fake = PiFake()
+        fake.script_mcp_question("Which framework?", session_id="pi-q")
+
+        result = _run(_spec(), fake)
+
+        assert result.question_posted is True
+        assert result.plan_posted is False
+
+    def test_script_mcp_update_progress_fires_progress_callback(self):
+        """script_mcp_update_progress → the progress callback receives the body."""
+        fake = PiFake()
+        fake.script_mcp_update_progress("Running: pytest tests/",
+                                        session_id="pi-p")
+
+        lines: list[str] = []
+        result = _run(_spec(progress_callback=lines.append), fake)
+
+        assert any("Running: pytest tests/" in ln for ln in lines), (
+            f"update_progress body must reach the progress callback; got {lines!r}"
+        )
+        # The body must NOT leak into the plan/question flags.
+        assert result.plan_posted is False
+        assert result.question_posted is False
+
+    def test_script_mcp_update_progress_empty_body_fires_no_body_line(self):
+        """An empty update_progress body fires no body progress line (suppression).
+
+        Pins the AUTOSWE_SUPPRESS_POSTING boundary end-to-end: a minimal-posting
+        server's empty body must not leak a blank progress line to the operator.
+        """
+        fake = PiFake()
+        fake.script_mcp_update_progress("", session_id="pi-p-empty")
+
+        lines: list[str] = []
+        _run(_spec(progress_callback=lines.append), fake)
+
+        # The generic "Tool:" line fires (a callback is present), but no empty
+        # body-derived progress line is emitted.
+        assert not any(ln == "" for ln in lines)
+        assert any(ln.startswith("Tool: ") for ln in lines)

@@ -2159,7 +2159,7 @@ TRANSITIONS: list[dict[str, Any]] = [
     # ---- WI #150: waiting -> planned via MCP post_plan during resume ----
     {
         "name": "waiting_resume_mcp_post_plan",
-        "description": "Task at waiting; user reply resumes plan; Claude calls MCP post_plan -> planned",
+        "description": "Task at waiting; user reply resumes plan; agent calls MCP post_plan -> planned (dual-axis: ClaudeFake honors plan_posted, pi branch maps mcp_tool to script_mcp_plan)",
         "meta": {"mcp_plan_posted": True},
         "start": {
             "issue": {"body": "/plan"},
@@ -2191,7 +2191,7 @@ TRANSITIONS: list[dict[str, Any]] = [
             },
         },
         "claude_responses": [
-            {"text": "Thanks! Here is the plan.", "session_id": "s-plan-42", "subtype": "success", "plan_posted": True},
+            {"text": "Thanks! Here is the plan.", "session_id": "s-plan-42", "subtype": "success", "plan_posted": True, "mcp_tool": "post_plan"},
         ],
         "git_calls": ["create_worktree"],
         "expect": {
@@ -2357,6 +2357,7 @@ PI_TRANSITIONS: list[str] = [
     "fresh_fix_command",                               # Fix phase: --tools read_write allowlist
     "pi_retry_forks_from_pi_checkpoint",               # /retry: pi forks (--fork) from a pi checkpoint
     "retry_no_fork_when_checkpoint_backend_mismatches",  # codex checkpoint vs pi fix → fresh (provenance gate rejects)
+    "waiting_resume_mcp_post_plan",                    # waiting -> planned via MCP post_plan on the pi axis (MCP event drives PLAN_READY, no tag in text)
 ]
 
 
