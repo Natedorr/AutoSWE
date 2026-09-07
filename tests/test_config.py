@@ -2,6 +2,90 @@
 
 
 # ---------------------------------------------------------------------------
+# pi mcp.json builder (autoswe.harness.mcp_config) — Phase 1 of PLAN-pi-mcp.md
+# ---------------------------------------------------------------------------
+
+
+def test_pi_mcp_json_shape():
+    """build_pi_mcp_json emits the plan's Phase 1 shape.
+
+    command/args/cwd point at the comment server module; toolPrefix is "mcp";
+    the three body-only tools are the directTools; settings freeze the tools
+    and disable sampling/elicitation (non-interactive).
+    """
+    from autoswe.harness.mcp_config import build_pi_mcp_json
+
+    cfg = build_pi_mcp_json("/usr/bin/python3", "/opt/autoswe")
+    assert set(cfg.keys()) == {"mcpServers", "settings"}
+
+    server = cfg["mcpServers"]["autoswe_comment"]
+    assert server["command"] == "/usr/bin/python3"
+    assert server["args"] == ["-m", "mcp_servers.autoswe_comment_server"]
+    assert server["cwd"] == "/opt/autoswe"
+    assert server["toolPrefix"] == "mcp"
+    assert server["directTools"] == ["post_plan", "post_question", "update_progress"]
+
+    # No per-task values leak into the file — only stable python path + repo root.
+    assert "env" not in server
+    assert "AUTOSWE_TOKEN" not in str(cfg)
+
+    assert cfg["settings"] == {"freezeDirectTools": True, "sampling": False, "elicitation": False}
+
+
+def test_pi_mcp_comment_server_entry():
+    """pi_mcp_comment_server returns just the autoswe_comment mcpServers value."""
+    from autoswe.harness.mcp_config import pi_mcp_comment_server
+
+    server = pi_mcp_comment_server("/usr/bin/python3", "/opt/autoswe")
+    assert server == {
+        "command": "/usr/bin/python3",
+        "args": ["-m", "mcp_servers.autoswe_comment_server"],
+        "cwd": "/opt/autoswe",
+        "toolPrefix": "mcp",
+        "directTools": ["post_plan", "post_question", "update_progress"],
+    }
+    # It is the same entry build_pi_mcp_json nests under mcpServers.autoswe_comment.
+    from autoswe.harness.mcp_config import build_pi_mcp_json
+    assert build_pi_mcp_json("/usr/bin/python3", "/opt/autoswe")["mcpServers"]["autoswe_comment"] == server
+
+
+def test_pi_mcp_json_bakes_python_not_token():
+    """command is a resolved path, not a ${AUTOSWE_PYTHON} token.
+
+    The pi-mcp-adapter uses `command` verbatim (no ${VAR} interpolation), so a
+    token would fail to spawn. The token is only meaningful in args/env/cwd.
+    """
+    from autoswe.harness.mcp_config import build_pi_mcp_json
+
+    cfg = build_pi_mcp_json("/home/u/.venv/bin/python", "/opt/autoswe")
+    server = cfg["mcpServers"]["autoswe_comment"]
+    assert server["command"] == "/home/u/.venv/bin/python"
+    assert "${" not in server["command"]
+
+
+def test_pi_mcp_json_path():
+    """pi_mcp_json_path joins the agent dir with mcp.json (and expands ~)."""
+    from pathlib import Path
+
+    from autoswe.harness.mcp_config import pi_mcp_json_path
+
+    assert pi_mcp_json_path("/tmp/agent") == Path("/tmp/agent") / "mcp.json"
+    assert str(pi_mcp_json_path("~/.pi/agent")).endswith(".pi/agent/mcp.json")
+
+
+def test_autoswe_repo_root_points_at_mcp_servers():
+    """autoswe_repo_root() is the checkout containing the mcp_servers package."""
+    from autoswe.harness.mcp_config import autoswe_repo_root
+
+    root = autoswe_repo_root()
+    assert root  # non-empty path
+    # The mcp_servers package must be importable from this root — it is where
+    # `python -m mcp_servers.autoswe_comment_server` resolves.
+    import os
+    assert os.path.isdir(os.path.join(root, "mcp_servers"))
+
+
+# ---------------------------------------------------------------------------
 # _as_bool helper (T7 DRY refactor)
 # ---------------------------------------------------------------------------
 

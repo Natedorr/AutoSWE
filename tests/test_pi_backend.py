@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -1364,6 +1365,179 @@ def test_run_api_key_not_injected_as_env(monkeypatch):
     env = mock_exec.call_args[1]["env"]
     # It must NOT be injected under a guessed provider env var name.
     assert env.get("ANTHROPIC_API_KEY") != "sk-secret"
+
+
+# ---------- Phase 1: agent-dir mcp.json + comment-server env routing ----------
+
+
+def _mcp_spec(comment_env=None, agent_dir="/tmp/agent-cfg-mcp"):
+    """A spec whose mcp_servers names autoswe_comment with a per-task env block."""
+    env = {"AUTOSWE_COMMENT_ID": "999", "AUTOSWE_PROVIDER": "github",
+           "AUTOSWE_TOKEN": "ghp_tok", "AUTOSWE_SUPPRESS_POSTING": "1"}
+    if comment_env is not None:
+        env = comment_env
+    return _spec(
+        state={"_harness_cfg": {"backend": "pi", "model": MODEL, "agent_dir": agent_dir}},
+        mcp_servers={"autoswe_comment": {"command": sys.executable, "args": ["-m", "x"],
+                                         "env": env}},
+    )
+
+
+def test_pi_mcp_comment_env_routed_into_subprocess_env():
+    """The autoswe_comment server env is merged into the pi subprocess env.
+
+    Phase 1 routes the server's env into the subprocess (the pi-mcp-adapter
+    inherits pi's process env into the server child) rather than into the
+    mcp.json file — so the file never carries per-task values.
+    """
+    proc = _mock_process(stdout=_jsonl(
+        {"type": "session", "id": "s", "version": 3},
+        {"type": "message_end",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+    ), returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await PiBackend().run(_mcp_spec())
+        return mock_exec.call_args[1]["env"]
+
+    env = asyncio.run(_run())
+    assert env["AUTOSWE_COMMENT_ID"] == "999"
+    assert env["AUTOSWE_PROVIDER"] == "github"
+    assert env["AUTOSWE_TOKEN"] == "ghp_tok"
+    assert env["AUTOSWE_SUPPRESS_POSTING"] == "1"
+
+
+def test_pi_mcp_no_comment_server_no_env_route():
+    """Without autoswe_comment in mcp_servers, no comment env is routed."""
+    proc = _mock_process(stdout=_jsonl(
+        {"type": "session", "id": "s", "version": 3},
+        {"type": "message_end",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+    ), returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        spec = _spec(state={"_harness_cfg": {"backend": "pi", "model": MODEL}})
+        # A different MCP server only — not autoswe_comment.
+        spec.mcp_servers = {"other_server": {"command": "x", "env": {"FOO": "bar"}}}
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await PiBackend().run(spec)
+        return mock_exec.call_args[1]["env"]
+
+    env = asyncio.run(_run())
+    # No autoswe_comment env routed. (FOO is not routed either — only the
+    # autoswe_comment server's env is in scope for Phase 1.)
+    assert "AUTOSWE_COMMENT_ID" not in env
+    assert "AUTOSWE_SUPPRESS_POSTING" not in env
+
+
+def test_pi_mcp_writes_agent_dir_mcp_json(tmp_path):
+    """When autoswe_comment is present, <agent dir>/mcp.json is written with the server.
+
+    The file carries only stable values (python path, repo root) — no per-task
+    env. It merges with any pre-existing file, preserving operator entries.
+    """
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    proc = _mock_process(stdout=_jsonl(
+        {"type": "session", "id": "s", "version": 3},
+        {"type": "message_end",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+    ), returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        spec = _mcp_spec(agent_dir=str(agent_dir))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await PiBackend().run(spec)
+
+    asyncio.run(_run())
+    mcp_json = agent_dir / "mcp.json"
+    assert mcp_json.exists()
+    data = json.loads(mcp_json.read_text())
+    server = data["mcpServers"]["autoswe_comment"]
+    assert server["command"] == sys.executable
+    assert server["args"] == ["-m", "mcp_servers.autoswe_comment_server"]
+    assert server["toolPrefix"] == "mcp"
+    assert server["directTools"] == ["post_plan", "post_question", "update_progress"]
+    # Stable values only — no per-task env leaked into the file.
+    assert "env" not in server
+    assert data["settings"] == {"freezeDirectTools": True, "sampling": False, "elicitation": False}
+
+
+def test_pi_mcp_merges_existing_agent_dir_mcp_json(tmp_path):
+    """A pre-existing mcp.json's other servers and settings are preserved."""
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    agent_dir.joinpath("mcp.json").write_text(json.dumps({
+        "mcpServers": {"other_server": {"command": "other", "args": []}},
+        "settings": {"toolPrefix": "server"},
+    }))
+    proc = _mock_process(stdout=_jsonl(
+        {"type": "session", "id": "s", "version": 3},
+        {"type": "message_end",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+    ), returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        spec = _mcp_spec(agent_dir=str(agent_dir))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await PiBackend().run(spec)
+
+    asyncio.run(_run())
+    data = json.loads((agent_dir / "mcp.json").read_text())
+    # The operator's other server survives the merge.
+    assert "other_server" in data["mcpServers"]
+    # autoSWE adds its own.
+    assert "autoswe_comment" in data["mcpServers"]
+    # Settings are merged: operator's toolPrefix kept, autoSWE's flags added.
+    assert data["settings"]["toolPrefix"] == "server"
+    assert data["settings"]["freezeDirectTools"] is True
+
+
+def test_pi_mcp_write_helper_no_agent_dir_is_noop(tmp_path):
+    """_write_pi_mcp_json('') is a no-op — no agent_dir means no file written.
+
+    When the agent_dir profile field is unset, pi's config lives in the default
+    ~/.pi/agent; autoSWE does not relocate or write there.
+    """
+    from autoswe.harness.backends.pi import _write_pi_mcp_json
+
+    # A blank agent_dir is a no-op: it must not raise or create anything.
+    _write_pi_mcp_json("")
+    _write_pi_mcp_json("   ")
+    # Nothing was created in the temp dir.
+    assert not (tmp_path / "mcp.json").exists()
+
+
+def test_pi_mcp_env_routed_even_without_agent_dir():
+    """The server env is routed into the subprocess even when agent_dir is unset.
+
+    Routing and the file write are independent: the env always reaches the
+    server child via the process env; only the file needs an agent dir.
+    """
+    proc = _mock_process(stdout=_jsonl(
+        {"type": "session", "id": "s", "version": 3},
+        {"type": "message_end",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+    ), returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        spec = _spec(
+            state={"_harness_cfg": {"backend": "pi", "model": MODEL}},  # no agent_dir
+            mcp_servers={"autoswe_comment": {"command": sys.executable,
+                                             "args": [], "env": {"AUTOSWE_COMMENT_ID": "777"}}},
+        )
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await PiBackend().run(spec)
+        return mock_exec.call_args[1]["env"]
+
+    env = asyncio.run(_run())
+    assert env["AUTOSWE_COMMENT_ID"] == "777"
 
 
 # ---------- Progress / MCP / misc result fields ----------

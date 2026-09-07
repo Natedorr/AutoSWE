@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 
 from autoswe.core.logging_utils import log
 from autoswe.harness.backends.base import RunResult, RunSpec
+from autoswe.harness.mcp_config import autoswe_repo_root, pi_mcp_comment_server, pi_mcp_json_path
 
 # Max bytes allowed on stdout/stderr pipes before we truncate and flag the
 # turn as failed.  Prevents pipe-buffer deadlock (~64KB on Linux) and
@@ -142,6 +143,78 @@ def _extract_cost(event: dict) -> float | None:
 
 
 # ---------- Command construction ----------
+
+
+def _write_pi_mcp_json(agent_dir: str) -> None:
+    """Write the autoswe_comment server into the pi agent-dir ``mcp.json``.
+
+    Only called when a run names the ``autoswe_comment`` MCP server. The
+    file is written only when the agent_dir profile field is set (pi's config
+    lives in the default ``~/.pi/agent`` otherwise; autoSWE does not relocate
+    or clobber a host's default agent dir).
+
+    Merge semantics: autoSWE manages only its own ``autoswe_comment`` entry and
+    its own top-level ``settings`` — any other servers or settings an operator
+    put in a shared agent dir are preserved. The ``pi-local`` profile points the
+    agent dir at ``~/.pi/agent``, which may already carry unrelated MCP
+    servers, so a wholesale overwrite would silently drop them. The file only
+    ever carries stable values (python path, repo root) — it does not change
+    between issues, so rewriting it is idempotent.
+
+    Best-effort: a write failure (e.g. the agent dir is read-only) is logged,
+    not raised — Phase 1's acceptance is config generation, and pi still runs
+    fine without the MCP server (its tools just are not yet in the allowlist,
+    which is Phase 2).
+    """
+    if not str(agent_dir).strip():
+        return
+    import sys
+
+    agent_dir = str(agent_dir).strip()
+    path = pi_mcp_json_path(agent_dir)
+    try:
+        os.makedirs(agent_dir, mode=0o700, exist_ok=True)
+    except OSError as e:
+        log(f"[PI] cannot create agent dir {agent_dir} for mcp.json: {e}")
+        return
+
+    try:
+        existing = {}
+        if path.exists():
+            with open(path, encoding="utf-8") as f:
+                existing = json.load(f)
+        if not isinstance(existing, dict):
+            existing = {}
+    except (OSError, json.JSONDecodeError) as e:
+        # A corrupt/unreadable existing file would otherwise crash every pi run;
+        # start fresh rather than die. The autoswe_comment entry is authoritative.
+        log(f"[PI] could not read existing {path} ({e}); rewriting")
+        existing = {}
+
+    servers = existing.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+    # cwd is the autoSWE checkout root (where the mcp_servers package lives),
+    # not pi's subprocess cwd (the target worktree).
+    servers["autoswe_comment"] = pi_mcp_comment_server(sys.executable, autoswe_repo_root())
+    existing["mcpServers"] = servers
+
+    # Preserve operator settings, then ensure autoSWE's own (non-interactive:
+    # freeze direct tools, no sampling/elicitation).
+    settings = existing.get("settings")
+    if not isinstance(settings, dict):
+        settings = {}
+    settings.update({"freezeDirectTools": True, "sampling": False, "elicitation": False})
+    existing["settings"] = settings
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2)
+            f.write("\n")
+        log(f"[PI] wrote autoswe_comment config to {path}")
+    except OSError as e:
+        log(f"[PI] could not write mcp.json at {path}: {e}")
 
 
 def _resolve_pi_executable(cli_path: str | None) -> tuple[str, list[str]]:
@@ -583,6 +656,24 @@ class PiBackend:
         env.update(harness_cfg.get("env") or {})
         if spec.env_overrides:
             env.update(spec.env_overrides)
+
+        # Phase 1 of PLAN-pi-mcp.md: when the run names the autoswe_comment MCP
+        # server, give pi the server config in its agent dir (the
+        # pi-mcp-adapter reads <agent dir>/mcp.json) and route the server's own
+        # env into this subprocess instead of into the file. The adapter
+        # inherits pi's process env into the MCP server child (resolveEnv), so
+        # the per-task vars set here reach the server without the config file
+        # ever changing between issues. The file only carries stable values.
+        # (Phase 2 adds the mcp__autoswe_comment_* tool names to the allowlist
+        # and parses the tool_execution events; until then the server is set up
+        # but its tools are not yet in the --tools allowlist.)
+        mcp_servers = spec.mcp_servers or {}
+        comment_cfg = mcp_servers.get("autoswe_comment") if isinstance(mcp_servers, dict) else None
+        if isinstance(comment_cfg, dict):
+            server_env = comment_cfg.get("env") or {}
+            if isinstance(server_env, dict):
+                env.update(server_env)
+            _write_pi_mcp_json(agent_dir)
 
         log(
             f"[PI] running model={model} "
