@@ -443,9 +443,40 @@ fake.script_fail(session_id="s-err", error_msg="timeout")
 fake.script_killed(session_id="s-kill")
 ```
 
-**`.calls` tracking:** Each pi command is parsed and recorded for flag/session/tool assertions (e.g. the `--tools` allowlist, the `--session`/`--session-id`/`--fork` session flags).
+**MCP comment fixtures (Phase 2 of `docs/autoswe/PLAN-pi-mcp.md`).** The pi-mcp-adapter's
+`tool_execution_start` events for the `autoswe_comment` server exist in three
+shapes, and the fake's builders pin all three so the real parser's
+classification (`pi.py:_classify_mcp_comment_call`) stays covered:
 
-**Fidelity guard:** `tests/test_pi_fake.py` feeds PiFake `--mode json` lines through the real `PiBackend` and asserts the resulting `RunResult`. This pins the fake to the real parser — if the pi stream shape changes, the fidelity test fails before transitions do.
+| Builder / fixture | `toolName` | `args` | `proxy=` |
+|---|---|---|---|
+| direct (the spike-pi-mcp.md fact-1/3 shape; `body` verbatim) | `mcp__autoswe_comment_<tool>` | `{"body": ...}` | `"direct"` |
+| generic `mcp` proxy (cold-cache fallback) | `"mcp"` | `{"tool": <tool>, "args": {"body": ...}}` | `"generic"` |
+| `mcp__autoswe_comment` namespace proxy (cold-cache fallback) | `"mcp__autoswe_comment"` | `{"tool": <tool>, "args": {"body": ...}}` | `"namespace"` |
+
+The tool event is emitted right before the assistant message blocks of the
+scripted response, so the real parser sets the resulting `RunResult` flags:
+`post_plan` → `plan_posted`, `post_question` → `question_posted`,
+`update_progress` → progress callback.
+
+```python
+fake = PiFake()
+# Warm-cache shape: the direct mcp__autoswe_comment_post_plan tool.
+fake.script_mcp_plan("## Plan", session_id="s-plan")
+# Cold-cache shape: same call through the generic mcp proxy.
+fake.script_mcp_plan("## Plan", session_id="s-plan-2", proxy="generic")
+# Namespace proxy + question / progress variants:
+fake.script_mcp_question("What framework?", session_id="s-plan-3", proxy="namespace")
+fake.script_mcp_update_progress("Reading files...")
+# Or hand-roll any shape (the fake's _mcp_comment_tool_event / _tool_execution_start
+# builders are the fixture of record):
+fake.script_response("", session_id="s1",
+    tool_event=pi_fake._mcp_comment_tool_event("post_plan", "## Plan", "direct"))
+```
+
+**`.calls` tracking:** Each pi command is parsed and recorded for flag/session/tool assertions (e.g. the `--tools` allowlist, the `--session`/`--session-id`/`--fork` session flags). When a run names the `autoswe_comment` server, the assertion surface includes the three `mcp__autoswe_comment_*` names appended to `--tools` for every mode (`tests/test_pi_backend.py::test_tools_mcp_comment_adds_three_names` and friends pin that).
+
+**Fidelity guard:** `tests/test_pi_fake.py` feeds PiFake `--mode json` lines through the real `PiBackend` and asserts the resulting `RunResult` — including the direct + proxy `tool_execution_start` fixtures above (the plan/question/progress flags must come out of the genuine parser, not the fake). This pins the fake to the real parser — if the pi stream shape changes, the fidelity test fails before transitions do.
 
 ### Backend Axis in Scenario Harness
 

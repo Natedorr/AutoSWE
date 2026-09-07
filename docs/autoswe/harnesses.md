@@ -327,7 +327,74 @@ variables; for local providers such as Ollama, configure the model via
 - `cli_path`: Path to the pi binary (optional; otherwise resolved via `shutil.which("pi")`, with a Windows `.cmd`/`.bat` shim invoked through `cmd /c`)
 - `env`: Extra environment variables (a `{key: value}` map) merged into the `pi --mode json` subprocess (optional). User values win over the named fields (e.g. `PI_CODING_AGENT_DIR` from `agent_dir`); see [Per-profile `env`](#per-profile-env)
 
-**Capabilities:** `mode`, `resume`, `session_fork`, `progress_stream`.
+**Capabilities:** `mode`, `mcp`, `resume`, `session_fork`, `progress_stream`.
+
+**MCP comment posting via the pi-mcp-adapter.** When a run's `spec.mcp_servers`
+names the `autoswe_comment` server, pi reaches it through the third-party
+`pi-mcp-adapter` (the pi-native MCP extension; see
+[spike-pi-mcp.md](spike-pi-mcp.md) for the live-run record this section rests
+on). The mechanism:
+
+- **Agent-dir `mcp.json`, not a worktree `.mcp.json`.** `PiBackend` writes the
+  `autoswe_comment` server into `<agent dir>/mcp.json` (the `agent_dir` profile
+  field; `autoswe/harness/mcp_config.py:build_pi_mcp_json()` builds the dict,
+  `pi.py:_write_pi_mcp_json` merges it in). A `.mcp.json` in the target
+  worktree would pollute the repo under test and trip project trust. The merge
+  is entry-scoped: autoSWE owns only its `autoswe_comment` server entry and its
+  own top-level `settings` (`freezeDirectTools`, `sampling: false`,
+  `elicitation: false`) — other servers/settings an operator left in a shared
+  agent dir are preserved.
+- **The `--tools` allowlist gains the three direct names for every mode.**
+  With `toolPrefix: "mcp"` the adapter surfaces the direct tools as
+  `mcp__autoswe_comment_post_plan` / `_post_question` / `_update_progress`.
+  pi's `--tools` is a *hard* allowlist — an MCP tool not listed is not in the
+  model's tool set at all — so `_tools_for_spec` appends all three names to the
+  mode-derived allowlist (a `plan`/`read_only` run still needs them even
+  though its base set is read-only).
+- **Stream parsing.** `tool_execution_start` events are classified by
+  `pi.py:_classify_mcp_comment_call` into the same three tools across the
+  shapes the adapter can emit: the **direct** name (`toolName` is
+  `mcp__autoswe_comment_<tool>`, `args` carries `body`), the **generic `mcp`
+  proxy** (`toolName: "mcp"`, `args: {tool, args: {body}}`), and the
+  **`mcp__autoswe_comment` namespace proxy** (bare namespace `toolName`, same
+  `{tool, args}` shape). `post_plan` → `RunResult.plan_posted`,
+  `post_question` → `question_posted`, `update_progress` → progress callback.
+  Parsing the two proxy shapes is a deliberate fallback: on a *cold* MCP cache
+  (no `autoswe_comment` entry in `<agent dir>/mcp-cache.json`) the adapter
+  serves the proxy shapes instead of the direct tools, so plan/question
+  detection keeps working instead of silently reverting to `<AUTOSWE_PLAN>`
+  tag-scraping. Because the `mcp` capability is advertised,
+  `planner.py`'s `has_mcp` branch (`autoswe/harness/planner.py:104`) turns on
+  for pi.
+
+**The env-vs-config-hash rule (spells out what goes where — it silently
+regresses otherwise).** The agent-dir `mcp.json` is matched/hashed by the
+adapter, and its `command`/`args`/`cwd`/`env` values are stable for the whole
+host (the resolved Python path, the autoSWE checkout root as `cwd`) — the file
+only ever carries values that do **not** change between issues, so rewriting
+it is idempotent and it is written once per host. The *per-task* values the
+server needs (the comment id, owner/repo, issue number, PAT, provider — the
+server's `env` block built by `mcp_config.build_mcp_comment_server`) must
+**not** go into that file: they would change the file every issue (and a
+changed config re-triggers the adapter's hash/match cycle). Instead
+`PiBackend` merges that `env` block into the **`pi --mode json` subprocess env**
+(`pi.py:_run_async`), and the adapter's `resolveEnv` seeds the MCP server
+child from pi's process env — so the per-task vars reach the server without
+the config file ever changing. If this ever regresses (per-task values baked
+into `mcp.json`, or the env block not merged into the subprocess env), the
+server starts with empty/`None` identity vars and comment posting fails or
+posts to the wrong thread, with no error in the pi stream — check
+`_write_pi_mcp_json` / `build_pi_mcp_json` (stable values only) and the
+`server_env` merge in `_run_async` when touching this path.
+
+**Cold-start warm-up.** A brand-new agent dir has no `mcp-cache.json` entry, so
+the first real run uses the proxy shapes. `pi.py:warm_up_mcp_cache` (driven by
+`pi_warmup_targets` over the harnesses.json profiles that pair `backend: pi`
+with an `agent_dir`) stages the `mcp.json` and runs pi once against a trivial
+prompt with the comment server named — the adapter connects at startup and
+writes the cache entry. `PiBackend` also logs a loud
+`[WARN][PI] cold MCP cache` preflight when the cache lacks a usable
+`autoswe_comment` entry, naming the run that will fall back.
 
 **Real read-only enforcement (the big difference from Codex).** pi *does*
 advertise the `mode` capability: a tool **allowlist** (`--tools`) over the
@@ -352,9 +419,7 @@ on it indefinitely.
 `spec.extra_tools` appends to the allowlist; `spec.disallowed_tools_override`
 adds to the `--exclude-tools` denylist.
 
-**Capabilities (not yet supported):** `mcp` (no MCP comment posting — the pi MCP
-flag on this build comes from a third-party proxy that hides tool names, so the
-planner falls back to text parsing), `can_use_tool` (no per-tool runtime
+**Capabilities (not yet supported):** `can_use_tool` (no per-tool runtime
 callback), `plan_permission` (no dedicated plan mode), `plan_file` (no native
 plan file — the planner's `~/.claude/plans` filesystem-scan fallback stays
 skipped), `structured_output` (pi has no JSON-Schema-validated output, so
@@ -407,9 +472,9 @@ There is no price table analogous to `codex_pricing.py`.
 **Known limitations:**
 - `RunSpec.max_turns` is **not honored** — pi has no turn cap (the guard is the wall-clock timeout, `timeout` profile field / `AGENT_TIMEOUT`).
 - **Any `isError` tool result flips the run to `error`.** A tool-result event with `isError: true` sets the run's error flag (mirroring how `extension_error` does), so a rc-0 run that tripped a failing tool — even a routine one like a `grep` that matched nothing — returns `subtype="error"` rather than `"success"`. Accepted per the spec ("`extension_error` and `isError` set the error flag"); the tradeoff is that a run that completed its work but had a nonzero tool exit can be marked failed.
-- **No MCP / AskUserQuestion / structured output** (see the "Capabilities (not yet supported)" bullet above) — plan/review keep their read-only guarantee via the tool allowlist, but comment posting and structured verdicts fall back to the text-pattern paths.
+- **No AskUserQuestion / structured output** (see the "Capabilities (not yet supported)" bullet above) — plan/review keep their read-only guarantee via the tool allowlist, but structured verdicts fall back to the text-pattern paths.
 - ``plan_file_path`` is always ``None`` — pi doesn't write a native plan file (the planner's `~/.claude/plans/` scan stays skipped; the `plan_file` capability is not advertised).
-- ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting.
+- ``plan_posted`` / ``question_posted`` are set from the `autoswe_comment` MCP `tool_execution_start` events when a run names that server (direct or proxy shapes — see the "MCP comment posting via the pi-mcp-adapter" section above); they stay ``False`` otherwise.
 - Duration is tracked via ``time.monotonic()`` locally.
 
 ### Shared RunSpec → RunResult contract (backends/base.py)
