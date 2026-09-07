@@ -15,6 +15,19 @@ Confirm the model-visible name is exactly `mcp__autoswe_comment_post_plan`, that
 survives a `--tools` allowlist, and that `tool_execution_start.args` carries `body`
 verbatim in `--mode json`. Everything below assumes these three.
 
+**Status: done (2026-09-07).** All three facts confirmed on a live `pi --mode json`
+run (pi 0.84.4, pi-mcp-adapter 2.31.0) — full record in
+[`spike-pi-mcp.md`](spike-pi-mcp.md). Two corrections to the assumptions below were
+found and are folded into the Phase 1 shape actually implemented:
+
+- `command` is **not** `${VAR}`-interpolated by the adapter (only `args`/`env`/`cwd`
+  are), so the resolved Python path is baked into `command` rather than a
+  `${AUTOSWE_PYTHON}` token.
+- the shipped `autoswe_comment_server.py` does not answer `tools/list` under the
+  pinned `mcp>=1.23.0,<2` (only `call_tool` is registered), so the direct tools do
+  not register for free — see the "Correction" note in the spike doc; Phase 2 must
+  address this before it can rely on the three names existing.
+
 ### Phase 1 — config, not code
 
 Generate `<agent dir>/mcp.json` — not `.mcp.json` in the target worktree, which would
@@ -24,15 +37,16 @@ is the natural home:
 
 ```json
 {"mcpServers": {"autoswe_comment": {
-    "command": "${AUTOSWE_PYTHON}", "args": ["-m", "mcp_servers.autoswe_comment_server"],
-    "cwd": "${AUTOSWE_REPO_ROOT}", "toolPrefix": "mcp",
+    "command": "<resolved python path>", "args": ["-m", "mcp_servers.autoswe_comment_server"],
+    "cwd": "<autoSWE checkout root>", "toolPrefix": "mcp",
     "directTools": ["post_plan", "post_question", "update_progress"]}},
    "settings": {"freezeDirectTools": true, "sampling": false, "elicitation": false}}
 ```
 
-Only stable values interpolate here (python path, repo root). `mcp_config.py` keeps
+Only stable values go in here (python path, repo root). `mcp_config.py` keeps
 building the same dict it builds today; `PiBackend` routes its env block into the
-subprocess env instead of into this file.
+subprocess env instead of into this file (the adapter's `resolveEnv` seeds the MCP
+server child from pi's process env, so per-task vars set on pi reach the server).
 `mcp_servers/autoswe_comment_server.py` is untouched — same tools, same provider
 tracker, same redaction, both backends.
 
