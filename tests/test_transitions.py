@@ -39,6 +39,16 @@ from tests.scenarios.transitions import (
 
 transition_names = [row["name"] for row in TRANSITIONS]
 
+# The three direct MCP comment tools, in the order pi appends them to the
+# --tools allowlist when the dispatch carries a sticky progress comment
+# (issue #226). Kept here so the plan/fix allowlist assertions read clearly
+# instead of as one long literal string.
+_MCP_COMMENT_TOOLS = (
+    "mcp__autoswe_comment_post_plan,"
+    "mcp__autoswe_comment_post_question,"
+    "mcp__autoswe_comment_update_progress"
+)
+
 
 def _get_row(name: str) -> dict:
     for row in TRANSITIONS:
@@ -357,10 +367,13 @@ def test_transition_pi(
 
     if transition_name == "fresh_plan_command":
         # Real read-only enforcement: the --tools allowlist is the read-only
-        # recipe. This is the pi ≠ codex distinction (codex emits no --tools).
+        # recipe, extended with the three MCP comment tools when the dispatch
+        # carries a sticky progress comment (_comment_id, issue #226). This is
+        # the pi ≠ codex distinction (codex emits no --tools).
         assert call["is_fresh"] is True
-        assert call.get("tools") == "read,grep,find,ls", (
-            f"plan must pin the read-only --tools allowlist; got {call.get('tools')!r}"
+        assert call.get("tools") == "read,grep,find,ls," + _MCP_COMMENT_TOOLS, (
+            f"plan must pin the read-only --tools allowlist (+MCP comment tools); "
+            f"got {call.get('tools')!r}"
         )
         # No loud-degrade warning: pi advertises "mode", so the planner must
         # NOT log the "no read-only enforcement" degrade line.
@@ -398,18 +411,21 @@ def test_transition_pi(
         # Plan resume on the pi axis: a waiting task resumes its session
         # (--session <id>, not a fresh --session-id) and the MCP post_plan
         # tool_execution_start event drives PLAN_READY even though the
-        # assistant text carries no <AUTOSWE_PLAN> tag. The parser's
-        # classification is allowlist-independent, so this works even though
-        # SILENT_REPORTING leaves spec.mcp_servers empty (no _comment_id) and
-        # the MCP names stay off the --tools allowlist.
+        # assistant text carries no <AUTOSWE_PLAN> tag. Since issue #226 the
+        # dispatch carries the sticky comment _comment_id, so the three
+        # mcp__autoswe_comment_* tools are appended to the read-only recipe —
+        # and the parser's classification is allowlist-independent, so the
+        # post_plan event still drives PLAN_READY.
         assert call["is_resume"] is True
         assert call.get("resume") == "s-plan-42", (
             f"plan resume must re-open the checkpoint session; got {call.get('resume')!r}"
         )
         assert call["is_fresh"] is False
-        # The read-only plan recipe stays exact (no MCP names appended).
-        assert call.get("tools") == "read,grep,find,ls", (
-            f"plan must pin the read-only --tools allowlist; got {call.get('tools')!r}"
+        # The read-only plan recipe plus the MCP comment tools (sticky comment
+        # present in this dispatch).
+        assert call.get("tools") == "read,grep,find,ls," + _MCP_COMMENT_TOOLS, (
+            f"plan must pin the read-only --tools allowlist (+MCP comment tools); "
+            f"got {call.get('tools')!r}"
         )
 
     # (The per-row pi call shape above is the authoritative assertion; the
