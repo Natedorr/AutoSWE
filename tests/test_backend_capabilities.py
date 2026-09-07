@@ -198,11 +198,11 @@ def test_legacy_path_without_mode():
 
 
 def test_pi_backend_capabilities_exact():
-    """PiBackend advertises exactly mode + resume + session_fork + progress_stream."""
+    """PiBackend advertises exactly mode + resume + session_fork + progress_stream + mcp."""
     from autoswe.harness.backends.pi import PiBackend
 
     caps = PiBackend.capabilities()
-    assert caps == {"mode", "resume", "session_fork", "progress_stream"}
+    assert caps == {"mode", "resume", "session_fork", "progress_stream", "mcp"}
 
 
 def test_pi_backend_has_mode_capability():
@@ -511,8 +511,8 @@ def test_backend_has_capability_claude_code():
 def test_backend_has_capability_pi():
     """backend_has_capability returns correct values for a pi profile.
 
-    pi advertises mode + resume + session_fork + progress_stream and nothing
-    else (no MCP, no per-tool approval, no plan_file, no structured_output).
+    pi advertises mode + resume + session_fork + progress_stream + mcp and
+    nothing else (no per-tool approval, no plan_file, no structured_output).
     """
     from autoswe.harness.runner import backend_has_capability
 
@@ -521,7 +521,7 @@ def test_backend_has_capability_pi():
     assert backend_has_capability(harness, "resume")
     assert backend_has_capability(harness, "session_fork")
     assert backend_has_capability(harness, "progress_stream")
-    assert not backend_has_capability(harness, "mcp")
+    assert backend_has_capability(harness, "mcp")
     assert not backend_has_capability(harness, "can_use_tool")
     assert not backend_has_capability(harness, "plan_permission")
     assert not backend_has_capability(harness, "plan_file")

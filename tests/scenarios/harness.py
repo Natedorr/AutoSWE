@@ -352,14 +352,31 @@ def patched_world(
         cx_fake = None
         pi_fake = PiFake()
         cl_fake = None
-        # Feed the existing claude_responses dicts through PiFake.  pi has no
-        # MCP, so only the text/session/subtype fields are meaningful.
+        # Feed the existing claude_responses dicts through PiFake.
+        # A response dict may carry an ``"mcp_tool"`` key naming one of the
+        # autoswe_comment direct tools ("post_plan" / "post_question") so a
+        # transition row can script a ``tool_execution_start`` MCP event; the
+        # row's "text" is then the tag-free assistant text that accompanied the
+        # tool call (the plan body is on the thread via MCP, not in the text).
         for resp in claude_responses:
-            pi_fake.script_response(
-                resp["text"],
-                session_id=resp.get("session_id", "s1"),
-                subtype=resp.get("subtype", "success"),
-            )
+            mcp_tool = resp.get("mcp_tool")
+            if mcp_tool:
+                # The script_mcp_* builders are success-only (the MCP tool call
+                # is the whole point of the row), so no subtype is threaded.
+                scripter = {
+                    "post_plan": pi_fake.script_mcp_plan,
+                    "post_question": pi_fake.script_mcp_question,
+                }[mcp_tool]
+                scripter(
+                    resp["text"],
+                    session_id=resp.get("session_id", "s1"),
+                )
+            else:
+                pi_fake.script_response(
+                    resp["text"],
+                    session_id=resp.get("session_id", "s1"),
+                    subtype=resp.get("subtype", "success"),
+                )
     else:
         cx_fake = None
         pi_fake = None

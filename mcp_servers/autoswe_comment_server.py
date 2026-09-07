@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from mcp.types import TextContent
@@ -52,6 +53,16 @@ except ImportError:
     _MCP_V2 = False
 
 BOT_MARKER = "<!-- autoswe-bot -->"
+
+# The three tools all take a single `body: str`.  Used by the low-level mcp 1.x
+# path's hand-rolled tools/list + dispatching tools/call handler (see the
+# _MCP_V2 gate below): the 1.x Server registers neither from the @tool()
+# decorator the way the high-level MCPServer does.
+_BODY_SCHEMA = {
+    "type": "object",
+    "properties": {"body": {"type": "string"}},
+    "required": ["body"],
+}
 
 
 def _tag(body: str) -> str:
@@ -102,10 +113,9 @@ def _update_comment(comment_id: str, body: str) -> None:
     tracker.update_comment(ISSUE_NUMBER, int(comment_id), _tag(body))
 
 
-# ---- MCP Tools (registered on the version-specific `server` from the header) ----
+# ---- MCP Tools ----
 
 
-@_tool()
 async def update_progress(*, body: str) -> list[TextContent]:
     """Update the sticky progress comment with current tool-use status.
 
@@ -126,7 +136,6 @@ async def update_progress(*, body: str) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error updating progress: {e}")]
 
 
-@_tool()
 async def post_plan(*, body: str) -> list[TextContent]:
     """Post the implementation plan as a comment on the issue.
 
@@ -144,7 +153,6 @@ async def post_plan(*, body: str) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error posting plan: {e}")]
 
 
-@_tool()
 async def post_question(*, body: str) -> list[TextContent]:
     """Post a question to the user as a comment on the issue.
 
@@ -160,6 +168,53 @@ async def post_question(*, body: str) -> list[TextContent]:
         return [TextContent(type="text", text=f"Question posted (comment_id={cid})")]
     except Exception as e:
         return [TextContent(type="text", text=f"Error posting question: {e}")]
+
+
+# The name -> (handler, description) map.  The three tools all share the
+# ``_BODY_SCHEMA`` input shape, so one dispatch table covers registration and
+# dispatch on the low-level 1.x path.
+_TOOLS: dict[str, tuple[Callable[..., Awaitable[list[TextContent]]], str]] = {
+    "update_progress": (update_progress, "Update the sticky progress comment with current tool-use status."),
+    "post_plan": (post_plan, "Post the implementation plan as a comment on the issue."),
+    "post_question": (post_question, "Post a question to the user as a comment on the issue."),
+}
+
+
+# ---- Registration ----
+#
+# The mcp 2.x high-level server auto-registers both tools/list and tools/call
+# from the @server.tool() decorators, so register each tool individually there.
+#
+# The mcp 1.x low-level Server is different in two ways, both of which break a
+# tools/list-based client like pi-mcp-adapter, so the 1.x path registers by hand:
+#   * it does NOT answer tools/list from the @call_tool() decorator — clients
+#     that discover tools that way see zero tools.
+#   * @call_tool() overwrites the single CallToolRequest handler slot on every
+#     registration, so three separate @call_tool() tools leave only the LAST
+#     one reachable (every call routes to it) — the others are silently dropped.
+# So on 1.x we register one dispatching tools/call handler (routed via _TOOLS)
+# plus a hand-rolled tools/list, instead of three colliding decorators.
+if _MCP_V2:
+    for _name in _TOOLS:
+        @_tool()
+        async def _v2_tool(name=_name, *, body: str) -> list[TextContent]:
+            return await _TOOLS[name][0](body)
+else:
+    @server.list_tools()
+    async def _list_tools() -> list:
+        from mcp.types import Tool
+
+        return [
+            Tool(name=name, description=desc, inputSchema=_BODY_SCHEMA)
+            for name, (_, desc) in _TOOLS.items()
+        ]
+
+    @server.call_tool()
+    async def _dispatch_call_tool(name: str, arguments: dict) -> list[TextContent]:
+        handler = _TOOLS.get(name, (None,))[0]
+        if handler is None:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        return await handler(body=str(arguments.get("body", "")))
 
 
 # ---- Entry point ----

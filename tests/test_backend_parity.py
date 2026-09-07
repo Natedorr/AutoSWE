@@ -388,18 +388,21 @@ class TestCapabilityHonesty:
         )
 
     def test_pi_capabilities(self):
-        """PiBackend advertises mode + resume + session_fork + progress_stream.
+        """PiBackend advertises mode + resume + session_fork + progress_stream + mcp.
 
         pi does REAL read-only enforcement via the ``--tools`` allowlist
         derived from RunSpec.mode (so it claims "mode", unlike Codex), and it
-        has a fork primitive (``--fork``) that Codex lacks.  It has no MCP,
-        no per-tool approval callback (``ask_question`` is excluded), and no
+        has a fork primitive (``--fork``) that Codex lacks.  Phase 2 adds the
+        "mcp" capability: pi reaches the autoswe_comment server through the
+        pi-mcp-adapter and parses its tool_execution_start events into the
+        RunResult.plan_posted / question_posted flags.  It still has no
+        per-tool approval callback (``ask_question`` is excluded) and no
         plan-file / structured-output support.
         """
         from autoswe.harness.backends.pi import PiBackend
 
         caps = PiBackend.capabilities()
-        expected = {"mode", "resume", "session_fork", "progress_stream"}
+        expected = {"mode", "resume", "session_fork", "progress_stream", "mcp"}
         assert caps == expected, (
             f"PiBackend capabilities changed: got {caps}"
         )
@@ -408,13 +411,17 @@ class TestCapabilityHonesty:
         )
 
     def test_pi_lacks_mcp_and_claude_exclusives(self):
-        """pi must NOT advertise capabilities it doesn't support."""
+        """pi must NOT advertise capabilities it doesn't support.
+
+        "mcp" is now supported (Phase 2) and therefore absent from this set;
+        the remaining Claude-exclusive capabilities stay unsupported.
+        """
         from autoswe.harness.backends.pi import PiBackend
 
         caps = PiBackend.capabilities()
-        # No MCP transport, no per-tool approval (ask_question is excluded in
-        # --mode json), no plan-file or structured-output support.
-        unsupported = {"mcp", "can_use_tool", "plan_permission", "plan_file",
+        # No per-tool approval (ask_question is excluded in --mode json), no
+        # plan-file or structured-output support.  "mcp" is now advertised.
+        unsupported = {"can_use_tool", "plan_permission", "plan_file",
                        "structured_output"}
         overlap = caps & unsupported
         assert not overlap, (
@@ -608,7 +615,7 @@ class TestRunnerDispatcherParity:
 
         pi advertises "mode" (real --tools allowlist enforcement) and
         "session_fork" (--fork) — both gaps Codex leaves open — plus
-        resume + progress_stream.  It has no MCP and no per-tool approval.
+        resume + progress_stream + mcp (Phase 2).  It has no per-tool approval.
         """
         from autoswe.harness.runner import backend_has_capability
 
@@ -617,7 +624,7 @@ class TestRunnerDispatcherParity:
         assert backend_has_capability(harness, "resume")
         assert backend_has_capability(harness, "session_fork")
         assert backend_has_capability(harness, "progress_stream")
-        assert not backend_has_capability(harness, "mcp")
+        assert backend_has_capability(harness, "mcp")
         assert not backend_has_capability(harness, "can_use_tool")
         assert not backend_has_capability(harness, "plan_permission")
         assert not backend_has_capability(harness, "plan_file")

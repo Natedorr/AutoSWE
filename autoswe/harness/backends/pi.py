@@ -7,8 +7,13 @@ the official SDK is TypeScript-only, so the CLI is the transport (the same
 shape as the Codex backend).  ``pi --mode json "<prompt>"`` emits the stream
 and exits on completion (``docs/pi/json.md``).
 
-**Capabilities (Phase 1):** ``mode``, ``resume``, ``session_fork``,
-``progress_stream``.
+**Capabilities (Phase 2):** ``mode``, ``resume``, ``session_fork``,
+``progress_stream``, ``mcp``.  The ``mcp`` capability is gated on the
+pi-mcp-adapter (which reads ``<agent dir>/mcp.json``); it surfaces the
+``autoswe_comment`` server's three tools as
+``mcp__autoswe_comment_post_plan`` / ``_post_question`` /
+``_update_progress`` when the run's ``spec.mcp_servers`` names that server
+(see ``_MCP_COMMENT_TOOL_NAMES``).
 
 Unlike Codex, pi performs **real read-only enforcement**: a tool *allowlist*
 (``--tools``) over the built-in tools is derived from ``RunSpec.mode``, so a
@@ -74,6 +79,37 @@ _DEFAULT_TOOLS = _MODE_TOOLS["read_write"]
 # unconditionally, independent of spec.disallowed_tools_override.
 _ALWAYS_EXCLUDED_TOOLS = ("ask_question",)
 
+# The autoswe_comment MCP server's three tools as named by the pi-mcp-adapter
+# when the agent-dir mcp.json has toolPrefix "mcp" (the Phase 1 shape):
+# mcp__<server>_<tool>  ->  mcp__autoswe_comment_<tool>.
+#
+# pi's --tools is a HARD allowlist (spike-pi-mcp.md, fact 2): an MCP tool that
+# is not listed is not in the model's tool set at all. So when a run names the
+# autoswe_comment server we must add these to the allowlist for EVERY mode — a
+# plan/read_only run still needs post_plan/post_question/update_progress even
+# though its base set is read-only.
+_MCP_COMMENT_TOOL_NAMES: tuple[str, ...] = (
+    "mcp__autoswe_comment_post_plan",
+    "mcp__autoswe_comment_post_question",
+    "mcp__autoswe_comment_update_progress",
+)
+# The namespace proxy for the server (pi-mcp-adapter: "mcp__" + the server
+# name, dashes -> underscores; "autoswe_comment" passes through unchanged).
+# It is a container that takes {tool, args} just like the generic "mcp" tool.
+_MCP_COMMENT_NAMESPACE_PROXY_NAME = "mcp__autoswe_comment"
+
+
+def _mcp_comment_active(spec: RunSpec) -> bool:
+    """True when the run's ``spec.mcp_servers`` names the autoswe_comment server.
+
+    This is the Phase 2 trigger: it both injects the three tool names into the
+    --tools allowlist (via _tools_for_spec) and, when observed on the stream,
+    feeds the RunResult.plan_posted / question_posted flags.
+    """
+    servers = spec.mcp_servers or {}
+    cfg = servers.get("autoswe_comment") if isinstance(servers, dict) else None
+    return isinstance(cfg, dict)
+
 
 # ---------- Streaming accumulator ----------
 
@@ -101,6 +137,13 @@ class _PiAccumulator:
     # Completion marker: set when agent_end is seen.  Used only for logging —
     # the subtype is derived from the exit code, not this flag.
     agent_end: bool = False
+    # MCP already-posted flags (Phase 2).  Set when a tool_execution_start
+    # event names one of the autoswe_comment tools: post_plan -> plan_posted,
+    # post_question -> question_posted.  These feed RunResult.plan_posted /
+    # question_posted so the planner's has_mcp branch sees the comment is
+    # already on the thread and does not re-post it.
+    plan_posted: bool = False
+    question_posted: bool = False
     # Per-contentIndex accumulated delta text.  Fallback source for
     # RunResult.text when no message_end carried assistant text (e.g. the
     # process was killed mid-stream).  Keyed by the delta's contentIndex so a
@@ -245,11 +288,15 @@ def _resolve_pi_executable(cli_path: str | None) -> tuple[str, list[str]]:
 
 
 def _tools_for_spec(spec: RunSpec) -> list[str]:
-    """Derive the --tools allowlist from RunSpec.mode + extra_tools.
+    """Derive the --tools allowlist from RunSpec.mode + MCP + extra_tools.
 
     The base allowlist comes from spec.mode (falling back to the read_write
-    set when mode is unset).  spec.extra_tools appends additional tools.
-    Duplicates are collapsed while preserving order.
+    set when mode is unset).  When the run names the ``autoswe_comment`` MCP
+    server, the three ``mcp__autoswe_comment_*`` tool names are added for
+    every mode (pi's --tools is a hard allowlist, so they must be listed to
+    be visible to the model at all — see _MCP_COMMENT_TOOL_NAMES).
+    spec.extra_tools appends additional tools. Duplicates are collapsed while
+    preserving order.
 
     On Windows, read_write additionally grants ``powershell`` (the native
     shell built-in) so a Windows host keeps its shell alongside bash.
@@ -261,6 +308,10 @@ def _tools_for_spec(spec: RunSpec) -> list[str]:
         # to the cross-platform set (the native shell built-in).
         if "powershell" not in base:
             base.append("powershell")
+    if _mcp_comment_active(spec):
+        for tool in _MCP_COMMENT_TOOL_NAMES:
+            if tool not in base:
+                base.append(tool)
     for tool in spec.extra_tools or []:
         if tool and tool not in base:
             base.append(tool)
@@ -393,6 +444,93 @@ def _assistant_text(message: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
+# The three autoswe_comment tools and the accumulator flag / progress action
+# each drives.  ``post_plan`` / ``post_question`` set the RunResult
+# already-posted flags (the comment is already on the thread); ``update_progress``
+# fires the live progress callback with its body.
+_MCP_COMMENT_TOOL_KINDS: tuple[tuple[str, str], ...] = (
+    ("post_plan", "plan"),
+    ("post_question", "question"),
+    ("update_progress", "progress"),
+)
+
+
+def _coerce_args(value) -> dict:
+    """Coerce a tool-call ``args`` value into a dict.
+
+    The pi-mcp-adapter accepts a proxy's ``args`` as either an object or a JSON
+    string ("object args; JSON string also accepted" — the generic ``mcp`` tool's
+    documented shape), so the nested args may arrive either way.  Returns ``{}``
+    for anything that is not (or does not parse into) a dict.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _classify_mcp_comment_call(event: dict) -> tuple[str | None, str]:
+    """Classify a tool_execution event as an autoswe_comment call.
+
+    Returns ``(kind, body)`` where *kind* is ``"plan"``, ``"question"``,
+    ``"progress"``, or ``None`` when the event is not one of the three
+    autoswe_comment tools; *body* is the tool's ``body`` argument (``""`` when
+    absent).
+
+    Three shapes reach here (spike-pi-mcp.md):
+      * **direct** — ``toolName`` is one of the three fully-prefixed names
+        (``mcp__autoswe_comment_post_plan`` …); ``args`` carries ``body``
+        directly.
+      * **generic ``mcp`` proxy** — ``toolName`` is ``"mcp"``; ``args`` is
+        ``{tool: <name>, args: {body: ...}}``.
+      * **``mcp__autoswe_comment`` namespace proxy** — ``toolName`` is the
+        bare namespace name; ``args`` is the same ``{tool, args}`` shape.
+
+    The direct names start with ``mcp__`` too, so they are matched against the
+    exact known set FIRST; only the two proxy containers (``"mcp"`` and the
+    bare namespace name) take the ``{tool, args}`` path. Within a proxy the
+    ``tool`` value may be the bare tool name (``post_plan``) or a
+    fully-qualified / server-prefixed form, so the target is matched by exact
+    name or by the trailing ``_<tool>`` suffix.
+    """
+    tool_name = str(event.get("toolName") or "")
+    args = event.get("args") or {}
+    if not isinstance(args, dict):
+        # A direct call with malformed args is not classifiable.
+        return None, ""
+
+    if tool_name in _MCP_COMMENT_TOOL_NAMES:
+        # Direct shape: toolName is the target; args carries the body.
+        target = tool_name
+        inner = args
+    elif tool_name in ("mcp", _MCP_COMMENT_NAMESPACE_PROXY_NAME):
+        # Proxy shape: args = {tool: <name>, args: {body: ...}}.
+        target = str(args.get("tool") or "")
+        inner = _coerce_args(args.get("args"))
+    else:
+        return None, ""
+
+    if not target:
+        return None, ""
+
+    kind: str | None = None
+    for bare, tool_kind in _MCP_COMMENT_TOOL_KINDS:
+        if target == bare or target.endswith("_" + bare):
+            kind = tool_kind
+            break
+
+    body = inner.get("body")
+    if not isinstance(body, str):
+        body = ""
+    return (kind, body)
+
+
 def _tool_label(event: dict) -> str:
     """Render a tool_execution event as a compact progress label.
 
@@ -509,6 +647,25 @@ def _parse_line(line: str, acc: _PiAccumulator, callback) -> None:
 
     elif etype in ("tool_execution_start", "tool_execution_end"):
         if etype == "tool_execution_start":
+            # Phase 2: recognize the autoswe_comment tools so the comment that
+            # the MCP server posts is reflected in the RunResult instead of
+            # falling through to <AUTOSWE_PLAN> tag-scraping. The direct name
+            # and the two proxy shapes (generic `mcp`, mcp__autoswe_comment
+            # namespace) all resolve to the same three tools — a cold cache
+            # (before the adapter's direct tools register) still hits the proxy
+            # shape, so parsing both keeps detection working either way.
+            kind, body = _classify_mcp_comment_call(event)
+            if kind == "plan":
+                acc.plan_posted = True
+                log(f"[PI] autoswe_comment post_plan (body {len(body)} chars)")
+            elif kind == "question":
+                acc.question_posted = True
+                log(f"[PI] autoswe_comment post_question (body {len(body)} chars)")
+            elif kind == "progress":
+                # update_progress drives the live progress callback with its
+                # body so the operator sees the model's status message.
+                if callback and body:
+                    callback(body[:200])
             if callback:
                 callback(f"Tool: {_tool_label(event)}")
         else:
@@ -563,7 +720,13 @@ class PiBackend:
 
     # "mode" is advertised: pi enforces read-only via the tool allowlist
     # derived from RunSpec.mode, so has_read_only_enforcement() is True.
-    CAPABILITIES: set[str] = {"mode", "resume", "session_fork", "progress_stream"}
+    #
+    # "mcp" is advertised (Phase 2 of PLAN-pi-mcp.md): pi reaches the
+    # autoswe_comment server through the pi-mcp-adapter, and the parser turns
+    # its tool_execution_start events into RunResult.plan_posted /
+    # question_posted. This is what turns on planner.py's has_mcp branch, so
+    # plan/question detection stops depending on <AUTOSWE_PLAN> tag-scraping.
+    CAPABILITIES: set[str] = {"mode", "resume", "session_fork", "progress_stream", "mcp"}
     RETRYABLE_SUBTYPES: set[str] = {"error", "killed"}
 
     @classmethod
@@ -657,16 +820,19 @@ class PiBackend:
         if spec.env_overrides:
             env.update(spec.env_overrides)
 
-        # Phase 1 of PLAN-pi-mcp.md: when the run names the autoswe_comment MCP
-        # server, give pi the server config in its agent dir (the
-        # pi-mcp-adapter reads <agent dir>/mcp.json) and route the server's own
-        # env into this subprocess instead of into the file. The adapter
-        # inherits pi's process env into the MCP server child (resolveEnv), so
-        # the per-task vars set here reach the server without the config file
-        # ever changing between issues. The file only carries stable values.
-        # (Phase 2 adds the mcp__autoswe_comment_* tool names to the allowlist
-        # and parses the tool_execution events; until then the server is set up
-        # but its tools are not yet in the --tools allowlist.)
+        # When the run names the autoswe_comment MCP server: give pi the server
+        # config in its agent dir (the pi-mcp-adapter reads <agent dir>/mcp.json)
+        # and route the server's own env into this subprocess instead of into
+        # the file. The adapter inherits pi's process env into the MCP server
+        # child (resolveEnv), so the per-task vars set here reach the server
+        # without the config file ever changing between issues. The file only
+        # carries stable values.
+        #
+        # The allowlist side of Phase 2 already happened up in _build_argv →
+        # _tools_for_spec, which adds the three mcp__autoswe_comment_* tool
+        # names to --tools when this server is named. And the parse side
+        # happens in _parse_line, which turns tool_execution_start events for
+        # those tools into the RunResult.plan_posted / question_posted flags.
         mcp_servers = spec.mcp_servers or {}
         comment_cfg = mcp_servers.get("autoswe_comment") if isinstance(mcp_servers, dict) else None
         if isinstance(comment_cfg, dict):
@@ -823,7 +989,7 @@ class PiBackend:
             cost_usd=acc.cost_usd,
             duration_seconds=duration,
             plan_file_path=None,
-            plan_posted=False,
-            question_posted=False,
+            plan_posted=acc.plan_posted,
+            question_posted=acc.question_posted,
             structured_output=None,
         )
