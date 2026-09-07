@@ -1652,6 +1652,67 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "pi_retry_forks_from_pi_checkpoint",
+        "description": (
+            "pi-specific: /retry from failed state forks from a checkpoint "
+            "produced by the pi backend (last_good_session_backend='pi'). "
+            "Unlike codex (no fork primitive), pi forks (--fork). The "
+            "provenance gate must ACCEPT a pi checkpoint when the fix harness "
+            "is pi — the pi ≠ codex divergence this row isolates."
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: timeout\n\nPost `/retry` to continue.\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 2,
+                "last_dispatched_command": "/fix",
+                # The surviving known-good checkpoint was produced by pi, so
+                # the provenance gate must accept it when the fix harness is pi.
+                "session_id": None,
+                "last_good_session_id": "s-pi-plan-good-42",
+                "last_good_session_backend": "pi",
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed\tabc1234", "session_id": "s-pi-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command"],
+            # Under the DEFAULT claude_code axis this row is a provenance
+            # MISMATCH: the checkpoint was produced by pi, so the claude_code
+            # fix backend must NOT fork it (foreign-backend session id).  The
+            # fork-accept path is asserted by test_transition_pi (backend="pi"),
+            # where the fix harness is pi and the gate accepts the pi checkpoint.
+            "claude_calls": [
+                {"resume": None, "fork_session": False},
+            ],
+        },
+    },
+    {
         "name": "dispatched_command_noop",
         "description": "Task in planning state; new /fix command → noop",
         "start": {
@@ -2279,6 +2340,23 @@ CODEX_TRANSITIONS: list[str] = [
     "attempts_guard_fires_on_restart",     # MAX_ATTEMPTS guard fires (decide-level, backend-agnostic)
     "failed_then_fix_restarts",            # /fix on a failed task re-dispatches (issue #192)
     "fix_red_suite_marks_test_failed",     # Post-fix test gate red → test_failed (backend-agnostic gate in _finalize_fix)
+]
+
+
+# ---------------------------------------------------------------------------
+# Pi backend transition rows
+
+# Curated set of transition names to run against the pi backend.
+# These cover the pi-specific divergences: REAL read-only enforcement via the
+# --tools allowlist (plan phase — no loud-degrade, no worktree-rollback
+# reliance), the pi --fork primitive on /retry (a gap Codex leaves open), and
+# the provenance gate accepting a pi checkpoint.
+
+PI_TRANSITIONS: list[str] = [
+    "fresh_plan_command",                              # Plan phase: real --tools read-only enforcement (no degrade)
+    "fresh_fix_command",                               # Fix phase: --tools read_write allowlist
+    "pi_retry_forks_from_pi_checkpoint",               # /retry: pi forks (--fork) from a pi checkpoint
+    "retry_no_fork_when_checkpoint_backend_mismatches",  # codex checkpoint vs pi fix → fresh (provenance gate rejects)
 ]
 
 

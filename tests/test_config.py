@@ -605,7 +605,9 @@ def test_load_harnesses_config_parses_json(isolated_autoswe_dir):
     """Valid harnesses.json → validated profiles."""
     harnesses_json = isolated_autoswe_dir / "config" / "harnesses.json"
     harnesses_json.write_text(
-        '{"claude-opus": {"backend": "claude_code", "model": "claude-opus-4-8"}, "my-codex": {"backend": "codex", "model": "gpt-5"}}',
+        '{"claude-opus": {"backend": "claude_code", "model": "claude-opus-4-8"}, '
+        '"my-codex": {"backend": "codex", "model": "gpt-5"}, '
+        '"my-pi": {"backend": "pi", "model": "claude-sonnet-4-5"}}',
         encoding="utf-8",
     )
 
@@ -617,6 +619,9 @@ def test_load_harnesses_config_parses_json(isolated_autoswe_dir):
     assert result["claude-opus"]["model"] == "claude-opus-4-8"
     assert "my-codex" in result
     assert result["my-codex"]["backend"] == "codex"
+    assert "my-pi" in result
+    assert result["my-pi"]["backend"] == "pi"
+    assert result["my-pi"]["model"] == "claude-sonnet-4-5"
 
 
 def test_load_harnesses_config_accepts_pi_backend(isolated_autoswe_dir):
@@ -722,6 +727,15 @@ def test_load_harnesses_config_backend_case_insensitive(isolated_autoswe_dir):
 
     result = load_harnesses_config()
     assert result["upper"]["backend"] == "claude_code"
+
+
+def test_known_backends_pins_three_backends():
+    """KNOWN_BACKENDS is exactly {claude_code, codex, pi} — the enumeration
+    axis every backend-aware test must agree on.  Adding a fourth backend
+    must update this pin (and the factory, and the test axes)."""
+    from autoswe.core.config import KNOWN_BACKENDS
+
+    assert {"claude_code", "codex", "pi"} == KNOWN_BACKENDS
 
 
 # ---------------------------------------------------------------------------
