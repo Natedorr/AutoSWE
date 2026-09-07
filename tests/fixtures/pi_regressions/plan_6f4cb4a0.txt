@@ -1,0 +1,64 @@
+
+
+< AUTOSWE_PLAN>
+# Plan: sliding-window moving average in `src/toolbox.py`
+
+Semantics confirmed with the user: full-length output with partial windows at the start, `window=3` default, `ValueError` only when `window < 1` (window > len is fine), no rounding, `TypeError` on non-numeric elements.
+
+## Files to change
+
+1. **`src/toolbox.py`** — add `moving_average`:
+
+   ```python
+   def moving_average(data: list, window: int = 3) -> list[float]:
+       """Sliding-window moving average.
+
+       Returns a list the same length as `data`; output element i is the mean
+       of data[max(0, i - window + 1) : i + 1] (partial windows at the start).
+       Raises ValueError if window < 1, TypeError if any element is not int/float.
+       """
+       if not isinstance(window, int) or isinstance(window, bool) or window < 1:
+           raise ValueError(f"window must be an int >= 1, got {window!r}")
+       out = []
+       for i in range(len(data)):
+           chunk = data[max(0, i - window + 1): i + 1]
+           for x in chunk:
+               if not isinstance(x, (int, float)) or isinstance(x, bool):
+                   raise TypeError(f"non-numeric element at index {i}: {x!r}")
+           out.append(sum(chunk) / len(chunk))
+       return out
+   ```
+
+   Design notes:
+   - Full-length output: element `i` averages `data[max(0, i-window+1) : i+1]`, so the first `window-1` entries use partial windows. A single pass, O(n) with bounded window — no need for `deque`/prefix sums at this scale.
+   - `window > len(data)` is valid: every entry uses the full available history.
+   - Rejects `bool` explicitly (bool is an `int` subclass in Python; treating `True` as a number would silently pass validation).
+   - No rounding: raw `float` results (standard for moving averages; `sum/len` is exact for small int windows).
+
+   Also update the module docstring's "Currently holds:" list to add `- moving_average(data, window): sliding-window moving average` — required because `test_module_docstring_describes_module` in `tests/test_toolbox.py` asserts every function name appears in the module docstring.
+
+2. **`tests/test_toolbox.py`** — import `moving_average` and add tests:
+   - `test_moving_average_basic`: `moving_average([1, 2, 3, 4, 5]) == [1.0, 1.5, 2.0, 3.0, 4.0]` (partial windows at start with default window=3).
+   - `test_moving_average_custom_window`: explicit `window=` (e.g. `window=2`, `window=1` → identity for numeric input).
+   - `test_moving_average_window_larger_than_len`: `moving_average([1, 2], window=5) == [1.0, 1.5]`.
+   - `test_moving_average_empty`: `moving_average([], 3) == []`.
+   - `test_moving_average_floats`: fractional input, assert exact/≈ values (no rounding applied).
+   - `test_moving_average_invalid_window`: `pytest.raises(ValueError)` for `window=0` and `window=-1`.
+   - `test_moving_average_non_numeric`: `pytest.raises(TypeError)` for `[1, "a", 3]` and `[1, None]`.
+
+## Verification
+
+- `pytest -q` — full suite, including the existing `test_module_docstring_describes_module` which forces the docstring update. No build step; stdlib only, so no import risk.
+- Edge cases covered by tests above: empty input, partial windows, window=1, window > len, invalid window, non-numeric elements.
+
+## Risks
+
+- **Low.** Pure stdlib function, no new dependencies, no external services. The only coupling is the docstring test, which is handled. Rollback is trivial (revert one commit touching two files). No production load concerns (deterministic test fixture per CLAUDE.md).
+</AUTOSWE_PLAN>
+
+```json
+{
+  "is_plan_ready": true,
+  "plan_markdown": "# Plan: sliding-window moving average in `src/toolbox.py`\n\nSemantics confirmed with the user: full-length output with partial windows at the start, `window=3` default, `ValueError` only when `window < 1` (window > len is fine), no rounding, `TypeError` on non-numeric elements.\n\n## Files to change\n\n1. **`src/toolbox.py`** — add `moving_average(data, window=3) -> list[float]`:\n   - Output element i is the mean of `data[max(0, i - window + 1) : i + 1]` (full-length output, partial windows at the start). O(n) single pass.\n   - Raises `ValueError` if `window` is not an int >= 1; `window > len(data)` is allowed (uses full available window).\n   - Raises `TypeError` on any non-numeric element (bool explicitly rejected as an int subclass).\n   - No rounding — raw floats.\n   - Update the module docstring's 'Currently holds:' list with the new function; required by `test_module_docstring_describes_module`.\n\n2. **`tests/test_toolbox.py`** — import `moving_average` and add tests:\n   - basic default window: `moving_average([1,2,3,4,5]) == [1.0, 1.5, 2.0, 3.0, 4.0]`\n   - custom windows (2 and 1)\n   - window larger than input length\n   - empty input\n   - float input, exact unrounded results\n   - `ValueError` for window=0 and window=-1\n   - `TypeError` for non-numeric elements (string, None)\n\n## Verification\n\n- `pytest -q` (same command CI runs). Stdlib-only, no new dependencies.\n- Edge cases: empty input, partial windows, window=1, window > len, invalid window, non-numeric elements.\n\n## Risks\n\n- Low. Pure stdlib, two small files, trivial rollback. Only coupling: the docstring test, handled. Deterministic test fixture per CLAUDE.md — no load concerns."
+}
+```

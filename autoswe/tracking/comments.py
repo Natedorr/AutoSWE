@@ -148,8 +148,12 @@ def _find_last_bot_comment_id(comments: list[CommentLike]) -> int | None:
     return _find_last_bot_comment_ts(comments)
 
 
-_PLAN_RE = re.compile(r"<AUTOSWE_PLAN>(.*?)</AUTOSWE_PLAN>", re.DOTALL)
-_QUESTIONS_RE = re.compile(r"<AUTOSWE_QUESTIONS>(.*?)</AUTOSWE_QUESTIONS>", re.DOTALL)
+# Tolerate optional whitespace inside the brackets: some backends (observed on
+# qwen3.8:27b via pi, 2026-09-07 E2E) emit "< AUTOSWE_PLAN>" with a space after
+# the opening bracket. These are the *fallback* tags for backends without the
+# MCP comment server, so any small model quirk should still be detected.
+_PLAN_RE = re.compile(r"<\s*AUTOSWE_PLAN>(.*?)</\s*AUTOSWE_PLAN>", re.DOTALL)
+_QUESTIONS_RE = re.compile(r"<\s*AUTOSWE_QUESTIONS>(.*?)</\s*AUTOSWE_QUESTIONS>", re.DOTALL)
 
 
 # ---------------------------------------------------------------------------
