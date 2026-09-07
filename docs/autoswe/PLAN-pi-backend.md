@@ -169,6 +169,7 @@ warning and no reliance on `ensure_worktree_unchanged` rollback for plan/review.
    phase 1 — proxy indirection hides tool names), or ship a small pi **extension**
    (`--extension`) registering `post_plan` / `post_question` / `update_progress` tools that
    talk to the same Python servers. The latter is the real path to the `mcp` capability.
+   Superseded by `PLAN-pi-mcp.md` (adapter route, agent-dir `mcp.json`, tool-name resolution).
 2. **AskUserQuestion → `autoswe:waiting`.** Needs either that extension or `--mode rpc`.
 3. **Structured output** — pi has no JSON-Schema-validated output; text fallback stands.
 4. **`--plan` plan-mode extension** for a true `plan_permission` capability.
