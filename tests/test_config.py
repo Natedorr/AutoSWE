@@ -619,6 +619,36 @@ def test_load_harnesses_config_parses_json(isolated_autoswe_dir):
     assert result["my-codex"]["backend"] == "codex"
 
 
+def test_load_harnesses_config_accepts_pi_backend(isolated_autoswe_dir):
+    """pi is a known backend and its profile fields load through validation."""
+    harnesses_json = isolated_autoswe_dir / "config" / "harnesses.json"
+    harnesses_json.write_text(
+        '{"pi-sonnet": {"backend": "pi", "model": "claude-sonnet-4-5", '
+        '"provider": "anthropic", "api_key": "${ANTHROPIC_API_KEY}", '
+        '"thinking": "medium", "cli_path": "/usr/bin/pi", '
+        '"agent_dir": "~/.pi/agent", "session_dir": "~/.pi/sessions", '
+        '"timeout": 3600, "approve_project": true, '
+        '"append_system_prompt": "extra", "env": {"FOO": "bar"}}}',
+        encoding="utf-8",
+    )
+
+    from autoswe.core.config import load_harnesses_config
+
+    result = load_harnesses_config()
+    assert "pi-sonnet" in result
+    profile = result["pi-sonnet"]
+    assert profile["backend"] == "pi"
+    assert profile["model"] == "claude-sonnet-4-5"
+    assert profile["provider"] == "anthropic"
+    assert profile["thinking"] == "medium"
+    assert profile["cli_path"] == "/usr/bin/pi"
+    assert profile["agent_dir"] == "~/.pi/agent"
+    assert profile["session_dir"] == "~/.pi/sessions"
+    assert profile["timeout"] == 3600
+    assert profile["approve_project"] is True
+    assert profile["env"] == {"FOO": "bar"}
+
+
 def test_load_harnesses_config_skips_underscore_keys(isolated_autoswe_dir):
     """Keys starting with _ are skipped."""
     harnesses_json = isolated_autoswe_dir / "config" / "harnesses.json"
@@ -918,6 +948,19 @@ def test_resolve_harness_codex_profile(isolated_autoswe_dir):
     result = resolve_harness("fix", repo_cfg, cfg, harnesses=harnesses)
     assert result["backend"] == "codex"
     assert result["model"] == "gpt-5"
+
+
+def test_resolve_harness_pi_profile(isolated_autoswe_dir):
+    """resolve_harness returns a pi backend profile when specified."""
+    from autoswe.core.config import resolve_harness
+
+    harnesses = {"my-pi": {"backend": "pi", "model": "claude-sonnet-4-5"}}
+    cfg = {"FIX_HARNESS": ""}
+    repo_cfg = {"fix_harness": "my-pi"}
+
+    result = resolve_harness("fix", repo_cfg, cfg, harnesses=harnesses)
+    assert result["backend"] == "pi"
+    assert result["model"] == "claude-sonnet-4-5"
 
 
 def test_load_harnesses_config_with_list_values(isolated_autoswe_dir):

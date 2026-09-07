@@ -61,5 +61,32 @@
     "openai_api_key": "${CUSTOM_API_KEY}",
     "timeout": 3600,
     "env": { "OPENAI_API_BASE": "http://your-openai-compatible-endpoint" }
+  },
+
+  "pi-opus": {
+    "_comment": "pi (pi --mode json) with Claude Opus — requires 'pi' CLI on PATH (npm i -g @earendil-works/pi-coding-agent) and ANTHROPIC_API_KEY (or api_key). pi runs on a dedicated isolated machine, so approve_project is true by default: pi otherwise ignores project-local resources in non-interactive modes; set it to false on a shared host. model is required (pi would otherwise pick a settings default).",
+    "backend": "pi",
+    "model": "claude-opus-4-8",
+    "provider": "anthropic",
+    "api_key": "${ANTHROPIC_API_KEY}",
+    "approve_project": true
+  },
+
+  "pi-gpt": {
+    "_comment": "Alternative: pi with an OpenAI model — the api_key is passed via the --api-key flag (or leave it unset and rely on the provider's env var, e.g. OPENAI_API_KEY, via profile `env`)",
+    "backend": "pi",
+    "model": "gpt-5.6-terra",
+    "provider": "openai",
+    "api_key": "${OPENAI_API_KEY}"
+  },
+
+  "pi-local": {
+    "_comment": "Local pi with Ollama — uses ~/.pi/agent/models.json for the local provider config. No API key needed. agent_dir/session_dir relocate pi's config/session storage; per-profile `env` reaches the subprocess (user values win over the api-key fields; `${VAR}` supported).",
+    "backend": "pi",
+    "model": "qwen3.6:27b",
+    "provider": "ollama",
+    "agent_dir": "~/.pi/agent",
+    "session_dir": "~/.pi/sessions",
+    "timeout": 3600
   }
 }

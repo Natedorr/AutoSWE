@@ -244,7 +244,7 @@ def load_repos_config() -> dict:
 
 
 # Recognized backend names (populated as new backends are added).
-KNOWN_BACKENDS = {"claude_code", "codex"}
+KNOWN_BACKENDS = {"claude_code", "codex", "pi"}
 
 # Module-level cache for harnesses config — avoids re-reading harnesses.json
 # on every handler invocation.  Clear with ``_harnesses_cache.clear()`` in tests.

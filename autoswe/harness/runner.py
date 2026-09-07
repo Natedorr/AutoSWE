@@ -183,7 +183,22 @@ def run(
     *allowed_tools* / *disallowed_tools* triple.
     """
     rc = repo_cfg or {}
-    timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
+    # Wall-clock timeout precedence (highest → lowest):
+    #   1. harness profile "timeout" field (per-profile, documented in
+    #      docs/autoswe/harnesses.md — "Backend-specific timeout in seconds")
+    #   2. repo_cfg "agent_timeout" (per-repo)
+    #   3. cfg "AGENT_TIMEOUT" (global)
+    #   4. 7200s default
+    profile_timeout = (harness_cfg or {}).get("timeout")
+    if profile_timeout is not None:
+        try:
+            timeout = int(profile_timeout)
+        except (TypeError, ValueError):
+            log(f"[RUNNER] harness profile 'timeout'={profile_timeout!r} is not a "
+                "valid integer; falling back to agent_timeout/AGENT_TIMEOUT")
+            timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
+    else:
+        timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
     max_retries = int(rc.get("agent_retry_on_failure", cfg.get("AGENT_RETRY_ON_FAILURE", 0)))
     raw_subtype_override = rc.get("agent_retry_on_subtype", cfg.get("AGENT_RETRY_ON_SUBTYPE", ""))
 
