@@ -394,6 +394,23 @@ def test_transition_pi(
         assert call["is_fresh"] is True, (
             "a foreign-backend checkpoint degrades to a fresh pi session"
         )
+    elif transition_name == "waiting_resume_mcp_post_plan":
+        # Plan resume on the pi axis: a waiting task resumes its session
+        # (--session <id>, not a fresh --session-id) and the MCP post_plan
+        # tool_execution_start event drives PLAN_READY even though the
+        # assistant text carries no <AUTOSWE_PLAN> tag. The parser's
+        # classification is allowlist-independent, so this works even though
+        # SILENT_REPORTING leaves spec.mcp_servers empty (no _comment_id) and
+        # the MCP names stay off the --tools allowlist.
+        assert call["is_resume"] is True
+        assert call.get("resume") == "s-plan-42", (
+            f"plan resume must re-open the checkpoint session; got {call.get('resume')!r}"
+        )
+        assert call["is_fresh"] is False
+        # The read-only plan recipe stays exact (no MCP names appended).
+        assert call.get("tools") == "read,grep,find,ls", (
+            f"plan must pin the read-only --tools allowlist; got {call.get('tools')!r}"
+        )
 
     # (The per-row pi call shape above is the authoritative assertion; the
     # row's ``claude_calls`` axis describes the DEFAULT claude_code behavior,
