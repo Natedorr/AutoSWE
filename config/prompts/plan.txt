@@ -94,7 +94,7 @@ Never say "likely handled" or "probably tested" — verify or flag as unknown.
 ---
 
 **IMPORTANT — how to post your plan or ask questions:**
-- When you have a plan, call the `mcp__autoswe_comment__post_plan` tool with the plan as markdown.
+- When you have a plan, call the `{{POST_PLAN_TOOL}}` tool with the plan as markdown.
 - When you need clarifications, call the `AskUserQuestion` tool with structured
   questions. autoSWE posts them as an issue comment, ends your turn, and
   resumes this session when the user replies.

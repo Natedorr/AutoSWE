@@ -114,6 +114,19 @@ def pi_mcp_json_path(agent_dir: str) -> Path:
     return Path(agent_dir).expanduser() / "mcp.json"
 
 
+def pi_mcp_cache_path(agent_dir: str) -> Path:
+    """Path to the pi-mcp-adapter metadata cache (``<agent dir>/mcp-cache.json``).
+
+    Phase 4 of ``docs/autoswe/PLAN-pi-mcp.md``: on a cold start (no valid
+    ``autoswe_comment`` entry in this cache) the adapter falls back to the
+    generic proxy shapes rather than the direct ``mcp__autoswe_comment_*``
+    tools, so the first run against a new server degrades. The cache path is
+    where PiBackend's preflight and the setup-time warm-up look for a
+    pre-populated entry.
+    """
+    return Path(agent_dir).expanduser() / "mcp-cache.json"
+
+
 def autoswe_repo_root() -> str:
     """The autoSWE checkout root — where the ``mcp_servers`` package lives.
 

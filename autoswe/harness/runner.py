@@ -62,6 +62,31 @@ def backend_has_capability(harness_cfg: dict, capability: str) -> bool:
     return capability in backend.capabilities()
 
 
+def comment_tool_names(harness_cfg: dict | None = None) -> dict[str, str]:
+    """Return the autoswe_comment MCP tool names for the resolved backend.
+
+    PLAN-pi-mcp.md Phase 3: the single source of truth for MCP tool naming.
+    Resolves the backend via the factory and returns its
+    ``comment_tool_names()`` dict (``{"post_plan": ..., "post_question": ...,
+    "update_progress": ...}``), so prompts and handlers name the tools the way
+    the resolved backend's adapter actually exposes them instead of hardcoding
+    the Claude Code spelling.
+
+    Defaults to ClaudeCodeBackend when *harness_cfg* is None — matching
+    ``backend_has_capability`` — so callers that don't yet pass a harness
+    profile get the Claude default (and existing custom prompt files that
+    hardcode the Claude names keep working).
+    """
+    if harness_cfg is not None:
+        # Deferred import: avoids loading the backend factory when default path runs.
+        from autoswe.harness.backends.factory import get_backend
+
+        backend = get_backend(harness_cfg)
+    else:
+        backend = ClaudeCodeBackend()
+    return backend.comment_tool_names()
+
+
 def has_read_only_enforcement(harness_cfg: dict) -> bool:
     """Return True if the backend for *harness_cfg* enforces read-only phases.
 
