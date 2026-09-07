@@ -101,6 +101,21 @@ def run(
     rc = world.repo_cfg
     guidance = action.guidance
 
+    # Re-inject the dispatch-time sticky progress comment onto the handler
+    # task dict (issue #226). TaskState.to_handler_dict() deliberately excludes
+    # the transient fields (_token, _comment_id, _minimal_posting) — _token is
+    # re-added from repo_cfg by to_handler_dict() itself, but _comment_id only
+    # exists on the mutable queue entry that loop.py sets at dispatch time, so
+    # without this the handler dict never carries it and
+    # build_mcp_comment_server() returns None: pi's --tools allowlist loses the
+    # three mcp__autoswe_comment_* tools and Claude Code gets empty
+    # mcp_servers. The ProgressComment is created by loop.py before run() is
+    # called, so comment_id is set for plan/fix/review dispatches.
+    progress_id = getattr(progress_callback, "comment_id", None)
+    if progress_id is not None:
+        task["_comment_id"] = progress_id
+        task["_minimal_posting"] = bool(cfg.get("MINIMAL_POSTING"))
+
     # Route to handler
     if kind == "plan":
         hr = _run_plan_with_sync(
