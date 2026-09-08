@@ -281,6 +281,30 @@ TRANSITIONS: list[dict[str, Any]] = [
             "comment_contains": ["Failed:", "/retry"],
         },
     },
+    {
+        "name": "fix_max_turns_no_work_fails",
+        "description": (
+            "The fix agent hits its turn budget (error_max_turns) but leaves no "
+            "committable work in the worktree. The commit-on-cap rescue "
+            "(issue #222) only fires when there is a non-empty diff AND a green "
+            "gate — with no work there is nothing to commit, so the run falls "
+            "through to the normal FAILED state with the /retry hint. The "
+            "committable-work check short-circuits before the test gate runs."
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "queue_task": None,
+        },
+        "claude_responses": [
+            {"text": "reached the turn limit", "session_id": "s-fix-42", "subtype": "error_max_turns"},
+        ],
+        "git_calls": ["create_worktree"],
+        "expect": {
+            "label_after": "autoswe:failed",
+            "autoswe_status": "failed",
+            "comment_contains": ["error_max_turns", "/retry"],
+        },
+    },
     # ---- Resume transitions ----
     {
         "name": "plan_ready_then_fix",

@@ -13,6 +13,7 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`, `pi`) wi
 | `backend` | **Yes** | — | Backend implementation: `"claude_code"`, `"codex"`, or `"pi"` |
 | `model` | No for `claude_code`, **required** for `codex` and `pi` | `""` | Model ID (e.g. `"claude-opus-5"`, `"gpt-5.6-terra"`, `"claude-sonnet-4-5"`). No default for `codex` or `pi` — resolution fails if missing (pi would otherwise silently pick a settings default, unacceptable for reproducibility) |
 | `timeout` | No | (from env) | Backend-specific timeout in seconds |
+| `max_turns` | No | `200` (review: `80`) | Turn cap for the agent run (issue #222). Validated as a positive integer on load. **Only honored by backends that expose a turn cap** — `claude_code` today; `codex` and `pi` treat it as a documented no-op (their anti-runaway guard is the wall-clock `timeout`). When set it beats the per-repo `agent_max_turns` and the global `MAX_TURNS`/`REVIEW_MAX_TURNS`. See [Turn cap (`max_turns`)](#turn-cap-max_turns) |
 | `cli_path` | No | (from env) | Path to the CLI binary (e.g. `claude` or `codex`) |
 | `codex_api_key` | No | — | API key for Codex backend (sets `CODEX_API_KEY` env var) |
 | `openai_api_key` | No | — | Alternative API key for Codex backend (sets `OPENAI_API_KEY` env var) |
@@ -32,6 +33,47 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`, `pi`) wi
 
 String values support ``${VAR}`` and ``${VAR:-default}`` environment variable
 interpolation (expanded at load time from the current process environment).
+
+### Turn cap (`max_turns`, issue #222)
+
+The agent's tool-use turn budget is configurable rather than a single
+hard-coded 200. It resolves per run in this precedence order (highest wins):
+
+1. **Harness profile** `max_turns` — the profile this phase resolves to
+   (`harnesses.json`). Validated as a positive integer on load; a non-integer
+   or a value `< 1` fails startup with a `ValueError` (fail fast — a silent
+   "no cap" from a typo would defeat the anti-runaway guard).
+2. **Per-repo** `agent_max_turns` — a `repos.json` entry field (same pattern
+   as `agent_timeout`).
+3. **Global** — `MAX_TURNS` (coding phases, default `200`) or `REVIEW_MAX_TURNS`
+   (the read-only review phase, default `80`). The review phase keeps its
+   separate lower cap because a read-only pass needs far fewer round trips than
+   a coding phase.
+
+Code path: `config.resolve_max_turns(phase, repo_cfg, cfg, harness_cfg)`.
+
+**Only backends that expose a turn cap honor it.** `claude_code` passes the
+resolved value to the Agent SDK. `codex` and `pi` have **no turn cap** (Codex
+`exec` dropped the `agent.max_turns` config key; pi has no cap) — they treat
+`max_turns` as a documented no-op, so the wall-clock `timeout` is their
+anti-runaway guard. The value is still resolved and passed on `RunSpec.max_turns`
+for contract parity.
+
+**Graceful commit-on-cap (fix phase).** A run can consume its whole turn budget
+*after* the coding work is done but before the commit step runs (the
+Natedorr/AutoSWE#216 failure: diff complete, only the commit left, ~$96
+burned). When a **fix** run ends `error_max_turns`, before emitting `failed`
+the handler checks whether the worktree holds committable work **and** the
+post-fix test gate is green in that tree:
+
+- **Both true** → the partial run is committed + pushed through the normal
+  finalize path and the task still reaches `autoswe:fixed`
+  (`[FIX] … max_turns rescue: gate green, committing partial run`).
+- **Either false** (no work, or a red gate) → the run fails exactly as before
+  (FAILED + `/retry` hint); a red suite is never committed as `fixed`.
+
+Only the fix phase rescues — plan and review are read-only and hold no
+committable work to save.
 
 ### Resolution Order
 

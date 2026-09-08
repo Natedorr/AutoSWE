@@ -150,6 +150,8 @@ def load_config() -> dict:
         "TEST_GATE": _as_bool(os.environ.get("TEST_GATE"), "true"),
         "TEST_GATE_TIMEOUT": int(os.environ.get("TEST_GATE_TIMEOUT", 600)),
         "TEST_COMMAND": os.environ.get("TEST_COMMAND", ""),
+        "MAX_TURNS": int(os.environ.get("MAX_TURNS", 200)),
+        "REVIEW_MAX_TURNS": int(os.environ.get("REVIEW_MAX_TURNS", 80)),
     }
     if CONFIG_FILE.exists():
         # Snapshot the defaults before the file-parse loop overwrites the
@@ -159,7 +161,7 @@ def load_config() -> dict:
             for int_key in (
                 "AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS",
                 "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES",
-                "TEST_GATE_TIMEOUT",
+                "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS",
             )
         }
         for line in CONFIG_FILE.read_text().splitlines():
@@ -171,7 +173,7 @@ def load_config() -> dict:
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
                     v = v[1:-1]
                 cfg[k.strip()] = v
-        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT"):
+        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS"):
             raw = cfg.get(int_key)
             if raw is None:
                 continue
@@ -284,6 +286,23 @@ def load_harnesses_config() -> dict:
             )
         # Expand ${VAR} and ${VAR:-default} env references in string values
         profile = _expand_env_dict(dict(entry, backend=backend))
+        # Optional per-profile turn cap (issue #222). Backends that honor
+        # RunSpec.max_turns (claude_code) use it; codex/pi treat it as a
+        # documented no-op. Fail fast on a non-positive value — a silent
+        # "no cap" from a typo would defeat the anti-runaway guard.
+        if "max_turns" in profile:
+            try:
+                profile["max_turns"] = int(str(profile["max_turns"]))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"harnesses.json entry '{key}' has a non-integer 'max_turns' "
+                    f"({profile['max_turns']!r}); it must be a positive integer."
+                ) from None
+            if profile["max_turns"] < 1:
+                raise ValueError(
+                    f"harnesses.json entry '{key}' has max_turns={profile['max_turns']}, "
+                    f"which must be >= 1."
+                )
         validated[key] = profile
 
     _harnesses_cache.update(validated)
@@ -340,3 +359,52 @@ def resolve_harness(phase: str, repo_cfg: dict, cfg: dict, harnesses: dict | Non
         "anthropic_auth_token": repo_cfg.get("anthropic_auth_token") or cfg.get("ANTHROPIC_AUTH_TOKEN"),
         "anthropic_api_key": repo_cfg.get("anthropic_api_key") or cfg.get("ANTHROPIC_API_KEY"),
     }
+
+
+# Per-phase default turn caps (issue #222). Review is deliberately lower — it is
+# a read-only pass and needs far fewer round trips than a coding phase.
+_DEFAULT_MAX_TURNS = 200
+_DEFAULT_REVIEW_MAX_TURNS = 80
+
+
+def resolve_max_turns(phase: str, repo_cfg: dict | None, cfg: dict | None, harness_cfg: dict | None = None) -> int:
+    """Resolve the agent turn cap for a coding phase (issue #222).
+
+    Resolution order (highest → lowest priority):
+
+    1. ``harness_cfg["max_turns"]`` — the per-profile cap from
+       ``harnesses.json`` (validated as a positive int on load).
+    2. ``repo_cfg["agent_max_turns"]`` — a per-repo override.
+    3. ``cfg`` global: ``REVIEW_MAX_TURNS`` for the review phase, ``MAX_TURNS``
+       otherwise (defaults ``80`` / ``200``).
+
+    Review keeps its separate lower default (80) unless a profile or per-repo
+    override bumps it; the coding phases default to 200. Backends that do not
+    honor ``RunSpec.max_turns`` (codex, pi) treat the value as a documented
+    no-op — it is still resolved and passed for consistency.
+    """
+    cfg = cfg or {}
+    repo_cfg = repo_cfg or {}
+    harness_cfg = harness_cfg or {}
+
+    candidate = harness_cfg.get("max_turns")
+    if candidate is None:
+        candidate = repo_cfg.get("agent_max_turns")
+    if candidate is None:
+        if (phase or "").lower() == "review":
+            return int(cfg.get("REVIEW_MAX_TURNS", _DEFAULT_REVIEW_MAX_TURNS))
+        return int(cfg.get("MAX_TURNS", _DEFAULT_MAX_TURNS))
+
+    try:
+        value = int(str(candidate))
+    except (TypeError, ValueError):
+        return (
+            _DEFAULT_REVIEW_MAX_TURNS
+            if (phase or "").lower() == "review"
+            else _DEFAULT_MAX_TURNS
+        )
+    return value if value >= 1 else (
+        _DEFAULT_REVIEW_MAX_TURNS
+        if (phase or "").lower() == "review"
+        else _DEFAULT_MAX_TURNS
+    )

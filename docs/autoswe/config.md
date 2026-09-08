@@ -66,6 +66,8 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | `MAX_ATTEMPTS` | `3` | Retry budget per issue: consecutive re-runs of failing work (from `failed`/`error`/`skipped`/`aborted` or `planned` restarts) before failing. Restarting from a successful rest (`fixed`/`synced`/`shipped`/`reviewed`, `review_failed`/`review_blocked`) starts a fresh budget |
 | `MAX_TOTAL_HOURS` | `2` | Max total time per issue in hours |
 | `AGENT_TIMEOUT` | `7200` | Max Claude session runtime in seconds (2 hours) |
+| `MAX_TURNS` | `200` | Agent turn cap for the coding phases (`/plan`, `/fix`) (issue #222). A per-harness-profile `max_turns` or per-repo `agent_max_turns` overrides it. Only backends that honor a turn cap (`claude_code`) apply it — codex/pi treat it as a no-op. |
+| `REVIEW_MAX_TURNS` | `80` | Agent turn cap for the read-only `/review` phase (issue #222). Same override chain as `MAX_TURNS`. |
 | `AGENT_RETRY_ON_FAILURE` | `0` | Auto-retry failed handler runs (0 = disabled) |
 | `AGENT_RETRY_ON_SUBTYPE` | `""` | Comma-separated list of `RunResult.subtype` values that trigger a retry (e.g. `"error,killed"`). When set, overrides the backend's default retryable-subtype set. Empty string = use backend default (Codex: `"error,killed"`; Claude Code: `""` — relies on exception-based retry). |
 | `WORKTREE_ORPHAN_POLICY` | `commit` | Policy when a worktree is left dirty by a SIGKILL'd dispatch: `"commit"` = commit + push orphaned changes before re-dispatch; `"discard"` = hard-reset; `"log_only"` = log but take no git action. |
@@ -97,7 +99,7 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | `TEST_COMMAND` | `""` | Explicit test command run in the worktree root for the post-fix test gate (e.g. `pytest -q`, `npm test`). Resolution order: per-repo `test_command` → `TEST_COMMAND` → Python/pytest detection in the worktree → skip. Blank = rely on per-repo / detection only. |
 | `AUTO_PURGE_BRANCHES` | `false` | Opt-in heartbeat cleanup of worktrees whose remote `autoswe/issue-{N}` branch no longer exists. When `true`, each poll cycle prunes a repo's remote-tracking refs (`git fetch --prune`) and removes any `issue-{N}/` worktree dir + local branch whose remote branch is gone — e.g. a merged-and-auto-deleted PR. In-flight tasks (live PID) and dirty worktrees are always skipped; a failed `fetch --prune` makes the whole step a no-op. Only the worktree dir + local branch are removed — `queue.json` is left to the separate `queue prune` job. See [git-worktrees.md](git-worktrees.md). |
 
-**Integer keys re-parsed:** After loading the file, `AGENT_TIMEOUT`, `AGENT_RETRY_ON_FAILURE`, `MAX_ATTEMPTS`, `MAX_TOTAL_HOURS`, `MAX_CONCURRENT`, `MAX_DRAIN_CYCLES`, and `TEST_GATE_TIMEOUT` are cast to `int` (`config.py:51-55`).
+**Integer keys re-parsed:** After loading the file, `AGENT_TIMEOUT`, `AGENT_RETRY_ON_FAILURE`, `MAX_ATTEMPTS`, `MAX_TOTAL_HOURS`, `MAX_CONCURRENT`, `MAX_DRAIN_CYCLES`, `TEST_GATE_TIMEOUT`, `MAX_TURNS`, and `REVIEW_MAX_TURNS` are cast to `int` (a malformed value falls back to its default).
 
 **Boolean keys re-parsed:** `SILENT_REPORTING`, `MINIMAL_POSTING`, `AUTO_ASSIGN`, `AUTO_CREATE_PR`, `LINK_BRANCH_TO_ISSUE`, `PR_REQUIRE_SYNC`, `PR_REQUIRE_CI`, `AUTO_PURGE_BRANCHES`, and `TEST_GATE` are compared to `"true"` (case-insensitive) after file load.
 
@@ -122,6 +124,7 @@ Loaded by `core/config.py:load_repos_config()`. Keys starting with `_` are skipp
 | `fix_harness` | No | `""` | Named harness profile for `/fix` phase |
 | `review_harness` | No | `""` | Named harness profile for `/review` phase |
 | `agent_timeout` | No | (from env) | Per-repo agent timeout in seconds |
+| `agent_max_turns` | No | (from `MAX_TURNS`/`REVIEW_MAX_TURNS`) | Per-repo agent turn cap (issue #222). Overrides the global `MAX_TURNS`/`REVIEW_MAX_TURNS` for this repo; a harness-profile `max_turns` still wins over it. |
 | `plan_prompt` | No | `config/prompts/plan.txt` | Custom plan prompt file path (relative to AUTOSWE_DIR, or absolute) |
 | `fix_prompt` | No | `config/prompts/fix.txt` | Custom fix prompt file path (relative to AUTOSWE_DIR, or absolute) |
 | `review_prompt` | No | `config/prompts/review.txt` | Custom review prompt file path (relative to AUTOSWE_DIR, or absolute) |
