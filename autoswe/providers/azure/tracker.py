@@ -198,9 +198,13 @@ class AzureTracker:
         - User comments matching the PAT authenticated user → ``"OWNER"``
         - Everything else → raw ``uniqueName`` (email)
         """
-        path = _ado_api_version(
+        # The work-item comments resource is under preview on hosted ADO:
+        # stable 7.1 returns HTTP 400 asking for the -preview flag
+        # (regression tracked in issue 022). format=Markdown so the `text`
+        # field round-trips the stored Markdown.
+        path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments"
+            f"{issue_number}/comments?format=Markdown&api-version=7.1-preview"
         )
         raw = ado_get(path, self._pat)
         comments_raw = raw.get("comments", [])
@@ -310,7 +314,7 @@ class AzureTracker:
         """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments?format=Markdown&api-version=7.1"
+            f"{issue_number}/comments?format=Markdown&api-version=7.1-preview"
         )
         result = ado_post(path, self._pat, body={"text": redact_outbound(body)})
         return result.get("id") if result else None
@@ -319,13 +323,14 @@ class AzureTracker:
         """Edit a comment on a work item via PATCH.
 
         ``PATCH .../comments/{id}`` has no refreshed reference page in
-        docs/azure-devops-api/; its availability at stable 7.1 is covered by
-        the live round-trip test in tests/test_azure_live.py (if it ever
-        regresses, re-introduce the preview version here — tracked in issue 022).
+        docs/azure-devops-api/; the live round-trip test in
+        tests/test_azure_live.py covers it. The comments resource is under
+        preview on hosted ADO, so this uses 7.1-preview (regression tracked
+        in issue 022).
         """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1"
+            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1-preview"
         )
         ado_patch_json(path, self._pat, body={"text": redact_outbound(body)})
 

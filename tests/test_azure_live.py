@@ -125,14 +125,14 @@ class TestLiveAzureAPI:
     def test_authenticate_user(self, ado_live_cfg):
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
-        email = tracker.authenticated_user(ado_live_cfg)
+        email = tracker.authenticated_user()
         assert email, "Should return authenticated user email"
         assert "@" in email, f"Email should contain @: {email}"
 
     def test_list_open_issues(self, ado_live_cfg):
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
-        issues = tracker.list_open_issues(ado_live_cfg)
+        issues = tracker.list_open_issues()
         assert isinstance(issues, list)
         if issues:
             wi = issues[0]
@@ -143,18 +143,18 @@ class TestLiveAzureAPI:
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
         # Use the first work item from the list
-        issues = tracker.list_open_issues(ado_live_cfg)
+        issues = tracker.list_open_issues()
         if issues:
-            wi = tracker.fetch_issue(ado_live_cfg, issues[0].number)
+            wi = tracker.fetch_issue(issues[0].number)
             assert wi.number == issues[0].number
             assert wi.labels is not None
 
     def test_fetch_comments(self, ado_live_cfg):
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
-        issues = tracker.list_open_issues(ado_live_cfg)
+        issues = tracker.list_open_issues()
         if issues:
-            comments = tracker.fetch_comments(ado_live_cfg, issues[0].number)
+            comments = tracker.fetch_comments(issues[0].number)
             assert isinstance(comments, list)
             if comments:
                 c = comments[0]
@@ -169,7 +169,7 @@ class TestLiveAzureVCS:
     def test_clone_url(self, ado_live_cfg):
         from autoswe.providers.factory import get_vcs
         vcs = get_vcs(ado_live_cfg)
-        url = vcs.clone_url(ado_live_cfg)
+        url = vcs.clone_url()
         assert urlparse(url).hostname.endswith("dev.azure.com")
         assert f"/{ado_live_cfg['org']}/" in urlparse(url).path
         assert f"/{ado_live_cfg['project']}/" in urlparse(url).path
@@ -183,7 +183,7 @@ class TestLiveAzureVCS:
     def test_find_existing_pr(self, ado_live_cfg):
         from autoswe.providers.factory import get_vcs
         vcs = get_vcs(ado_live_cfg)
-        result = vcs.find_existing_pr(ado_live_cfg, "autoswe/issue-1")
+        result = vcs.find_existing_pr("autoswe/issue-1")
         assert result is None or (
             hasattr(result, "url") and urlparse(result.url).hostname.endswith("dev.azure.com")
         )
@@ -209,45 +209,45 @@ class TestAzureWriteOps:
     def test_tracker_create_issue(self, ado_live_cfg):
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
-        wid = tracker.create_issue(ado_live_cfg, "Live test issue", "Test body from pytest")
+        wid = tracker.create_issue("Live test issue", "Test body from pytest")
         assert isinstance(wid, int) and wid > 0
 
     def test_tracker_post_comment(self, ado_live_cfg):
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
         # Post a comment on issue #1 (should always exist)
-        tracker.post_comment(ado_live_cfg, 1, "Live test comment from pytest")
+        tracker.post_comment(1, "Live test comment from pytest")
 
     def test_comment_roundtrip_at_7_1(self, ado_live_cfg):
-        """Comment create/read/update round-trip at stable api-version=7.1.
+        """Comment create/read/update round-trip at api-version=7.1-preview.
 
         Creates a throwaway work item, POSTs a markdown comment, reads it
-        back (verifying format=Markdown is stored under 7.1), PATCHes it
-        (verifying the comment-update endpoint works at 7.1 — it has no
-        refreshed reference page; see tracker.update_comment docstring),
-        then closes the work item.
+        back (verifying format=Markdown round-trips), PATCHes it (the
+        comments resource is under preview on hosted ADO; see
+        tracker.update_comment docstring / issue 022), then closes the
+        work item.
         """
         from autoswe.providers.azure.api import _ado_api_version, ado_patch
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
         wid = tracker.create_issue(
-            ado_live_cfg, "Live test: comment round-trip @7.1", "Test body from pytest"
+            "Live test: comment round-trip @7.1", "Test body from pytest"
         )
         assert isinstance(wid, int) and wid > 0
 
         original = "## Round trip\n\n- **bold**\n- `code`"
-        comment_id = tracker.post_comment(ado_live_cfg, wid, original)
+        comment_id = tracker.post_comment(wid, original)
         assert isinstance(comment_id, int) and comment_id > 0
 
-        comments = tracker.fetch_comments(ado_live_cfg, wid)
+        comments = tracker.fetch_comments(wid)
         posted = next(c for c in comments if c.id == comment_id)
         assert "**bold**" in posted.body, f"markdown markers missing: {posted.body!r}"
         assert "code" in posted.body
 
-        updated = "## Updated round trip\n\npatched at 7.1"
-        tracker.update_comment(ado_live_cfg, wid, comment_id, updated)
+        updated = "## Updated round trip\n\npatched at 7.1-preview"
+        tracker.update_comment(wid, comment_id, updated)
 
-        comments = tracker.fetch_comments(ado_live_cfg, wid)
+        comments = tracker.fetch_comments(wid)
         posted = next(c for c in comments if c.id == comment_id)
         assert "Updated round trip" in posted.body, f"PATCH not stored: {posted.body!r}"
         assert "**bold**" not in posted.body
@@ -258,20 +258,20 @@ class TestAzureWriteOps:
             f"/_apis/wit/workitems/{wid}"
         )
         ado_patch(close_path, ado_live_cfg["pat"],
-                  body=[{"op": "add", "path": "/fields/System.State", "value": "Closed"}])
+                  body=[{"op": "add", "path": "/fields/System.State", "value": "Done"}])
 
     def test_tracker_set_status_transitions(self, ado_live_cfg):
         """Set status through multiple autoswe: transitions."""
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
-        for status in ("pending", "dispatched", "done"):
-            tracker.set_status(ado_live_cfg, 1, status)
+        for status in ("pending", "fixing", "shipped"):
+            tracker.set_status(1, status)
 
     def test_tracker_assign_to_user(self, ado_live_cfg):
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
         # Assign to authenticated user (None resolves automatically)
-        tracker.assign_to_user(ado_live_cfg, 1, None)
+        tracker.assign_to_user(1, None)
 
     def test_vcs_open_pull_request_roundtrip(self, ado_live_cfg):
         """Open a PR, verify it exists, then close it."""
@@ -279,33 +279,66 @@ class TestAzureWriteOps:
         from autoswe.providers.factory import get_vcs
         vcs = get_vcs(ado_live_cfg)
         branch = f"autoswe/live-test-{int(time.time())}"
-        pr = vcs.open_pull_request(
-            ado_live_cfg, branch, "main", "Live test PR", "Test body from pytest"
-        )
-        assert pr.number is not None
-        assert urlparse(pr.url).hostname.endswith("dev.azure.com")
-        found = vcs.find_existing_pr(ado_live_cfg, branch)
-        assert found is not None and found.number == pr.number
-        # Close the PR
-        close_path = _ado_api_version(
-            f"https://dev.azure.com/{ado_live_cfg['org']}/{ado_live_cfg['project']}"
-            f"/_apis/git/repositories/{ado_live_cfg['repo']}/pullrequests/{pr.number}"
-        )
-        ado_patch_json(close_path, ado_live_cfg["pat"],
-                       body={"status": "completed", "completionOptions": {"deleteSourceBranch": False}})
+        # ADO requires the source branch to exist before the PR activates:
+        # push a throwaway commit via the PAT-embedded clone URL (mirrors
+        # the poller's own clone flow).
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="autoswe-live-test-") as td:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "--branch", "main",
+                 vcs.clone_url(), td],
+                check=True, capture_output=True, timeout=120,
+            )
+            env_file = f"{td}/autoswe-live-test.md"
+            with open(env_file, "w") as fh:
+                fh.write("live test\n")
+            subprocess.run(["git", "config", "user.email", "autoswe@localhost"],
+                           cwd=td, check=True)
+            subprocess.run(["git", "config", "user.name", "AutoSWE live test"],
+                           cwd=td, check=True)
+            subprocess.run(["git", "add", "autoswe-live-test.md"],
+                           cwd=td, check=True)
+            subprocess.run(["git", "commit", "-m", "Live test: comment round-trip push"],
+                           cwd=td, check=True)
+            subprocess.run(["git", "push", "origin",
+                            f"HEAD:{branch}"],
+                           cwd=td, check=True, capture_output=True, timeout=120)
+
+            pr = vcs.open_pull_request(
+                branch, "main", "Live test PR", "Test body from pytest"
+            )
+            assert pr.number is not None
+            assert urlparse(pr.url).hostname.endswith("dev.azure.com")
+            found = vcs.find_existing_pr(branch)
+            assert found is not None and found.number == pr.number
+
+            # Abandon the PR ("completed" requires a LastMergeSourceCommit,
+            # which only the UI flow provides; abandon is API-supported)
+            close_path = _ado_api_version(
+                f"https://dev.azure.com/{ado_live_cfg['org']}/{ado_live_cfg['project']}"
+                f"/_apis/git/repositories/{ado_live_cfg['repo']}/pullrequests/{pr.number}"
+            )
+            ado_patch_json(close_path, ado_live_cfg["pat"],
+                           body={"status": "abandoned"})
+
+            # Delete the throwaway branch (REST ref-delete is 405 on hosted
+            # ADO; git push --delete is the reliable path)
+            subprocess.run(["git", "push", "origin", f"--delete", branch],
+                           cwd=td, check=True, capture_output=True, timeout=120)
 
     def test_factory_sync_workflow(self, ado_live_cfg):
         """Full factory-based sync workflow."""
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
-        issues = tracker.list_open_issues(ado_live_cfg)
+        issues = tracker.list_open_issues()
         assert len(issues) > 0
-        issue = tracker.fetch_issue(ado_live_cfg, issues[0].number)
+        issue = tracker.fetch_issue(issues[0].number)
         assert issue.title
-        comments = tracker.fetch_comments(ado_live_cfg, issues[0].number)
+        comments = tracker.fetch_comments(issues[0].number)
         assert isinstance(comments, list)
-        tracker.set_status(ado_live_cfg, 1, "pending")
-        tracker.post_comment(ado_live_cfg, 1, "Live sync test comment")
+        tracker.set_status(1, "pending")
+        tracker.post_comment(1, "Live sync test comment")
 
 
 @pytest.mark.live

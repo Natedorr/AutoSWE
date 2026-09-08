@@ -249,9 +249,9 @@ def test_fetch_comments_pending(tracker, mock_ado_request, ado_route_table):
 
     result = tracker.fetch_comments(100)
 
-    # issue #125: comment reads must use stable 7.1, not a retired preview
-    assert "api-version=7.1" in mock_ado_request.calls[0]["path"]
-    assert "preview" not in mock_ado_request.calls[0]["path"]
+    # issue #125 (reverted by 022): comment reads must use 7.1-preview —
+    # the comments resource is under preview on hosted ADO again.
+    assert "api-version=7.1-preview" in mock_ado_request.calls[0]["path"]
 
     assert len(result) == 2
     assert result[0].body == "/plan --branch develop"
@@ -574,9 +574,8 @@ def test_post_comment(tracker, mock_ado_request, ado_route_table):
     assert call["method"] == "POST"
     assert "workitems/100/comments" in call["path"]
     assert "format=Markdown" in call["path"]
-    # issue #125: comment POST must use stable 7.1, not a retired preview
-    assert "api-version=7.1" in call["path"]
-    assert "preview" not in call["path"]
+    # issue #125 (reverted by 022): comment POST must use 7.1-preview
+    assert "api-version=7.1-preview" in call["path"]
     assert call["body"] == {"text": "This is a test comment"}
 
 
@@ -781,9 +780,8 @@ def test_update_comment_markdown(tracker, mock_ado_request, ado_route_table):
     assert call["method"] == "PATCH"
     assert "workitems/100/comments/42" in call["path"]
     assert "format=Markdown" in call["path"]
-    # issue #125: comment PATCH must use stable 7.1, not a retired preview
-    assert "api-version=7.1" in call["path"]
-    assert "preview" not in call["path"]
+    # issue #125 (reverted by 022): comment PATCH must use 7.1-preview
+    assert "api-version=7.1-preview" in call["path"]
     assert call["body"] == {"text": "Updated text, no bot marker"}
 
 
