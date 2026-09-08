@@ -324,7 +324,7 @@ class TestAzureWriteOps:
 
             # Delete the throwaway branch (REST ref-delete is 405 on hosted
             # ADO; git push --delete is the reliable path)
-            subprocess.run(["git", "push", "origin", f"--delete", branch],
+            subprocess.run(["git", "push", "origin", "--delete", branch],
                            cwd=td, check=True, capture_output=True, timeout=120)
 
     def test_factory_sync_workflow(self, ado_live_cfg):
