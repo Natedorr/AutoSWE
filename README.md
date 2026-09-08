@@ -206,7 +206,7 @@ Run `./setup.sh` for a guided first-time configuration. Run `./setup.sh --force`
 - [Git Worktrees](docs/autoswe/git-worktrees.md)
 - [Debugging](docs/autoswe/debugging.md)
 - [Testing](docs/autoswe/testing.md)
-- [Live E2E harness](e2e/README.md) — `e2e/` drives real issues through real backends and scores every state-machine path
+- [Live E2E suite](tests/e2e/README.md) — `tests/e2e/` is a corpus of test cases (issue + expected process) that an agent drives against a real GitHub/Azure test project
 
 ---
 

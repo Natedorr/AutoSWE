@@ -1,0 +1,81 @@
+{
+  "$schema_version": 2,
+  "name": "autoswe-live-e2e",
+  "purpose": "A corpus of live test cases: each one is an issue to create in a real GitHub or Azure DevOps project, the comments to post on it, and the process autoSWE must follow in response.",
+  "entry_point": "tests/e2e/README.md",
+  "stable_location": "tests/e2e/",
+  "_note": "There is nothing to execute here - no scripts, no cron files, no queue access. An agent reads these files, drives real issues through the provider API, and reports what diverges.",
+
+  "driver": {
+    "who": "openclaw (or any agent that can call the provider API)",
+    "reads": ["tests/e2e/README.md", "tests/e2e/SETUP.md", "tests/e2e/MATRIX.md", "tests/e2e/cases/*.md"],
+    "does": [
+      "creates its own recurring wake-up schedule for the duration of the run (10-15 minutes)",
+      "creates one issue per case, using the case file's exact title and body",
+      "on each wake-up, advances every unfinished case by one step - posting the next comment only once the previous step's expected label has appeared",
+      "verifies what autoSWE actually did, against the case file and the docs it cites",
+      "files one issue per finding in the autoSWE repo",
+      "deletes its own schedule when the pass is done"
+    ],
+    "must_not": [
+      "alter the [E2E-NN] prefix in an issue title - it is the only thing that identifies which case an issue belongs to",
+      "post a command while a running label (planning/fixing/syncing/reviewing/shipping) is on the issue",
+      "advance a case on a timer instead of on an observed label",
+      "re-drive issues from a previous pass"
+    ]
+  },
+
+  "files": {
+    "tests/e2e/README.md": "The runbook: the loop, start to finish",
+    "tests/e2e/SETUP.md": "What the test project must contain, and the config a run assumes",
+    "tests/e2e/MATRIX.md": "Permutations - backend x phase split x provider - and case groups",
+    "tests/e2e/VERIFY.md": "How to check a step: the evidence, and what each observation proves",
+    "tests/e2e/REPORTING.md": "How to write up a finding, with the template",
+    "tests/e2e/cases/": "One file per case; cases/README.md indexes them"
+  },
+
+  "cases": [
+    {"id": "E2E-01", "file": "cases/E2E-01.md", "covers": "plan -> fix -> pr happy path", "group": "core"},
+    {"id": "E2E-02", "file": "cases/E2E-02.md", "covers": "question, resumed by a plain reply", "group": "questions"},
+    {"id": "E2E-03", "file": "cases/E2E-03.md", "covers": "question, resumed by a slash command", "group": "questions"},
+    {"id": "E2E-03b", "file": "cases/E2E-03b.md", "covers": "question asked mid-fix", "group": "questions", "backends": ["claude_code", "pi"]},
+    {"id": "E2E-04", "file": "cases/E2E-04.md", "covers": "fix with no plan phase", "group": "core"},
+    {"id": "E2E-05", "file": "cases/E2E-05.md", "covers": "fix with nothing to do", "group": "core"},
+    {"id": "E2E-06", "file": "cases/E2E-06.md", "covers": "sync, clean merge", "group": "sync"},
+    {"id": "E2E-07", "file": "cases/E2E-07.md", "covers": "sync conflict resolved by the agent", "group": "sync"},
+    {"id": "E2E-07b", "file": "cases/E2E-07b.md", "covers": "rebase conflict fails loudly", "group": "sync", "run_alone": true, "scoped_config": "SYNC_STRATEGY=rebase"},
+    {"id": "E2E-08", "file": "cases/E2E-08.md", "covers": "review approving", "group": "review"},
+    {"id": "E2E-09", "file": "cases/E2E-09.md", "covers": "review needs changes, pr refused, automatic re-review", "group": "review"},
+    {"id": "E2E-10", "file": "cases/E2E-10.md", "covers": "review blocked on a critical finding", "group": "review"},
+    {"id": "E2E-11", "file": "cases/E2E-11.md", "covers": "post-fix test gate red", "group": "gates"},
+    {"id": "E2E-12", "file": "cases/E2E-12.md", "covers": "failure, retry replay, attempt guard, session provenance", "group": "guards", "run_alone": true, "scoped_config": "agent_timeout=20"},
+    {"id": "E2E-13", "file": "cases/E2E-13.md", "covers": "skip, and inert plain text", "group": "steering"},
+    {"id": "E2E-14", "file": "cases/E2E-14.md", "covers": "abort and restart", "group": "steering"},
+    {"id": "E2E-15", "file": "cases/E2E-15.md", "covers": "--branch, and the PR base", "group": "steering"},
+    {"id": "E2E-16", "file": "cases/E2E-16.md", "covers": "pr blocked by pending CI", "group": "gates"},
+    {"id": "E2E-17", "file": "cases/E2E-17.md", "covers": "command parsing and idempotence", "group": "parsing"},
+    {"id": "E2E-17b", "file": "cases/E2E-17b.md", "covers": "author allowlist", "group": "parsing", "run_alone": true, "scoped_config": "ALLOWED_AUTHORS"},
+    {"id": "E2E-18", "file": "cases/E2E-18.md", "covers": "body command, auto-dispatch, issue closure", "group": "parsing", "run_alone": true, "scoped_config": "auto_dispatch_new=true"},
+    {"id": "E2E-19", "file": "cases/E2E-19.md", "covers": "with <guidance> reaching the prompt", "group": "review", "soft": true},
+    {"id": "OOB", "file": "cases/OOB.md", "covers": "crash -> error, and the wall-clock guard", "group": "operator-assisted"}
+  ],
+
+  "passes": [
+    {"label": "A-claude", "plan": "claude_code", "fix": "claude_code", "review": "claude_code"},
+    {"label": "B-codex", "plan": "codex", "fix": "codex", "review": "codex"},
+    {"label": "C-mixed", "plan": "codex", "fix": "claude_code", "review": "claude_code"},
+    {"label": "D-pi", "plan": "pi", "fix": "pi", "review": "pi"}
+  ],
+
+  "upstream_docs": {
+    "_note": "The cases test the behaviour these describe. A finding is only real if it contradicts one of them.",
+    "state_machine": "docs/autoswe/labels.md",
+    "statuses_and_queue_shape": "docs/autoswe/data-model.md",
+    "commands": "docs/autoswe/slash-commands.md",
+    "handlers": "docs/autoswe/handlers.md",
+    "guards": "docs/autoswe/safeguards.md",
+    "backends": "docs/autoswe/harnesses.md",
+    "providers": "docs/autoswe/providers.md",
+    "offline_suite": "docs/autoswe/testing.md"
+  }
+}

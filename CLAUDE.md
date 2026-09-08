@@ -26,7 +26,7 @@ All architecture, data shapes, and process documentation lives in `docs/autoswe/
 | Safeguards (limits, loop protection) | [docs/autoswe/safeguards.md](docs/autoswe/safeguards.md) |
 | Debugging & operations | [docs/autoswe/debugging.md](docs/autoswe/debugging.md) |
 | Testing strategy | [docs/autoswe/testing.md](docs/autoswe/testing.md) |
-| Live E2E suite (real repos, real backends) | [e2e/README.md](e2e/README.md) — self-contained in `e2e/`, indexed by `e2e/MANIFEST.json` |
+| Live E2E suite (real project, real backends) | [tests/e2e/README.md](tests/e2e/README.md) — a corpus of test cases an agent drives against a real GitHub/Azure project; no scripts to run |
 
 ## Working Rules for Claude
 
