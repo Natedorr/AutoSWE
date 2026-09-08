@@ -13,7 +13,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import resolve_harness
+from autoswe.core.config import resolve_harness, resolve_max_turns
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
@@ -213,7 +213,7 @@ def run_review(
             resume=None,  # CRITICAL: one-off session
             model=review_model,
             mode="read_only",
-            max_turns=80,
+            max_turns=resolve_max_turns("review", repo_cfg, cfg or {}, harness),
             can_use_tool=cut,
             state=state,
             progress_callback=progress_callback,

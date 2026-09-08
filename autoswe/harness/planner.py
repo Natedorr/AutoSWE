@@ -3,7 +3,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from autoswe.core.config import resolve_harness
+from autoswe.core.config import resolve_harness, resolve_max_turns
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool, post_question_fallback
@@ -392,6 +392,7 @@ def _plan_session(
             resume=resume_session_id,
             model=harness.get("model"),
             mode="plan",
+            max_turns=resolve_max_turns("plan", repo_cfg, cfg or {}, harness),
             mcp_servers=build_mcp_comment_server(task, repo_cfg),
             progress_callback=progress_callback,
             can_use_tool=cut,

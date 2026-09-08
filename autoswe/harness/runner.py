@@ -182,7 +182,10 @@ def run(
     permission_mode: str = "default",
     allowed_tools: list | None = None,
     disallowed_tools: list | None = None,
-    max_turns: int = 200,
+    # When omitted (None), the effective cap is resolved from the harness
+    # profile / per-repo / global config (issue #222) via resolve_max_turns.
+    # An explicit caller value always wins (e.g. a handler pinning a lower cap).
+    max_turns: int | None = None,
     model: str | None = None,
     cli_path: str | None = None,
     env_overrides: dict | None = None,
@@ -226,6 +229,14 @@ def run(
         timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
     max_retries = int(rc.get("agent_retry_on_failure", cfg.get("AGENT_RETRY_ON_FAILURE", 0)))
     raw_subtype_override = rc.get("agent_retry_on_subtype", cfg.get("AGENT_RETRY_ON_SUBTYPE", ""))
+
+    # Turn cap (issue #222). Handlers resolve the effective cap for their phase
+    # via config.resolve_max_turns() and pass it here; an explicit value always
+    # wins. Callers that omit it get the historical 200 default so that direct
+    # runner.run() use (tests, one-off scripts) is unchanged when no profile /
+    # per-repo / global override is set.
+    if max_turns is None:
+        max_turns = 200
 
     # Thread harness_cfg into spec.state so the backend can read
     # backend-specific fields (cli_path, anthropic_api_key, etc.).

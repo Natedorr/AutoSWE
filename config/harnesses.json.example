@@ -8,6 +8,14 @@
     "env": { "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" }
   },
 
+  "claude-opus-longfix": {
+    "_comment": "Same as claude-opus but with a higher turn cap for large multi-part /fix tasks. `max_turns` (issue #222) is a positive integer honored by backends that expose a turn cap (claude_code); codex/pi ignore it. When unset the coding phases default to 200 (review to 80).",
+    "backend": "claude_code",
+    "model": "claude-opus-5",
+    "max_turns": 400,
+    "env": { "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1" }
+  },
+
   "claude-sonnet": {
     "backend": "claude_code",
     "model": "claude-sonnet-5"
