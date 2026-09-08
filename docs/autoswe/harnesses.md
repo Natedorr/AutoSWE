@@ -475,6 +475,7 @@ There is no price table analogous to `codex_pricing.py`.
 - **No AskUserQuestion / structured output** (see the "Capabilities (not yet supported)" bullet above) — plan/review keep their read-only guarantee via the tool allowlist, but structured verdicts fall back to the text-pattern paths.
 - ``plan_file_path`` is always ``None`` — pi doesn't write a native plan file (the planner's `~/.claude/plans/` scan stays skipped; the `plan_file` capability is not advertised).
 - ``plan_posted`` / ``question_posted`` are set from the `autoswe_comment` MCP `tool_execution_start` events when a run names that server (direct or proxy shapes — see the "MCP comment posting via the pi-mcp-adapter" section above); they stay ``False`` otherwise.
+- **Question-terminal precedence (issue #230):** once `post_question` is observed in a run, any later `post_plan` in the *same* run is ignored (``plan_posted`` stays ``False``), keeping `question_posted` authoritative. This mirrors the planner's question>plan check so a plan model that continues past its own question and self-posts a plan cannot flip the run back to "posted a plan."
 - Duration is tracked via ``time.monotonic()`` locally.
 
 ### Shared RunSpec → RunResult contract (backends/base.py)

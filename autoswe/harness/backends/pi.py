@@ -818,8 +818,18 @@ def _parse_line(line: str, acc: _PiAccumulator, callback) -> None:
             # shape, so parsing both keeps detection working either way.
             kind, body = _classify_mcp_comment_call(event)
             if kind == "plan":
-                acc.plan_posted = True
-                log(f"[PI] autoswe_comment post_plan (body {len(body)} chars)")
+                if acc.question_posted:
+                    # Question-terminal (issue #230): post_question was already
+                    # observed in this run, so the run's authoritative outcome is
+                    # "waiting on the user." The model continuing past its own
+                    # question and then calling post_plan must NOT set
+                    # plan_posted — keeping question_posted authoritative at the
+                    # source mirrors the planner's question>plan precedence, so a
+                    # late post_plan can never flip the run back to a posted plan.
+                    log("[PI] post_plan ignored — post_question already observed in this run (question-terminal)")
+                else:
+                    acc.plan_posted = True
+                    log(f"[PI] autoswe_comment post_plan (body {len(body)} chars)")
             elif kind == "question":
                 acc.question_posted = True
                 log(f"[PI] autoswe_comment post_question (body {len(body)} chars)")
