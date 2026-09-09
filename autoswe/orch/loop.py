@@ -490,7 +490,17 @@ def _handle_dispatch_error(
     # 2. Post structured error comment (best effort)
     try:
         comment_body = format_error_comment(ctx)
-        tracker.post_comment(issue_num, comment_body)
+        error_comment_id = tracker.post_comment(issue_num, comment_body)
+        # Record the ID immediately so the error comment is never mistaken for a
+        # user reply on the next poll — this path runs *after* the dispatch
+        # crash, so the normal emit-time bot_comment_ids bookkeeping never ran.
+        # The in-memory append is persisted by the cycle's save_queue() (union
+        # in autoswe/core/queue_store.py); content fallback in
+        # _is_autoswe_bot_comment backstops any hard crash before save (issue #236).
+        if error_comment_id is not None:
+            bot_ids = queue_entry.setdefault("bot_comment_ids", [])
+            if error_comment_id not in bot_ids:
+                bot_ids.append(error_comment_id)
         log(f"[ERROR] {slug}: posted error comment")
     except Exception as post_err:  # Post is best-effort; log and continue if the provider API fails
         dbg.error("dispatch error: failed to post comment for %s: %s", slug, post_err, exc_info=True)
@@ -685,12 +695,19 @@ def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None
         try:
             tracker = get_tracker(repo_cfg)
             branch = get_vcs(repo_cfg).branch_name(issue_num)
-            tracker.post_comment(
+            recovery_comment_id = tracker.post_comment(
                 issue_num,
                 f"**autoSWE recovery**: found orphaned changes from an interrupted run "
                 f"— committed and pushed them to `{branch}`."
                 f"{AUTOSWE_BOT_FOOTER}",
             )
+            # Record the ID so the recovery comment is never mistaken for a user
+            # reply (same rationale as the dispatch-error path, issue #236).
+            # `task` is queue[slug]; persisted by the cycle's save_queue().
+            if recovery_comment_id is not None:
+                bot_ids = task.setdefault("bot_comment_ids", [])
+                if recovery_comment_id not in bot_ids:
+                    bot_ids.append(recovery_comment_id)
         except Exception as e:
             dbg.error("recover: comment post failed for %s: %s", slug, e, exc_info=True)
             log(f"[RECOVER] {slug}: recovery comment failed: {e}")

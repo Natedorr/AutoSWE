@@ -306,7 +306,9 @@ class NormalizedComment:
     is_bot: bool = False             # set by adapter from bot_comment_ids membership
 ```
 
-The `id` field is the **primary watermark** for the state machine. The `is_bot` flag is set by the adapter from `bot_comment_ids` membership (with body marker fallback for pre-existing bot comments). Orchestrator code uses `is_bot` exclusively — no content pattern matching in the decision layer.
+The `id` field is the **primary watermark** for the state machine. The `is_bot` flag is set by the adapter from `bot_comment_ids` membership (with body marker fallback for pre-existing bot comments).
+
+**Bot-comment tracking is recorded on every posting path, not only the happy path.** Every comment autoSWE posts is tagged with the `BOT_MARKER`, and its ID is appended to `bot_comment_ids` at the moment of the successful POST — including the sticky progress comment (`_dispatch_task`), the dispatch-error comment (`_handle_dispatch_error`), and the orphaned-worktree recovery comment (`_recover_orphaned_worktrees`), not just completion/`emit` effects. The decision layer's reply/restart filters (`_has_user_reply_after`, `_has_new_user_comment_after`) therefore use the layered `_is_autoswe_bot_comment` check — `is_bot` flag **then** `BOT_MARKER` **then** content patterns — rather than the raw flag alone. This is the defense for the case where a comment's ID never reaches `bot_comment_ids` (e.g. a progress comment posted just before a dispatch crash, on a provider such as Azure DevOps that strips HTML markers from bodies): the content-pattern fallback still classifies it as a bot comment, so it is never mistaken for a user reply that resumes the task (issue #236).
 
 ### `PRResult`
 

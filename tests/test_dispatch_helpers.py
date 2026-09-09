@@ -1501,6 +1501,119 @@ def test_dispatch_error_clears_first_dispatched_at(
 
 
 # ---------------------------------------------------------------------------
+# Issue #236 — failed-dispatch bot comments must be tracked so they are never
+# mistaken for user replies
+#
+# A dispatch posts a progress comment, then worktree creation fails. The
+# progress comment ID is recorded in-memory by _dispatch_task (loop.py:323);
+# the dispatch-error comment must ALSO be recorded by _handle_dispatch_error.
+# If either were missing from bot_comment_ids, the next poll's reply filter
+# would treat that comment as a human reply and resume the task.
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_error_records_progress_and_error_comment_ids(
+    isolated_autoswe_dir, monkeypatch, tmp_path,
+):
+    """After a dispatch crash, BOTH the progress and the dispatch-error
+    comment IDs must be in bot_comment_ids, and a second poll must not
+    re-dispatch (task stays in terminal 'error')."""
+    from autoswe.core.queue_store import LockedQueue
+
+    task_id = "gh:owner_repo_1"
+    task = {
+        "id": task_id, "owner": "owner", "repo": "repo", "issue_number": 1,
+        "title": "Test issue", "body": "Fix this\n\n/fix", "autoswe_status": "pending",
+        "base_branch": "main", "provider": "github", "suppress_welcome": True,
+        "pr_number": None, "session_id": None, "last_dispatched_command_id": None,
+        "last_consumed_reply_id": None, "bot_comment_ids": [],
+        "last_synced": "2026-01-01T00:00:00Z", "created_at": "2026-01-01T00:00:00Z",
+    }
+    with LockedQueue() as lq:
+        lq.queue[task_id] = dict(task)
+
+    import json
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+
+    import autoswe.orch.loop as loop_mod
+
+    dispatch_count = [0]
+    progress_id = 555
+
+    def failing_dispatch(*args, **kwargs):
+        dispatch_count[0] += 1
+        pt = args[0]
+        slug = pt.slug
+        queue_entry = args[6]
+        queue_entry[slug]["autoswe_status"] = "dispatched"
+        # The real _dispatch_task records the progress comment ID here
+        # (loop.py:319-325) before run() raises; mirror that.
+        queue_entry[slug]["progress_comment_id"] = progress_id
+        queue_entry[slug].setdefault("bot_comment_ids", []).append(progress_id)
+        raise RuntimeError("simulated worktree creation failure")
+
+    monkeypatch.setattr(loop_mod, "_dispatch_task", failing_dispatch)
+
+    class FakeTracker:
+        _next_id = 700
+        def set_status(self, issue_num, label):
+            pass
+        def post_comment(self, issue_num, body):
+            cid = FakeTracker._next_id
+            FakeTracker._next_id += 1
+            return cid
+        def fetch_comments(self, *a, **kw):
+            return []
+
+    import autoswe.providers.factory as factory_mod
+    monkeypatch.setattr(loop_mod, "get_tracker", lambda repo_cfg: FakeTracker())
+    monkeypatch.setattr(factory_mod, "get_tracker", lambda repo_cfg: FakeTracker())
+
+    from autoswe.orch.types import ApiState
+    from autoswe.providers.base import NormalizedIssue
+
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
+        return {
+            1: ApiState(
+                issue=NormalizedIssue(
+                    number=1, title="Test issue", body="Fix this\n\n/fix",
+                    owner="owner", repo="repo", state="open",
+                    is_pull_request=False, labels=[],
+                ),
+                comments=(),
+            ),
+        }
+
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
+
+    cfg = {"MAX_CONCURRENT": 1, "SILENT_REPORTING": True, "WORKTREE_DIR": str(tmp_path / "worktrees")}
+    loop_mod.poll(cfg, mode="full", repo_filter="owner/repo")
+
+    with LockedQueue() as lq:
+        entry = lq.queue[task_id]
+        status = entry["autoswe_status"]
+        bot_ids = entry.get("bot_comment_ids", [])
+
+    assert status == "error"
+    assert progress_id in bot_ids, "progress comment ID must be tracked"
+    assert 700 in bot_ids, (
+        f"dispatch-error comment ID (700) must be tracked by _handle_dispatch_error; "
+        f"got bot_comment_ids={bot_ids}"
+    )
+
+    # Second poll: error is terminal — the un-tracked progress/error comments
+    # must not resume the task.
+    loop_mod.poll(cfg, mode="full", repo_filter="owner/repo")
+    assert dispatch_count[0] == 1, (
+        "second poll must NOT re-dispatch a task in 'error' state "
+        "(a bot comment must not be read as a user reply)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Sticky progress comment reuse on /retry after a crash
 #
 # progress_comment_id survives in the queue only when a dispatch crashed

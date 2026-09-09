@@ -360,3 +360,74 @@ def test_comment_id_negative():
     result = _find_last_completion_id(comments)
     # Negative ID is not None, so it passes the check
     assert result == -1
+
+
+# ------ Issue #236 — bot comments must never be misread as user replies ------
+#
+# A progress/error comment posted just before a dispatch crash may have its ID
+# lost from bot_comment_ids (the dispatch failed before emit-time bookkeeping).
+# On re-read it arrives with is_bot=False. GitHub keeps the marker; Azure
+# strips it. Either way the content fallback must classify it as bot so the
+# reply filter never resumes the task on it.
+
+
+def test_is_bot_progress_comment_dispatching_pattern():
+    """The exact posted progress body (no marker, no flag) is a bot comment."""
+    c = _comment("Dispatching `plan`&hellip;", cid=5, is_bot=False)
+    assert _is_autoswe_bot_comment(c) is True
+
+
+def test_is_bot_progress_comment_resuming_and_retrying_patterns():
+    """The resume and adopted-retry sticky bodies are bot comments."""
+    assert _is_autoswe_bot_comment(_comment("Resuming `plan` session&hellip;", cid=5)) is True
+    assert _is_autoswe_bot_comment(_comment("Retrying `fix`&hellip;", cid=5)) is True
+
+
+def test_is_bot_dispatch_error_and_recovery_comments():
+    """The dispatch-error and orphaned-worktree recovery bodies are bot comments."""
+    assert _is_autoswe_bot_comment(_comment("## Dispatch Error\n\nAn infrastructure error…", cid=5)) is True
+    assert _is_autoswe_bot_comment(_comment(
+        "**autoSWE recovery**: found orphaned changes from an interrupted run", cid=5)) is True
+
+
+def test_user_reply_filter_ignores_progress_comment_without_newer_human_reply():
+    """Regression for #236: a marker-stripped progress comment (is_bot=False)
+    newer than both watermarks must NOT be returned as a user reply when no
+    newer human comment exists."""
+    from autoswe.orch.decide import _has_user_reply_after
+
+    comments = [
+        # Prior bot completion, fully consumed (the after_id watermark).
+        _comment("Completed with command `/plan`.", cid=3, is_bot=True),
+        # The failed-dispatch progress comment: posted, then crash; its ID was
+        # never recorded so it re-reads as is_bot=False. No marker (Azure).
+        _comment("Dispatching `plan`&hellip;", cid=5, is_bot=False),
+        # The error comment from _handle_dispatch_error — also unpersisted.
+        _comment("## Dispatch Error\n\n**Exception:** `RuntimeError`…", cid=6, is_bot=False),
+    ]
+    assert _has_user_reply_after(tuple(comments), after_id=3, last_consumed=None) is None
+
+
+def test_user_reply_filter_still_finds_genuine_human_reply():
+    """Control: a real human reply newer than the progress comment is found."""
+    from autoswe.orch.decide import _has_user_reply_after
+
+    comments = [
+        _comment("Completed with command `/plan`.", cid=3, is_bot=True),
+        _comment("Dispatching `plan`&hellip;", cid=5, is_bot=False),
+        _comment("yes, please add the tests too", cid=7, is_bot=False),
+    ]
+    reply = _has_user_reply_after(tuple(comments), after_id=3, last_consumed=5)
+    assert reply is not None
+    assert reply.id == 7
+
+
+def test_new_user_comment_after_ignores_bot_error_comment():
+    """The terminal-restart new-user check must also skip bot comments."""
+    from autoswe.orch.decide import _has_new_user_comment_after
+
+    comments = [
+        _comment("## Dispatch Error\n\n…", cid=5, is_bot=False),
+    ]
+    assert _has_new_user_comment_after(tuple(comments), after_id=3) is False
+
