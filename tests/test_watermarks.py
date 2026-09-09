@@ -11,6 +11,7 @@ from autoswe.tracking.comments import (
     _find_last_bot_comment_id,
     _find_last_completion_id,
     _is_autoswe_bot_comment,
+    record_bot_comment_id,
 )
 
 # ------ Helpers ------
@@ -430,4 +431,26 @@ def test_new_user_comment_after_ignores_bot_error_comment():
         _comment("## Dispatch Error\n\n…", cid=5, is_bot=False),
     ]
     assert _has_new_user_comment_after(tuple(comments), after_id=3) is False
+
+
+def test_is_bot_pr_and_deferred_comments():
+    """The ship PR-opened/PR-exists and PR-deferred bodies are bot comments.
+
+    These three post sites (vcs/ship.open_pr, providers/adapter create_pr) do
+    NOT record their ID to bot_comment_ids, so on a marker-stripping provider
+    they rely on the content-pattern fallback (issue #236 review)."""
+    assert _is_autoswe_bot_comment(_comment("Pull request opened: https://github.com/o/r/pull/7", cid=5)) is True
+    assert _is_autoswe_bot_comment(_comment("Pull request already exists: https://github.com/o/r/pull/7", cid=5)) is True
+    assert _is_autoswe_bot_comment(_comment("PR deferred — branch out of date. Post `/pr` when ready.", cid=5)) is True
+
+
+def test_record_bot_comment_id_dedups_and_skips_none():
+    """The shared ID-recording helper appends once, dedupes, and ignores None."""
+    entry: dict = {}
+    record_bot_comment_id(entry, None)
+    assert entry == {}, "None must be a no-op"
+    record_bot_comment_id(entry, 555)
+    record_bot_comment_id(entry, 555)  # duplicate
+    record_bot_comment_id(entry, 700)
+    assert entry["bot_comment_ids"] == [555, 700]
 

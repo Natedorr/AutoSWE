@@ -1573,9 +1573,29 @@ def test_dispatch_error_records_progress_and_error_comment_ids(
     monkeypatch.setattr(factory_mod, "get_tracker", lambda repo_cfg: FakeTracker())
 
     from autoswe.orch.types import ApiState
-    from autoswe.providers.base import NormalizedIssue
+    from autoswe.providers.base import NormalizedComment, NormalizedIssue
 
+    # The bot comments actually posted during the cycle — progress (id 555,
+    # recorded in-memory by _dispatch_task before the crash) and the dispatch
+    # error (id 700, recorded by _handle_dispatch_error). We re-read them with
+    # the marker STRIPPED and is_bot computed from bot_comment_ids exactly like
+    # the real adapter does (providers/adapter.py), so the second poll's reply
+    # filter is genuinely exercised against the real comment stream rather than
+    # an empty one. A regression that drops either ID from bot_comment_ids
+    # would re-read that comment as is_bot=False and, pre-#236, resume the task.
     def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
+        bot_ids = bot_ids or set()
+
+        def nc(cid: int, body: str, ts: str) -> NormalizedComment:
+            return NormalizedComment(
+                body=body, created_at=ts, author_login="autoswe",
+                id=cid, is_bot=cid in bot_ids,
+            )
+
+        comments = (
+            nc(555, "Dispatching `fix`&hellip;", "2026-01-01T00:01:00Z"),
+            nc(700, "## Dispatch Error\n\n**Exception:** `RuntimeError`…", "2026-01-01T00:02:00Z"),
+        )
         return {
             1: ApiState(
                 issue=NormalizedIssue(
@@ -1583,7 +1603,7 @@ def test_dispatch_error_records_progress_and_error_comment_ids(
                     owner="owner", repo="repo", state="open",
                     is_pull_request=False, labels=[],
                 ),
-                comments=(),
+                comments=comments,
             ),
         }
 
@@ -1604,8 +1624,11 @@ def test_dispatch_error_records_progress_and_error_comment_ids(
         f"got bot_comment_ids={bot_ids}"
     )
 
-    # Second poll: error is terminal — the un-tracked progress/error comments
-    # must not resume the task.
+    # Second poll: the progress + error comments are now re-read from the API.
+    # Because BOTH their IDs are tracked, the adapter sets is_bot=True for each;
+    # even if one ID were lost, the content-pattern fallback would still
+    # classify it as a bot comment. Neither may be read as a user reply that
+    # resumes the task, so no re-dispatch happens.
     loop_mod.poll(cfg, mode="full", repo_filter="owner/repo")
     assert dispatch_count[0] == 1, (
         "second poll must NOT re-dispatch a task in 'error' state "

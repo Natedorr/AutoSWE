@@ -115,7 +115,27 @@ _BOT_CONTENT_PATTERNS = (
     "Dispatching `",            # initial sticky body (e.g. "Dispatching `plan`…")
     "Resuming `",               # initial sticky body for resume (e.g. "Resuming `plan` session…")
     "Retrying `",               # adopted sticky body on /retry after a crash (e.g. "Retrying `plan`…")
+    "Pull request opened: ",    # ship PR-opened comment (vcs/ship.open_pr)
+    "Pull request already exists: ",  # ship PR-exists comment (vcs/ship.open_pr)
+    "PR deferred — ",           # /pr preflight-deferred comment (providers/adapter.apply_effect)
 )
+
+
+def record_bot_comment_id(entry: dict, comment_id: int | None) -> None:
+    """Append a posted comment's ID to the queue entry's ``bot_comment_ids``.
+
+    Centralised so every posting path records IDs the same way — the dispatch
+    lifecycle comments posted on the live queue entry (progress, dispatch
+    error, orphaned-worktree recovery in ``orch/loop.py``) and the
+    completion/``emit`` effect bookkeeping in ``providers/adapter.py`` all
+    funnel through here (issue #236 review: the inline setdefault/append was
+    repeated with slightly inconsistent dedup).
+    """
+    if comment_id is None:
+        return
+    ids = entry.setdefault("bot_comment_ids", [])
+    if comment_id not in ids:
+        ids.append(comment_id)
 
 
 def _find_last_completion_id(comments: list[CommentLike]) -> int | None:

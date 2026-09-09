@@ -34,6 +34,7 @@ from autoswe.orch.run import DispatchResult, run
 from autoswe.orch.types import ApiState, TaskState, World
 from autoswe.providers.adapter import apply_effect, read_api
 from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
+from autoswe.tracking.comments import record_bot_comment_id
 from autoswe.tracking.labels import (
     RUNNING_STATUSES,
     SHIPPING_BLOCKING_STATUSES,
@@ -320,9 +321,10 @@ def _dispatch_task(
             task_entry["_comment_id"] = progress.comment_id
             task_entry["progress_comment_id"] = progress.comment_id
             task_entry["_minimal_posting"] = minimal
-            bot_ids = task_entry.setdefault("bot_comment_ids", [])
-            if progress.comment_id not in bot_ids:
-                bot_ids.append(progress.comment_id)
+            # Record the progress comment ID immediately (issue #236): a
+            # dispatch can crash before the emit-time bookkeeping, and an
+            # untracked progress comment must never read back as a user reply.
+            record_bot_comment_id(task_entry, progress.comment_id)
 
         # --- Run the action (Layer B) ---
         # Pass the ProgressComment object (not just its .update bound method):
@@ -497,10 +499,7 @@ def _handle_dispatch_error(
         # The in-memory append is persisted by the cycle's save_queue() (union
         # in autoswe/core/queue_store.py); content fallback in
         # _is_autoswe_bot_comment backstops any hard crash before save (issue #236).
-        if error_comment_id is not None:
-            bot_ids = queue_entry.setdefault("bot_comment_ids", [])
-            if error_comment_id not in bot_ids:
-                bot_ids.append(error_comment_id)
+        record_bot_comment_id(queue_entry, error_comment_id)
         log(f"[ERROR] {slug}: posted error comment")
     except Exception as post_err:  # Post is best-effort; log and continue if the provider API fails
         dbg.error("dispatch error: failed to post comment for %s: %s", slug, post_err, exc_info=True)
@@ -565,7 +564,7 @@ def _post_pending_welcomes(
             task["suppress_welcome"] = True
             if welcome_id:
                 task["welcome_comment_id"] = welcome_id
-                task.setdefault("bot_comment_ids", []).append(welcome_id)
+                record_bot_comment_id(task, welcome_id)
             log(f"[WELCOME] posted to {slug}")
             # Throttle welcome posts to avoid API rate limits (10s between each).
             time.sleep(10)
@@ -704,10 +703,7 @@ def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None
             # Record the ID so the recovery comment is never mistaken for a user
             # reply (same rationale as the dispatch-error path, issue #236).
             # `task` is queue[slug]; persisted by the cycle's save_queue().
-            if recovery_comment_id is not None:
-                bot_ids = task.setdefault("bot_comment_ids", [])
-                if recovery_comment_id not in bot_ids:
-                    bot_ids.append(recovery_comment_id)
+            record_bot_comment_id(task, recovery_comment_id)
         except Exception as e:
             dbg.error("recover: comment post failed for %s: %s", slug, e, exc_info=True)
             log(f"[RECOVER] {slug}: recovery comment failed: {e}")

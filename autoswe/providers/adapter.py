@@ -18,7 +18,7 @@ from autoswe.core.logging_utils import get_debug_logger
 from autoswe.orch.types import ApiState, Effect
 from autoswe.providers.base import IssueTracker, NormalizedComment
 from autoswe.providers.factory import get_vcs
-from autoswe.tracking.comments import BOT_MARKER
+from autoswe.tracking.comments import BOT_MARKER, record_bot_comment_id
 from autoswe.vcs.pr_gate import preflight_pr
 
 dbg = get_debug_logger()
@@ -126,7 +126,7 @@ def apply_effect(
         if comment_id:
             task = queue.get(slug)
             if task:
-                task.setdefault("bot_comment_ids", []).append(comment_id)
+                record_bot_comment_id(task, comment_id)
     elif effect.kind == "update_comment":
         if effect.comment_id:
             tracker.update_comment(issue_num, effect.comment_id, effect.body or "")
@@ -153,8 +153,7 @@ def apply_effect(
                         issue_num,
                         f"PR deferred — {reason}. Post `/pr` when ready.{BOT_MARKER}",
                     )
-                    if comment_id:
-                        task_entry.setdefault("bot_comment_ids", []).append(comment_id)
+                    record_bot_comment_id(task_entry, comment_id)
                 return
         existing = vcs.find_existing_pr(branch)
         if existing is None:
