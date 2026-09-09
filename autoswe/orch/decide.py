@@ -17,6 +17,7 @@ from autoswe.providers.base import NormalizedComment
 from autoswe.tracking.comments import (
     _find_last_bot_comment_id,
     _find_last_completion_id,
+    _is_autoswe_bot_comment,
 )
 from autoswe.tracking.labels import (
     COMPLETED_STATUSES,
@@ -94,7 +95,13 @@ def _has_user_reply_after(
     """Find the latest user comment after both watermarks.
 
     Returns the NormalizedComment or None.
-    Uses is_bot flag as the sole source of truth for bot detection.
+
+    Bot detection uses ``_is_autoswe_bot_comment`` (is_bot flag, then marker,
+    then content patterns) rather than the raw ``is_bot`` flag alone — a bot
+    comment whose ID was never persisted to ``bot_comment_ids`` (e.g. a
+    progress comment posted just before a dispatch crash) still carries the
+    marker or a content pattern, and must not be mistaken for a user reply
+    that resumes the task (issue #236).
 
     Handles mixed watermark types: when the fallback returns a timestamp
     (str), compares by created_at. When IDs are available (int), compares
@@ -108,7 +115,7 @@ def _has_user_reply_after(
         user_after = [
             c
             for c in comments
-            if not c.is_bot
+            if not _is_autoswe_bot_comment(c)
             and c.id is not None
             and c.id > (after_id or 0)
             and c.id > (last_consumed or 0)
@@ -120,7 +127,7 @@ def _has_user_reply_after(
         user_after = [
             c
             for c in comments
-            if not c.is_bot
+            if not _is_autoswe_bot_comment(c)
             and c.created_at > after_ts
             and c.created_at > consumed_ts
         ]
@@ -133,17 +140,21 @@ def _has_user_reply_after(
 def _has_new_user_comment_after(comments: tuple, after_id: int | str | None) -> bool:
     """Check if any non-bot comment exists after the given watermark.
 
+    Bot detection uses ``_is_autoswe_bot_comment`` (marker/content fallback,
+    not just the ``is_bot`` flag) so a bot comment with an unpersisted ID is
+    not misread as user intent (issue #236).
+
     Handles both ID (int) and timestamp (str) watermarks.
     """
     if isinstance(after_id, int):
         return any(
-            not c.is_bot and c.id is not None and c.id > after_id
+            not _is_autoswe_bot_comment(c) and c.id is not None and c.id > after_id
             for c in comments
         )
     # TODO: remove after queue migration — timestamp fallback for old queue entries
     after_ts = after_id or ""
     return any(
-        not c.is_bot and c.created_at > after_ts
+        not _is_autoswe_bot_comment(c) and c.created_at > after_ts
         for c in comments
     )
 
@@ -416,16 +427,18 @@ def _check_restart_or_guard(
         allowlist_active = bool(repo_allowed or active_allowlist)
 
         if allowlist_active:
-            # Find the latest new non-bot comment to check its author
+            # Find the latest new non-bot comment to check its author.
+            # Same marker/content fallback as _has_new_user_comment_after
+            # (issue #236) so the two checks agree on which comments count.
             new_comment = None
             if isinstance(last_autoswe, int):
                 for c in comments:
-                    if not c.is_bot and c.id is not None and c.id > (last_autoswe or 0):
+                    if not _is_autoswe_bot_comment(c) and c.id is not None and c.id > (last_autoswe or 0):
                         new_comment = c
             else:
                 after_ts = last_autoswe or ""
                 for c in comments:
-                    if not c.is_bot and c.created_at > after_ts:
+                    if not _is_autoswe_bot_comment(c) and c.created_at > after_ts:
                         new_comment = c
             if new_comment and not _is_author_allowed(
                 new_comment.author_login or "", cfg, repo_cfg,

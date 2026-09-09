@@ -98,16 +98,44 @@ def _is_autoswe_bot_comment(comment: CommentLike) -> bool:
 
 # Content patterns that uniquely identify autoSWE bot comments.
 # Used as a fallback when BOT_MARKER is stripped (e.g. Azure DevOps).
+#
+# Each pattern is a *literal substring* of a body autoSWE actually posts (issue
+# #236: the "Dispatching `/..." pattern had a stray slash that no posted body
+# ever contained, so on Azure — where the marker is stripped — a progress
+# comment was misread as a user reply and drove a bogus resume).
 _BOT_CONTENT_PATTERNS = (
     "## Questions",             # planner WAITING output
     "## Plan\n",                # planner PLAN_READY output (## Plan followed by newline)
     "## Claude's response",     # planner WAITING:see comment fallback
+    "## Dispatch Error",        # dispatch-error comment (core/error_utils.format_error_comment)
     "Completed with command",   # dispatch completion comment
     "Post `/retry`",            # dispatch failure comment (partial — enough to be unique)
     "Task aborted.",            # dispatch abort comment
-    "Dispatching `/",           # initial sticky body (e.g. "Dispatching `/plan`…")
+    "autoSWE recovery",         # orphaned-worktree recovery comment (orch/loop)
+    "Dispatching `",            # initial sticky body (e.g. "Dispatching `plan`…")
     "Resuming `",               # initial sticky body for resume (e.g. "Resuming `plan` session…")
+    "Retrying `",               # adopted sticky body on /retry after a crash (e.g. "Retrying `plan`…")
+    "Pull request opened: ",    # ship PR-opened comment (vcs/ship.open_pr)
+    "Pull request already exists: ",  # ship PR-exists comment (vcs/ship.open_pr)
+    "PR deferred — ",           # /pr preflight-deferred comment (providers/adapter.apply_effect)
 )
+
+
+def record_bot_comment_id(entry: dict, comment_id: int | None) -> None:
+    """Append a posted comment's ID to the queue entry's ``bot_comment_ids``.
+
+    Centralised so every posting path records IDs the same way — the dispatch
+    lifecycle comments posted on the live queue entry (progress, dispatch
+    error, orphaned-worktree recovery in ``orch/loop.py``) and the
+    completion/``emit`` effect bookkeeping in ``providers/adapter.py`` all
+    funnel through here (issue #236 review: the inline setdefault/append was
+    repeated with slightly inconsistent dedup).
+    """
+    if comment_id is None:
+        return
+    ids = entry.setdefault("bot_comment_ids", [])
+    if comment_id not in ids:
+        ids.append(comment_id)
 
 
 def _find_last_completion_id(comments: list[CommentLike]) -> int | None:
