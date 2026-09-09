@@ -633,11 +633,15 @@ def test_set_status_preserves_non_autoswe_tags(tracker, mock_ado_request, ado_ro
     patch_call = mock_ado_request.calls[1]
     assert patch_call["method"] == "PATCH"
     patch_body = patch_call["body"]
-    assert len(patch_body) == 1
-    assert patch_body[0]["op"] == "add"
-    assert patch_body[0]["path"] == "/fields/System.Tags"
+    # Two-op JSON-Patch: remove the field first, then add the full new set.
+    # (``add`` on System.Tags is additive on the server — the remove is what
+    # makes the write a true replace, issue #235.)
+    assert len(patch_body) == 2
+    assert patch_body[0] == {"op": "remove", "path": "/fields/System.Tags"}
+    assert patch_body[1]["op"] == "add"
+    assert patch_body[1]["path"] == "/fields/System.Tags"
     # Should have feature; bug; autoswe:fixed (no autoswe:pending)
-    new_tags = patch_body[0]["value"]
+    new_tags = patch_body[1]["value"]
     assert "feature" in new_tags
     assert "bug" in new_tags
     assert "autoswe:fixed" in new_tags
@@ -656,7 +660,10 @@ def test_set_status_no_existing_tags(tracker, mock_ado_request, ado_route_table)
 
     assert len(mock_ado_request.calls) == 2
     patch_call = mock_ado_request.calls[1]
-    assert patch_call["body"] == [{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending"}]
+    assert patch_call["body"] == [
+        {"op": "remove", "path": "/fields/System.Tags"},
+        {"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending"},
+    ]
 
 
 def test_set_status_with_full_label_no_double_prefix(tracker, mock_ado_request, ado_route_table):
@@ -675,7 +682,7 @@ def test_set_status_with_full_label_no_double_prefix(tracker, mock_ado_request, 
     tracker.set_status(100, "autoswe:pending")
 
     patch_call = mock_ado_request.calls[1]
-    tag_value = patch_call["body"][0]["value"]
+    tag_value = patch_call["body"][1]["value"]  # op[0] is the remove
     assert tag_value == "autoswe:pending"
     assert "autoswe:autoswe:pending" not in tag_value
 
@@ -691,11 +698,54 @@ def test_set_status_full_label_replaces_old_full_label(tracker, mock_ado_request
     tracker.set_status(100, "autoswe:fixing")
 
     patch_call = mock_ado_request.calls[1]
-    tag_value = patch_call["body"][0]["value"]
+    tag_value = patch_call["body"][1]["value"]  # op[0] is the remove
     assert "autoswe:fixing" in tag_value
     assert "autoswe:pending" not in tag_value
     assert "feature" in tag_value
     assert "bug" in tag_value
+
+
+def test_set_status_removes_old_status_tag_on_server(ado_repo_cfg, azure_fake, monkeypatch):
+    """Regression (#235): a status transition must not leave the old autoswe:*
+    tag on the work item.
+
+    Runs the REAL AzureTracker.set_status against the stateful AzureFake, which
+    models ADO's additive ``add`` on System.Tags. If set_status ever regressed
+    to a single ``add`` op, the old tag would survive the write and this
+    assertion would fail.
+    """
+    import autoswe.providers.azure.api as ado_module
+    from autoswe.providers.azure.tracker import AzureTracker
+
+    # The fake materializes System.Tags from the "tags" list (azure_fake.load),
+    # so seed the pre-existing tag set here — including the old autoswe:* tag
+    # that set_status must remove.
+    azure_fake.load({
+        "org": "my-org", "project": "my-project", "repo": "repo",
+        "work_item": {"id": 42, "fields": {
+            "System.Id": 42, "System.State": "Active",
+            "System.Title": "T",
+        }},
+        "tags": ["feature", "autoswe:pending"], "comments": [],
+    })
+
+    def route_to_fake(method, path, pat, body=None,
+                      content_type="application/json", max_retries=3):
+        return azure_fake.handle_request(
+            method, path, pat, body=body, content_type=content_type
+        )
+
+    monkeypatch.setattr(ado_module, "_ado_request", route_to_fake)
+    tracker = AzureTracker(ado_repo_cfg)
+
+    tracker.set_status(42, "autoswe:fixed")
+
+    tags = azure_fake.work_items[42]["fields"]["System.Tags"]
+    assert "autoswe:fixed" in tags
+    assert "autoswe:pending" not in tags, (
+        f"old autoswe:* tag survived the write (accumulation): {tags!r}"
+    )
+    assert "feature" in tags
 
 
 # -- assign_to_user --

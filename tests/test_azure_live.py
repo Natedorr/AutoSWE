@@ -261,11 +261,21 @@ class TestAzureWriteOps:
                   body=[{"op": "add", "path": "/fields/System.State", "value": "Done"}])
 
     def test_tracker_set_status_transitions(self, ado_live_cfg):
-        """Set status through multiple autoswe: transitions."""
+        """Set status through multiple autoswe: transitions.
+
+        After each transition, read the work item back and assert no autoswe:*
+        tag accumulates (issue #235 — a lone ``add`` on System.Tags merges onto
+        the existing tag set, so old status tags would survive).
+        """
         from autoswe.providers.factory import get_tracker
         tracker = get_tracker(ado_live_cfg)
         for status in ("pending", "fixing", "shipped"):
             tracker.set_status(1, status)
+            issue = tracker.fetch_issue(1)
+            autoswe_tags = [t for t in issue.labels if t.startswith("autoswe:")]
+            assert autoswe_tags == [f"autoswe:{status}"], (
+                f"expected exactly [autoswe:{status!r}], got {autoswe_tags!r}"
+            )
 
     def test_tracker_assign_to_user(self, ado_live_cfg):
         from autoswe.providers.factory import get_tracker

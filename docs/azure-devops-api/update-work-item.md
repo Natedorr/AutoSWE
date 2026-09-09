@@ -75,7 +75,12 @@ Update one or more fields on an existing work item. Uses **RFC 6902 JSON Patch f
 | `add` | Set or change a field value | `{"op": "add", "path": "/fields/System.State", "value": "Resolved"}` |
 | `remove` | Clear a field value | `{"op": "remove", "path": "/fields/System.AssignedTo"}` |
 
-**Note:** Both setting a new value AND changing an existing value use `"op": "add"`. There's no separate `replace` needed for work item fields.
+**Note:** Both setting a new value AND changing an existing value use `"op": "add"`. There's no separate `replace` needed for most work item fields.
+
+**Exception — `System.Tags`:** ADO applies `op: "add"` on `System.Tags`
+*additively* (it merges the value into the existing tag set rather than
+replacing the field). To truly replace the tag set you must `remove` the field
+first, then `add` the new value — see [Replace Tags on Work Item](replace-tags-on-work-item.md).
 
 ### Common Update Patterns
 
@@ -95,7 +100,10 @@ curl -u ":$ADO_PAT" \
   ]'
 ```
 
-#### Update Title and Add Tags
+#### Replace Tags (and update title)
+
+`add` on `System.Tags` is additive, so clear the field with `remove` first to
+replace the whole tag set (issue #235):
 
 ```bash
 curl -u ":$ADO_PAT" \
@@ -107,6 +115,10 @@ curl -u ":$ADO_PAT" \
       "op": "add",
       "path": "/fields/System.Title",
       "value": "Fix login bug — critical path"
+    },
+    {
+      "op": "remove",
+      "path": "/fields/System.Tags"
     },
     {
       "op": "add",
@@ -311,6 +323,8 @@ result = update_work_item(
     [
         {"op": "add", "path": "/fields/System.Title", "value": "New title"},
         {"op": "add", "path": "/fields/System.State", "value": "Active"},
+        # System.Tags: remove first — a lone `add` merges onto existing tags.
+        {"op": "remove", "path": "/fields/System.Tags"},
         {"op": "add", "path": "/fields/System.Tags", "value": "in-progress; frontend"},
     ],
     "YOUR_PAT"
@@ -319,7 +333,7 @@ result = update_work_item(
 
 ### Common Pitfalls
 
-1. **`op` is always "add" for setting values** — Even when changing an existing field, use `"op": "add"`, not `"op": "replace"`.
+1. **`op` is "add" for setting values** — Even when changing an existing scalar field, use `"op": "add"`, not `"op": "replace"`. **Exception:** `System.Tags` — `add` merges into the existing tags, so to replace the tag set use `remove` then `add` (see [replace-tags-on-work-item.md](replace-tags-on-work-item.md)).
 2. **Content-Type header** — Must be `application/json-patch+json`.
 3. **State transitions** — You can't always transition directly from any state to any state. Process rules govern valid transitions (e.g., New → Active → Resolved → Closed).
 4. **Removing fields** — Use `"op": "remove"` with no `"value"` field.

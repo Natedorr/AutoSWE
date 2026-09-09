@@ -306,6 +306,9 @@ class TestAzureFakeContract:
 
     def test_patch_workitem(self, azure_fake):
         azure_fake.load(_SAMPLE_STATE_AZ)
+        # NOTE: a lone ``add`` on System.Tags is modeled additively by the fake
+        # (matches ADO, issue #235). From an empty tag set it still yields the
+        # added tag, so this shape test stays valid.
         resp = azure_fake.handle_request(
             "PATCH", "https://dev.azure.com/testorg/testproject/_apis/wit/workitems/42?api-version=7.1", "pat",
             body=[{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:dispatched"}],

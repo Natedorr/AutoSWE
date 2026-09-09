@@ -252,10 +252,15 @@ class TestAzureOutputContracts:
     """Verify Azure DevOps API request body shapes."""
 
     def test_patch_tags_json_patch(self, isolated_autoswe_dir, azure_fake):
-        """PATCH workitem (tags) must be JSON-Patch array with autoswe tags."""
+        """PATCH workitem (tags) must be JSON-Patch array with autoswe tags.
+
+        Production writes tags with a two-op patch (remove then add) because ADO
+        treats a lone ``add`` on System.Tags additively (issue #235).
+        """
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
+            {"op": "remove", "path": "/fields/System.Tags"},
             {"op": "add", "path": "/fields/System.Tags",
              "value": "tag1; autoswe:planned"},
         ]
@@ -269,14 +274,17 @@ class TestAzureOutputContracts:
         assert calls, "Expected PATCH workitem call"
         body = calls[-1]["body"]
         assert isinstance(body, list), "PATCH body should be JSON-Patch array"
-        assert body[0]["op"] == "add"
+        assert body[0]["op"] == "remove"
         assert body[0]["path"] == "/fields/System.Tags"
+        assert body[1]["op"] == "add"
+        assert body[1]["path"] == "/fields/System.Tags"
 
     def test_patch_tags_content_type(self, isolated_autoswe_dir, azure_fake):
         """PATCH workitem must use application/json-patch+json content type."""
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
+            {"op": "remove", "path": "/fields/System.Tags"},
             {"op": "add", "path": "/fields/System.Tags", "value": "autoswe:fixed"},
         ]
         azure_fake.handle_request(
@@ -290,7 +298,12 @@ class TestAzureOutputContracts:
         assert calls[-1]["content_type"] == "application/json-patch+json"
 
     def test_patch_strips_old_autoswe_tags(self, isolated_autoswe_dir, azure_fake):
-        """PATCH workitem (tags) should strip old autoswe:* tags before adding new."""
+        """Two-op tag write (remove then add) leaves no old autoswe:* tag behind.
+
+        Mirrors production set_status: the client strips autoswe:* tags and the
+        fake models ADO's additive ``add``. Only the leading ``remove`` makes the
+        strip stick — assert on the *stored* tag set, not the request body.
+        """
         azure_fake.load({
             **_AZ_PLAN_STATE,
             "tags": ["autoswe:pending", "tag1"],
@@ -303,6 +316,7 @@ class TestAzureOutputContracts:
         new_tags.append("autoswe:fixed")
 
         patch_body = [
+            {"op": "remove", "path": "/fields/System.Tags"},
             {"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
         ]
         azure_fake.handle_request(
@@ -311,11 +325,10 @@ class TestAzureOutputContracts:
             "pat", body=patch_body, content_type="application/json-patch+json",
         )
 
-        calls = _find_patch_workitem(azure_fake)
-        value = calls[-1]["body"][0]["value"]
-        assert "autoswe:pending" not in value, "Old autoswe:pending should be stripped"
-        assert "autoswe:fixed" in value, "New autoswe:fixed should be present"
-        assert "tag1" in value, "Non-autoswe tags should be preserved"
+        stored = azure_fake.work_items[1]["fields"]["System.Tags"]
+        assert "autoswe:pending" not in stored, "Old autoswe:pending should be stripped"
+        assert "autoswe:fixed" in stored, "New autoswe:fixed should be present"
+        assert "tag1" in stored, "Non-autoswe tags should be preserved"
 
     def test_post_comment_azure_format(self, isolated_autoswe_dir, azure_fake):
         """POST comment on Azure workitem must use 'text' key and format=Markdown query param."""

@@ -354,6 +354,14 @@ class AzureTracker:
 
         GETs the current work item, strips existing autoswe:* tags,
         appends the new status tag, and PATCHes via JSON-Patch.
+
+        The write is a two-op patch — ``remove`` then ``add`` on
+        ``/fields/System.Tags``. ADO applies ``op: "add"`` on ``System.Tags``
+        additively (it merges the value into the existing tag set instead of
+        replacing the field), so a lone ``add`` re-merges the tags we just
+        stripped and the status tags accumulate across transitions. Clearing
+        the field first guarantees the written value is the complete tag set
+        (issue #235).
         """
         _validate_status(status)
         # Read current tags
@@ -373,13 +381,18 @@ class AzureTracker:
         new_tags = [t for t in tags if not t.startswith(_PREFIX)]
         new_tags.append(f"{_PREFIX}{normalized_status}")
 
-        # PATCH via JSON-Patch
+        # PATCH via JSON-Patch: remove first, then add. ``add`` on System.Tags
+        # is additive on the server (see docstring), so the ``remove`` is what
+        # makes this a true replace of the tag set.
         patch_path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
         )
         ado_patch(
             patch_path, self._pat,
-            body=[{"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)}],
+            body=[
+                {"op": "remove", "path": "/fields/System.Tags"},
+                {"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
+            ],
         )
 
     def normalize_comment_body(self, comment: NormalizedComment) -> tuple[str, bool]:
