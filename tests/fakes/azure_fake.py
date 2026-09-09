@@ -205,15 +205,36 @@ class AzureFake:
         # ---- PATCH work item (update fields/tags) ----
         if wi_num is not None and method in ("PATCH", "PUT"):
             if wi_num in self.work_items and body and isinstance(body, list):
+                fields = self.work_items[wi_num].setdefault("fields", {})
                 for op in body:
                     op_type = op.get("op", "")
                     op_path = op.get("path", "")
                     value = op.get("value")
-                    if op_type in ("add", "replace") and op_path.startswith("/fields/"):
-                        field = op_path.removeprefix("/fields/")
-                        self.work_items[wi_num].setdefault("fields", {})[
-                            field
-                        ] = value
+                    if not op_path.startswith("/fields/"):
+                        continue
+                    field = op_path.removeprefix("/fields/")
+                    if op_type == "remove":
+                        # JSON-Patch remove clears a scalar field.
+                        fields[field] = ""
+                    elif op_type in ("add", "replace"):
+                        if field == "System.Tags":
+                            # Faithful to ADO: ``add`` on System.Tags is
+                            # ADDITIVE — the value is merged into the existing
+                            # tag set, not a replace (issue #235). A true
+                            # replace requires a preceding ``remove``.
+                            existing = fields.get("System.Tags", "") or ""
+                            existing_tags = [
+                                t.strip() for t in existing.split(";") if t.strip()
+                            ]
+                            new_tags = [
+                                t.strip() for t in (value or "").split(";") if t.strip()
+                            ]
+                            for t in new_tags:
+                                if t not in existing_tags:
+                                    existing_tags.append(t)
+                            fields["System.Tags"] = "; ".join(existing_tags)
+                        else:
+                            fields[field] = value
             return copy.deepcopy(self.work_items.get(wi_num, {}))
 
         # ---- POST WIQL query (list work items) ----

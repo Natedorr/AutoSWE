@@ -13,6 +13,12 @@ PATCH /{organization}/{project}/_apis/wit/workitems/{id}?api-version=7.1
 
 Completely replace all tags on a work item by setting `System.Tags` to a new value. This overwrites whatever tags existed before.
 
+> **Why two ops?** ADO applies `op: "add"` on `System.Tags` *additively* — the
+> value is merged into the existing tag set, not written over it. A lone `add`
+> therefore accumulates tags across calls. To get a true replace you must first
+> `remove` the field (clearing it to empty) and then `add` the new value. This
+> is what autoSWE does in `AzureTracker.set_status` (issue #235).
+
 ### Parameters
 
 #### Headers
@@ -43,6 +49,10 @@ Completely replace all tags on a work item by setting `System.Tags` to a new val
 ```json
 [
   {
+    "op": "remove",
+    "path": "/fields/System.Tags"
+  },
+  {
     "op": "add",
     "path": "/fields/System.Tags",
     "value": "bug; high-priority; security"
@@ -60,6 +70,10 @@ curl -u ":$ADO_PAT" \
   -H "Content-Type: application/json-patch+json" \
   "https://dev.azure.com/myorg/myproject/_apis/wit/workitems/123?api-version=7.1" \
   -d '[
+    {
+      "op": "remove",
+      "path": "/fields/System.Tags"
+    },
     {
       "op": "add",
       "path": "/fields/System.Tags",
@@ -100,19 +114,22 @@ def replace_tags(org, project, work_item_id, new_tags, pat):
     :return: Updated work item dict
     """
     url = f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems/{work_item_id}"
-    tag_string = "; ".join(new_tags) if new_tags else ""
 
-    patch_op = (
-        {"op": "remove", "path": "/fields/System.Tags"}
-        if not new_tags
-        else {"op": "add", "path": "/fields/System.Tags", "value": tag_string}
-    )
+    # `add` on System.Tags is additive, so a true replace requires `remove`
+    # first. When the new set is empty, a lone `remove` suffices.
+    if new_tags:
+        patch_ops = [
+            {"op": "remove", "path": "/fields/System.Tags"},
+            {"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
+        ]
+    else:
+        patch_ops = [{"op": "remove", "path": "/fields/System.Tags"}]
 
     response = requests.patch(
         url, auth=("", pat),
         params={"api-version": "7.1"},
         headers={"Content-Type": "application/json-patch+json"},
-        json=[patch_op]
+        json=patch_ops
     )
     response.raise_for_status()
     return response.json()
@@ -132,6 +149,6 @@ result = replace_tags("myorg", "myproject", 123, ["bug", "critical"], "YOUR_PAT"
 ### Common Pitfalls
 
 1. **This DESTROYS existing tags** — Unlike `add-tags-to-work-item`, this replaces everything. Use only when you want a clean slate.
-2. **`op: "add"` for setting** — Even when replacing, the operation is `"op": "add"`, not `"op": "replace"`.
+2. **Remove before add** — `add` on `System.Tags` is additive, so pair it with a preceding `remove` to replace the tag set instead of merging into it.
 3. **Use `op: "remove"` to clear** — To remove all tags, use `"op": "remove"` with no value, rather than setting to an empty string.
 4. **Tag format** — Semicolon-separated string: `"tag1; tag2; tag3"`. Whitespace after semicolons is cosmetic but recommended for consistency.

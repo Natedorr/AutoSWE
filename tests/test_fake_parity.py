@@ -220,6 +220,8 @@ class TestAzureFakeCoverage:
                                                "System.Title": "T", "System.Tags": ""}},
             "tags": [], "comments": [],
         })
+        # A lone ``add`` on System.Tags is additive in the fake (matches ADO,
+        # issue #235); empty starting tags make the added tag appear.
         resp = azure_fake.handle_request(
             "PATCH", "https://dev.azure.com/org/proj/_apis/wit/workitems/1", "pat",
             body=[{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:done"}],
