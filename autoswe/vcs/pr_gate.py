@@ -85,8 +85,10 @@ def preflight_pr(
         if ci.state == "failure":
             return False, f"CI failing: {ci.summary}"
         if ci.state == "pending":
-            stale_note = " (stale — build predates branch head)" if ci.stale else ""
-            return False, f"CI still running ({ci.pending_count} pending) — retry /pr when green{stale_note}"
+            if ci.stale:
+                # Stale build: no run is in flight, so don't claim a pending count.
+                return False, "CI stale — build predates branch head, no current build running — retry /pr once a build for this commit lands"
+            return False, f"CI still running ({ci.pending_count} pending) — retry /pr when green"
         if ci.state == "error" and _policy("PR_CI_ERROR_POLICY", cfg, repo_cfg, "block") == "block":
             # Fail-safe: an unconsultable CI API is not a pass.
             return False, f"CI status unavailable ({ci.summary}) — PR_CI_ERROR_POLICY=block"

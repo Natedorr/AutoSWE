@@ -571,6 +571,26 @@ class TestGitHubVCS:
         assert ci.state == "failure"
         assert ci.failing == ["ci/circleci"]
 
+    def test_get_ci_status_legacy_status_error_is_failure(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        """A legacy commit status state of ``error`` keeps blocking.
+
+        Pre-hardening, ``error`` went into ``failing`` (blocked the gate). It is
+        a check that verified nothing, NOT a neutral pass: with a legacy
+        ``error`` as the only CI signal the commit must reduce to ``failure``
+        (fail-safe), not ``success``.
+        """
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {"check_runs": []}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {
+            "statuses": [{"context": "ci/legacy", "state": "error"}],
+        }
+
+        ci = vcs.get_ci_status("autoswe/issue-42")
+
+        assert ci.state == "failure"
+        assert ci.failing == ["ci/legacy"]
+        assert ci.neutral == 0
+
     def test_get_ci_status_no_checks_is_none(self, vcs, fake_token, mock_gh_request, gh_route_table):
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {"check_runs": []}

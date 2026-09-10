@@ -22,11 +22,12 @@ dataclass in `providers/base.py`, (b) a `VCSProvider`/`IssueTracker` protocol me
 
 ## 0. Why capabilities come first
 
-The two platforms are *not* symmetric, and today the asymmetry is expressed as a **silent no-op**
-(`AzureVCS.link_branch_to_issue` returns `None`; a broken API call returns `CIStatus(state="none")`
-which the gate reads as "pass"). `base.py` documents the no-inheritance trade-off honestly, but the
-GitHub review's F-2 and the Azure review's F-2a are the same bug wearing two hats: **absence and
-failure are indistinguishable at the seam.**
+The two platforms are *not* symmetric, and (pre-P0) the asymmetry was expressed as a **silent
+no-op**: `AzureVCS.link_branch_to_issue` returned `None`, and a broken CI API call returned
+`CIStatus(state="none")` which the gate read as "pass". (Since #244 the broken-API path returns
+`CIStatus(state="error")`, which the gate blocks on — see §2.1.) `base.py` documents the
+no-inheritance trade-off honestly, but the GitHub review's F-2 and the Azure review's F-2a are the
+same bug wearing two hats: **absence and failure are indistinguishable at the seam.**
 
 Homogenizing means making the difference *explicit and queryable*, not making it invisible. The
 codebase already has exactly this idiom one layer over — `harness/backends` declares capabilities

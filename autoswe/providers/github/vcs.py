@@ -331,12 +331,12 @@ class GitHubVCS:
                 total += 1
                 context = s.get("context", "status")
                 state = s.get("state")
-                if state == "failure":
+                if state in ("failure", "error"):
+                    # Both "failure" and "error" blocked the gate pre-hardening —
+                    # a legacy status of "error" means the check itself errored,
+                    # i.e. it verified nothing, so it must keep blocking rather
+                    # than read as a neutral pass.
                     failing.append(context)
-                elif state == "error":
-                    # A legacy status state of "error" means the *check*
-                    # errored, not the API — it verified nothing.
-                    neutral += 1
                 elif state == "pending":
                     pending_count += 1
                 elif state == "success":
@@ -372,10 +372,11 @@ class GitHubVCS:
                 summary=f"{pending_count} check(s) pending",
             )
         if success_count or neutral:
-            # A check that concluded neutral/skipped verified nothing but is
-            # not a failure — the commit still passes (no behaviour regression
-            # from the pre-hardening code, which counted these as success),
-            # the difference is that they are now reported separately.
+            # A check-run/action that concluded neutral/skipped verified nothing
+            # but is not a failure — the commit still passes. Pre-hardening these
+            # were folded into the success count; the only change is that they are
+            # now reported separately in the summary. (Legacy-status "error" is
+            # deliberately NOT counted here — it is a blocking failure, see above.)
             summary = f"{success_count} check(s) passed"
             if neutral:
                 summary += f", {neutral} skipped/neutral"
