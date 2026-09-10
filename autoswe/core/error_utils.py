@@ -13,6 +13,7 @@ import sys
 import traceback
 from dataclasses import dataclass, field
 
+from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.tracking.comments import BOT_MARKER
 
 
@@ -163,6 +164,7 @@ def _run_safe(cwd: str, cmd: list[str], timeout: float = 5.0) -> str:
             text=True,
             cwd=cwd,
             timeout=timeout,
+            **GIT_TEXT_ARGS,
         )
         combined = result.stdout.strip()
         if not combined and result.stderr.strip():
@@ -194,7 +196,7 @@ def _get_memory_info() -> str:
         try:
             out = subprocess.run(
                 ["sysctl", "-n", "hw.memsize"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, **GIT_TEXT_ARGS,
             )
             total_kb = int(out.stdout.strip()) // 1024
             if total_kb > 0:

@@ -146,6 +146,53 @@ def test_get_disk_usage_unreadable_path_reports_unavailable(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# _run_safe — UTF-8 decoding (issue #238, Windows CP1252 crash)
+# ---------------------------------------------------------------------------
+
+
+def test_run_safe_survives_utf8_output_under_cp1252_locale(tmp_path, monkeypatch):
+    """Regression (issue #238): diagnostics must not die decoding UTF-8 output
+    on a CP1252-locale host.
+
+    The original symptom was doubly hidden: the reviewer crashed on a UTF-8
+    diff, and then _run_safe — itself running bare text=True — raised the same
+    UnicodeDecodeError *inside* the error-capture path, so only the bare
+    'Exception in thread …' line reached the log. With the pinned UTF-8
+    decode the UTF-8 payload returns intact.
+    """
+    import subprocess
+
+    from autoswe.core.error_utils import _run_safe
+
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+
+    out = _run_safe(str(tmp_path), ["printf", "add — em dash\n"])
+    assert "—" in out
+    # The fake default encoding is still in effect — the pin (not the
+    # environment) is what kept this call alive.
+    assert subprocess._text_encoding() == "cp1252"
+
+
+def test_run_safe_passes_explicit_encoding_to_subprocess(tmp_path, monkeypatch):
+    """_run_safe must not rely on the platform-locale default codec."""
+    import subprocess
+
+    from autoswe.core import error_utils
+    from autoswe.core.error_utils import _run_safe
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(error_utils.subprocess, "run", fake_run)
+    assert _run_safe(str(tmp_path), ["true"]) == "ok"
+    assert captured.get("encoding") == "utf-8"
+    assert captured.get("errors") == "replace"
+
+
+# ---------------------------------------------------------------------------
 # format_error_comment
 # ---------------------------------------------------------------------------
 

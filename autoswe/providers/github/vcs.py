@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import subprocess
 
+from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
 from autoswe.providers.base import CIStatus, PRResult
@@ -45,7 +46,7 @@ class GitHubVCS:
             result = subprocess.run(
                 ["gh", "pr", "list", "--repo", f"{self._owner}/{self._repo}",
                  "--head", branch, "--json", "number,url", "--limit", "1"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=30, **GIT_TEXT_ARGS,
             )
             if result.returncode != 0:
                 pass  # fall through to API
@@ -101,7 +102,7 @@ class GitHubVCS:
                     "--title", safe_title,
                     "--body", safe_body,
                 ],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=60, **GIT_TEXT_ARGS,
             )
             if result.returncode == 0:
                 url = result.stdout.strip()
