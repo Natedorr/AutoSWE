@@ -51,6 +51,25 @@ def _policy(name: str, cfg: dict, repo_cfg: dict, default: str) -> str:
     return normalized or default
 
 
+def _resolve_ref_sha(task: dict, repo_cfg: dict, cfg: dict, issue_num: int) -> str | None:
+    """Resolve the worktree's branch head to pass as ``ref_sha`` to the CI gate.
+
+    Best-effort and provider-agnostic: a missing or unresolvable worktree yields
+    ``None`` (the CI read then makes no staleness claim, exactly as before this
+    helper existed). No exception is ever raised here — the gate must not fail
+    because head resolution failed.
+    """
+    owner, repo = task.get("owner"), task.get("repo")
+    if not owner or not repo:
+        return None
+    provider = repo_cfg.get("provider", "github")
+    try:
+        wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
+    except Exception:
+        return None
+    return worktree_mod.resolve_branch_head(wt)
+
+
 def preflight_pr(
     task: dict,
     cfg: dict,
@@ -81,7 +100,14 @@ def preflight_pr(
             return False, reason
 
     if _flag("PR_REQUIRE_CI", cfg, repo_cfg):
-        ci = resolved_vcs.get_ci_status(branch)
+        # Pass the branch head so providers that correlate a CI verdict against
+        # a specific commit (Azure build ``sourceVersion`` staleness) can claim
+        # "this build predates the branch head". Resolving a local git SHA is
+        # provider-agnostic; when it can't be resolved (no worktree, dirty HEAD)
+        # we fall back to the exact no-ref_sha call — no staleness claim, no
+        # behaviour change, no error.
+        ref_sha = _resolve_ref_sha(task, repo_cfg, cfg, issue_num)
+        ci = resolved_vcs.get_ci_status(branch, ref_sha)
         if ci.state == "failure":
             return False, f"CI failing: {ci.summary}"
         if ci.state == "pending":

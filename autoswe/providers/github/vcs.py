@@ -377,9 +377,15 @@ class GitHubVCS:
             # were folded into the success count; the only change is that they are
             # now reported separately in the summary. (Legacy-status "error" is
             # deliberately NOT counted here — it is a blocking failure, see above.)
-            summary = f"{success_count} check(s) passed"
+            # Read naturally for a neutral-only commit (no "0 check(s) passed"):
+            # lead with the passed count, and add the skipped/neutral count only
+            # when there is one.
+            parts = []
+            if success_count:
+                parts.append(f"{success_count} check(s) passed")
             if neutral:
-                summary += f", {neutral} skipped/neutral"
+                parts.append(f"{neutral} skipped/neutral")
+            summary = ", ".join(parts)
             return CIStatus(
                 state="success", head_sha=sha, url=url or self.commit_url(sha),
                 total=total, neutral=neutral, summary=summary,

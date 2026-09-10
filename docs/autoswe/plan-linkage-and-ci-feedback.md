@@ -240,7 +240,9 @@ class CIStatus:
 - Azure: honour `ref_sha` — compare the latest build's `sourceVersion`; on mismatch return
   `stale=True` with `state="pending"` (a build for the right commit is presumably coming), never a
   false green or a false red. `canceled` stays failure (existing pin), but a *stale* canceled build
-  no longer blocks forever.
+  no longer blocks forever. The `/pr` gate resolves the worktree branch head
+  (`git rev-parse HEAD`) and passes it as `ref_sha`, so this staleness path is live end-to-end, not
+  dead — when the head can't be resolved it falls back to a no-`ref_sha` read (no staleness claim).
 - Tests `test_get_ci_status_unresolvable_sha_is_none` and
   `test_get_ci_status_request_error_is_none` flip to `…_is_error` — they currently pin the bug as
   contract, which is the single most important line of this plan.

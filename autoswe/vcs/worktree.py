@@ -171,6 +171,21 @@ def is_dirty(wt: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def resolve_branch_head(wt: Path) -> str | None:
+    """Return the worktree's ``HEAD`` sha, or ``None`` if it cannot be resolved.
+
+    Used to correlate a provider CI verdict against the commit the branch is
+    actually at (Azure ``sourceVersion`` staleness, e.g.). Best-effort: a
+    missing/corrupt worktree or a ``rev-parse`` failure simply yields ``None``
+    so the caller falls back to a staleness-agnostic CI read.
+    """
+    if not wt.exists():
+        return None
+    result = _run(["git", "-C", str(wt), "rev-parse", "HEAD"], check=False)
+    sha = result.stdout.strip() if result.returncode == 0 else ""
+    return sha or None
+
+
 def fetch_prune(main: Path) -> None:
     """Prune the main clone's remote-tracking refs to match the remote.
 
