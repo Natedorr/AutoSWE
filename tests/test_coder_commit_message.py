@@ -281,7 +281,10 @@ def test_run_fix_uses_generated_subject_no_autoswe_prefix(tmp_path):
     first_line = msg.splitlines()[0]
     assert first_line == "Fix off-by-one in pagination cursor"
     assert not msg.startswith("autoswe:")
-    assert "Fixes #1" in msg
+    # E2 (issue #245): the issue reference is no longer hard-coded into the
+    # commit message — it is the provider's commit_trailer, appended inside
+    # commit_and_push (spied here, so it does not appear in the pre-trailer msg).
+    assert "Fixes #1" not in msg
     assert "skipped the last page" in msg
 
 
@@ -335,7 +338,10 @@ def test_run_fix_falls_back_to_issue_title_when_block_missing(tmp_path):
     msg = commit_msgs[0]
     assert msg.splitlines()[0] == "Fix pagination bug"
     assert not msg.startswith("autoswe:")
-    assert "Fixes #1" in msg
+    # E2 (issue #245): no hard-coded "Fixes #N" keyword in the commit message
+    # (it moves behind commit_trailer, applied in commit_and_push which is
+    # spied here).
+    assert "Fixes #1" not in msg
     # Body falls back to the agent's raw summary.
     assert "I made the change" in msg
 
@@ -433,7 +439,9 @@ def test_resume_fix_uses_generated_subject(tmp_path):
     msg = commit_msgs[0]
     assert msg.splitlines()[0] == "Add cursor clamping to paginator"
     assert not msg.startswith("autoswe:")
-    assert "Fixes #1" in msg
+    # E2 (issue #245): reference is the provider trailer (in commit_and_push),
+    # not a hard-coded keyword in the commit message.
+    assert "Fixes #1" not in msg
 
 
 def test_resume_fix_falls_back_to_issue_title(tmp_path):

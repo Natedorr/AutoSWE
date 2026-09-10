@@ -298,8 +298,29 @@ class AzureFake:
             pr["sourceRefName"] = f"refs/heads/{pr_body.get('sourceRefName', pr['sourceRefName'].removeprefix('refs/heads/'))}"
             pr["targetRefName"] = f"refs/heads/{pr_body.get('targetRefName', pr['targetRefName'].removeprefix('refs/heads/'))}"
             pr["url"] = f"https://dev.azure.com/{self._org}/{self._project}/_git/{self._repo}/pullrequest/{pr_number}"
+            # Faithful to ADO: workItemRefs on the create payload establishes
+            # the PR<->work-item link and is reflected by the read-back
+            # ``.../pullrequests/{id}/workitems`` endpoint below (edge E3).
+            pr["workItemRefs"] = copy.deepcopy(pr_body.get("workItemRefs", []))
             self.pulls[pr_number] = pr
             return pr
+
+        # ---- GET PR's associated work items (read-only endpoint, edge E3) ----
+        # Distinct from the collection GET below: the path has a numeric
+        # pullRequestId and the ``workitems`` sub-resource segment.
+        m_pr_workitems = re.search(r"/pullrequests/(\d+)/workitems", path)
+        if m_pr_workitems and method == "GET":
+            pr_num = int(m_pr_workitems.group(1))
+            pr = self.pulls.get(pr_num, {})
+            refs = pr.get("workItemRefs", [])
+            value = [
+                {"id": str(ref.get("id")),
+                 "name": f"Work item {ref.get('id')}",
+                 "url": f"https://dev.azure.com/{self._org}/{self._project}/_apis/wit/workItems/{ref.get('id')}"}
+                for ref in refs
+                if isinstance(ref, dict) and ref.get("id") is not None
+            ]
+            return {"count": len(value), "value": value}
 
         # ---- GET PRs ----
         if "/pullrequests" in path and method == "GET":

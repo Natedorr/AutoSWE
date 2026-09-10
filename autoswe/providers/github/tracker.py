@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import Capability, NormalizedComment, NormalizedIssue
 from autoswe.tracking import api as gh_api
 from autoswe.tracking.assignment import _auto_assign_issue, _get_authenticated_user
 from autoswe.tracking.comments import BOT_MARKER
@@ -166,6 +166,27 @@ class GitHubTracker:
             body={"title": title, "body": body},
         )
         return raw["number"]
+
+    def close_issue(self, issue_number: int, reason: str = "completed") -> None:
+        """Close a GitHub issue via the real API (E5 safety net).
+
+        Sets ``state=closed`` with ``state_reason`` mapped from *reason*
+        (``completed`` / ``not_planned`` → GitHub's matching enum values;
+        anything else is treated as ``completed``). Used only as the safety
+        net when ``AUTO_CLOSE_ON_MERGE`` is absent or the closing keyword in
+        the PR body failed to register — on GitHub the normal close path is
+        the keyword itself, so this is normally a no-op in practice.
+        """
+        state_reason = "not_planned" if reason == "not_planned" else "completed"
+        gh_api.gh_patch(
+            f"/repos/{self._owner}/{self._repo}/issues/{issue_number}",
+            self._token,
+            body={"state": "closed", "state_reason": state_reason},
+        )
+
+    def capabilities(self) -> frozenset[Capability]:
+        """GitHub's merge auto-closes via the keyword; the tracker declares it."""
+        return frozenset({Capability.AUTO_CLOSE_ON_MERGE})
 
     def set_status(self, issue_number: int, status: str) -> None:
         """Set autoSWE status label, ensuring labels exist first."""

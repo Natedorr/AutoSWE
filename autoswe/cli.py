@@ -10,6 +10,7 @@ from autoswe.core.queue_store import _atomic_write, _load_json
 from autoswe.core.slug import make_slug
 from autoswe.orch.loop import poll as orch_poll
 from autoswe.providers.factory import build_repo_cfg, get_tracker, provider_names
+from autoswe.vcs.linkage import render_linkage_checklist
 
 dbg = get_debug_logger()
 
@@ -230,6 +231,7 @@ def _cmd_queue_status(args, cfg):
 
         pass
     task["label_status"] = label_status
+    print(render_linkage_checklist(task))
     print(json.dumps(task, indent=2))
 
 

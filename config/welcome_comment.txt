@@ -15,4 +15,6 @@ autoSWE picked up this issue (`{{SLUG}}`).
 
 You can add guidance: `/fix with performance focus`
 
+**Cross-linkage:** autoSWE links the issue ↔ branch ↔ PR so each edge is traceable on the platform. On Azure DevOps the issue→branch link is not supported by the API (a declared absence), so it is omitted rather than silently skipped — the PR→issue link and merge→issue-close are still established.
+
 <!-- autoswe-bot -->

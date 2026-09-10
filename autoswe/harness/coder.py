@@ -586,15 +586,19 @@ def _finalize_fix(
     # fallback so the subject line is always clean.
     subject = _clean_commit_subject(parsed_subject or task.get("title") or f"Issue #{issue_num}")
     body_text = parsed_body or "\n".join(summary_lines[-15:])
-    if body_text:
-        commit_msg = f"{subject}\n\n{body_text}\n\nFixes #{issue_num}"
-    else:
-        commit_msg = f"{subject}\n\nFixes #{issue_num}"
+    # E2 (issue #245): the issue reference is NOT hard-coded here — it is the
+    # provider's commit_trailer, appended by commit_and_push (which knows the
+    # provider via its own repo_cfg). The PR body still carries the closing
+    # keyword ("Fixes #N"), which is what actually closes the issue on GitHub;
+    # the commit reference is the commit↔issue Development association.
+    commit_msg = f"{subject}\n\n{body_text}" if body_text else subject
 
     log(f"[FIX] {task['id']} committing subject={subject!r}")
     dbg.debug("FIX: committing with subject=%r", subject)
     try:
-        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider)
+        commit_result = commit_and_push(
+            wt, owner, repo, issue_num, commit_msg, base_branch, provider, cfg=cfg,
+        )
     except Exception as e:  # Commit/push boundary — any provider or git error surfaces to the task result.
         dbg.error("_finalize_fix: commit/push failed: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: commit/push error: {e}")

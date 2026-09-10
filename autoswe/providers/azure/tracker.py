@@ -10,6 +10,7 @@ import html
 import re
 from html.parser import HTMLParser
 
+from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
 from autoswe.providers.azure.api import (
     _ado_api_version,
@@ -21,9 +22,11 @@ from autoswe.providers.azure.api import (
     ado_post,
     ado_post_patch,
 )
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import Capability, NormalizedComment, NormalizedIssue
 from autoswe.tracking.comments import _BOT_CONTENT_PATTERNS, BOT_MARKER
 from autoswe.tracking.labels import _validate_status
+
+dbg = get_debug_logger()
 
 _PREFIX = "autoswe:"
 
@@ -31,6 +34,12 @@ _PREFIX = "autoswe:"
 # Keep well under that cap — docs/azure-devops-api/list-work-items.md,
 # Common Pitfalls #3 ("split into multiple requests").
 _BATCH_CHUNK_SIZE = 100
+
+# The terminal states the *read* side treats as closed, lifted out of the
+# literals that used to be hard-coded in list_open_issues / _to_normalized
+# (issue #245 §1.5). Covers Agile/CMMI (Closed), Basic/Scrum (Done), and
+# Removed. Configurable per repo / globally as ``done_states``.
+_DEFAULT_DONE_STATES = frozenset({"Closed", "Done", "Removed"})
 
 
 def _is_bot_comment(body: str) -> bool:
@@ -101,6 +110,11 @@ class AzureTracker:
         self._pat = repo_cfg.get("pat") or repo_cfg.get("token", "")
         self._authenticated_user: str | None = None
         self._resolved_repo_id: str | None = None
+        # Cache of work-item-type → {category: state-name} from runtime state
+        # discovery (issue #245 §1.5). Keyed per (project, type) so a second
+        # close in the same poll doesn't re-query the states endpoint. A
+        # ``None`` value is a negative cache for a failed/empty lookup.
+        self._state_cache: dict[tuple[str, str], dict[str, str] | None] = {}
         # Single source of org/project/repo partition (issue #168 F-08):
         # build_repo_cfg normalises the main path; _normalize_azure_parts
         # covers inline throwaway repo_cfg dicts that skip build_repo_cfg.
@@ -128,14 +142,132 @@ class AzureTracker:
     def pid_prefix(self) -> str:
         return "ado_"
 
+    # ---- Done-state resolution (issue #245 §1.5) ----
+
+    def _done_states(self) -> frozenset[str]:
+        """The terminal states the *read* side treats as closed.
+
+        Lifted from config (``done_states`` on the repo_cfg — per-repo value
+        beats the global seed ``build_repo_cfg`` sets) so a customized process
+        that renames its terminal state is honoured on discovery, not just on
+        close. Falls back to the historical hard-coded set.
+        """
+        raw = self._repo_cfg.get("done_states")
+        if not raw:
+            return _DEFAULT_DONE_STATES
+        if isinstance(raw, (list, tuple, set, frozenset)):
+            states = {str(s).strip() for s in raw if str(s).strip()}
+        else:
+            states = {s.strip() for s in str(raw).split(",") if s.strip()}
+        return frozenset(states) or _DEFAULT_DONE_STATES
+
+    def _state_category_map(self, work_item_type: str | None) -> dict[str, str] | None:
+        """Map a work item type's states to their categories (cached).
+
+        ``GET {org}/{project}/_apis/wit/workitemtypes/{type}/states`` returns
+        one entry per state, each with a ``name`` and a ``category``
+        (``Proposed`` / ``InProgress`` / ``Resolved`` / ``Completed`` /
+        ``Removed``). Returns ``{category: state_name}`` (first wins on a
+        category collision — the signal to set ``done_state`` explicitly) or
+        ``None`` when the type is unknown or the lookup fails.
+        """
+        if not work_item_type:
+            return None
+        key = (self._project, work_item_type)
+        if key in self._state_cache:
+            return self._state_cache[key]
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}"
+            f"/_apis/wit/workitemtypes/{_encode_path_segment(work_item_type)}/states"
+        )
+        try:
+            raw = ado_get(path, self._pat)
+        except Exception as e:  # noqa: BLE001 — a failed discovery is a fallback, not a crash
+            dbg.warning(
+                "state discovery failed for type %r: %s: %s",
+                work_item_type, type(e).__name__, e,
+            )
+            self._state_cache[key] = None
+            return None
+        states = raw.get("value", raw) if isinstance(raw, dict) else raw
+        mapping: dict[str, str] = {}
+        for st in states or []:
+            name = st.get("name")
+            category = st.get("category")
+            if name and category:
+                mapping.setdefault(category, name)  # first-wins on a collision
+        self._state_cache[key] = mapping or None
+        return self._state_cache[key]
+
+    def _resolve_done_state(self, issue_number: int, reason: str) -> str | None:
+        """Resolve the single state value *close_issue* writes.
+
+        Resolution order (issue #245 §1.5, first hit wins):
+        1. per-repo / global ``done_state`` on the repo_cfg;
+        2. runtime discovery — the ``Completed``-category state for the work
+           item's type (the correct answer for any process, incl. custom);
+        3. ``"Closed"`` fallback.
+
+        For ``not_planned`` the write targets the ``Removed``-category state
+        when the process has one, else the resolved done-state (a process may
+        have no "removed" concept). Returns the state name, or None when no
+        value could be determined (caller logs and skips rather than guessing).
+        """
+        configured = self._repo_cfg.get("done_state")
+        if configured:
+            configured = str(configured).strip()
+            if configured:
+                # Per-repo/global re-check at resolution (issue #245 §1.5): the
+                # value written MUST be terminal per the read side, or the work
+                # item is closed to a state the poller still reads as open and
+                # is rediscovered forever. The global pair is validated at
+                # config load; this catches a per-repo misconfiguration that
+                # load_config never sees. A mismatch refuses the write rather
+                # than guessing — it falls through to discovery / the fallback
+                # below, which always produce a terminal state.
+                terminal = self._done_states()
+                if configured in terminal:
+                    return configured
+                dbg.warning(
+                    "done_state=%r is not in the effective done_states %s; "
+                    "refusing to write a non-terminal state (issue #245 §1.5) "
+                    "— falling back to discovery",
+                    configured, sorted(terminal),
+                )
+
+        # Runtime discovery needs the work item's type.
+        try:
+            issue = self.fetch_issue(issue_number)
+        except Exception as e:  # noqa: BLE001 — can't discover without a read; fall back
+            dbg.warning(
+                "close_issue: could not read work item %d for state discovery: %s: %s",
+                issue_number, type(e).__name__, e,
+            )
+            return "Closed"
+
+        categories = self._state_category_map(issue.work_item_type)
+        if categories:
+            if reason == "not_planned":
+                removed = categories.get("Removed")
+                if removed:
+                    return removed
+                return categories.get("Completed") or "Closed"
+            completed = categories.get("Completed")
+            if completed:
+                return completed
+        return "Closed"
+
     # ---- Protocol: IssueTracker ----
 
     def list_open_issues(self) -> list[NormalizedIssue]:
         """Return all open work items via WIQL + batch expand."""
+        # Terminal states come from config (done_states) so a customized
+        # process is honoured on discovery, not just on close (issue #245).
+        terminal = ", ".join(f"'{s}'" for s in sorted(self._done_states()))
         wiql = {
             "query": (
                 "SELECT [System.Id] FROM WorkItems "
-                "WHERE [System.State] NOT IN ('Closed','Done','Removed') "
+                f"WHERE [System.State] NOT IN ({terminal}) "
                 f"AND [System.TeamProject] = '{self._project}'"
             ),
         }
@@ -349,6 +481,95 @@ class AzureTracker:
         result = ado_post_patch(path, self._pat, body=payload)
         return result["id"]
 
+    def close_issue(self, issue_number: int, reason: str = "completed") -> None:
+        """Transition the work item to its done state (edge E5).
+
+        Azure has no auto-close: merging a PR never changes the work item's
+        ``System.State``, so this explicit write is the only way the work item
+        reaches a terminal state (issue #245 §1.5). The state value is
+        resolved per §1.5 (configured → runtime discovery → ``Closed``) and the
+        write is a single ``System.State`` JSON-Patch op.
+
+        A 400 from ADO (a process that forbids the direct jump, or one that
+        requires ``System.Reason`` alongside the state) is logged with the
+        discovered states and surfaced as a one-time operator comment — never
+        retried with a different state. A wrong state write is worse than
+        none, so we do not guess.
+        """
+        state = self._resolve_done_state(issue_number, reason)
+        if not state:
+            dbg.warning(
+                "close_issue(%d): no done state resolvable for reason=%r; "
+                "set done_state in repos.json", issue_number, reason,
+            )
+            return
+
+        patch_path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
+        )
+        try:
+            ado_patch(
+                patch_path, self._pat,
+                body=[{"op": "add", "path": "/fields/System.State", "value": state}],
+            )
+        except Exception as e:  # noqa: BLE001 — report, do not blind-retry (see §1.5 step 4)
+            err = str(e)
+            if "HTTP 400" in err:
+                discovered = self._state_category_map(self._work_item_type(issue_number))
+                available = (
+                    ", ".join(sorted(discovered.values())) if discovered else "unknown"
+                )
+                dbg.warning(
+                    "close_issue(%d): ADO rejected state %r (available: %s); "
+                    "set done_state explicitly in repos.json",
+                    issue_number, state, available,
+                )
+                self._post_done_state_hint(issue_number, state, available)
+            else:
+                raise
+
+    def _work_item_type(self, issue_number: int) -> str | None:
+        """Read the work item's ``System.WorkItemType`` (best-effort)."""
+        try:
+            return self.fetch_issue(issue_number).work_item_type
+        except Exception:  # noqa: BLE001 — used only to enrich an error message
+            return None
+
+    def _post_done_state_hint(self, issue_number: int, state: str, available: str) -> None:
+        """Post a one-time operator note after a rejected done-state write.
+
+        Guarded by a content marker in the existing bot comments so we never
+        spam a hint on every poll while the work item stays open.
+        """
+        marker = "<AUTOSWE_DONE_STATE_HINT>"
+        try:
+            for c in self.fetch_comments(issue_number):
+                if marker in (c.body or ""):
+                    return
+        except Exception:  # noqa: BLE001 — if we can't read, skip the dedup guard
+            pass
+        body = (
+            f"{marker}\n\n"
+            f"autoSWE could not transition this work item to **{state}** "
+            f"(ADO rejected the state; available states: {available}). "
+            f"Set `done_state` in `repos.json` for this repo to the state your "
+            f"process uses for completion, then re-run `/sync`."
+        )
+        try:
+            self.post_comment(issue_number, body)
+        except Exception:  # noqa: BLE001 — the hint is best-effort
+            pass
+
+    def capabilities(self) -> frozenset[Capability]:
+        """Declared ADO tracker capabilities.
+
+        Azure declares none of the tracker-side capabilities: there is no
+        auto-close mechanic (``AUTO_CLOSE_ON_MERGE``) — ``close_issue`` is the
+        explicit write that replaces it, which is exactly why it is *not*
+        declared here (issue #245 §1.5).
+        """
+        return frozenset()
+
     def set_status(self, issue_number: int, status: str) -> None:
         """Set the autoswe status tag on a work item (read-modify-write).
 
@@ -435,7 +656,10 @@ class AzureTracker:
         tags_raw = fields.get("System.Tags", "") or ""
         labels = [t.strip() for t in tags_raw.split(";") if t.strip()] if tags_raw else []
         raw_state = fields.get("System.State", "New")
-        state = "closed" if raw_state in ("Closed", "Done", "Removed") else "open"
+        # The terminal set is the same config-driven set close_issue writes
+        # against (§1.5 invariant: the value written must be a member of the
+        # set the read side treats as terminal, or the item re-discovers forever).
+        state = "closed" if raw_state in self._done_states() else "open"
         return NormalizedIssue(
             number=raw["id"],
             title=title,
@@ -448,4 +672,5 @@ class AzureTracker:
             status=self._extract_status(labels),
             last_updated=fields.get("System.ChangedDate"),
             creator_login=fields.get("System.CreatedBy", {}).get("uniqueName", ""),
+            work_item_type=fields.get("System.WorkItemType"),
         )

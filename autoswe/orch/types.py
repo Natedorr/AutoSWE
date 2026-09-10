@@ -80,6 +80,14 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("fix_summary", "fix_summary", ""),
     TaskField("rereview_after_fix", "rereview_after_fix", False),
     TaskField("pr_url", "pr_url", None),
+    # Cross-linkage observation (issue #245 §1.4): the last LinkageState
+    # (as a plain dict) for the per-task edge checklist, plus the missing edge
+    # names (declared-unsupported or failed) so an operator sees at a glance
+    # which edges exist on a task. Written by ensure_links at pr_open /
+    # merge_observation and read by `queue status` and /sync.
+    TaskField("linkage_state", "linkage_state", None),
+    TaskField("linkage_missing", "linkage_missing", None,
+              transform=lambda v: list(v) if isinstance(v, tuple) else v),
 )
 
 
@@ -182,6 +190,13 @@ class TaskState:
     # pr_number is the machine-facing cache (idempotency, result.json); pr_url
     # is the human-facing link for operators inspecting queue.json.
     pr_url: str | None = None
+    # Cross-linkage observation (issue #245 §1.4). linkage_state is the last
+    # LinkageState as a plain dict (the dataclass is not JSON-native); None until
+    # the first pr_open / merge_observation. linkage_missing lists the edge
+    # names that could not be established (declared-unsupported or failed), so
+    # `queue status` and /sync can render a per-task edge checklist.
+    linkage_state: dict = None
+    linkage_missing: list = None
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:

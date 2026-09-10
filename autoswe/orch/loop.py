@@ -35,6 +35,7 @@ from autoswe.orch.types import ApiState, TaskState, World
 from autoswe.providers.adapter import apply_effect, read_api
 from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
 from autoswe.tracking.comments import record_bot_comment_id
+from autoswe.vcs.linkage import ensure_links
 from autoswe.tracking.labels import (
     RUNNING_STATUSES,
     SHIPPING_BLOCKING_STATUSES,
@@ -683,7 +684,7 @@ def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None
             token = os.environ.get("PAT", "") or repo_cfg.get("pat", "")
             ensure_clone(owner, repo, token, cfg, base_branch=base_branch, provider=provider)
             msg = f"autoswe: recovered orphaned changes from interrupted run (issue #{issue_num})"
-            commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider)
+            commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider, cfg=cfg)
             log(f"[RECOVER] {slug}: committed and pushed orphaned changes")
         except Exception as e:
             dbg.error("recover: commit_and_push failed for %s: %s", slug, e, exc_info=True)
@@ -997,6 +998,38 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             if task_entry.get("gh_closed", False):
                 task_entry["gh_closed"] = False
                 log(f"[REOPENED] {slug} — issue reopened on platform")
+
+        # --- Phase 2.5: merge observation (E5, issue #245) ---
+        # For each task that has an open PR, read the PR's merge state. If the
+        # PR is merged and the platform will not close the issue by itself
+        # (no AUTO_CLOSE_ON_MERGE capability — e.g. ADO — or the GitHub closing
+        # keyword failed to register), issue the explicit close_issue write.
+        # This is what actually closes an ADO work item after its PR merges,
+        # since ADO has no auto-close mechanic. ensure_links is idempotent:
+        # it re-reads get_linkage each cycle (cheap) and only writes what is
+        # owed, so repeated observation does not re-close. Best-effort — a
+        # linkage failure must never abort the poll cycle.
+        if run_actions:
+            obs_vcs = get_vcs(repo_cfg)
+            for slug in list(queue.keys()):
+                task_entry = queue[slug]
+                if task_entry["owner"] != owner or task_entry["repo"] != repo:
+                    continue
+                if task_entry.get("gh_closed", False):
+                    continue  # already terminal via gh_closed — nothing owed
+                pr_number = task_entry.get("pr_number")
+                if pr_number is None:
+                    continue
+                try:
+                    ensure_links(
+                        task_entry, repo_cfg, cfg,
+                        phase="merge_observation", vcs=obs_vcs,
+                    )
+                except Exception as e:  # noqa: BLE001 — linkage is best-effort
+                    dbg.warning(
+                        "merge observation failed for %s: %s: %s",
+                        slug, type(e).__name__, e,
+                    )
 
         # --- Phase 3: Label mirror for terminal tasks ---
         # Only call set_status when the issue's current status (from labels/tags

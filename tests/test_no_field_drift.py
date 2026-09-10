@@ -92,6 +92,16 @@ def _fully_populated_entry() -> dict[str, Any]:
         "review_file_path": "/tmp/review.md",
         "fix_summary": "fixed the thing",
         "pr_url": "https://github.com/acme/widget/pull/5",
+        "linkage_state": {
+            "branch_linked": True,
+            "pr_number": 5,
+            "pr_linked": False,
+            "merged": False,
+            "merge_state": "none",
+            "closes_on_merge": False,
+            "missing": ("pr_link",),
+        },
+        "linkage_missing": ["pr_link"],
     }
 
 

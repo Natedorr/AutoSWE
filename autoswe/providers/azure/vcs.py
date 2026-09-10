@@ -14,7 +14,7 @@ from autoswe.providers.azure.api import (
     ado_get,
     ado_post,
 )
-from autoswe.providers.base import CIStatus, PRResult
+from autoswe.providers.base import CIStatus, Capability, LinkageState, PRResult
 
 dbg = get_debug_logger()
 
@@ -22,6 +22,20 @@ dbg = get_debug_logger()
 _PENDING_STATUSES = {"notStarted", "inProgress", "postponed", "cancelling"}
 _FAILURE_RESULTS = {"failed", "canceled"}
 _SUCCESS_RESULTS = {"succeeded", "partiallySucceeded"}
+
+# Azure DevOps declares the PR<->work-item link (workItemRefs), per-commit CI
+# correlation (sourceVersion), CI log reads, and merge status. It does NOT
+# declare BRANCH_LINK (no documented REST branch<->work-item link — see the
+# live probe, issue #245 E1) and does NOT declare AUTO_CLOSE_ON_MERGE (no
+# auto-close mechanic — autoSWE must transition System.State explicitly, E5).
+_AZURE_VCS_CAPS = frozenset(
+    {
+        Capability.PR_ISSUE_LINK,
+        Capability.CI_PER_COMMIT,
+        Capability.CI_LOGS,
+        Capability.MERGE_STATUS,
+    }
+)
 
 
 class AzureVCS:
@@ -178,8 +192,14 @@ class AzureVCS:
         base: str,
         title: str,
         body: str,
+        issue_number: int | None = None,
     ) -> PRResult:
-        """Open a pull request in Azure Repos."""
+        """Open a pull request in Azure Repos.
+
+        *issue_number*, when given, is written as ``workItemRefs`` so the PR
+        is linked to the work item in a machine-readable, indexed way (edge
+        E3) — the Azure equivalent of GitHub's closing keyword in the body.
+        """
         path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories/"
             f"{self._repo_enc}/pullrequests"
@@ -190,6 +210,10 @@ class AzureVCS:
             "title": redact_outbound(title),
             "description": redact_outbound(body),
         }
+        # E3: link the PR to the work item. ADO workItemRefs uses
+        # replace-semantics, so the create payload carries the full list.
+        if issue_number is not None:
+            pr_data["workItemRefs"] = [{"id": issue_number}]
         result = ado_post(path, self._pat, body=pr_data)
         # ADO returns the API URL in "url"; construct the clickable web URL instead
         pr_id = result.get("pullRequestId")
@@ -204,7 +228,140 @@ class AzureVCS:
         commit_sha: str,
         branch: str,
     ) -> None:
-        """Azure DevOps does not have an equivalent feature — no-op."""
+        """Azure DevOps does not have a documented REST branch<->work-item link.
+
+        Declared absence (issue #245 E1, see §1.3 of the plan): the branch is
+        named ``autoswe/issue-{n}`` so the association is recoverable by name,
+        but there is no platform-managed branch edge. BRANCH_LINK is therefore
+        not in the declared capability set, and ``get_linkage`` lists it in
+        ``missing`` rather than claiming it. A live probe is the follow-up that
+        may turn this into a real write.
+        """
+
+    def commit_trailer(self, issue_number: int) -> str:
+        """The commit-message reference ADO auto-links to the work item.
+
+        ADO parses ``#<workItemId>`` in the commit subject into a ``Commit``
+        development link (issue #245 E2). Unlike GitHub, this is the *native*
+        mechanism — there is no "closing keyword" concept, so the trailer is
+        just the bare id.
+        """
+        return f"#{issue_number}"
+
+    def _workitems_url(self, pr_number: int) -> str:
+        """URL of the PR's associated-work-items endpoint (lowercase segment)."""
+        return _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories/"
+            f"{self._repo_enc}/pullrequests/{pr_number}/workitems"
+        )
+
+    def _pullrequest_url(self, pr_number: int) -> str:
+        """URL of the single PR detail endpoint."""
+        return _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories/"
+            f"{self._repo_enc}/pullrequests/{pr_number}"
+        )
+
+    def _linked_work_item_ids(self, pr_number: int) -> set[int]:
+        """Return the set of work item ids linked to the PR.
+
+        ADO returns ``ResourceRef[]`` whose ``id`` is a *string*; normalise to
+        int ids for easy containment checks. A failed read yields an empty set
+        so callers treat the edge as unestablished (never crash the heal path).
+        """
+        try:
+            result = ado_get(self._workitems_url(pr_number), self._pat)
+        except Exception as e:  # noqa: BLE001 — best-effort read, logged once
+            dbg.warning(
+                "get_linkage: could not read workitems for PR %s: %s: %s",
+                pr_number, type(e).__name__, e,
+            )
+            return set()
+        ids: set[int] = set()
+        for ref in result.get("value", []) if isinstance(result, dict) else []:
+            raw = ref.get("id")
+            if raw is None:
+                continue
+            try:
+                ids.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        return ids
+
+    def link_pr_to_issue(self, issue_number: int, pr_number: int) -> None:
+        """Establish the PR<->work-item edge (edge E3) by re-PUTting the PR.
+
+        The ``.../pullrequests/{id}/workitems`` endpoint is read-only; the only
+        write path is ``workItemRefs`` on the PR update body, which is
+        *replace-semantics* — the full desired list must be sent. Read the
+        current set, add the id if absent, and PUT the complete list. A no-op
+        when the id is already present keeps this idempotent and cheap.
+        """
+        linked = self._linked_work_item_ids(pr_number)
+        if issue_number in linked:
+            return
+        linked.add(issue_number)
+        work_item_refs = [{"id": wi} for wi in sorted(linked)]
+        # ado_post on the PR detail URL performs the update (PUT-equivalent);
+        # ADO accepts a JSON body with the fields to update.
+        ado_post(
+            self._pullrequest_url(pr_number),
+            self._pat,
+            body={"workItemRefs": work_item_refs},
+        )
+
+    def get_linkage(self, issue_number: int, branch: str, pr_number: int | None) -> LinkageState:
+        """Normalised linkage for a task (issue #245 §1.2).
+
+        Reads the PR detail (merge state, head SHA, merged flag) and the
+        associated-work-items list (PR<->work-item edge). ``branch_linked`` and
+        ``closes_on_merge`` are False on ADO — neither edge is
+        platform-managed, so they are reported in ``missing`` instead of being
+        silently claimed.
+        """
+        state = LinkageState(missing=("branch", "closes"))
+        if pr_number is None:
+            state.missing = ("branch", "closes", "pr_link")
+            return state
+
+        try:
+            pr = ado_get(self._pullrequest_url(pr_number), self._pat)
+        except Exception as e:  # noqa: BLE001 — a failed read means unknown, not clean
+            dbg.warning(
+                "get_linkage: could not read PR %s: %s: %s",
+                pr_number, type(e).__name__, e,
+            )
+            state.missing = ("branch", "closes", "pr_link")
+            return state
+
+        state.pr_number = pr.get("pullRequestId") or pr_number
+        state.head_sha = (pr.get("sourceRef") or "").replace("refs/heads/", "") or None
+        state.merged = bool(pr.get("isMerged"))
+
+        # mergeState: ADO's status.mergeStatus — clean / conflicts / pending.
+        status = pr.get("status") or {}
+        merge_status = status.get("mergeStatus")
+        if state.merged:
+            state.merge_state = "clean"
+        elif merge_status in (None, "notApplicable", "succeeded"):
+            state.merge_state = "clean"
+        elif merge_status == "conflicts":
+            state.merge_state = "conflicts"
+        else:  # "queued" or any unknown value
+            state.merge_state = "pending"
+
+        # PR<->work-item edge (E3): machine-readable link present?
+        linked = self._linked_work_item_ids(pr_number)
+        if issue_number in linked:
+            state.pr_linked = True
+        else:
+            state.missing = state.missing + ("pr_link",)
+
+        return state
+
+    def capabilities(self) -> frozenset[Capability]:
+        """Declared ADO capabilities (issue #245 §1)."""
+        return _AZURE_VCS_CAPS
 
     def get_ci_status(self, branch: str, ref_sha: str | None = None) -> CIStatus:
         """Return CI status from the most recent Azure Pipelines build for *branch*.

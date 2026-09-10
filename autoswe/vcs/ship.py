@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.base import PRResult
 from autoswe.providers.factory import get_tracker, get_vcs
+from autoswe.vcs.linkage import ensure_links
 from autoswe.vcs.pr_gate import preflight_pr
 
 if TYPE_CHECKING:
@@ -128,6 +129,7 @@ def open_pr(
             tracker.post_comment(issue_num,
                 f"Pull request already exists: {pr_url}{AUTOSWE_BOT_FOOTER}")
         _record_pr(task, pr_url, existing.number)
+        _ensure_pr_links(task, cfg, rcfg, vcs, issue_num)
         return f"DONE: PR {pr_url}"
 
     try:
@@ -136,6 +138,7 @@ def open_pr(
             base=base_branch,
             title=f"Fixes #{issue_num}: {title}",
             body=pr_body,
+            issue_number=issue_num,
         )
         pr_url = pr_result.url
         pr_ref = _pr_ref(pr_url)
@@ -145,7 +148,22 @@ def open_pr(
             tracker.post_comment(issue_num,
                "Pull request opened: " + pr_url + AUTOSWE_BOT_FOOTER)
         _record_pr(task, pr_url, pr_result.number)
+        _ensure_pr_links(task, cfg, rcfg, vcs, issue_num)
         return f"DONE: PR {pr_url}"
     except Exception as e:  # Poller resilience — any PR creation failure is caught and reported
         dbg.error("open_pr: failed: %s", e, exc_info=True)
         return f"FAILED: could not create PR: {e}"
+
+
+def _ensure_pr_links(task: dict, cfg: dict, rcfg: dict, vcs, issue_num: int) -> None:
+    """Establish + persist the PR edge after a PR is opened (issue #245 E3/E4).
+
+    ``_record_pr`` has already cached ``pr_number`` on *task*, so this reads the
+    current linkage and writes the machine-readable PR→issue edge only if it is
+    missing (a no-op on GitHub, where the closing keyword is the link). Best-
+    effort: a linkage failure is logged, never fatal to the PR open.
+    """
+    try:
+        ensure_links(task, rcfg, cfg, phase="pr_open", vcs=vcs)
+    except Exception as e:  # noqa: BLE001
+        dbg.warning("SHIP: ensure_links(pr_open) failed for issue %d: %s", issue_num, e)

@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.base import CIStatus, PRResult
+from autoswe.providers.base import CIStatus, Capability, LinkageState, PRResult
 from autoswe.tracking.api import gh_get, gh_post
 
 dbg = get_debug_logger()
@@ -15,6 +16,45 @@ dbg = get_debug_logger()
 # check-run/status conclusions that block a PR vs. that count as a pass
 _FAILURE_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required"}
 _SUCCESS_CONCLUSIONS = {"success", "neutral", "skipped"}
+
+# GitHub declares every capability it can read/write: the branch link is the
+# GraphQL createLinkedBranch mutation, the PR<->issue link is the closing
+# keyword in the body, auto-close rides that same keyword, and CI / merge
+# status are read from the checks API + PR payload.
+_GITHUB_VCS_CAPS = frozenset(
+    {
+        Capability.BRANCH_LINK,
+        Capability.PR_ISSUE_LINK,
+        Capability.AUTO_CLOSE_ON_MERGE,
+        Capability.CI_PER_COMMIT,
+        Capability.CI_LOGS,
+        Capability.MERGE_STATUS,
+    }
+)
+
+
+def _issue_refs_in_body(body: str, issue_number: int) -> tuple[bool, bool]:
+    """Inspect a PR body for references to *issue_number*.
+
+    Returns ``(linked, closes)`` where:
+    - *linked* is True if any association keyword references the issue
+      (``refs`` / ``fixes`` / ``closes`` / ``resolves``) → ``pr_linked``;
+    - *closes* is True if a *closing* keyword does → ``closes_on_merge``.
+
+    GitHub auto-links on any keyword and auto-closes on a closing one; the
+    keyword must sit at a word boundary and reference the exact issue number
+    (case-insensitive, matching GitHub's own matching).
+    """
+    if not body:
+        return False, False
+    num = str(issue_number)
+    if re.search(rf"\bfixes\s+#{num}\b", body, re.IGNORECASE) or \
+       re.search(rf"\bcloses\s+#{num}\b", body, re.IGNORECASE) or \
+       re.search(rf"\bresolves\s+#{num}\b", body, re.IGNORECASE):
+        return True, True
+    if re.search(rf"\brefs\s+#{num}\b", body, re.IGNORECASE):
+        return True, False
+    return False, False
 
 
 class MissingScopeError(RuntimeError):
@@ -81,11 +121,16 @@ class GitHubVCS:
         base: str,
         title: str,
         body: str,
+        issue_number: int | None = None,
     ) -> PRResult:
         """Open a GitHub pull request via gh CLI or API fallback.
 
         Extracts the PR's head commit SHA so callers can use it for
         branch-to-issue linking when the remote SHA is unavailable.
+
+        *issue_number* is accepted for protocol parity with Azure (which
+        writes it as ``workItemRefs``) but unused here — GitHub's
+        PR<->issue link is the closing keyword already in *body* (edge E3).
         """
         # Redact worktree paths before posting
         safe_title = redact_outbound(title)
@@ -237,6 +282,95 @@ class GitHubVCS:
             f"createLinkedBranch GraphQL error: "
             f"{[e.get('message', str(e)) for e in errors]}"
         )
+
+    def commit_trailer(self, issue_number: int) -> str:
+        """GitHub commit-message reference: ``Refs #N`` (E2)."""
+        return f"Refs #{issue_number}"
+
+    def link_pr_to_issue(self, issue_number: int, pr_number: int) -> None:
+        """No-op on GitHub.
+
+        The PR<->issue link is derived from the closing keyword already written
+        into the PR body at open time — there is no separate machine-readable
+        relation to establish (edge E3). ``ensure_links`` therefore never
+        writes; ``get_linkage`` reads the link from the body instead.
+        """
+
+    def get_linkage(
+        self,
+        issue_number: int,
+        branch: str,
+        pr_number: int | None,
+    ) -> LinkageState:
+        """Read the current E1–E5 edges from the PR payload.
+
+        With no PR open the result reports nothing established and lists
+        ``pr``/``closes`` as missing (the PR edges don't exist yet). A missing
+        or unresolvable PR surfaces as ``merged=False`` / ``merge_state="unknown"``
+        rather than a fabricated pass.
+        """
+        missing: list[str] = []
+        if pr_number is None:
+            # No PR yet, so neither PR-derived edge (pr_link, closes) exists.
+            # The branch edge (E1) is managed at worktree-creation time via
+            # createLinkedBranch and is not re-observed here.
+            return LinkageState(pr_linked=False, missing=("pr_link", "closes"))
+
+        try:
+            pr = gh_get(
+                f"/repos/{self._owner}/{self._repo}/pulls/{pr_number}",
+                self._token, max_retries=1,
+            )
+        except Exception:
+            # The PR read could not be consulted — report unknown, don't guess.
+            return LinkageState(
+                pr_number=pr_number, merge_state="unknown",
+                missing=("pr_link", "closes"),
+            )
+
+        body = pr.get("body") or ""
+        linked, closes = _issue_refs_in_body(body, issue_number)
+        head = (pr.get("head") or {})
+        head_ref = head.get("ref", "")
+        head_sha = head.get("sha")
+        merged = bool(pr.get("merged"))
+
+        # branch_linked: the PR's head ref is our work branch (E1 — the branch
+        # is associated with the issue through the PR that was opened from it).
+        branch_linked = bool(branch) and head_ref == branch
+
+        # merge_state from the PR payload's mergeability fields.
+        mergeable = pr.get("mergeable")
+        mergeable_state = pr.get("mergeable_state", "")
+        if merged:
+            merge_state = "clean"
+        elif mergeable is True or mergeable_state == "clean":
+            merge_state = "clean"
+        elif mergeable is False or mergeable_state == "dirty":
+            merge_state = "conflicts"
+        elif mergeable_state in ("behind", "unstable", "has_hooks", "blocked"):
+            merge_state = "pending"
+        else:
+            merge_state = "unknown"
+
+        if not linked:
+            missing.append("pr_link")
+        if not closes:
+            missing.append("closes")
+
+        return LinkageState(
+            branch_linked=branch_linked,
+            pr_linked=linked,
+            closes_on_merge=closes,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            merge_state=merge_state,
+            merged=merged,
+            missing=tuple(missing),
+        )
+
+    def capabilities(self) -> frozenset[Capability]:
+        return _GITHUB_VCS_CAPS
 
     def get_ci_status(self, branch: str, ref_sha: str | None = None) -> CIStatus:
         """Combine check-runs and legacy commit status into one CIStatus.

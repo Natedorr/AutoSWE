@@ -141,6 +141,19 @@ def load_config() -> dict:
         "BOT_NAME": os.environ.get("BOT_NAME", "autoswe"),
         "ALLOWED_AUTHORS": os.environ.get("ALLOWED_AUTHORS", ""),
         "LINK_BRANCH_TO_ISSUE": _as_bool(os.environ.get("LINK_BRANCH_TO_ISSUE"), "true"),
+        # Cross-linkage switches (issue #245, plan §3). LINK_COMMIT_TRAILER
+        # appends the provider's commit reference (E2); AUTO_CLOSE_ON_MERGE
+        # gates the explicit close_issue write the poller issues after a merge
+        # on platforms with no auto-close mechanic (E5). Both default on.
+        "LINK_COMMIT_TRAILER": _as_bool(os.environ.get("LINK_COMMIT_TRAILER"), "true"),
+        "AUTO_CLOSE_ON_MERGE": _as_bool(os.environ.get("AUTO_CLOSE_ON_MERGE"), "true"),
+        # Azure done-state pair (issue #245 §1.5). done_state is the single
+        # value close_issue writes; done_states is the set the read side treats
+        # as terminal. They are validated against each other below — a
+        # done_state outside done_states is a startup error, not a runtime
+        # surprise. Both can also be overridden per repo in repos.json.
+        "done_state": os.environ.get("done_state", ""),
+        "done_states": os.environ.get("done_states", "Closed,Done,Removed"),
         "SYNC_STRATEGY": os.environ.get("SYNC_STRATEGY", "merge"),  # "merge" | "rebase"
         "PR_REQUIRE_SYNC": _as_bool(os.environ.get("PR_REQUIRE_SYNC"), "true"),
         "PR_REQUIRE_CI": _as_bool(os.environ.get("PR_REQUIRE_CI"), "true"),
@@ -194,6 +207,8 @@ def load_config() -> dict:
         cfg["AUTO_ASSIGN"] = _as_bool(cfg.get("AUTO_ASSIGN"), "true")
         cfg["AUTO_CREATE_PR"] = _as_bool(cfg.get("AUTO_CREATE_PR"))
         cfg["LINK_BRANCH_TO_ISSUE"] = _as_bool(cfg.get("LINK_BRANCH_TO_ISSUE"), "true")
+        cfg["LINK_COMMIT_TRAILER"] = _as_bool(cfg.get("LINK_COMMIT_TRAILER"), "true")
+        cfg["AUTO_CLOSE_ON_MERGE"] = _as_bool(cfg.get("AUTO_CLOSE_ON_MERGE"), "true")
         cfg["PR_REQUIRE_SYNC"] = _as_bool(cfg.get("PR_REQUIRE_SYNC"), "true")
         cfg["PR_REQUIRE_CI"] = _as_bool(cfg.get("PR_REQUIRE_CI"), "true")
         cfg["AUTO_PURGE_BRANCHES"] = _as_bool(cfg.get("AUTO_PURGE_BRANCHES"))
@@ -202,6 +217,7 @@ def load_config() -> dict:
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()
     cfg["ALLOWED_AUTHORS"] = {a.strip() for a in _raw.split(",") if a.strip()} if _raw else set()
     _normalise_ci_error_policy(cfg)
+    _validate_done_state(cfg)
     return cfg
 
 
@@ -221,6 +237,40 @@ def _normalise_ci_error_policy(cfg: dict) -> None:
         )
         raw = "block"
     cfg["PR_CI_ERROR_POLICY"] = raw
+
+
+def _validate_done_state(cfg: dict) -> None:
+    """Validate the Azure done-state pair (issue #245 §1.5).
+
+    ``done_states`` (the terminal set the read side treats as closed) is
+    normalised to a list of stripped, non-empty names. ``done_state`` (the
+    single value ``close_issue`` writes) must be a member of ``done_states`` —
+    the read/write invariant. A ``done_state`` outside the set is a startup
+    error: it would close the work item to a state the poller still reads as
+    open, rediscovering it forever. An empty ``done_state`` is left empty (the
+    tracker then falls back to runtime discovery / ``Closed``); the invariant
+    only applies when an operator pinned a value.
+    """
+    raw_states = cfg.get("done_states")
+    if isinstance(raw_states, (list, tuple, set, frozenset)):
+        states = {str(s).strip() for s in raw_states if str(s).strip()}
+    else:
+        states = {s.strip() for s in str(raw_states or "").split(",") if s.strip()}
+    if not states:
+        # No terminal set configured — keep the canonical default so reads and
+        # writes agree, rather than treating everything as open.
+        states = {"Closed", "Done", "Removed"}
+    cfg["done_states"] = sorted(states)
+
+    done_state = str(cfg.get("done_state") or "").strip()
+    if done_state and done_state not in states:
+        raise ValueError(
+            f"config: done_state={done_state!r} is not in done_states "
+            f"{sorted(states)}; the value close_issue writes must be a member "
+            f"of the set the read side treats as terminal (issue #245 §1.5). "
+            f"Fix done_state or add it to done_states."
+        )
+    cfg["done_state"] = done_state
 
 
 def load_repos_config() -> dict:

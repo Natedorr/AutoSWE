@@ -41,21 +41,40 @@ def get_tracker(repo_cfg: dict) -> IssueTracker:
     """Return an IssueTracker for the given repo configuration.
 
     The ``provider`` field in repo_cfg selects the backend.
+
+    Asserts structural Protocol conformance at construction so a missing
+    protocol method (e.g. a new ``capabilities`` / ``close_issue`` that a
+    provider forgets to implement) fails at wiring time — not at dispatch,
+    where it would surface as a confusing ``AttributeError`` deep in the poll
+    cycle (closes GitHub review F-10). The ``@runtime_checkable`` duck-type
+    check verifies every protocol method exists on the concrete instance.
     """
     provider = repo_cfg.get("provider", "github").lower()
     try:
-        return TRACKERS[provider](repo_cfg)
+        instance = TRACKERS[provider](repo_cfg)
     except KeyError:
         raise ValueError(f"Unknown provider: {provider}") from None
+    assert isinstance(instance, IssueTracker), (
+        f"{type(instance).__name__} does not satisfy the IssueTracker protocol"
+    )
+    return instance
 
 
 def get_vcs(repo_cfg: dict) -> VCSProvider:
-    """Return a VCSProvider for the repo configuration."""
+    """Return a VCSProvider for the repo configuration.
+
+    Asserts structural Protocol conformance at construction (fail at wiring,
+    not dispatch — see ``get_tracker``).
+    """
     provider = repo_cfg.get("provider", "github").lower()
     try:
-        return VCSS[provider](repo_cfg)
+        instance = VCSS[provider](repo_cfg)
     except KeyError:
         raise ValueError(f"Unknown provider: {provider}") from None
+    assert isinstance(instance, VCSProvider), (
+        f"{type(instance).__name__} does not satisfy the VCSProvider protocol"
+    )
+    return instance
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +108,16 @@ def build_repo_cfg(owner: str, repo: str, cfg: dict, repos_cfg: dict | None = No
         "repo": repo,
         "provider": "github",
     }
+    # Seed the global Azure done-state pair (issue #245 §1.5) so the tracker —
+    # which only sees repo_cfg, not cfg — can resolve the read-side terminal
+    # set and the close_issue write value. A per-repo entry (repos.json)
+    # overrides, because the update below runs after this seed. A repo with a
+    # different provider simply ignores the keys.
+    if cfg is not None:
+        if "done_states" in cfg:
+            rcfg["done_states"] = cfg["done_states"]
+        if cfg.get("done_state"):
+            rcfg["done_state"] = cfg["done_state"]
     if repos_cfg and repo_key in repos_cfg:
         rcfg.update(repos_cfg[repo_key])
     # If the lookup missed and caller gave us a provider (e.g. from a task that

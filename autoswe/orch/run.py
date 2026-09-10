@@ -20,6 +20,7 @@ from autoswe.harness.runner import HandlerResult, backend_has_capability
 from autoswe.orch.types import Action, World
 from autoswe.vcs import ship
 from autoswe.vcs import worktree as worktree_mod
+from autoswe.vcs.linkage import render_linkage_checklist
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -236,6 +237,11 @@ def _run_sync(
                 )
             else:
                 summary = f"Already up to date with `origin/{sync_base}`."
+            # Surface the cross-linkage checklist on /sync (issue #245 §1.4) so
+            # an operator steering by comment sees which edges exist on the task.
+            checklist = render_linkage_checklist(task)
+            if checklist:
+                summary = f"{summary}\n\n{checklist}"
             return DispatchResult(
                 done_content=f"DONE_SUMMARY\t{summary}\t{commit_sha}",
             )

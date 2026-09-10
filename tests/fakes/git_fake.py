@@ -88,7 +88,7 @@ class GitFake:
 
     def commit_and_push(self, wt: Path, owner: str, repo: str, issue_num: int,
                         msg: str, base_branch: str = "main",
-                        provider: str = "github") -> dict:
+                        provider: str = "github", cfg: dict | None = None) -> dict:
         self.calls.append({"func": "commit_and_push", "wt": str(wt), "owner": owner,
                            "repo": repo, "issue_num": issue_num, "msg": msg,
                            "base_branch": base_branch, "provider": provider})
