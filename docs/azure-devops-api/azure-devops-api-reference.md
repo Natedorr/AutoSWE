@@ -277,3 +277,11 @@ Most Azure DevOps API responses include:
 7. **POST returns 200** — Creating work items returns 200 (not 201) for the create endpoint.
 8. **Rate limiting headers** — No `X-RateLimit-*` headers. Use `x-ms-credletailers-ms` instead.
 9. **$filter syntax** — Uses OData-style filtering: `$filter=WorkItemTypeId eq 'Bug'`, not `?type=Bug`.
+
+---
+
+## Deep-dive Guides
+
+| Guide | Covers |
+|---|---|
+| [workitem-pr-linking-and-builds.md](workitem-pr-linking-and-builds.md) | How work items tie to branches/PRs/commits, the PR work-items + relation APIs, reading build/pipeline results, why ADO does **not** auto-close work items on merge, and a full linkage recipe. GitHub counterpart: [../github-api/issue-pr-linking-and-ci.md](../github-api/issue-pr-linking-and-ci.md) |

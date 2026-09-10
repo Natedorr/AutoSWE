@@ -199,6 +199,6 @@ curl -L \
 
 * **Branch names MUST include `refs/heads/` prefix** — Omitting the prefix will cause a 409 Conflict error.
 * **Reviewers require identity GUIDs** — You cannot use display names. Use the contributors endpoint (`GET /{org}/{project}/_apis/git/repositories/{repositoryId}/contributors?api-version=7.1`) to look up user GUIDs.
-* **`workItemRefs` links PRs to work items** — This is the Azure DevOps equivalent of linking GitHub issues to a pull request.
+* **`workItemRefs` links PRs to work items** — This is the Azure DevOps equivalent of linking GitHub issues to a pull request. For the full mechanics (auto-link triggers, read-back endpoint, what happens on merge, and the fact that ADO never auto-completes work items), see [workitem-pr-linking-and-builds.md](workitem-pr-linking-and-builds.md).
 * **Auto-complete** — Set `autoCompleteSet` to `true` to allow the PR to auto-complete when all policies pass.
 * **Draft PRs** — Set `isDraft` to `true` for work-in-progress PRs that shouldn't trigger policy checks or notifications.

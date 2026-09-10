@@ -13,6 +13,8 @@ PATCH /{organization}/{project}/_apis/wit/workitems/{id}?api-version=7.1
 
 Update one or more fields on an existing work item. Uses **RFC 6902 JSON Patch format** — same as the create endpoint.
 
+> **Relations:** `op: add` on `/relations/-` is how you add links (hyperlinks, work-item links) — the same call powers the generic link APIs. Full mechanics (relation `rel` names, reading relations with `$expand=relations`, PR↔work-item links, and why merges don't complete work items) are covered in [workitem-pr-linking-and-builds.md](workitem-pr-linking-and-builds.md).
+
 ### Parameters
 
 #### Path Parameters
