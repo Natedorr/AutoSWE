@@ -243,6 +243,12 @@ class GitHubVCS:
 
         Priority: any failure -> failure; else any queued/in_progress/pending
         -> pending; else >=1 completed-success -> success; else none.
+
+        Fail-safe: when the CI API could not be consulted (unresolvable
+        branch head, or both check-runs and legacy status errored with no
+        fallback data), the result is ``state="error"`` — never a vacuous
+        "none" pass. A check-runs 403 (the documented classic-PAT-on-private
+        repo case) falls back to ``GET /actions/runs?head_sha=``.
         """
         sha = ref_sha
         if not sha:
@@ -253,15 +259,22 @@ class GitHubVCS:
                 )
                 sha = commit.get("sha")
             except Exception:
-                return CIStatus(state="none", summary="could not resolve branch head")
+                return CIStatus(state="error", summary="could not resolve branch head")
         if not sha:
-            return CIStatus(state="none", summary="could not resolve branch head")
+            return CIStatus(state="error", summary="could not resolve branch head")
 
         failing: list[str] = []
         pending_count = 0
         success_count = 0
+        neutral = 0
         total = 0
+        url: str | None = None
 
+        # Both sources are best-effort; ``check_runs_ok`` / ``legacy_ok``
+        # track whether the *API* was consulted successfully. Only when
+        # neither source answers do we report state="error" (fail-safe:
+        # absence of data is not the same as absence of CI).
+        check_runs_ok = False
         try:
             check_runs = gh_get(
                 f"/repos/{self._owner}/{self._repo}/commits/{sha}/check-runs",
@@ -274,10 +287,40 @@ class GitHubVCS:
                     pending_count += 1
                 elif run.get("conclusion") in _FAILURE_CONCLUSIONS:
                     failing.append(name)
+                elif run.get("conclusion") in ("neutral", "skipped"):
+                    neutral += 1
                 elif run.get("conclusion") in _SUCCESS_CONCLUSIONS:
                     success_count += 1
-        except Exception:
-            pass  # best-effort — treat as no check-runs available
+            check_runs_ok = True
+        except Exception as exc:
+            if "HTTP 403" in str(exc):
+                # Classic PAT on private repos: the Checks API answers 403
+                # ("Resource not accessible by personal access token"), but
+                # the Actions API is still reachable. Use the documented
+                # PAT-friendly fallback.
+                try:
+                    runs = gh_get(
+                        f"/repos/{self._owner}/{self._repo}/actions/runs"
+                        f"?head_sha={sha}&per_page=100",
+                        self._token, max_retries=1,
+                    )
+                    for run in runs.get("workflow_runs", []):
+                        total += 1
+                        name = run.get("name", "workflow")
+                        conclusion = run.get("conclusion")
+                        if conclusion is None:
+                            pending_count += 1
+                        elif conclusion in _FAILURE_CONCLUSIONS:
+                            failing.append(name)
+                        elif conclusion in ("neutral", "skipped"):
+                            neutral += 1
+                        elif conclusion in _SUCCESS_CONCLUSIONS:
+                            success_count += 1
+                        if run.get("html_url"):
+                            url = run.get("html_url")
+                    check_runs_ok = True
+                except Exception:
+                    pass  # fallback also failed — error below if legacy fails too
 
         try:
             status = gh_get(
@@ -289,27 +332,71 @@ class GitHubVCS:
                 context = s.get("context", "status")
                 state = s.get("state")
                 if state in ("failure", "error"):
+                    # Both "failure" and "error" blocked the gate pre-hardening —
+                    # a legacy status of "error" means the check itself errored,
+                    # i.e. it verified nothing, so it must keep blocking rather
+                    # than read as a neutral pass.
                     failing.append(context)
                 elif state == "pending":
                     pending_count += 1
                 elif state == "success":
                     success_count += 1
         except Exception:
-            pass  # best-effort — treat as no legacy status available
+            pass  # legacy status is supplementary — a failure here alone is
+                  # not fatal if check-runs produced data
+
+        # Fail-safe terminal rule: the check-runs source (direct or the
+        # actions/runs fallback) is the authoritative "does CI exist" signal.
+        # If it could NOT be consulted AND no checks of any kind surfaced
+        # (total == 0), we cannot distinguish "no CI" from "couldn't read
+        # CI" — report error rather than a vacuous "none" pass. When legacy
+        # combined-status *did* surface checks (total > 0) that alone is a
+        # real CI signal, so a verdict is returned from legacy even with
+        # check_runs_ok False. An empty legacy read alone, however, is not
+        # proof of no CI (Actions-only repos have none), hence the
+        # ``total == 0`` guard.
+        if not check_runs_ok and total == 0:
+            return CIStatus(
+                state="error", head_sha=sha, url=self.commit_url(sha),
+                summary="could not read CI status (check endpoints unavailable)",
+            )
 
         if failing:
             return CIStatus(
-                state="failure", total=total, failing=failing, pending_count=pending_count,
+                state="failure", head_sha=sha, url=url or self.commit_url(sha),
+                total=total, failing=failing, neutral=neutral,
+                pending_count=pending_count,
                 summary=f"{len(failing)} check(s) failing: {', '.join(failing)}",
             )
         if pending_count:
             return CIStatus(
-                state="pending", total=total, pending_count=pending_count,
+                state="pending", head_sha=sha, url=url or self.commit_url(sha),
+                total=total, neutral=neutral, pending_count=pending_count,
                 summary=f"{pending_count} check(s) pending",
             )
-        if success_count:
-            return CIStatus(state="success", total=total, summary=f"{success_count} check(s) passed")
-        return CIStatus(state="none", total=total, summary="no checks found")
+        if success_count or neutral:
+            # A check-run/action that concluded neutral/skipped verified nothing
+            # but is not a failure — the commit still passes. Pre-hardening these
+            # were folded into the success count; the only change is that they are
+            # now reported separately in the summary. (Legacy-status "error" is
+            # deliberately NOT counted here — it is a blocking failure, see above.)
+            # Read naturally for a neutral-only commit (no "0 check(s) passed"):
+            # lead with the passed count, and add the skipped/neutral count only
+            # when there is one.
+            parts = []
+            if success_count:
+                parts.append(f"{success_count} check(s) passed")
+            if neutral:
+                parts.append(f"{neutral} skipped/neutral")
+            summary = ", ".join(parts)
+            return CIStatus(
+                state="success", head_sha=sha, url=url or self.commit_url(sha),
+                total=total, neutral=neutral, summary=summary,
+            )
+        return CIStatus(
+            state="none", head_sha=sha, url=self.commit_url(sha),
+            total=total, neutral=neutral, summary="no checks found",
+        )
 
     def commit_url(self, commit_sha: str) -> str | None:
         """Clickable GitHub commit URL, or None when owner/repo are unset."""

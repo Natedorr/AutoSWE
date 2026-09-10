@@ -377,8 +377,133 @@ def test_get_ci_status_no_builds_is_none(vcs, mock_ado_request, ado_route_table)
     assert ci.state == "none"
 
 
-def test_get_ci_status_request_error_is_none(vcs, mock_ado_request, ado_route_table):
-    """No route stubbed → request raises → treated as none, not a crash."""
+def test_get_ci_status_request_error_is_error(vcs, mock_ado_request, ado_route_table):
+    """No route stubbed → request raises → error, not a vacuous 'none' pass.
+
+    Fail-safe: the build API could not be consulted, so the result is
+    ``state="error"`` — the gate blocks on it rather than shipping blind.
+    """
     ci = vcs.get_ci_status("autoswe/issue-100")
 
-    assert ci.state == "none"
+    assert ci.state == "error"
+    assert "could not query builds" in ci.summary
+
+
+def test_get_ci_status_success_carries_head_sha_and_url(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "ABC1234DEF", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100")
+
+    assert ci.state == "success"
+    assert ci.head_sha == "ABC1234DEF"
+    assert ci.url == "https://dev.azure.com/my-org/my-project/_build/results?buildId=7"
+
+
+def test_get_ci_status_stale_source_version_is_pending(vcs, mock_ado_request, ado_route_table):
+    """Latest build predates the requested commit → stale, not green.
+
+    A build that succeeded on an *older* commit is not evidence the current
+    head is green — report pending + stale so the gate waits for a fresh
+    build instead of a false green.
+    """
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "oldsha", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100", ref_sha="newsha")
+
+    assert ci.state == "pending"
+    assert ci.stale is True
+    assert ci.head_sha == "oldsha"
+
+
+def test_get_ci_status_stale_canceled_build_no_longer_blocks_as_failure(
+    vcs, mock_ado_request, ado_route_table,
+):
+    """A stale canceled build is pending, not a permanent failure.
+
+    The existing pin (fresh canceled → failure) is preserved; this covers the
+    staleness flip: a canceled build for an *older* commit stops blocking the
+    gate as a hard failure until a build for the requested head lands.
+    """
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "canceled",
+                   "sourceVersion": "oldsha", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100", ref_sha="newsha")
+
+    assert ci.state == "pending"
+    assert ci.stale is True
+
+
+@pytest.mark.parametrize(
+    "ref_sha",
+    ["newsha", "NEWsha"],
+    ids=["exact-case", "mixed-case"],
+)
+def test_get_ci_status_fresh_source_version_is_not_stale(
+    vcs, mock_ado_request, ado_route_table, ref_sha,
+):
+    """A build on the *requested* commit is fresh, not stale.
+
+    The staleness comparison is case-insensitive, so both an exact-case match
+    and a mixed-case match on the same build read as a fresh verdict — the
+    build's real result, not a pending/stale stand-in. This pins the match arm
+    of the ``source_version.lower() != str(ref_sha).lower()`` comparison that
+    the mismatch rows above only exercise in the other direction.
+    """
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "newsha", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100", ref_sha=ref_sha)
+
+    assert ci.state == "success"
+    assert ci.stale is False
+    assert ci.head_sha == "newsha"
+
+
+def test_get_ci_status_no_ref_sha_no_staleness_claim(vcs, mock_ado_request, ado_route_table):
+    """Without ref_sha the provider can't claim staleness — fresh verdicts."""
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "whatever", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100")
+
+    assert ci.state == "success"
+    assert ci.stale is False
+
+
+def test_get_ci_status_source_version_missing_no_staleness_claim(
+    vcs, mock_ado_request, ado_route_table,
+):
+    """Older pipelines omit sourceVersion → no staleness claim even with ref_sha."""
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "id": 7, "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100", ref_sha="newsha")
+
+    assert ci.state == "success"
+    assert ci.stale is False
+    assert ci.head_sha is None

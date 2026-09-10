@@ -571,6 +571,26 @@ class TestGitHubVCS:
         assert ci.state == "failure"
         assert ci.failing == ["ci/circleci"]
 
+    def test_get_ci_status_legacy_status_error_is_failure(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        """A legacy commit status state of ``error`` keeps blocking.
+
+        Pre-hardening, ``error`` went into ``failing`` (blocked the gate). It is
+        a check that verified nothing, NOT a neutral pass: with a legacy
+        ``error`` as the only CI signal the commit must reduce to ``failure``
+        (fail-safe), not ``success``.
+        """
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {"check_runs": []}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {
+            "statuses": [{"context": "ci/legacy", "state": "error"}],
+        }
+
+        ci = vcs.get_ci_status("autoswe/issue-42")
+
+        assert ci.state == "failure"
+        assert ci.failing == ["ci/legacy"]
+        assert ci.neutral == 0
+
     def test_get_ci_status_no_checks_is_none(self, vcs, fake_token, mock_gh_request, gh_route_table):
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
         gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {"check_runs": []}
@@ -580,11 +600,128 @@ class TestGitHubVCS:
 
         assert ci.state == "none"
 
-    def test_get_ci_status_unresolvable_sha_is_none(self, vcs, fake_token, mock_gh_request, gh_route_table):
-        """Branch head can't be resolved (unstubbed request raises) → treated as none, not a crash."""
+    def test_get_ci_status_unresolvable_sha_is_error(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        """Branch head can't be resolved (unstubbed request raises) → error, not a crash.
+
+        Fail-safe: an unresolvable head means the CI API could not be
+        consulted, so the result is ``error`` (never a vacuous ``none`` pass).
+        """
         ci = vcs.get_ci_status("autoswe/issue-42")
 
-        assert ci.state == "none"
+        assert ci.state == "error"
+        assert "branch head" in ci.summary
+
+    def test_get_ci_status_success_populates_head_sha(self, vcs, fake_token, mock_gh_request, gh_route_table):
+        """Success carries the commit sha and a commit URL it was verified against."""
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {
+            "check_runs": [{"name": "build", "status": "completed", "conclusion": "success"}],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
+
+        ci = vcs.get_ci_status("autoswe/issue-42")
+
+        assert ci.state == "success"
+        assert ci.head_sha == "deadbeef"
+        assert ci.url == "https://github.com/natedorr/autoswe/commit/deadbeef"
+
+    def test_get_ci_status_neutral_conclusion_counted(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        """A neutral-only check is reported, not collapsed into 'no CI'.
+
+        It still passes (success is the only pass that verified something),
+        but ``neutral`` is counted so the gate can see it did nothing.
+        """
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = {
+            "check_runs": [{"name": "build", "status": "completed", "conclusion": "neutral"}],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
+
+        ci = vcs.get_ci_status("autoswe/issue-42")
+
+        assert ci.state == "success"
+        assert ci.total == 1
+        assert ci.neutral == 1
+        assert "neutral" in ci.summary or "skipped" in ci.summary
+
+    def test_get_ci_status_check_runs_403_falls_back_to_actions_runs(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        """check-runs 403 → PAT-friendly GET /actions/runs?head_sha= fallback.
+
+        The documented classic-PAT-on-private-repo case: the Checks API
+        answers 403 but the Actions API is still reachable.
+        """
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = (
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("GitHub API /x/check-runs -> HTTP 403: "
+                             "Resource not accessible by personal access token")
+            )
+        )
+        gh_route_table[("GET", "/repos/natedorr/autoswe/actions/runs?head_sha=deadbeef")] = {
+            "workflow_runs": [
+                {"name": "build", "status": "completed", "conclusion": "success",
+                 "html_url": "https://github.com/natedorr/autoswe/actions/runs/1"},
+            ],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
+
+        ci = vcs.get_ci_status("autoswe/issue-42")
+
+        assert ci.state == "success"
+        assert ci.url == "https://github.com/natedorr/autoswe/actions/runs/1"
+        # Both the check-runs attempt and the actions/runs fallback were made.
+        paths = [c["path"] for c in mock_gh_request.calls]
+        assert any(p.endswith("/commits/deadbeef/check-runs") for p in paths)
+        assert any(p.startswith("/repos/natedorr/autoswe/actions/runs?head_sha=deadbeef") for p in paths)
+
+    def test_get_ci_status_check_runs_403_fallback_failure_is_error(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        """403 on check-runs AND the actions/runs fallback also fails → error."""
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = (
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("GitHub API /x/check-runs -> HTTP 403: forbidden")
+            )
+        )
+        gh_route_table[("GET", "/repos/natedorr/autoswe/actions/runs?head_sha=deadbeef")] = (
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("GitHub API /x/actions/runs -> HTTP 503: unavailable")
+            )
+        )
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = {"statuses": []}
+
+        ci = vcs.get_ci_status("autoswe/issue-42")
+
+        assert ci.state == "error"
+
+    def test_get_ci_status_all_endpoints_unavailable_is_error(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        """Non-403 failure on check-runs + no legacy data → error (fail-safe).
+
+        An all-failure read must not collapse to a vacuous 'none' pass.
+        """
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = {"sha": "deadbeef"}
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/check-runs")] = (
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("GitHub API /x/check-runs -> HTTP 503: unavailable")
+            )
+        )
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/deadbeef/status")] = (
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("GitHub API /x/status -> HTTP 503: unavailable")
+            )
+        )
+
+        ci = vcs.get_ci_status("autoswe/issue-42")
+
+        assert ci.state == "error"
+        assert ci.head_sha == "deadbeef"
 
     def test_get_ci_status_uses_explicit_ref_sha(self, vcs, fake_token, mock_gh_request, gh_route_table):
         """When ref_sha is given, skip resolving the branch head entirely."""

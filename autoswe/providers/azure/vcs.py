@@ -209,8 +209,13 @@ class AzureVCS:
     def get_ci_status(self, branch: str, ref_sha: str | None = None) -> CIStatus:
         """Return CI status from the most recent Azure Pipelines build for *branch*.
 
-        ``ref_sha`` is unused — Azure Pipelines builds are queried by branch,
-        not commit SHA (kept for VCSProvider protocol parity with GitHub).
+        ``ref_sha`` pins the verdict to a specific commit via the build's
+        ``sourceVersion``: builds are queried by branch, not SHA, so when the
+        latest build's ``sourceVersion`` differs from *ref_sha* the verdict
+        is stale — it belongs to an older commit. Stale verdicts are reported
+        as ``state="pending", stale=True`` (a build for the requested commit
+        is presumably coming) rather than trusting the old result as green
+        or red. A stale *canceled* build therefore no longer blocks forever.
         """
         path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/build/builds"
@@ -220,7 +225,9 @@ class AzureVCS:
         try:
             result = ado_get(path, self._pat)
         except Exception:
-            return CIStatus(state="none", summary="could not query builds")
+            # Fail-safe: the build API could not be consulted. Never report
+            # "no CI" from a failed read — the gate blocks on state="error".
+            return CIStatus(state="error", summary="could not query builds")
 
         builds = result.get("value", [])
         if not builds:
@@ -230,11 +237,46 @@ class AzureVCS:
         name = (latest.get("definition") or {}).get("name", "build")
         status = latest.get("status")
         build_result = latest.get("result")
+        # sourceVersion is the build's commit; keep it verbatim for display
+        # and only compare case-insensitively (Azure shas are lowercase but
+        # a caller may pass a mixed-case ref).
+        source_version = latest.get("sourceVersion") or None
+        build_id = latest.get("id")
+        build_url = (
+            f"https://dev.azure.com/{self._org}/{self._project}"
+            f"/_build/results?buildId={build_id}"
+        ) if build_id else None
+
+        # Staleness: the latest build ran on a different commit than the
+        # one requested. No claim when ref_sha is absent or the build
+        # payload has no sourceVersion (older pipelines omit it).
+        if (
+            ref_sha
+            and source_version
+            and source_version.lower() != str(ref_sha).lower()
+        ):
+            return CIStatus(
+                state="pending", stale=True, head_sha=source_version,
+                url=build_url, total=1, pending_count=0,
+                summary=f"build '{name}' predates branch head (stale)",
+            )
 
         if status in _PENDING_STATUSES:
-            return CIStatus(state="pending", total=1, pending_count=1, summary=f"build '{name}' in progress")
+            return CIStatus(
+                state="pending", head_sha=source_version, url=build_url,
+                total=1, pending_count=1, summary=f"build '{name}' in progress",
+            )
         if build_result in _FAILURE_RESULTS:
-            return CIStatus(state="failure", total=1, failing=[name], summary=f"build '{name}' failed")
+            return CIStatus(
+                state="failure", head_sha=source_version, url=build_url,
+                total=1, failing=[name], summary=f"build '{name}' failed",
+            )
         if build_result in _SUCCESS_RESULTS:
-            return CIStatus(state="success", total=1, summary=f"build '{name}' succeeded")
-        return CIStatus(state="none", total=1, summary="no build result")
+            return CIStatus(
+                state="success", head_sha=source_version, url=build_url,
+                total=1, summary=f"build '{name}' succeeded",
+            )
+        return CIStatus(
+            state="none", head_sha=source_version, url=build_url,
+            total=1, summary="no build result",
+        )

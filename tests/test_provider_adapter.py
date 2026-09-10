@@ -376,6 +376,19 @@ def test_apply_effect_create_pr_deferred_when_ci_failing(provider):
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_deferred_when_ci_error(provider):
+    """CI state 'error' (API unconsultable) -> PR deferred, not shipped blind.
+
+    Fail-safe: the default PR_CI_ERROR_POLICY=block refuses to open a PR when
+    the CI status could not be read.
+    """
+    vcs, tracker = _run_create_pr_ci(provider, "error", {"PR_REQUIRE_CI": True})
+    vcs.open_pull_request.assert_not_called()
+    tracker.post_comment.assert_called_once()
+    assert "PR_CI_ERROR_POLICY=block" in tracker.post_comment.call_args[0][1]
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
 def test_apply_effect_create_pr_proceeds_when_ci_success(provider):
     """CI success -> PR created as normal."""
     vcs, tracker = _run_create_pr_ci(provider, "success", {"PR_REQUIRE_CI": True})

@@ -134,11 +134,33 @@ class GitHubFake:
     def set_ci_status(self, state: str, name: str = "CI") -> None:
         """Configure the CI status served by check-runs/status/commit routes.
 
-        *state* is one of ``"success"``, ``"pending"``, ``"failure"``, ``"none"``
-        (no checks configured — the default).
+        *state* is one of ``"success"``, ``"pending"``, ``"failure"``,
+        ``"none"`` (no checks configured — the default), or ``"error"``
+        (the CI endpoints raise so the provider returns state="error").
         """
         self._ci_state = state
         self._ci_name = name
+
+    def _actions_run_templates(self) -> list[dict]:
+        """Workflow-run list for the ``actions/runs`` (403-fallback) route.
+
+        Mirrors the check-runs shape for the current ``_ci_state`` so the
+        fallback path produces the same verdict as the check-runs path.
+        """
+        if self._ci_state == "none":
+            return []
+        if self._ci_state == "pending":
+            return [{"id": 1, "name": self._ci_name, "status": "in_progress",
+                     "conclusion": None, "head_sha": "abc1234",
+                     "html_url": "https://github.com/o/r/actions/runs/1"}]
+        if self._ci_state == "failure":
+            return [{"id": 1, "name": self._ci_name, "status": "completed",
+                     "conclusion": "failure", "head_sha": "abc1234",
+                     "html_url": "https://github.com/o/r/actions/runs/1"}]
+        # success
+        return [{"id": 1, "name": self._ci_name, "status": "completed",
+                 "conclusion": "success", "head_sha": "abc1234",
+                 "html_url": "https://github.com/o/r/actions/runs/1"}]
 
     def add_issue(self, number: int, payload: dict, labels: list[str],
                   comments: list[dict] | None = None) -> None:
@@ -369,8 +391,23 @@ class GitHubFake:
                     }
             return {}
 
+        # ---- GET /repos/{o}/{r}/actions/runs?head_sha=... (403 fallback) ----
+        if method == "GET" and "/actions/runs" in path:
+            if self._ci_state == "error":
+                raise RuntimeError(
+                    f"GitHub API {path} -> HTTP 503: service unavailable"
+                )
+            template = copy.deepcopy(T.github_list_actions_runs())
+            template["workflow_runs"] = self._actions_run_templates()
+            template["total_count"] = len(template["workflow_runs"])
+            return template
+
         # ---- GET /repos/{o}/{r}/commits/{sha}/check-runs ----
         if method == "GET" and "/commits/" in path and path.endswith("/check-runs"):
+            if self._ci_state == "error":
+                raise RuntimeError(
+                    f"GitHub API {path} -> HTTP 503: service unavailable"
+                )
             template = copy.deepcopy(T.github_list_check_runs())
             if self._ci_state == "none":
                 template["check_runs"] = []
@@ -392,6 +429,10 @@ class GitHubFake:
 
         # ---- GET /repos/{o}/{r}/commits/{sha}/status (legacy combined status) ----
         if method == "GET" and "/commits/" in path and path.endswith("/status"):
+            if self._ci_state == "error":
+                raise RuntimeError(
+                    f"GitHub API {path} -> HTTP 503: service unavailable"
+                )
             # Combined status left empty — check-runs alone carry the fake's CI signal.
             template = copy.deepcopy(T.github_combined_status())
             template["statuses"] = []

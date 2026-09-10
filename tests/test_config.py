@@ -457,6 +457,75 @@ def test_pr_gate_flags_per_repo_override():
     assert _flag("PR_REQUIRE_CI", cfg, {"pr_require_ci": True}) is True
 
 
+# ---------------------------------------------------------------------------
+# PR_CI_ERROR_POLICY (fail-safe policy for CI state="error" at the /pr gate)
+# ---------------------------------------------------------------------------
+
+def test_pr_ci_error_policy_defaults_to_block(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "block"
+
+
+def test_pr_ci_error_policy_env_override(isolated_autoswe_dir, monkeypatch):
+    monkeypatch.setenv("PR_CI_ERROR_POLICY", "open")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "open"
+
+
+def test_pr_ci_error_policy_from_env_file(isolated_autoswe_dir):
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("PR_CI_ERROR_POLICY=open\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "open"
+
+
+def test_pr_ci_error_policy_case_insensitive(isolated_autoswe_dir, monkeypatch):
+    monkeypatch.setenv("PR_CI_ERROR_POLICY", "BLOCK")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "block"
+
+
+def test_pr_ci_error_policy_unknown_value_falls_back_to_block(
+    isolated_autoswe_dir, monkeypatch, caplog,
+):
+    """A typo (e.g. 'BLOCKED') is not a valid policy; fall back to the
+    fail-safe 'block' rather than silently opening the gate."""
+    monkeypatch.setenv("PR_CI_ERROR_POLICY", "BLOCKED")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "block"
+    assert "PR_CI_ERROR_POLICY" in caplog.text
+
+
+def test_pr_ci_error_policy_per_repo_override():
+    """pr_gate._policy lets a repo_cfg override (lowercase key) beat the cfg."""
+    from autoswe.vcs.pr_gate import _policy
+
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "block"}, {}, "block") == "block"
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "block"},
+                   {"pr_ci_error_policy": "open"}, "block") == "open"
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "open"},
+                   {"pr_ci_error_policy": "block"}, "block") == "block"
+
+
 def test_load_repos_config_parses_json(isolated_autoswe_dir):
     repos_json = isolated_autoswe_dir / "config" / "repos.json"
     repos_json.write_text(

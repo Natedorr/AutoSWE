@@ -5,6 +5,13 @@ Shared by explicit ``/pr`` (``ship.open_pr``) and auto-PR-after-``/fix``
 default to on and are controlled by ``PR_REQUIRE_SYNC`` / ``PR_REQUIRE_CI``
 in ``cfg``, with optional per-repo overrides (same keys, lowercased) in
 ``repo_cfg``.
+
+The CI gate treats ``CIStatus.state="error"`` (the CI API could not be
+consulted — network failure, bad PAT, unresolvable head) as blocking by
+default; the ``PR_CI_ERROR_POLICY`` key (``block`` | ``open``, default
+``block``) is the explicit opt-out to let a PR through when CI cannot be
+verified. A *stale* ``pending`` verdict (build predates the branch head)
+blocks like an in-flight build.
 """
 from __future__ import annotations
 
@@ -26,6 +33,55 @@ def _flag(name: str, cfg: dict, repo_cfg: dict, default: bool = True) -> bool:
     if override is not None:
         return bool(override)
     return bool(cfg.get(name, default))
+
+
+def _policy(
+    name: str, cfg: dict, repo_cfg: dict, default: str, allowed: set[str] | None = None
+) -> str:
+    """Resolve a string policy: a per-repo override (lowercase key) beats cfg.
+
+    Mirrors ``_flag`` for non-boolean values (e.g. ``PR_CI_ERROR_POLICY``).
+    The value is normalised (stripped, lowercased). When *allowed* is given,
+    the normalised value must be one of those members, else we log a warning
+    and fall back to *default* — so an unknown/typo'd override (``"blocked"``)
+    cannot silently open the gate on unconsultable CI, mirroring
+    ``config._normalise_ci_error_policy``. An empty value falls back to
+    *default* so a stray ``""`` override can't disable the policy.
+    """
+    value = repo_cfg.get(name.lower())
+    if value is None:
+        value = cfg.get(name)
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return default
+    if allowed is not None and normalized not in allowed:
+        dbg.warning(
+            "pr_gate: %s=%r is not one of %s, using %r",
+            name, value, sorted(allowed), default,
+        )
+        return default
+    return normalized
+
+
+def _resolve_ref_sha(task: dict, repo_cfg: dict, cfg: dict, issue_num: int) -> str | None:
+    """Resolve the worktree's branch head to pass as ``ref_sha`` to the CI gate.
+
+    Best-effort and provider-agnostic: a missing or unresolvable worktree yields
+    ``None`` (the CI read then makes no staleness claim, exactly as before this
+    helper existed). No exception is ever raised here — the gate must not fail
+    because head resolution failed.
+    """
+    owner, repo = task.get("owner"), task.get("repo")
+    if not owner or not repo:
+        return None
+    provider = repo_cfg.get("provider", "github")
+    try:
+        wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
+    except Exception:
+        return None
+    return worktree_mod.resolve_branch_head(wt)
 
 
 def preflight_pr(
@@ -58,12 +114,27 @@ def preflight_pr(
             return False, reason
 
     if _flag("PR_REQUIRE_CI", cfg, repo_cfg):
-        ci = resolved_vcs.get_ci_status(branch)
+        # Pass the branch head so providers that correlate a CI verdict against
+        # a specific commit (Azure build ``sourceVersion`` staleness) can claim
+        # "this build predates the branch head". Resolving a local git SHA is
+        # provider-agnostic; when it can't be resolved (no worktree, dirty HEAD)
+        # we fall back to the exact no-ref_sha call — no staleness claim, no
+        # behaviour change, no error.
+        ref_sha = _resolve_ref_sha(task, repo_cfg, cfg, issue_num)
+        ci = resolved_vcs.get_ci_status(branch, ref_sha)
         if ci.state == "failure":
             return False, f"CI failing: {ci.summary}"
         if ci.state == "pending":
+            if ci.stale:
+                # Stale build: no run is in flight, so don't claim a pending count.
+                return False, "CI stale — build predates branch head, no current build running — retry /pr once a build for this commit lands"
             return False, f"CI still running ({ci.pending_count} pending) — retry /pr when green"
-        # "success" and "none" (no CI configured) both pass
+        if ci.state == "error" and _policy(
+            "PR_CI_ERROR_POLICY", cfg, repo_cfg, "block", allowed={"block", "open"}
+        ) == "block":
+            # Fail-safe: an unconsultable CI API is not a pass.
+            return False, f"CI status unavailable ({ci.summary}) — PR_CI_ERROR_POLICY=block"
+        # "success", "none" (no CI configured), and (policy "open") "error" pass
 
     return True, ""
 

@@ -112,6 +112,11 @@ def github_combined_status() -> dict:
     return load_template("github", "get_combined_status")
 
 
+def github_list_actions_runs() -> dict:
+    """Template for GET /repos/{o}/{r}/actions/runs?head_sha=..."""
+    return load_template("github", "list_actions_runs")
+
+
 def azure_current_user() -> dict:
     """Template for GET current user."""
     return load_template("azure", "get_current_user")

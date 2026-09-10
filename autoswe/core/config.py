@@ -144,6 +144,7 @@ def load_config() -> dict:
         "SYNC_STRATEGY": os.environ.get("SYNC_STRATEGY", "merge"),  # "merge" | "rebase"
         "PR_REQUIRE_SYNC": _as_bool(os.environ.get("PR_REQUIRE_SYNC"), "true"),
         "PR_REQUIRE_CI": _as_bool(os.environ.get("PR_REQUIRE_CI"), "true"),
+        "PR_CI_ERROR_POLICY": os.environ.get("PR_CI_ERROR_POLICY", "block"),
         "AGENT_RETRY_ON_SUBTYPE": os.environ.get("AGENT_RETRY_ON_SUBTYPE", ""),
         "WORKTREE_ORPHAN_POLICY": os.environ.get("WORKTREE_ORPHAN_POLICY", "commit"),
         "AUTO_PURGE_BRANCHES": _as_bool(os.environ.get("AUTO_PURGE_BRANCHES")),
@@ -200,7 +201,26 @@ def load_config() -> dict:
     # Parse ALLOWED_AUTHORS as a set for O(1) lookup
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()
     cfg["ALLOWED_AUTHORS"] = {a.strip() for a in _raw.split(",") if a.strip()} if _raw else set()
+    _normalise_ci_error_policy(cfg)
     return cfg
+
+
+def _normalise_ci_error_policy(cfg: dict) -> None:
+    """Normalise and validate ``PR_CI_ERROR_POLICY`` (``block`` | ``open``).
+
+    Case-insensitive; an unknown value logs a warning and falls back to
+    ``block`` — the fail-safe default, so a typo can't silently open the
+    gate on unconsultable CI.
+    """
+    valid = {"block", "open"}
+    raw = str(cfg.get("PR_CI_ERROR_POLICY", "block")).strip().lower()
+    if raw not in valid:
+        get_debug_logger().warning(
+            "config: PR_CI_ERROR_POLICY=%r is not %s, using 'block'",
+            cfg.get("PR_CI_ERROR_POLICY"), sorted(valid),
+        )
+        raw = "block"
+    cfg["PR_CI_ERROR_POLICY"] = raw
 
 
 def load_repos_config() -> dict:

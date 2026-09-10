@@ -94,6 +94,7 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 | `SYNC_STRATEGY` | `merge` | Strategy for `/sync`: `"merge"` (append-only merge commit) or `"rebase"` (linear history, force-pushes) |
 | `PR_REQUIRE_SYNC` | `true` | Gate `/pr` (and auto-PR) on the feature branch being in sync with its base. When behind, `pr_gate.preflight_pr()` runs the same sync used by `/sync`, resolving merge conflicts via `coder.resolve_sync_conflicts()`; if sync can't complete cleanly, the PR is blocked with `FAILED: <reason>`. Set `false` to skip this check entirely. |
 | `PR_REQUIRE_CI` | `true` | Gate `/pr` (and auto-PR) on CI status via `VCSProvider.get_ci_status()`. `pending` or `failure` blocks the PR; `success` or `none` (no CI configured on the repo) passes. Set `false` to skip this check entirely. |
+| `PR_CI_ERROR_POLICY` | `block` | What `pr_gate` does when `get_ci_status()` returns `state="error"` (the CI API could not be consulted — a failed read, **not** "no CI"). `block` (default) treats `error` as blocking, fail-safe: the PR is held rather than opened on an unverified commit. `open` treats `error` as passing. Never conflated with `none`. |
 | `TEST_GATE` | `true` | Post-fix test gate (Natedorr/testProject#20): after the fix agent commits/pushes, `coder._finalize_fix` runs the repo's test suite in the worktree before the task can reach terminal `fixed`. A red suite lands the task in the non-terminal `test_failed` status (a comment carries the failure, `/pr` is blocked, `/fix`/`/retry` restart with a fresh attempt budget). Skips (no resolvable command, missing runner, timeout, no tests collected) are non-gating. Set `false` to disable. |
 | `TEST_GATE_TIMEOUT` | `600` | Post-fix test gate timeout in seconds. A timeout is non-gating (skip + warning). |
 | `TEST_COMMAND` | `""` | Explicit test command run in the worktree root for the post-fix test gate (e.g. `pytest -q`, `npm test`). Resolution order: per-repo `test_command` → `TEST_COMMAND` → Python/pytest detection in the worktree → skip. Blank = rely on per-repo / detection only. |
@@ -103,7 +104,7 @@ Loaded by `core/config.py:load_config()`. Env vars take precedence over file val
 
 **Boolean keys re-parsed:** `SILENT_REPORTING`, `MINIMAL_POSTING`, `AUTO_ASSIGN`, `AUTO_CREATE_PR`, `LINK_BRANCH_TO_ISSUE`, `PR_REQUIRE_SYNC`, `PR_REQUIRE_CI`, `AUTO_PURGE_BRANCHES`, and `TEST_GATE` are compared to `"true"` (case-insensitive) after file load.
 
-**Per-repo overrides:** `pr_gate._flag()` checks `repo_cfg` first — a lowercase `pr_require_sync` / `pr_require_ci` key in a `repos.json` entry overrides the global `autoswe.env` value for that repo only (same pattern as `plan_model`/`fix_model` overrides).
+**Per-repo overrides:** `pr_gate._flag()` checks `repo_cfg` first — a lowercase `pr_require_sync` / `pr_require_ci` key in a `repos.json` entry overrides the global `autoswe.env` value for that repo only (same pattern as `plan_model`/`fix_model` overrides). The string-valued `PR_CI_ERROR_POLICY` uses the same per-repo override via `pr_gate._policy()`: a lowercase `pr_ci_error_policy` key (`block`/`open`) in a `repos.json` entry beats the global value for that repo only.
 
 ## `config/repos.json` (gitignored, copy from `repos.json.example`)
 

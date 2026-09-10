@@ -22,11 +22,12 @@ dataclass in `providers/base.py`, (b) a `VCSProvider`/`IssueTracker` protocol me
 
 ## 0. Why capabilities come first
 
-The two platforms are *not* symmetric, and today the asymmetry is expressed as a **silent no-op**
-(`AzureVCS.link_branch_to_issue` returns `None`; a broken API call returns `CIStatus(state="none")`
-which the gate reads as "pass"). `base.py` documents the no-inheritance trade-off honestly, but the
-GitHub review's F-2 and the Azure review's F-2a are the same bug wearing two hats: **absence and
-failure are indistinguishable at the seam.**
+The two platforms are *not* symmetric, and (pre-P0) the asymmetry was expressed as a **silent
+no-op**: `AzureVCS.link_branch_to_issue` returned `None`, and a broken CI API call returned
+`CIStatus(state="none")` which the gate read as "pass". (Since #244 the broken-API path returns
+`CIStatus(state="error")`, which the gate blocks on — see §2.1.) `base.py` documents the
+no-inheritance trade-off honestly, but the GitHub review's F-2 and the Azure review's F-2a are the
+same bug wearing two hats: **absence and failure are indistinguishable at the seam.**
 
 Homogenizing means making the difference *explicit and queryable*, not making it invisible. The
 codebase already has exactly this idiom one layer over — `harness/backends` declares capabilities
@@ -208,6 +209,12 @@ implementation maps `completed` → the resolved `done_state` and `not_planned` 
 
 ### 2.1 Hardening the signal first (blocking prerequisite)
 
+> **Status (P0, #244):** the `CIStatus` hardening below — the `error`/`head_sha`/`stale`/`url`/
+> `neutral` fields, the GH `actions/runs` 403 fallback, ADO `sourceVersion` staleness,
+> `PR_CI_ERROR_POLICY`, and the two flipped fail-open tests — **is landed**. The `CIFailure` /
+> `get_ci_failures()` feedback-text method (§2.1's last block) is **deliberately deferred** — it has
+> no P0 consumer and would be dead code until the auto-fix loop lands.
+
 An auto-fix loop built on a fail-open signal is worse than no loop: an API 403 currently reads as
 "no CI" → "pass". Fix `CIStatus` before anything consumes it more widely.
 
@@ -233,7 +240,9 @@ class CIStatus:
 - Azure: honour `ref_sha` — compare the latest build's `sourceVersion`; on mismatch return
   `stale=True` with `state="pending"` (a build for the right commit is presumably coming), never a
   false green or a false red. `canceled` stays failure (existing pin), but a *stale* canceled build
-  no longer blocks forever.
+  no longer blocks forever. The `/pr` gate resolves the worktree branch head
+  (`git rev-parse HEAD`) and passes it as `ref_sha`, so this staleness path is live end-to-end, not
+  dead — when the head can't be resolved it falls back to a no-`ref_sha` read (no staleness claim).
 - Tests `test_get_ci_status_unresolvable_sha_is_none` and
   `test_get_ci_status_request_error_is_none` flip to `…_is_error` — they currently pin the bug as
   contract, which is the single most important line of this plan.
