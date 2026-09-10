@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from autoswe.core.config import resolve_harness, resolve_max_turns
+from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool, post_question_fallback
@@ -128,13 +129,13 @@ def _worktree_has_committable_work(wt: Path, branch: str) -> bool:
     try:
         status = subprocess.run(
             ["git", "-C", str(wt), "status", "--porcelain"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, **GIT_TEXT_ARGS,
         )
         if status.returncode == 0 and status.stdout.strip():
             return True
         ahead = subprocess.run(
             ["git", "-C", str(wt), "log", f"origin/{branch}..HEAD", "--oneline"],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True, text=True, timeout=10, check=False, **GIT_TEXT_ARGS,
         )
         if ahead.returncode == 0 and ahead.stdout.strip():
             return True
@@ -210,7 +211,7 @@ def _get_branch_head_sha(wt, branch: str) -> str | None:
     try:
         result = subprocess.run(
             ["git", "-C", str(wt), "rev-parse", branch],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, **GIT_TEXT_ARGS,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -768,7 +769,7 @@ def resolve_sync_conflicts(
     try:
         subprocess.run(
             ["git", "-C", str(wt), "push", "origin", branch],
-            capture_output=True, text=True, timeout=60, check=True,
+            capture_output=True, text=True, timeout=60, check=True, **GIT_TEXT_ARGS,
         )
     except Exception as e:  # subprocess can raise TimeoutExpired, CalledProcessError, OSError
         return HandlerResult(
@@ -782,7 +783,7 @@ def resolve_sync_conflicts(
     try:
         short_sha_result = subprocess.run(
             ["git", "-C", str(wt), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=10, check=True,
+            capture_output=True, text=True, timeout=10, check=True, **GIT_TEXT_ARGS,
         )
         short_sha = short_sha_result.stdout.strip()
     except Exception:  # Subprocess call (git rev-parse) is best-effort; fallback to "unknown".
@@ -791,7 +792,7 @@ def resolve_sync_conflicts(
     try:
         ahead_result = subprocess.run(
             ["git", "-C", str(wt), "log", f"origin/{sync_base}..HEAD", "--oneline"],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True, text=True, timeout=10, check=False, **GIT_TEXT_ARGS,
         )
         ahead_count = len(ahead_result.stdout.strip().split("\n")) if ahead_result.stdout.strip() else 0
     except Exception:  # Subprocess call (git log) is best-effort; fallback to 0.

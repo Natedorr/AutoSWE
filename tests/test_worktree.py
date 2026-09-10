@@ -556,6 +556,70 @@ def test_commit_and_push_multi_fix_preserves_history(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _run — UTF-8 decoding (issue #238, Windows CP1252 crash)
+# ---------------------------------------------------------------------------
+
+def test_run_passes_explicit_encoding_to_subprocess(tmp_path, monkeypatch):
+    """_run must not rely on the platform-locale default codec."""
+    import subprocess
+
+    import autoswe.vcs.worktree as wt
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(wt.subprocess, "run", fake_run)
+    result = wt._run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"])
+    assert result.stdout == "ok\n"
+    assert captured.get("encoding") == "utf-8"
+    assert captured.get("errors") == "replace"
+
+
+def test_run_survives_utf8_commit_message_under_cp1252_locale(tmp_path, monkeypatch):
+    """Regression (issue #238): a UTF-8 commit message must not kill
+    subprocess's reader thread on a CP1252-locale host (Windows).
+
+    Before the fix, bare text=True resolved the codec to the platform
+    default; byte 0x9D (second byte of the UTF-8 em dash) is undefined in
+    CP1252, so the reader thread raised UnicodeDecodeError, stdout stayed
+    None, and the next .strip() raised TypeError. With the pinned UTF-8
+    decode the same bytes return the em dash intact.
+    """
+    import subprocess
+
+    import autoswe.vcs.worktree as wt
+
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+
+    wt_path = tmp_path / "repo"
+    wt_path.mkdir()
+    env = dict(subprocess.os.environ,
+               GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    subprocess.run(["git", "init", "-q"], cwd=wt_path, check=True, env=env,
+                   capture_output=True)
+    (wt_path / "doc.md").write_text("add — em dash\n", encoding="utf-8")
+    subprocess.run(["git", "add", "doc.md"], cwd=wt_path, check=True, env=env,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-m", "docs: add note — em dash"],
+                   cwd=wt_path, check=True, env=env, capture_output=True)
+
+    logline = wt._run(
+        ["git", "-C", str(wt_path), "log", "--oneline", "-1"], check=False,
+    )
+    assert "—" in logline.stdout
+
+    head = wt._run(["git", "-C", str(wt_path), "rev-parse", "HEAD"], check=False)
+    assert head.returncode == 0 and len(head.stdout.strip()) == 40
+    # Sanity: the fake default encoding is still in effect — the fix (not
+    # the environment) kept these calls alive.
+    assert subprocess._text_encoding() == "cp1252"
+
+
+# ---------------------------------------------------------------------------
 # is_dirty / reset_clean
 # ---------------------------------------------------------------------------
 
