@@ -347,11 +347,14 @@ class GitHubVCS:
 
         # Fail-safe terminal rule: the check-runs source (direct or the
         # actions/runs fallback) is the authoritative "does CI exist" signal.
-        # If it could NOT be consulted AND no legacy checks surfaced either,
-        # we cannot distinguish "no CI" from "couldn't read CI" — report
-        # error rather than a vacuous "none" pass. An empty legacy
-        # combined-status alone is not proof of no CI (Actions-only repos
-        # have none), so check_runs_ok must be true to claim "none".
+        # If it could NOT be consulted AND no checks of any kind surfaced
+        # (total == 0), we cannot distinguish "no CI" from "couldn't read
+        # CI" — report error rather than a vacuous "none" pass. When legacy
+        # combined-status *did* surface checks (total > 0) that alone is a
+        # real CI signal, so a verdict is returned from legacy even with
+        # check_runs_ok False. An empty legacy read alone, however, is not
+        # proof of no CI (Actions-only repos have none), hence the
+        # ``total == 0`` guard.
         if not check_runs_ok and total == 0:
             return CIStatus(
                 state="error", head_sha=sha, url=self.commit_url(sha),

@@ -447,6 +447,36 @@ def test_get_ci_status_stale_canceled_build_no_longer_blocks_as_failure(
     assert ci.stale is True
 
 
+@pytest.mark.parametrize(
+    "ref_sha",
+    ["newsha", "NEWsha"],
+    ids=["exact-case", "mixed-case"],
+)
+def test_get_ci_status_fresh_source_version_is_not_stale(
+    vcs, mock_ado_request, ado_route_table, ref_sha,
+):
+    """A build on the *requested* commit is fresh, not stale.
+
+    The staleness comparison is case-insensitive, so both an exact-case match
+    and a mixed-case match on the same build read as a fresh verdict — the
+    build's real result, not a pending/stale stand-in. This pins the match arm
+    of the ``source_version.lower() != str(ref_sha).lower()`` comparison that
+    the mismatch rows above only exercise in the other direction.
+    """
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "newsha", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100", ref_sha=ref_sha)
+
+    assert ci.state == "success"
+    assert ci.stale is False
+    assert ci.head_sha == "newsha"
+
+
 def test_get_ci_status_no_ref_sha_no_staleness_claim(vcs, mock_ado_request, ado_route_table):
     """Without ref_sha the provider can't claim staleness — fresh verdicts."""
     ado_route_table[("GET", _BUILDS_PREFIX)] = {
