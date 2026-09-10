@@ -697,6 +697,7 @@ class ClaudeCodeBackend:
         captured_plan_file: str | None = None
         captured_plan_text: str | None = None
         plan_posted, question_posted = False, False
+        plan_posted_body: str | None = None
         structured_output: dict | None = None
         progress_state = ProgressState()
 
@@ -721,6 +722,10 @@ class ClaudeCodeBackend:
                                     if block.name == "mcp__autoswe_comment__post_plan":
                                         if (block.input or {}).get("body", "").strip():
                                             plan_posted = True
+                                            # Capture the body so the planner can finalize the
+                                            # sticky planning comment in place after the loop —
+                                            # the last call's body wins (issue #241).
+                                            plan_posted_body = str((block.input or {}).get("body", ""))
                                     elif block.name == "mcp__autoswe_comment__post_question":
                                         if (block.input or {}).get("body", "").strip():
                                             question_posted = True
@@ -796,6 +801,7 @@ class ClaudeCodeBackend:
             plan_file_path=captured_plan_file,
             plan_posted=plan_posted,
             question_posted=question_posted,
+            plan_posted_body=plan_posted_body,
             plan_text=captured_plan_text,
             structured_output=structured_output,
         )

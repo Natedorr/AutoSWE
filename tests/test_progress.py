@@ -704,6 +704,51 @@ def test_progress_drain_does_not_clobber_frozen_question():
     assert "StructuredOutput" not in updates[-1]
 
 
+def test_progress_plan_push_replaces_coalesced_tool_event():
+    """Regression (issue #241): drain-after-coalesce ordering.
+
+    A raw tool event coalesces into ``_pending_body`` within the throttle
+    window. The planner now pushes the plan through the progress callback as
+    the LAST write (after the run returns, before ``drain()``). That push must
+    replace the coalesced tool event so ``drain()`` writes the plan — not the
+    stale tool event clobbering the in-place-patched sticky.
+    """
+    from autoswe.tracking.progress import ProgressComment
+
+    updates = []
+
+    class PlanTracker:
+        def post_comment(self, issue_num, body):
+            return 999
+
+        def update_comment(self, issue_num, comment_id, body):
+            updates.append(body)
+
+    progress = ProgressComment(PlanTracker(), {}, 1)
+    progress.create("Dispatching `plan`…")
+    progress._last_update = 0  # release throttle so the first tool event flushes
+    progress.update("Read: autoswe/harness/planner.py")  # flushes
+    assert len(updates) == 1
+
+    # A later tool event lands inside the throttle window → coalesced.
+    progress.update("Tool: StructuredOutput")
+    assert progress._pending_body == "Tool: StructuredOutput"
+    assert len(updates) == 1  # still coalesced, not flushed
+
+    # The planner's post-plan push is the LAST write — it must replace the
+    # coalesced tool event in _pending_body.
+    progress.update("## Plan\n\n1. Do the thing")
+    assert progress._pending_body == "## Plan\n\n1. Do the thing"
+    assert len(updates) == 1  # still coalesced
+
+    # drain() (called from _finalize_handler for a non-terminal "planned" status)
+    # must flush the plan, not the stale tool event.
+    progress.drain()
+    assert len(updates) == 2
+    assert "## Plan" in updates[-1]
+    assert "StructuredOutput" not in updates[-1]
+
+
 def test_progress_freeze_noop_without_comment_id():
     """freeze() without create() must not raise and must not post."""
     from autoswe.tracking.progress import ProgressComment

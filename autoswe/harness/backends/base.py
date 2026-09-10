@@ -72,6 +72,14 @@ class RunResult:
     plan_file_path: str | None = None
     plan_posted: bool = False
     question_posted: bool = False
+    # The ``body`` argument of the ``post_plan`` MCP tool call, captured from
+    # the run's stream. ``None`` when the tool was not called with a
+    # non-empty body or the backend has no MCP. The planner uses it to finalize
+    # the sticky planning comment in place so the plan is the last write — a
+    # coalesced raw tool event in the last 10s would otherwise be flushed by
+    # ProgressComment.drain() on top of the plan the MCP server just patched
+    # in (issue #241).
+    plan_posted_body: str | None = None
     # Plan markdown captured from an ExitPlanMode tool call. The model often
     # exits plan mode via the native ExitPlanMode tool (even though it is
     # disallowed, the tool-use block — and its plan content — still appears in

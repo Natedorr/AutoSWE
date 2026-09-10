@@ -310,7 +310,8 @@ class TestRunResultShape:
         """RunResult has the expected set of fields."""
         expected = {
             "text", "session_id", "subtype", "cost_usd", "duration_seconds",
-            "ok", "plan_file_path", "plan_posted", "question_posted", "plan_text",
+            "ok", "plan_file_path", "plan_posted", "question_posted",
+            "plan_posted_body", "plan_text",
             "structured_output",
         }
         actual = {f.name for f in fields(RunResult)}
@@ -324,6 +325,7 @@ class TestRunResultShape:
         assert r.plan_file_path is None
         assert r.plan_posted is False
         assert r.question_posted is False
+        assert r.plan_posted_body is None
         assert r.structured_output is None
 
     def test_runresult_ok_resolved_from_subtype(self):

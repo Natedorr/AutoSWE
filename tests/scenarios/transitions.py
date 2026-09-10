@@ -2183,7 +2183,7 @@ TRANSITIONS: list[dict[str, Any]] = [
     # ---- WI #150: waiting -> planned via MCP post_plan during resume ----
     {
         "name": "waiting_resume_mcp_post_plan",
-        "description": "Task at waiting; user reply resumes plan; agent calls MCP post_plan -> planned (dual-axis: ClaudeFake honors plan_posted, pi branch maps mcp_tool to script_mcp_plan)",
+        "description": "Task at waiting; user reply resumes plan; agent calls MCP post_plan -> planned (dual-axis: ClaudeFake honors plan_posted, pi branch maps mcp_tool to script_mcp_plan). The captured post_plan body (issue #241) is re-pushed through the sticky progress comment, so the plan lands on the thread as a '## Plan' comment via the PATCH channel.",
         "meta": {"mcp_plan_posted": True},
         "start": {
             "issue": {"body": "/plan"},
@@ -2215,7 +2215,8 @@ TRANSITIONS: list[dict[str, Any]] = [
             },
         },
         "claude_responses": [
-            {"text": "Thanks! Here is the plan.", "session_id": "s-plan-42", "subtype": "success", "plan_posted": True, "mcp_tool": "post_plan"},
+            {"text": "Thanks! Here is the plan. Use Django.", "session_id": "s-plan-42", "subtype": "success",
+             "plan_posted": True, "mcp_tool": "post_plan", "plan_posted_body": "Use Django."},
         ],
         "git_calls": ["create_worktree"],
         "expect": {
@@ -2223,6 +2224,11 @@ TRANSITIONS: list[dict[str, Any]] = [
             "autoswe_status": "planned",
             "session_id": "s-plan-42",
             "claude_permission": "plan",
+            # issue #241: the captured post_plan body is re-pushed through the
+            # sticky planning comment (the "Resuming `plan` session…" PATCH
+            # channel), so the plan lands on the thread as a "## Plan" comment
+            # instead of a separate new POST.
+            "comment_contains": ["## Plan", "Use Django."],
         },
     },
     # ---- Issue #27: waiting resume with stale last_phase ----
