@@ -950,3 +950,237 @@ def test_fetch_comments_mixed_html_and_markdown(tracker, mock_ado_request, ado_r
     assert comments[1].author_login == "BOT"
     assert "<p>" not in comments[1].body  # HTML tags stripped
 
+
+
+# ---------------------------------------------------------------------------
+# close_issue — done-state resolution + 400 hint (issue #245 §1.5)
+# ---------------------------------------------------------------------------
+
+def _wi(work_item_type, state="Active"):
+    """A raw ADO work item payload (the shape fetch_issue returns)."""
+    return {
+        "id": 42,
+        "fields": {
+            "System.WorkItemType": work_item_type,
+            "System.State": state,
+            "System.Title": "Test work item",
+        },
+    }
+
+
+def _states(value):
+    """A workitemtypes/{type}/states response body."""
+    return {"count": len(value), "value": value}
+
+
+def _state_route():
+    """State discovery route value for a Bug-type work item (Agile process)."""
+    return _states([
+        {"name": "New", "category": "Proposed"},
+        {"name": "Active", "category": "InProgress"},
+        {"name": "Resolved", "category": "Resolved"},
+        {"name": "Closed", "category": "Completed"},
+    ])
+
+
+def _fetch_route():
+    """Route value for the work-item fetch (GET .../workitems/42?$expand=all)."""
+    return _wi("Bug")
+
+
+# -- Resolution order (first hit wins) --
+
+def test_close_issue_uses_configured_done_state_when_terminal(
+    ado_repo_cfg, mock_ado_request, ado_route_table,
+):
+    """A configured ``done_state`` that is terminal is written directly — no
+    fetch, no state discovery."""
+    ado_repo_cfg["done_state"] = "Done"
+    ado_repo_cfg["done_states"] = ["Closed", "Done", "Removed"]
+    tracker = AzureTracker(ado_repo_cfg)
+    patch_path = "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/42"
+    ado_route_table[("PATCH", patch_path)] = {}
+
+    tracker.close_issue(42)
+
+    # Exactly one call, the state PATCH — no discovery traffic at all.
+    assert len(mock_ado_request.calls) == 1
+    call = mock_ado_request.calls[0]
+    assert call["method"] == "PATCH"
+    assert call["body"] == [{"op": "add", "path": "/fields/System.State", "value": "Done"}]
+
+
+def test_close_issue_refuses_non_terminal_configured_state_and_discovers(
+    ado_repo_cfg, mock_ado_request, ado_route_table,
+):
+    """A configured ``done_state`` NOT in ``done_states`` is refused (would close
+    to a state the read side still reads as open) — falls through to discovery."""
+    ado_repo_cfg["done_state"] = "Shipped"  # not a terminal state
+    ado_repo_cfg["done_states"] = ["Closed", "Done", "Removed"]
+    tracker = AzureTracker(ado_repo_cfg)
+    base = "https://dev.azure.com/my-org/my-project/_apis"
+    ado_route_table[("GET", f"{base}/wit/workitems/42?$expand=all")] = _fetch_route()
+    ado_route_table[("GET", f"{base}/wit/workitemtypes/Bug/states")] = _state_route()
+    ado_route_table[("PATCH", f"{base}/wit/workitems/42")] = {}
+
+    tracker.close_issue(42)
+
+    patch = [c for c in mock_ado_request.calls if c["method"] == "PATCH"][0]
+    # Discovery found the Completed-category state ("Closed"), not "Shipped".
+    assert patch["body"][0]["value"] == "Closed"
+    assert "Shipped" not in str(patch["body"])
+
+
+def test_close_issue_runtime_discovers_completed_category_state(
+    ado_repo_cfg, mock_ado_request, ado_route_table,
+):
+    """No ``done_state`` set → runtime discovery writes the Completed-category
+    state for the work item's type (a custom process that renames its terminal
+    state is honoured, not just the default "Closed")."""
+    tracker = AzureTracker(ado_repo_cfg)
+    base = "https://dev.azure.com/my-org/my-project/_apis"
+    ado_route_table[("GET", f"{base}/wit/workitems/42?$expand=all")] = _fetch_route()
+    # Custom process: the Completed state is named "Approved", not "Closed".
+    ado_route_table[("GET", f"{base}/wit/workitemtypes/Bug/states")] = _states([
+        {"name": "Active", "category": "InProgress"},
+        {"name": "Approved", "category": "Completed"},
+    ])
+    ado_route_table[("PATCH", f"{base}/wit/workitems/42")] = {}
+
+    tracker.close_issue(42)
+
+    patch = [c for c in mock_ado_request.calls if c["method"] == "PATCH"][0]
+    assert patch["body"][0]["value"] == "Approved"
+
+
+def test_close_issue_falls_back_to_closed_when_discovery_fails(
+    ado_repo_cfg, mock_ado_request, ado_route_table,
+):
+    """When the type's states can't be read, close_issue writes the "Closed"
+    fallback rather than guessing a bespoke state."""
+    tracker = AzureTracker(ado_repo_cfg)
+    base = "https://dev.azure.com/my-org/my-project/_apis"
+    ado_route_table[("GET", f"{base}/wit/workitems/42?$expand=all")] = _fetch_route()
+
+    def states_404(method, path, pat, body):
+        raise RuntimeError("Azure API /workitemtypes/Bug/states -> HTTP 404: not found")
+
+    ado_route_table[("GET", f"{base}/wit/workitemtypes/Bug/states")] = states_404
+    ado_route_table[("PATCH", f"{base}/wit/workitems/42")] = {}
+
+    tracker.close_issue(42)
+
+    patch = [c for c in mock_ado_request.calls if c["method"] == "PATCH"][0]
+    assert patch["body"][0]["value"] == "Closed"
+
+
+def test_close_issue_not_planned_targets_removed_category_state(
+    ado_repo_cfg, mock_ado_request, ado_route_table,
+):
+    """reason='not_planned' targets the Removed-category state when the process
+    has one (a work item that is not planned should be removed, not closed)."""
+    tracker = AzureTracker(ado_repo_cfg)
+    base = "https://dev.azure.com/my-org/my-project/_apis"
+    ado_route_table[("GET", f"{base}/wit/workitems/42?$expand=all")] = _fetch_route()
+    ado_route_table[("GET", f"{base}/wit/workitemtypes/Bug/states")] = _states([
+        {"name": "Active", "category": "InProgress"},
+        {"name": "Closed", "category": "Completed"},
+        {"name": "Removed", "category": "Removed"},
+    ])
+    ado_route_table[("PATCH", f"{base}/wit/workitems/42")] = {}
+
+    tracker.close_issue(42, reason="not_planned")
+
+    patch = [c for c in mock_ado_request.calls if c["method"] == "PATCH"][0]
+    assert patch["body"][0]["value"] == "Removed"
+
+
+# -- 400 handling: one-time hint, never a blind retry --
+
+def test_close_issue_400_posts_one_time_hint_not_retry(
+    ado_repo_cfg, mock_ado_request, ado_route_table,
+):
+    """ADO rejecting the state with HTTP 400 → a one-time operator comment
+    telling them to set ``done_state``; the PATCH is NOT retried with a
+    different state (a wrong write is worse than none)."""
+    tracker = AzureTracker(ado_repo_cfg)
+    base = "https://dev.azure.com/my-org/my-project/_apis"
+    ado_route_table[("GET", f"{base}/wit/workitems/42?$expand=all")] = _fetch_route()
+    ado_route_table[("GET", f"{base}/wit/workitemtypes/Bug/states")] = _state_route()
+
+    def patch_400(method, path, pat, body):
+        raise RuntimeError(
+            "Azure API /workitems/42 -> HTTP 400: The requested transition "
+            "is not allowed for the current work item type and state"
+        )
+
+    ado_route_table[("PATCH", f"{base}/wit/workitems/42")] = patch_400
+    # The hint's marker check + post:
+    ado_route_table[("GET", f"{base}/wit/workitems/42/comments")] = {"comments": []}
+    ado_route_table[("POST", f"{base}/wit/workitems/42/comments")] = {}
+
+    tracker.close_issue(42)
+
+    # Exactly ONE PATCH attempt — no blind retry with a different state.
+    patches = [c for c in mock_ado_request.calls if c["method"] == "PATCH"]
+    assert len(patches) == 1
+    # A hint comment was posted, guarded by the marker, with operator guidance.
+    posts = [c for c in mock_ado_request.calls if c["method"] == "POST" and "/comments" in c["path"]]
+    assert len(posts) == 1
+    hint_body = posts[0]["body"]["text"]
+    assert "<AUTOSWE_DONE_STATE_HINT>" in hint_body
+    assert "done_state" in hint_body
+    assert "repos.json" in hint_body
+
+
+def test_close_issue_400_hint_is_not_reposted(
+    ado_repo_cfg, mock_ado_request, ado_route_table,
+):
+    """The hint is one-time: if the marker is already in an existing comment,
+    close_issue does not post a duplicate on a subsequent 400."""
+    tracker = AzureTracker(ado_repo_cfg)
+    base = "https://dev.azure.com/my-org/my-project/_apis"
+    ado_route_table[("GET", f"{base}/wit/workitems/42?$expand=all")] = _fetch_route()
+    ado_route_table[("GET", f"{base}/wit/workitemtypes/Bug/states")] = _state_route()
+    ado_route_table[("PATCH", f"{base}/wit/workitems/42")] = (
+        lambda m, p, t, b: (_ for _ in ()).throw(
+            RuntimeError("Azure API /workitems/42 -> HTTP 400: rejected")
+        )
+    )
+    # Marker already present in an existing comment.
+    ado_route_table[("GET", f"{base}/wit/workitems/42/comments")] = {
+        "comments": [
+            {"id": 1, "text": "<AUTOSWE_DONE_STATE_HINT> already posted",
+             "createdBy": {"uniqueName": "bot@example.com"}},
+        ],
+    }
+    ado_route_table[("POST", f"{base}/wit/workitems/42/comments")] = {}
+
+    tracker.close_issue(42)
+
+    # No new comment POST — the marker guard suppressed the duplicate.
+    posts = [c for c in mock_ado_request.calls if c["method"] == "POST" and "/comments" in c["path"]]
+    assert posts == []
+
+
+def test_close_issue_non_400_error_is_re_raised(
+    ado_repo_cfg, mock_ado_request, ado_route_table,
+):
+    """A non-400 transport error is re-raised — not swallowed, not hinted, so a
+    transient outage is visible to the operator (and retried at the next poll)
+    rather than misread as a process rejection."""
+    tracker = AzureTracker(ado_repo_cfg)
+    base = "https://dev.azure.com/my-org/my-project/_apis"
+    ado_repo_cfg["done_state"] = "Done"
+    ado_repo_cfg["done_states"] = ["Closed", "Done", "Removed"]
+    tracker = AzureTracker(ado_repo_cfg)
+    ado_route_table[("PATCH", f"{base}/wit/workitems/42")] = (
+        lambda m, p, t, b: (_ for _ in ()).throw(RuntimeError("Azure API -> HTTP 500: boom"))
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        tracker.close_issue(42)
+
+    # No hint comment posted for a transport error.
+    posts = [c for c in mock_ado_request.calls if c["method"] == "POST"]
+    assert posts == []

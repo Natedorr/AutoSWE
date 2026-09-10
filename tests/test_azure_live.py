@@ -352,6 +352,90 @@ class TestAzureWriteOps:
 
 
 @pytest.mark.live
+class TestE1BranchLinkProbe:
+    """E1 probe (issue #245 §1.3): does ADO actually expose a branch<->work-item
+    edge we can write?
+
+    ``AzureVCS`` currently *declares the absence* of BRANCH_LINK — the branch is
+    named ``autoswe/issue-{n}`` so the association is recoverable by name, but
+    there is no documented platform-managed branch edge. This probe settles it:
+    it tries to add a ``System.LinkType.ArtifactLink`` relation from a work item
+    to a git branch, reads the relation set back, and reports whether the write
+    took.
+
+    The assertion is deliberately *soft* (assert on the probe having run, not on
+    the outcome) so the result is a recorded observation, not a pass/fail gate:
+    if the relation round-trips the developer may promote BRANCH_LINK into the
+    declared capability set; if it does not, the declared absence stands. The
+    outcome is printed for the commit-message record.
+    """
+
+    def test_artifactlink_branch_relation_probe(self, ado_live_cfg):
+        from autoswe.providers.azure.api import _ado_api_version, ado_get, ado_post
+        from autoswe.providers.factory import get_tracker
+
+        org = ado_live_cfg["org"]
+        project = ado_live_cfg["project"]
+        pat = ado_live_cfg["pat"]
+
+        tracker = get_tracker(ado_live_cfg)
+        wid = tracker.create_issue(
+            "Live test: E1 branch-link probe",
+            "Throwaway work item for the ADO ArtifactLink branch probe.",
+        )
+        assert isinstance(wid, int) and wid > 0
+
+        base = f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems/{wid}"
+        relations_path = _ado_api_version(base + "/relations")
+
+        try:
+            # Attempt to add an ArtifactLink relation pointing at a git branch.
+            # The rel attribute for a git branch is
+            # git:Branch/{project}/{repo}/refs/heads/{branch}.
+            branch = "main"
+            repo = ado_live_cfg["repo"]
+            try:
+                ado_post(relations_path, pat, body={
+                    "rel": "ArtifactLink",
+                    "url": f"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}/refs/heads/{branch}",
+                    "attributes": {"name": branch},
+                })
+                write_ok = True
+            except RuntimeError as e:
+                write_ok = False
+                write_err = str(e)
+
+            # Read the relation set back and look for a branch artifact.
+            rels = ado_get(relations_path, pat)
+            values = rels.get("relations", rels.get("value", []))
+            branch_rels = [
+                r for r in values
+                if r.get("rel") == "ArtifactLink" and "refs/heads/" in (r.get("url") or "")
+            ]
+            persisted = len(branch_rels) > 0
+
+            print(f"\n=== E1 branch-link probe (work item {wid}) ===")
+            print(f"  write accepted: {write_ok}"
+                  + ("" if write_ok else f"  ({write_err})"))
+            print(f"  branch ArtifactLink round-trips: {persisted}")
+            print(f"  relation count: {len(values)}")
+            if persisted:
+                print("  -> BRANCH_LINK is platform-managed; consider declaring it.")
+            else:
+                print("  -> no persisted branch edge; declared absence stands.")
+            print("==========================================\n")
+        finally:
+            # Tear down the throwaway work item.
+            try:
+                from autoswe.providers.azure.api import ado_patch
+                ado_patch(_ado_api_version(base), pat,
+                          body=[{"op": "add", "path": "/fields/System.State",
+                                 "value": "Removed"}])
+            except RuntimeError:
+                pass  # best-effort teardown; never fail the probe on cleanup
+
+
+@pytest.mark.live
 class TestAzureSlug:
     """Slug helper roundtrip for Azure provider."""
 

@@ -152,8 +152,8 @@ def load_config() -> dict:
         # as terminal. They are validated against each other below — a
         # done_state outside done_states is a startup error, not a runtime
         # surprise. Both can also be overridden per repo in repos.json.
-        "done_state": os.environ.get("done_state", ""),
-        "done_states": os.environ.get("done_states", "Closed,Done,Removed"),
+        "done_state": os.environ.get("DONE_STATE", ""),
+        "done_states": os.environ.get("DONE_STATES", "Closed,Done,Removed"),
         "SYNC_STRATEGY": os.environ.get("SYNC_STRATEGY", "merge"),  # "merge" | "rebase"
         "PR_REQUIRE_SYNC": _as_bool(os.environ.get("PR_REQUIRE_SYNC"), "true"),
         "PR_REQUIRE_CI": _as_bool(os.environ.get("PR_REQUIRE_CI"), "true"),

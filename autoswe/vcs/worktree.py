@@ -580,7 +580,7 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
     if (cfg or {}).get("LINK_COMMIT_TRAILER", True):
         try:
             trailer = vcs.commit_trailer(issue_num)
-        except Exception as e:  # noqa: BLE001 — a trailer surprise is not fatal
+        except Exception as e:
             dbg.warning("WORKTREE: commit_trailer failed for issue %d: %s", issue_num, e)
         else:
             if trailer and trailer not in msg:

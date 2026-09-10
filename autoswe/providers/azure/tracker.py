@@ -182,7 +182,7 @@ class AzureTracker:
         )
         try:
             raw = ado_get(path, self._pat)
-        except Exception as e:  # noqa: BLE001 — a failed discovery is a fallback, not a crash
+        except Exception as e:
             dbg.warning(
                 "state discovery failed for type %r: %s: %s",
                 work_item_type, type(e).__name__, e,
@@ -238,7 +238,7 @@ class AzureTracker:
         # Runtime discovery needs the work item's type.
         try:
             issue = self.fetch_issue(issue_number)
-        except Exception as e:  # noqa: BLE001 — can't discover without a read; fall back
+        except Exception as e:
             dbg.warning(
                 "close_issue: could not read work item %d for state discovery: %s: %s",
                 issue_number, type(e).__name__, e,
@@ -512,7 +512,7 @@ class AzureTracker:
                 patch_path, self._pat,
                 body=[{"op": "add", "path": "/fields/System.State", "value": state}],
             )
-        except Exception as e:  # noqa: BLE001 — report, do not blind-retry (see §1.5 step 4)
+        except Exception as e:
             err = str(e)
             if "HTTP 400" in err:
                 discovered = self._state_category_map(self._work_item_type(issue_number))
@@ -532,7 +532,7 @@ class AzureTracker:
         """Read the work item's ``System.WorkItemType`` (best-effort)."""
         try:
             return self.fetch_issue(issue_number).work_item_type
-        except Exception:  # noqa: BLE001 — used only to enrich an error message
+        except Exception:
             return None
 
     def _post_done_state_hint(self, issue_number: int, state: str, available: str) -> None:
@@ -546,7 +546,7 @@ class AzureTracker:
             for c in self.fetch_comments(issue_number):
                 if marker in (c.body or ""):
                     return
-        except Exception:  # noqa: BLE001 — if we can't read, skip the dedup guard
+        except Exception:
             pass
         body = (
             f"{marker}\n\n"
@@ -557,7 +557,7 @@ class AzureTracker:
         )
         try:
             self.post_comment(issue_number, body)
-        except Exception:  # noqa: BLE001 — the hint is best-effort
+        except Exception:
             pass
 
     def capabilities(self) -> frozenset[Capability]:

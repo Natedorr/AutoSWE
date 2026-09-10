@@ -1,4 +1,5 @@
 """Tests for autoswe.core.config — load_config defaults and override parsing."""
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -1295,3 +1296,80 @@ def test_load_init_prompt_fallback():
     prompt = load_init_prompt({"init_prompt": "/nonexistent/init.txt"})
     assert len(prompt) > 50
     assert "CLAUDE.md" in prompt
+
+
+# ---------------------------------------------------------------------------
+# done_state / done_states validation (issue #245 §1.5)
+# ---------------------------------------------------------------------------
+#
+# close_issue writes a single state value on the write side; list_open_issues
+# treats done_states as terminal on the read side. The two MUST agree, or a
+# work item closed to a non-terminal state is rediscovered forever. So a global
+# done_state outside done_states is a hard config error, while an empty
+# done_state is legal (runtime discovery picks the terminal state).
+
+
+def test_load_config_done_state_outside_done_states_raises(isolated_autoswe_dir, monkeypatch):
+    """done_state not in done_states → ValueError at config load (fail-fast)."""
+    monkeypatch.setenv("DONE_STATE", "Shipped")
+    monkeypatch.setenv("DONE_STATES", "Closed,Done,Removed")
+
+    from autoswe.core.config import load_config
+
+    with pytest.raises(ValueError, match=r"done_state='Shipped' is not in done_states"):
+        load_config()
+
+
+def test_load_config_done_state_in_done_states_accepted(isolated_autoswe_dir, monkeypatch):
+    """A done_state that is a member of done_states is accepted and preserved."""
+    monkeypatch.setenv("DONE_STATE", "Done")
+    monkeypatch.setenv("DONE_STATES", "Closed,Done,Removed")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["done_state"] == "Done"
+    assert cfg["done_states"] == ["Closed", "Done", "Removed"]
+
+
+def test_load_config_done_state_empty_left_empty(isolated_autoswe_dir):
+    """An empty done_state is legal — it means 'runtime discovery', so load_config
+    leaves it empty rather than forcing a value (no ValueError)."""
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+    assert cfg["done_state"] == ""
+    # done_states still defaults to the canonical terminal set.
+    assert cfg["done_states"] == ["Closed", "Done", "Removed"]
+
+
+def test_build_repo_cfg_done_state_global_seed(isolated_autoswe_dir):
+    """build_repo_cfg seeds the global done_state so the tracker (which only
+    sees repo_cfg) can resolve the write value + read-side terminal set."""
+    from autoswe.providers.factory import build_repo_cfg
+
+    cfg = {"done_state": "Done", "done_states": ["Closed", "Done", "Removed"]}
+    rcfg = build_repo_cfg("owner", "repo", cfg, {})
+    assert rcfg["done_state"] == "Done"
+    assert rcfg["done_states"] == ["Closed", "Done", "Removed"]
+
+
+def test_build_repo_cfg_done_state_empty_global_not_seeded(isolated_autoswe_dir):
+    """An empty global done_state is NOT seeded onto the repo_cfg — the tracker
+    then falls to runtime discovery."""
+    from autoswe.providers.factory import build_repo_cfg
+
+    cfg = {"done_state": "", "done_states": ["Closed", "Done", "Removed"]}
+    rcfg = build_repo_cfg("owner", "repo", cfg, {})
+    assert not rcfg.get("done_state")
+
+
+def test_build_repo_cfg_done_state_per_repo_override_wins(isolated_autoswe_dir):
+    """A per-repo done_state in repos.json beats the global seed (the update
+    runs after the seed, so the per-repo value is authoritative)."""
+    from autoswe.providers.factory import build_repo_cfg
+
+    cfg = {"done_state": "Done", "done_states": ["Closed", "Done", "Removed"]}
+    repos_cfg = {"owner/repo": {"provider": "github", "done_state": "Closed"}}
+    rcfg = build_repo_cfg("owner", "repo", cfg, repos_cfg)
+    assert rcfg["done_state"] == "Closed"

@@ -66,6 +66,9 @@ class AzureFake:
         self._repo = ""
         self._ci_state = "none"  # "success" | "pending" | "failure" | "none"
         self._ci_name = "CI"
+        # workitemtype → states list served by the .../workitemtypes/{type}/states
+        # route (state discovery, issue #245 §1.5). Each state: {"name", "category"}.
+        self._state_maps: dict[str, list[dict]] = {}
 
     # ------------------------------------------------------------------
     # Loading initial state from scenario fixtures
@@ -103,6 +106,22 @@ class AzureFake:
             self._repos = [copy.deepcopy(r) for r in state["repos"]]
         if state.get("ci_status"):
             self.set_ci_status(state["ci_status"])
+        # Pre-seeded PRs: a list of PR payload dicts (each with a pullRequestId)
+        # or a dict keyed by PR number. Lets a scenario start from a state where
+        # a PR already exists (e.g. merged, or with workItemRefs) — the PR
+        # state rows (done_then_pr, pr_ships_when_ci_success, ...) rely on this.
+        if state.get("pulls"):
+            seeded = state["pulls"]
+            if isinstance(seeded, dict):
+                for pr_num, pr in seeded.items():
+                    self.pulls[int(pr_num)] = copy.deepcopy(pr)
+            else:
+                for pr in seeded:
+                    pr = copy.deepcopy(pr)
+                    pr_num = pr.get("pullRequestId", self._next_pr_number)
+                    pr["pullRequestId"] = pr_num
+                    self.pulls[pr_num] = pr
+                    self._next_pr_number = max(self._next_pr_number, pr_num + 1)
 
     def set_ci_status(self, state: str, name: str = "CI") -> None:
         """Configure the CI status served by the build/builds route.
@@ -238,6 +257,16 @@ class AzureFake:
                             fields[field] = value
             return copy.deepcopy(self.work_items.get(wi_num, {}))
 
+        # ---- GET workitemtype states (state discovery, issue #245 §1.5) ----
+        # ``GET {org}/{proj}/_apis/wit/workitemtypes/{type}/states`` — serves the
+        # configured state→category map per work item type. Stored as a plain
+        # dict on the fake: ``{"Bug": [{"name": "Active", "category": "Proposed"}, ...]}``.
+        m_wit_states = re.search(r"/_apis/wit/workitemtypes/([^/?]+)(?:/states)?(?:\?|$)", path)
+        if m_wit_states and method == "GET":
+            witype = m_wit_states.group(1)
+            states = self._state_maps.get(witype, [])
+            return {"count": len(states), "value": copy.deepcopy(states)}
+
         # ---- POST WIQL query (list work items) ----
         if "wit/wiql" in path and method == "POST":
             items = []
@@ -287,6 +316,32 @@ class AzureFake:
                     ] = "; ".join(label_names)
             return {}
 
+        # ---- GET PR detail (e.g. AzureVCS.get_linkage reads sourceRef /
+        # isMerged / status.mergeStatus) — before the collection route below,
+        # which also matches paths containing "/pullrequests". The lookahead
+        # only admits ``?`` or end-of-string so the ``.../workitems``
+        # sub-resource (``/pullrequests/{id}/workitems``) is NOT swallowed
+        # here and falls through to its own route below.
+        m_pr_detail = re.search(r"/pullrequests/(\d+)(?=\?|$)", path)
+        if m_pr_detail and method == "GET":
+            pr_num = int(m_pr_detail.group(1))
+            pr = self.pulls.get(pr_num)
+            if pr is None:
+                return {}
+            return copy.deepcopy(pr)
+
+        # ---- POST PR update (e.g. AzureVCS.link_pr_to_issue rewrites
+        # workItemRefs) — replace semantics, before the create route below,
+        # which also POSTs to .../pullrequests ----
+        if m_pr_detail and method == "POST":
+            pr_num = int(m_pr_detail.group(1))
+            pr = self.pulls.get(pr_num)
+            if pr is None:
+                return {}
+            if body and "workItemRefs" in body:
+                pr["workItemRefs"] = copy.deepcopy(body["workItemRefs"])
+            return copy.deepcopy(pr)
+
         # ---- POST PR ----
         if "git/repositories" in path and "/pullrequests" in path and method == "POST":
             pr_number = self._next_pr_number
@@ -302,6 +357,15 @@ class AzureFake:
             # the PR<->work-item link and is reflected by the read-back
             # ``.../pullrequests/{id}/workitems`` endpoint below (edge E3).
             pr["workItemRefs"] = copy.deepcopy(pr_body.get("workItemRefs", []))
+            # The canonical fixture's ``status`` is the raw capture (an int
+            # enum), but ADO returns it as an *object* and the provider reads
+            # ``status.mergeStatus``. Normalise to the real shape (a fresh,
+            # mergeable PR is "succeeded" -> clean) so get_linkage works on the
+            # read-back. A pre-seeded PR may carry its own dict status, which
+            # is preserved by the ``not isinstance`` guard.
+            if not isinstance(pr.get("status"), dict):
+                pr["status"] = {"mergeStatus": "succeeded",
+                                "isMergeBlocked": False, "isDraft": False}
             self.pulls[pr_number] = pr
             return pr
 

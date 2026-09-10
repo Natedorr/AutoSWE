@@ -14,7 +14,7 @@ from autoswe.providers.azure.api import (
     ado_get,
     ado_post,
 )
-from autoswe.providers.base import CIStatus, Capability, LinkageState, PRResult
+from autoswe.providers.base import Capability, CIStatus, LinkageState, PRResult
 
 dbg = get_debug_logger()
 
@@ -271,7 +271,7 @@ class AzureVCS:
         """
         try:
             result = ado_get(self._workitems_url(pr_number), self._pat)
-        except Exception as e:  # noqa: BLE001 — best-effort read, logged once
+        except Exception as e:
             dbg.warning(
                 "get_linkage: could not read workitems for PR %s: %s: %s",
                 pr_number, type(e).__name__, e,
@@ -326,7 +326,7 @@ class AzureVCS:
 
         try:
             pr = ado_get(self._pullrequest_url(pr_number), self._pat)
-        except Exception as e:  # noqa: BLE001 — a failed read means unknown, not clean
+        except Exception as e:
             dbg.warning(
                 "get_linkage: could not read PR %s: %s: %s",
                 pr_number, type(e).__name__, e,
@@ -341,9 +341,7 @@ class AzureVCS:
         # mergeState: ADO's status.mergeStatus — clean / conflicts / pending.
         status = pr.get("status") or {}
         merge_status = status.get("mergeStatus")
-        if state.merged:
-            state.merge_state = "clean"
-        elif merge_status in (None, "notApplicable", "succeeded"):
+        if state.merged or merge_status in (None, "notApplicable", "succeeded"):
             state.merge_state = "clean"
         elif merge_status == "conflicts":
             state.merge_state = "conflicts"
@@ -355,7 +353,7 @@ class AzureVCS:
         if issue_number in linked:
             state.pr_linked = True
         else:
-            state.missing = state.missing + ("pr_link",)
+            state.missing = (*state.missing, "pr_link")
 
         return state
 

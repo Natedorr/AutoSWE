@@ -154,7 +154,7 @@ def _establish_branch(vcs, caps, base_sha, issue_num, branch, missing) -> None:
         return
     try:
         vcs.link_branch_to_issue(issue_num, base_sha, branch)
-    except Exception as e:  # noqa: BLE001 — a permission error or network failure
+    except Exception as e:
         # must not block the branch push.
         dbg.warning(
             "ensure_links: branch link failed for issue %d: %s: %s",
@@ -177,7 +177,7 @@ def _establish_pr_link(vcs, caps, state, issue_num, pr_number, missing) -> None:
         # The link is now established; drop it from the missing list.
         if "pr_link" in missing:
             missing.remove("pr_link")
-    except Exception as e:  # noqa: BLE001 — best-effort; record, don't raise.
+    except Exception as e:
         dbg.warning(
             "ensure_links: PR link failed for issue %d / PR %s: %s: %s",
             issue_num, pr_number, type(e).__name__, e,
@@ -210,7 +210,7 @@ def _maybe_close_on_merge(cfg, vcs, caps, state, repo_cfg, issue_num, missing) -
     tracker = get_tracker(repo_cfg)
     try:
         issue = tracker.fetch_issue(issue_num)
-    except Exception as e:  # noqa: BLE001 — cannot verify state; skip the close.
+    except Exception as e:
         dbg.warning(
             "ensure_links: could not read issue %d before close: %s: %s",
             issue_num, type(e).__name__, e,
@@ -222,7 +222,7 @@ def _maybe_close_on_merge(cfg, vcs, caps, state, repo_cfg, issue_num, missing) -
         return  # already terminal — the close is owed but already done.
     try:
         tracker.close_issue(issue_num, reason="completed")
-    except Exception as e:  # noqa: BLE001 — the tracker already reported it
+    except Exception as e:
         # (one-time operator comment on a 400); do not double-report here.
         dbg.warning(
             "ensure_links: close_issue(%d) failed: %s: %s",

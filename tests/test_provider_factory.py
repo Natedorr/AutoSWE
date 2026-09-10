@@ -4,7 +4,14 @@ import pytest
 from autoswe.providers.azure.tracker import AzureTracker
 from autoswe.providers.azure.vcs import AzureVCS
 from autoswe.providers.base import IssueTracker, VCSProvider
-from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs, provider_names
+from autoswe.providers.factory import (
+    TRACKERS,
+    VCSS,
+    build_repo_cfg,
+    get_tracker,
+    get_vcs,
+    provider_names,
+)
 from autoswe.providers.github.tracker import GitHubTracker
 from autoswe.providers.github.vcs import GitHubVCS
 
@@ -36,6 +43,53 @@ def test_concrete_classes_satisfy_protocols_structurally():
     # for any structural match, so check the actual base-class chain instead.)
     assert IssueTracker not in GitHubTracker.__mro__
     assert VCSProvider not in GitHubVCS.__mro__
+
+
+# ---------------------------------------------------------------------------
+# Conformance gate — a provider that forgets a protocol method fails at wiring
+# ---------------------------------------------------------------------------
+
+def _incomplete(base, missing):
+    """Build a structurally-identical class that is missing *one* protocol method.
+
+    We copy the concrete class's namespace as-is and drop a single method —
+    a ``del SubClass.method`` cannot remove an *inherited* attribute, and a
+    property that raises AttributeError would still satisfy the protocol
+    (``getattr_static`` returns the property object, not the exception). A
+    genuinely-absent attribute is what ``runtime_checkable`` ``isinstance``
+    checks for, so the class must truly lack the name.
+    """
+    ns = {k: v for k, v in vars(base).items() if k != missing}
+    ns.pop("__dict__", None)
+    ns.pop("__weakref__", None)
+    ns["__module__"] = base.__module__
+    return type(base.__name__ + "Incomplete", (object,), ns)
+
+
+def test_get_tracker_fails_conformance_when_method_missing(monkeypatch):
+    """F-10: a tracker missing a protocol method (capabilities) trips the assert.
+
+    The factory asserts ``isinstance(instance, IssueTracker)`` at construction so
+    a forgotten method fails at *wiring* time, not as an AttributeError deep in
+    the poll cycle. The registry entry is swapped and restored by the test.
+    """
+    monkeypatch.setitem(TRACKERS, "github", _incomplete(GitHubTracker, "capabilities"))
+    with pytest.raises(AssertionError, match="does not satisfy the IssueTracker protocol"):
+        get_tracker({"owner": "o", "repo": "r", "provider": "github"})
+
+
+def test_get_vcs_fails_conformance_when_method_missing(monkeypatch):
+    """F-10: the same gate holds for the VCS registry (get_linkage missing)."""
+    monkeypatch.setitem(VCSS, "github", _incomplete(GitHubVCS, "get_linkage"))
+    with pytest.raises(AssertionError, match="does not satisfy the VCSProvider protocol"):
+        get_vcs({"owner": "o", "repo": "r", "provider": "github"})
+
+
+def test_azure_tracker_fails_conformance_when_method_missing(monkeypatch):
+    """The conformance gate is provider-agnostic: an Azure tracker also trips it."""
+    monkeypatch.setitem(TRACKERS, "azure", _incomplete(AzureTracker, "capabilities"))
+    with pytest.raises(AssertionError, match="does not satisfy the IssueTracker protocol"):
+        get_tracker({"org": "o", "project": "p", "pat": "t", "provider": "azure"})
 
 
 def test_get_tracker_defaults_to_github():

@@ -8,7 +8,7 @@ import subprocess
 from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.base import CIStatus, Capability, LinkageState, PRResult
+from autoswe.providers.base import Capability, CIStatus, LinkageState, PRResult
 from autoswe.tracking.api import gh_get, gh_post
 
 dbg = get_debug_logger()
@@ -342,9 +342,7 @@ class GitHubVCS:
         # merge_state from the PR payload's mergeability fields.
         mergeable = pr.get("mergeable")
         mergeable_state = pr.get("mergeable_state", "")
-        if merged:
-            merge_state = "clean"
-        elif mergeable is True or mergeable_state == "clean":
+        if merged or mergeable is True or mergeable_state == "clean":
             merge_state = "clean"
         elif mergeable is False or mergeable_state == "dirty":
             merge_state = "conflicts"

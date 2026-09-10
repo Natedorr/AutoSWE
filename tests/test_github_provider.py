@@ -307,6 +307,50 @@ class TestGitHubTracker:
     def test_tracker_token_uses_pat_key(self, tracker_with_github_token, fake_token):
         assert tracker_with_github_token._token == fake_token
 
+    # -- close_issue (E5 safety net) --
+
+    def test_close_issue_issues_real_api_call_completed(
+        self, tracker, mock_gh_request, gh_route_table,
+    ):
+        """E5 safety net: close_issue PATCHes the real endpoint with
+        state=closed and maps reason=completed -> state_reason=completed."""
+        gh_route_table[("PATCH", "/repos/natedorr/autoswe/issues/42")] = {
+            "state": "closed",
+        }
+        tracker.close_issue(42, reason="completed")
+
+        patch_calls = [c for c in mock_gh_request.calls
+                       if c["method"] == "PATCH"]
+        assert len(patch_calls) == 1
+        call = patch_calls[0]
+        assert call["path"] == "/repos/natedorr/autoswe/issues/42"
+        assert call["body"] == {"state": "closed", "state_reason": "completed"}
+
+    def test_close_issue_maps_not_planned_reason(self, tracker, mock_gh_request,
+                                                gh_route_table):
+        """reason=not_planned maps to state_reason=not_planned."""
+        gh_route_table[("PATCH", "/repos/natedorr/autoswe/issues/42")] = {
+            "state": "closed",
+        }
+        tracker.close_issue(42, reason="not_planned")
+
+        call = [c for c in mock_gh_request.calls
+                if c["method"] == "PATCH"][0]
+        assert call["body"] == {"state": "closed", "state_reason": "not_planned"}
+
+    def test_close_issue_unknown_reason_maps_to_completed(self, tracker,
+                                                          mock_gh_request,
+                                                          gh_route_table):
+        """Any reason other than not_planned maps to the completed enum."""
+        gh_route_table[("PATCH", "/repos/natedorr/autoswe/issues/42")] = {
+            "state": "closed",
+        }
+        tracker.close_issue(42, reason="some-other-reason")
+
+        call = [c for c in mock_gh_request.calls
+                if c["method"] == "PATCH"][0]
+        assert call["body"] == {"state": "closed", "state_reason": "completed"}
+
 
 # ============================================================================
 # GitHubVCS tests

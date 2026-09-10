@@ -165,5 +165,5 @@ def _ensure_pr_links(task: dict, cfg: dict, rcfg: dict, vcs, issue_num: int) -> 
     """
     try:
         ensure_links(task, rcfg, cfg, phase="pr_open", vcs=vcs)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         dbg.warning("SHIP: ensure_links(pr_open) failed for issue %d: %s", issue_num, e)
