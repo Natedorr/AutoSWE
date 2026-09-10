@@ -377,6 +377,11 @@ async def warm_up_mcp_cache(harness_cfg: dict, *, timeout: float = 60.0) -> bool
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=autoswe_repo_root(),
+            # Same StreamReader limit as a real run: the warm-up drains both
+            # pipes (chunked read() only, no readline), but keeping the
+            # "every pipe we read from has an oversized limit" invariant means
+            # a future readline on this path cannot hit the 64 KiB default.
+            limit=_MAX_STREAM_BYTES + 1,
         )
     except FileNotFoundError:
         log("[PI-WARMUP] pi executable not found on PATH. Install with: npm i -g @earendil-works/pi-coding-agent")
@@ -1069,6 +1074,14 @@ class PiBackend:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=spec.cwd,
+                # StreamReader limit threads to BOTH stdout and stderr pipes.
+                # Default is 64 KiB: a single JSON event larger than that makes
+                # readline() raise ValueError, which is not a retryable
+                # exception and would crash the poller.  Raise it past
+                # _MAX_STREAM_BYTES so any line the byte budget allows is
+                # readable; the residual case (line > limit) is caught in
+                # read_stdout_jsonl below.
+                limit=_MAX_STREAM_BYTES + 1,
             )
         except FileNotFoundError as e:
             raise RuntimeError(
@@ -1115,11 +1128,37 @@ class PiBackend:
             Bounded by _MAX_STREAM_BYTES to prevent pipe-buffer deadlock and
             unbounded memory growth.  After the limit is hit, the pipe is
             drained (discarding data) so the child does not block.
+
+            Also guards the StreamReader limit: the process is spawned with
+            ``limit=_MAX_STREAM_BYTES + 1`` so any line the byte budget
+            allows is readable.  If a single line still exceeds the limit,
+            ``readline()`` raises ``ValueError``; we flag the run and drain
+            (discarding data) so the child does not block — the run surfaces
+            as a backend error (subtype='error'), never a poller crash.
+            ``readline()`` clears the reader's internal buffer on this
+            error, so the drain below sees a fresh stream to EOF.
             """
             if process.stdout:
                 total_bytes = 0
                 while True:
-                    raw = await process.stdout.readline()
+                    try:
+                        raw = await process.stdout.readline()
+                    except ValueError:
+                        # A single JSON event exceeded the StreamReader limit
+                        # (limit=_MAX_STREAM_BYTES + 1).  Fail the run, drain
+                        # the rest so the child does not block, and let the
+                        # returncode/has_error path turn this into an error
+                        # RunResult instead of letting the ValueError escape
+                        # the poller (it is not a retryable exception).
+                        log(f"[PI] single JSON line exceeded the StreamReader limit ({_MAX_STREAM_BYTES + 1} bytes) — truncating stream")
+                        acc.has_error = True
+                        # Use read() not readline() — if the child writes
+                        # non-newline data, readline() would block forever.
+                        while True:
+                            leftover = await process.stdout.read(64 * 1024)
+                            if not leftover:
+                                break
+                        break
                     if not raw:
                         break
                     total_bytes += len(raw)
