@@ -49,6 +49,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 
 dbg = get_debug_logger()
@@ -214,6 +215,7 @@ def run_test_gate(
             capture_output=True,
             text=True,
             timeout=timeout,
+            **GIT_TEXT_ARGS,
         )
     except subprocess.TimeoutExpired:
         reason = f"test gate timed out after {timeout}s"

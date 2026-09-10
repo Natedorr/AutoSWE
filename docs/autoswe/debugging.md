@@ -76,6 +76,27 @@ Session state lives at `~/.claude/projects/<encoded-worktree-path>/<session-id>.
 | Stale PID | stuck at RUNNING status | Process crashed without cleanup | Delete `.pid` file, re-sync |
 | No dispatch | `autoswe:pending` sits | `MAX_CONCURRENT` reached | Check `running/` for active jobs |
 | Wrong model | plan/fix uses unexpected model | Model resolution order | Check repos.json phase-specific → env phase-specific → repos.json generic |
+| `Exception in thread ...` with no traceback | `autoswe:error` | Subprocess output decode failure (historically: CP1252 default codec on Windows hitting a UTF-8 git byte, e.g. `0x9D`) | Fixed in #238 — all git/gh subprocess calls pin `encoding="utf-8", errors="replace"`; see below |
+
+### Subprocess output decoding (Windows / CP1252, issue #238)
+
+`subprocess.run(text=True)` with no `encoding` decodes child output using the
+platform locale — **CP1252 on Windows**. Git always emits UTF-8, so a byte
+undefined in CP1252 (e.g. `0x9D`, seen when an em dash was mis-decoded and
+re-encoded) made CPython's internal reader thread raise
+`UnicodeDecodeError` and die *silently*: `stdout` stayed `None`, the next
+`.strip()` raised `TypeError`, and — because that second exception is what
+escapes the handler — only the bare `Exception in thread ...` line reached the
+log, hiding the real traceback. It could compound: the error-diagnostics path
+(`autoswe/core/error_utils.py`) previously ran its own bare `text=True` git
+calls and could fail the same way *inside* the error capture.
+
+Fix: every git/gh subprocess call in `autoswe/` passes
+`encoding="utf-8", errors="replace"` (shared constant `GIT_TEXT_ARGS` in
+`autoswe/core/constants.py`). Un-decodable bytes surface as `U+FFFD` instead
+of crashing. Regression tests monkeypatch `subprocess._text_encoding` to
+`cp1252` to reproduce the failure mode on Linux CI. If you ever add a new
+subprocess call that reads git/gh output, pass `**GIT_TEXT_ARGS`.
 
 ## Testing
 

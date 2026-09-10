@@ -4,6 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from autoswe.core.config import resolve_harness, resolve_max_turns
+from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool, post_question_fallback
@@ -313,7 +314,7 @@ def _get_git_head(wt: Path) -> str | None:
     """Return git HEAD SHA of the worktree, or None on error."""
     result = subprocess.run(
         ["git", "-C", str(wt), "rev-parse", "HEAD"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, **GIT_TEXT_ARGS,
     )
     if result.returncode == 0:
         return result.stdout.strip()

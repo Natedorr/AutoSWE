@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from autoswe.core.config import AUTOSWE_DIR
+from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.factory import get_vcs
 from autoswe.providers.github.vcs import MissingScopeError
@@ -32,7 +33,7 @@ def get_remote_branch_sha(
     try:
         result = subprocess.run(
             ["git", "-c", "credential.helper=", "ls-remote", clone_url, branch],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15, **GIT_TEXT_ARGS,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.split()[0]
@@ -79,7 +80,7 @@ def worktree_path(owner: str, repo: str, issue_num: int, cfg: dict, provider: st
 def _run(args: list, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
     if args and args[0] == "git":
         args = [args[0], "-c", "credential.helper=", *args[1:]]
-    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check)
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check, **GIT_TEXT_ARGS)
 
 
 def _get_default_branch(main: Path, base_branch: str) -> str:
