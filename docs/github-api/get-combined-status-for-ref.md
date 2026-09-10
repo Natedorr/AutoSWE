@@ -2,6 +2,8 @@
 
 Source: https://docs.github.com/en/rest/commits/statuses
 
+> See guide: [Issue ↔ Branch ↔ PR Linking & CI Results](issue-pr-linking-and-ci.md) — full picture of reading build/CI results (Actions runs, jobs, artifacts, check runs, commit statuses) and how runs/checks tie back to a PR.
+
 ## Get the combined status for a specific reference
 
 ```
