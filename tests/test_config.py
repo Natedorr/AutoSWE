@@ -1,7 +1,6 @@
 """Tests for autoswe.core.config — load_config defaults and override parsing."""
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # pi mcp.json builder (autoswe.harness.mcp_config) — Phase 1 of PLAN-pi-mcp.md
 # ---------------------------------------------------------------------------

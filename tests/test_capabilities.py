@@ -32,7 +32,7 @@ def _az_tracker():
 
 
 # ---------------------------------------------------------------------------
-# VCS capability sets (edges E1–E5 live here)
+# VCS capability sets (edges E1-E5 live here)
 # ---------------------------------------------------------------------------
 
 def test_github_vcs_declares_all_capabilities():
@@ -113,5 +113,5 @@ def test_every_provider_instance_exposes_capabilities():
     we build in tests, so a fake that omits it cannot silently diverge from the
     real provider's declared-absence semantics."""
     for inst in (_gh_vcs(), _az_vcs(), _gh_tracker(), _az_tracker()):
-        assert callable(getattr(inst, "capabilities"))
+        assert callable(inst.capabilities)
         assert isinstance(inst.capabilities(), frozenset)
