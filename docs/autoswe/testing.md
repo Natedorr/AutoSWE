@@ -456,8 +456,8 @@ classification (`pi.py:_classify_mcp_comment_call`) stays covered:
 
 The tool event is emitted right before the assistant message blocks of the
 scripted response, so the real parser sets the resulting `RunResult` flags:
-`post_plan` → `plan_posted`, `post_question` → `question_posted`,
-`update_progress` → progress callback.
+`post_plan` → `plan_posted` (plus the `body` argument → `plan_posted_body`),
+`post_question` → `question_posted`, `update_progress` → progress callback.
 
 ```python
 fake = PiFake()

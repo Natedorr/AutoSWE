@@ -388,6 +388,7 @@ def patched_world(
                 subtype=resp.get("subtype", "success"),
                 plan_posted=resp.get("plan_posted", False),
                 question_posted=resp.get("question_posted", False),
+                plan_posted_body=resp.get("plan_posted_body"),
             )
 
     # Load state into the API fake

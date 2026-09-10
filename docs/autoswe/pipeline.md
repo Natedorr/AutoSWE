@@ -131,7 +131,7 @@ The `emit()` layer maps `DispatchResult.done_content` to status transitions:
 
 | Handler Return | `autoswe_status` | Mirrored Label | Comment Posted |
 |----------------|------------------|----------------|----------------|
-| `"PLAN_READY"` | `planned` | `autoswe:planned` | Plan comment (posted by handler) |
+| `"PLAN_READY"` | `planned` | `autoswe:planned` | Plan (patched into the sticky planning comment in place via MCP `post_plan`; new comment only on the text-parse fallback — issue #241) |
 | `"REVIEW_READY"` | `reviewed` | `autoswe:reviewed` | Review comment (posted by handler) |
 | `"WAITING: …"` | `waiting` | `autoswe:waiting` | Questions comment (posted by handler) |
 | `"DONE*"` (from `/fix`) | `fixed` | `autoswe:fixed` | Completion comment with commit link |

@@ -242,6 +242,7 @@ class RunResult:
     plan_file_path: str | None = None
     plan_posted: bool = False        # MCP post_plan fired (Claude Code / pi)
     question_posted: bool = False    # MCP post_question fired (Claude Code / pi)
+    plan_posted_body: str | None = None  # the post_plan `body` arg (issue #241)
 ```
 
 What a `CodingBackend.run(spec)` returns — the unparsed result of one agent run. Supports tuple unpacking (`text, session_id, subtype = result`) for legacy callers. `plan_posted` / `question_posted` are only meaningful when the backend advertises the `"mcp"` capability; handlers gate on `runner.backend_has_capability(harness, "mcp")` before trusting them and fall back to text parsing otherwise.

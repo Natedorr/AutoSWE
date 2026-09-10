@@ -1424,6 +1424,105 @@ def test_run_plan_question_posted_beats_plan_posted(tmp_path, mock_gh_post_comme
 
 
 # ---------------------------------------------------------------------------
+# MCP post_plan finalizes the sticky planning comment in place (issue #241)
+# ---------------------------------------------------------------------------
+
+
+def test_run_plan_mcp_post_plan_finalizes_sticky(tmp_path, mock_gh_post_comment):
+    """When the backend reports plan_posted with a captured body, the planner
+    pushes the normalized plan through the progress callback as the LAST sticky
+    write (so drain() flushes the plan, not a coalesced raw tool event) — and
+    posts no new comment (the MCP server already patched the sticky)."""
+    task = make_task()
+    plan_md = "Step 1: fix the bug\nStep 2: add tests"
+
+    sticky_bodies = []
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult(
+                           "Posted the plan.", "sess-1", "success",
+                           plan_posted=True, plan_posted_body=plan_md,
+                       )):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"},
+                                  progress_callback=sticky_bodies.append)
+
+    assert result.done_content == "PLAN_READY"
+    # No separate plan comment — the plan lives on the sticky comment.
+    assert len(mock_gh_post_comment.posted) == 0
+    # The plan was pushed through the sticky callback, normalized and tagged.
+    assert len(sticky_bodies) == 1
+    assert sticky_bodies[0].startswith("## Plan\n\n")
+    assert "Step 1: fix the bug" in sticky_bodies[0]
+    assert "<!-- autoswe-bot -->" in sticky_bodies[0]
+
+
+def test_run_plan_mcp_post_plan_no_push_without_body(tmp_path, mock_gh_post_comment):
+    """plan_posted without a captured body (older backend) keeps the previous
+    behavior: plain PLAN_READY, no sticky push, no new comment."""
+    task = make_task()
+
+    sticky_bodies = []
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult("text", "sess-1", "success", plan_posted=True)):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"},
+                                  progress_callback=sticky_bodies.append)
+
+    assert result.done_content == "PLAN_READY"
+    assert sticky_bodies == []
+    assert len(mock_gh_post_comment.posted) == 0
+
+
+def test_run_plan_mcp_post_plan_no_push_when_no_progress_callback(tmp_path, mock_gh_post_comment):
+    """Without a sticky progress callback there is nothing to finalize — no push,
+    no new comment (MCP already handled the comment)."""
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult("text", "sess-1", "success",
+                                               plan_posted=True, plan_posted_body="Step 1")):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    assert len(mock_gh_post_comment.posted) == 0
+
+
+def test_run_plan_mcp_post_plan_no_push_when_sticky_frozen(tmp_path, mock_gh_post_comment):
+    """When the sticky is frozen on a posted question (issue #184), the plan must
+    NOT be pushed through it — the question stays the last thing the sticky
+    shows."""
+    task = make_task()
+
+    class FrozenSticky:
+        frozen = True
+
+        def __init__(self):
+            self.bodies = []
+
+        def __call__(self, body):
+            self.bodies.append(body)
+
+    sticky = FrozenSticky()
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult("text", "sess-1", "success",
+                                               plan_posted=True, plan_posted_body="Step 1")):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"}, progress_callback=sticky)
+
+    assert result.done_content == "PLAN_READY"
+    assert sticky.bodies == []
+
+
+# ---------------------------------------------------------------------------
 # ExitPlanMode plan capture — model exits plan mode via the native tool
 
 def test_run_plan_uses_exit_plan_mode_text(tmp_path, mock_gh_post_comment):

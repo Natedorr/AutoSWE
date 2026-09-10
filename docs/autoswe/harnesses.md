@@ -399,7 +399,9 @@ on). The mechanism:
   `mcp__autoswe_comment_<tool>`, `args` carries `body`), the **generic `mcp`
   proxy** (`toolName: "mcp"`, `args: {tool, args: {body}}`), and the
   **`mcp__autoswe_comment` namespace proxy** (bare namespace `toolName`, same
-  `{tool, args}` shape). `post_plan` → `RunResult.plan_posted`,
+  `{tool, args}` shape). `post_plan` → `RunResult.plan_posted` (and the
+  `body` argument → `RunResult.plan_posted_body`, so the planner can re-push
+  the normalized plan to the sticky comment after the run — issue #241),
   `post_question` → `question_posted`, `update_progress` → progress callback.
   Parsing the two proxy shapes is a deliberate fallback: on a *cold* MCP cache
   (no `autoswe_comment` entry in `<agent dir>/mcp-cache.json`) the adapter

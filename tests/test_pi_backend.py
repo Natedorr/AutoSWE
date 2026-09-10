@@ -840,6 +840,40 @@ def test_parse_mcp_post_plan_direct_sets_flag():
     }), acc, Mock())
     assert acc.plan_posted is True
     assert acc.question_posted is False
+    # The body is captured so the planner can finalize the sticky planning
+    # comment in place after the run (issue #241).
+    assert acc.plan_posted_body == "1. Do the thing"
+
+
+def test_parse_mcp_post_plan_empty_body_keeps_body_none():
+    """A post_plan with an empty body sets the flag but not the body."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolName": "mcp__autoswe_comment_post_plan",
+        "args": {"body": ""},
+    }), acc, Mock())
+    assert acc.plan_posted is True
+    assert acc.plan_posted_body is None
+
+
+def test_parse_mcp_post_plan_last_body_wins():
+    """Two post_plan calls: the last non-empty body is the one captured."""
+    acc = _PiAccumulator()
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolCallId": "t1",
+        "toolName": "mcp__autoswe_comment_post_plan",
+        "args": {"body": "## Plan\nFirst attempt"},
+    }), acc, Mock())
+    _parse_line(json.dumps({
+        "type": "tool_execution_start",
+        "toolCallId": "t2",
+        "toolName": "mcp__autoswe_comment_post_plan",
+        "args": {"body": "## Plan\nRevised after review"},
+    }), acc, Mock())
+    assert acc.plan_posted is True
+    assert acc.plan_posted_body == "## Plan\nRevised after review"
 
 
 def test_parse_mcp_post_question_direct_sets_flag():
@@ -1813,6 +1847,39 @@ def test_run_mcp_post_plan_event_sets_plan_posted():
     assert result.plan_posted is True
     assert result.question_posted is False
     assert result.ok is True
+    # The post_plan body rides the RunResult so the planner can finalize the
+    # sticky planning comment in place (issue #241).
+    assert result.plan_posted_body == "1. Do the thing"
+
+
+def test_run_pi_fake_mcp_plan_carries_plan_posted_body():
+    """PiFake parity: a scripted post_plan flow yields RunResult.plan_posted_body.
+
+    PiFake patches at the subprocess level, so the real PiBackend parser runs
+    unmodified — the body capture is exercised end-to-end, the same fidelity
+    contract as the ClaudeFake RunResult passthrough.
+    """
+    from tests.fakes.pi_fake import PiFake
+
+    fake = PiFake()
+    fake.script_mcp_plan("## Plan\nFix the thing", session_id="s")
+    result, _ = _run_pi(_spec_with_comment_mcp(mode="plan"), fake)
+
+    assert result.plan_posted is True
+    assert result.plan_posted_body == "## Plan\nFix the thing"
+    assert result.question_posted is False
+
+
+def test_run_pi_fake_no_mcp_keeps_plan_posted_body_none():
+    """PiFake parity: a plain run leaves plan_posted_body None (default)."""
+    from tests.fakes.pi_fake import PiFake
+
+    fake = PiFake()
+    fake.script_plan("steps", session_id="s")
+    result, _ = _run_pi(_spec_with_comment_mcp(mode="plan"), fake)
+
+    assert result.plan_posted is False
+    assert result.plan_posted_body is None
 
 
 def test_run_mcp_post_question_event_sets_question_posted():

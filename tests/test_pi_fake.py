@@ -351,6 +351,10 @@ class TestPiFakeMcpFidelity:
         assert result.question_posted is False
         assert result.session_id == "pi-plan"
         assert result.text == "Posted the plan to the issue."
+        # The post_plan body rides the RunResult so the planner can finalize
+        # the sticky planning comment in place (issue #241) — must come out of
+        # the genuine parser, not the fake.
+        assert result.plan_posted_body == "The plan body."
 
     def test_script_mcp_plan_generic_proxy_sets_plan_posted(self):
         """The generic `mcp` proxy shape also drives plan_posted."""

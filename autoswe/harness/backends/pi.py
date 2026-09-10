@@ -149,6 +149,11 @@ class _PiAccumulator:
     # already on the thread and does not re-post it.
     plan_posted: bool = False
     question_posted: bool = False
+    # The post_plan tool's ``body`` argument (the plan markdown), captured on
+    # tool_execution_start so the planner can finalize the sticky planning
+    # comment in place after the run — the last call's body wins (issue #241).
+    # None when post_plan was never called with a non-empty body.
+    plan_posted_body: str | None = None
     # Per-contentIndex accumulated delta text.  Fallback source for
     # RunResult.text when no message_end carried assistant text (e.g. the
     # process was killed mid-stream).  Keyed by the delta's contentIndex so a
@@ -829,6 +834,10 @@ def _parse_line(line: str, acc: _PiAccumulator, callback) -> None:
                     log("[PI] post_plan ignored — post_question already observed in this run (question-terminal)")
                 else:
                     acc.plan_posted = True
+                    # Capture the body so the planner can finalize the sticky
+                    # planning comment in place after the run (issue #241).
+                    if body:
+                        acc.plan_posted_body = body
                     log(f"[PI] autoswe_comment post_plan (body {len(body)} chars)")
             elif kind == "question":
                 acc.question_posted = True
@@ -1194,5 +1203,6 @@ class PiBackend:
             plan_file_path=None,
             plan_posted=acc.plan_posted,
             question_posted=acc.question_posted,
+            plan_posted_body=acc.plan_posted_body,
             structured_output=None,
         )

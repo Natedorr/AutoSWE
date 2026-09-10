@@ -12,7 +12,7 @@ from autoswe.harness.prompts import BOT_MARKER, build_plan_prompt
 from autoswe.harness.runner import HandlerResult
 from autoswe.harness.schemas import PLAN_SCHEMA, output_format_for
 from autoswe.providers.factory import get_tracker
-from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
+from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE, normalize_plan_comment
 from autoswe.vcs.worktree import create_worktree, ensure_worktree_unchanged
 
 dbg = get_debug_logger()
@@ -117,6 +117,16 @@ def _interpret_plan_result(
                     plan_text = pf.read_text(encoding="utf-8").strip()
                     if not _plan_file_is_pending(plan_text):
                         plan_file_path = str(pf)
+            # The MCP server has already patched the plan into the sticky
+            # planning comment in place (issue #241). Push the plan through the
+            # progress callback as the LAST write so the coalesced raw tool
+            # event in the final 10s (ProgressComment._pending_body) cannot be
+            # flushed over it by drain() after the handler returns. Skip when
+            # the sticky is frozen (a posted question must stay the last
+            # thing the sticky shows — issue #184).
+            if result.plan_posted_body and progress_callback is not None \
+                    and not getattr(progress_callback, "frozen", False):
+                progress_callback(normalize_plan_comment(result.plan_posted_body) + BOT_MARKER)
             return "PLAN_READY", plan_file_path
 
     # 3. Structured output (schema-validated, NOT yet posted) — the handler posts

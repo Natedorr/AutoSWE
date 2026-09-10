@@ -183,6 +183,32 @@ def _find_last_bot_comment_id(comments: list[CommentLike]) -> int | None:
 _PLAN_RE = re.compile(r"<\s*AUTOSWE_PLAN>(.*?)</\s*AUTOSWE_PLAN>", re.DOTALL)
 _QUESTIONS_RE = re.compile(r"<\s*AUTOSWE_QUESTIONS>(.*?)</\s*AUTOSWE_QUESTIONS>", re.DOTALL)
 
+# Leading "## Plan" header, tolerating trailing whitespace on the line and a
+# header that ends the body outright (no trailing newline).  Used by
+# normalize_plan_comment() to strip an already-present header before
+# re-prepending, so the normalization is idempotent.
+_PLAN_HEADER_RE = re.compile(r"^\s*##\s+Plan\s*(?:\n|\Z)")
+
+
+def normalize_plan_comment(body: str) -> str:
+    """Idempotently ensure *body* starts with a ``## Plan`` header.
+
+    Downstream plan extraction (``_find_plan_in_comments``) only recognises
+    plan comments whose body starts with ``## Plan`` — but the plan prompt
+    asks the agent to call ``post_plan`` "with the plan as markdown" and does
+    not require the header, so an agent-supplied body is not guaranteed to
+    carry it.  This normalizes the body once at the boundary (MCP server and
+    planner both call it) so the sticky planning comment is always
+    extractable by ``/fix`` and ``/review`` (issue #241).
+    """
+    stripped = body.strip()
+    stripped = _PLAN_HEADER_RE.sub("", stripped, count=1).lstrip()
+    if not stripped:
+        # Header-only (or empty-after-strip) body: leave the header as-is
+        # rather than collapsing to the empty string.
+        return "## Plan"
+    return f"## Plan\n\n{stripped}"
+
 
 # ---------------------------------------------------------------------------
 # Compatibility aliases — timestamp-based variants for legacy test files

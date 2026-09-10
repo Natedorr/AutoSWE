@@ -9,8 +9,9 @@ Reads env vars:
     AUTOSWE_REPO       — repo name / project
     AUTOSWE_ISSUE_NUMBER — issue number
     AUTOSWE_TOKEN      — PAT for the provider API
-    AUTOSWE_COMMENT_ID — optional; when set, update_claude_comment edits this
-                         comment in-place (sticky progress).
+    AUTOSWE_COMMENT_ID — optional; when set, update_progress and post_plan
+                         edit this comment in-place (sticky progress) instead
+                         of posting a new comment (issue #241).
 
 Registered tool names (Claude SDK prefix):
     mcp__autoswe_comment__update_progress
@@ -34,6 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from autoswe.providers.factory import get_tracker  # noqa: E402
+from autoswe.tracking.comments import normalize_plan_comment  # noqa: E402
 
 # mcp SDK version tolerance:
 #   mcp >= 2.0 exposes the high-level MCPServer (.tool() decorator, run_stdio_async)
@@ -137,17 +139,34 @@ async def update_progress(*, body: str) -> list[TextContent]:
 
 
 async def post_plan(*, body: str) -> list[TextContent]:
-    """Post the implementation plan as a comment on the issue.
+    """Post the implementation plan onto the planning comment on the issue.
 
     Call this when you have a complete plan. The plan should include the
     approach, files to modify, and any questions for the user.
+
+    When the sticky planning comment exists (``AUTOSWE_COMMENT_ID`` is set —
+    the "Dispatching `plan`…" comment the dispatch posted), the plan is patched
+    INTO that comment in place so the user sees the plan on the same comment
+    autoSWE has been using, not a separate new one (issue #241). The body is
+    normalized to start with ``## Plan`` so ``/fix`` / ``/review`` can extract
+    it. Only when there is no sticky comment (or the in-place edit fails) is a
+    new comment posted as a fallback.
     """
     if not body or not body.strip():
         return [TextContent(type="text", text="Error: body cannot be empty — provide the plan content")]
     if SUPPRESS_POSTING:
         return [TextContent(type="text", text="suppressed (minimal posting)")]
+    normalized = normalize_plan_comment(body)
+    if COMMENT_ID:
+        try:
+            _update_comment(COMMENT_ID, normalized)
+            return [TextContent(type="text", text="Plan posted to planning comment")]
+        except Exception as e:
+            # Sticky edit failed (provider can't edit / comment gone): fall back
+            # to a new comment so the plan is never lost.
+            print(f"[autoswe-comment] post_plan in-place edit failed ({e}); posting new comment", file=sys.stderr)
     try:
-        cid = _post_comment(body)
+        cid = _post_comment(normalized)
         return [TextContent(type="text", text=f"Plan posted (comment_id={cid})")]
     except Exception as e:
         return [TextContent(type="text", text=f"Error posting plan: {e}")]
@@ -175,7 +194,8 @@ async def post_question(*, body: str) -> list[TextContent]:
 # dispatch on the low-level 1.x path.
 _TOOLS: dict[str, tuple[Callable[..., Awaitable[list[TextContent]]], str]] = {
     "update_progress": (update_progress, "Update the sticky progress comment with current tool-use status."),
-    "post_plan": (post_plan, "Post the implementation plan as a comment on the issue."),
+    "post_plan": (post_plan, "Post the implementation plan onto the planning comment on the issue "
+                              "(patches the sticky planning comment in place when one exists)."),
     "post_question": (post_question, "Post a question to the user as a comment on the issue."),
 }
 
