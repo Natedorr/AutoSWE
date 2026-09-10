@@ -132,6 +132,44 @@ def test_ci_error_repo_override_policy_open_beats_cfg(git_fake):
     assert ok is True
 
 
+def test_ci_error_repo_override_typo_does_not_open_gate(git_fake):
+    """A per-repo pr_ci_error_policy override that is a typo (e.g. 'blocked')
+    must NOT silently open the gate: it is not a recognised value, so the gate
+    falls back to the fail-safe default ('block') and still blocks on an
+    unconsultable CI. A typo can't ship a PR on unconsultable CI."""
+    task = make_task()
+    vcs = _vcs(ci_state="error", summary="could not read CI status")
+    ok, reason = preflight_pr(
+        task, {"PR_CI_ERROR_POLICY": "block"}, {"pr_ci_error_policy": "blocked"}, vcs=vcs,
+    )
+    assert ok is False
+    assert "PR_CI_ERROR_POLICY=block" in reason
+
+
+def test_ci_error_cfg_unknown_value_does_not_open_gate(git_fake):
+    """A cfg-level PR_CI_ERROR_POLICY that is not 'open'/'block' is an unknown
+    value: the gate falls back to the fail-safe default ('block') and blocks
+    on an unconsultable CI, rather than treating the typo as an opt-out."""
+    task = make_task()
+    vcs = _vcs(ci_state="error", summary="could not read CI status")
+    ok, reason = preflight_pr(task, {"PR_CI_ERROR_POLICY": "blockish"}, {}, vcs=vcs)
+    assert ok is False
+    assert "PR_CI_ERROR_POLICY=block" in reason
+
+
+def test_ci_error_empty_repo_override_falls_back_to_block(git_fake):
+    """An empty-string per-repo override is not a recognised value: it falls
+    back to the fail-safe default ('block'), so an unconsultable CI still
+    blocks. Regression pin for the pre-existing '' -> default behaviour."""
+    task = make_task()
+    vcs = _vcs(ci_state="error", summary="could not read CI status")
+    ok, reason = preflight_pr(
+        task, {"PR_CI_ERROR_POLICY": "open"}, {"pr_ci_error_policy": ""}, vcs=vcs,
+    )
+    assert ok is False
+    assert "PR_CI_ERROR_POLICY=block" in reason
+
+
 def test_ci_stale_pending_blocks_with_note(git_fake):
     """A stale pending verdict (build predates branch head) blocks like an
     in-flight build, with a note explaining why."""
@@ -232,6 +270,23 @@ def test_policy_normalises_case_and_whitespace():
 
 def test_policy_empty_value_falls_back_to_default():
     assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": ""}, {}, "block") == "block"
+
+
+def test_policy_unknown_value_falls_back_to_default():
+    """An unknown value (not in *allowed*) is not silently accepted — it falls
+    back to *default*, so a typo can't open the gate on unconsultable CI."""
+    allowed = {"block", "open"}
+    # cfg-level typo
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "blocked"}, {}, "block",
+                   allowed=allowed) == "block"
+    # per-repo override typo beats cfg, but is still an unknown value
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "block"},
+                   {"pr_ci_error_policy": "openish"}, "block", allowed=allowed) == "block"
+    # a valid normalised value still resolves normally
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "BLOCK"}, {}, "block",
+                   allowed=allowed) == "block"
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": " OPEN "}, {}, "block",
+                   allowed=allowed) == "open"
 
 
 def test_ci_gate_disabled_ignores_failure(git_fake):

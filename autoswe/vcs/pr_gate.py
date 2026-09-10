@@ -35,12 +35,18 @@ def _flag(name: str, cfg: dict, repo_cfg: dict, default: bool = True) -> bool:
     return bool(cfg.get(name, default))
 
 
-def _policy(name: str, cfg: dict, repo_cfg: dict, default: str) -> str:
+def _policy(
+    name: str, cfg: dict, repo_cfg: dict, default: str, allowed: set[str] | None = None
+) -> str:
     """Resolve a string policy: a per-repo override (lowercase key) beats cfg.
 
     Mirrors ``_flag`` for non-boolean values (e.g. ``PR_CI_ERROR_POLICY``).
-    The value is normalised (stripped, lowercased); an empty value falls back
-    to *default* so a stray ``""`` override can't disable the policy.
+    The value is normalised (stripped, lowercased). When *allowed* is given,
+    the normalised value must be one of those members, else we log a warning
+    and fall back to *default* — so an unknown/typo'd override (``"blocked"``)
+    cannot silently open the gate on unconsultable CI, mirroring
+    ``config._normalise_ci_error_policy``. An empty value falls back to
+    *default* so a stray ``""`` override can't disable the policy.
     """
     value = repo_cfg.get(name.lower())
     if value is None:
@@ -48,7 +54,15 @@ def _policy(name: str, cfg: dict, repo_cfg: dict, default: str) -> str:
     if value is None:
         return default
     normalized = str(value).strip().lower()
-    return normalized or default
+    if not normalized:
+        return default
+    if allowed is not None and normalized not in allowed:
+        dbg.warning(
+            "pr_gate: %s=%r is not one of %s, using %r",
+            name, value, sorted(allowed), default,
+        )
+        return default
+    return normalized
 
 
 def _resolve_ref_sha(task: dict, repo_cfg: dict, cfg: dict, issue_num: int) -> str | None:
@@ -115,7 +129,9 @@ def preflight_pr(
                 # Stale build: no run is in flight, so don't claim a pending count.
                 return False, "CI stale — build predates branch head, no current build running — retry /pr once a build for this commit lands"
             return False, f"CI still running ({ci.pending_count} pending) — retry /pr when green"
-        if ci.state == "error" and _policy("PR_CI_ERROR_POLICY", cfg, repo_cfg, "block") == "block":
+        if ci.state == "error" and _policy(
+            "PR_CI_ERROR_POLICY", cfg, repo_cfg, "block", allowed={"block", "open"}
+        ) == "block":
             # Fail-safe: an unconsultable CI API is not a pass.
             return False, f"CI status unavailable ({ci.summary}) — PR_CI_ERROR_POLICY=block"
         # "success", "none" (no CI configured), and (policy "open") "error" pass
