@@ -367,8 +367,11 @@ def patched_world(
                     "post_plan": pi_fake.script_mcp_plan,
                     "post_question": pi_fake.script_mcp_question,
                 }[mcp_tool]
+                # Thread plan_posted_body through so the pi axis tests the
+                # same body as the claude axis (issue #241 review); fall back
+                # to the text when a row does not script a separate body.
                 scripter(
-                    resp["text"],
+                    resp.get("plan_posted_body") or resp["text"],
                     session_id=resp.get("session_id", "s1"),
                 )
             else:
