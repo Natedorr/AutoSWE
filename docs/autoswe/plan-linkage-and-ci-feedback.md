@@ -208,6 +208,12 @@ implementation maps `completed` → the resolved `done_state` and `not_planned` 
 
 ### 2.1 Hardening the signal first (blocking prerequisite)
 
+> **Status (P0, #244):** the `CIStatus` hardening below — the `error`/`head_sha`/`stale`/`url`/
+> `neutral` fields, the GH `actions/runs` 403 fallback, ADO `sourceVersion` staleness,
+> `PR_CI_ERROR_POLICY`, and the two flipped fail-open tests — **is landed**. The `CIFailure` /
+> `get_ci_failures()` feedback-text method (§2.1's last block) is **deliberately deferred** — it has
+> no P0 consumer and would be dead code until the auto-fix loop lands.
+
 An auto-fix loop built on a fail-open signal is worse than no loop: an API 403 currently reads as
 "no CI" → "pass". Fix `CIStatus` before anything consumes it more widely.
 

@@ -7,7 +7,7 @@ import pytest
 
 from autoswe.harness.backends.base import HandlerResult
 from autoswe.providers.base import CIStatus
-from autoswe.vcs.pr_gate import _flag, preflight_pr
+from autoswe.vcs.pr_gate import _flag, _policy, preflight_pr
 from tests.fakes.git_fake import GitFake
 
 
@@ -90,6 +90,80 @@ def test_ci_failure_blocks(git_fake):
     ok, reason = preflight_pr(task, {}, {}, vcs=vcs)
     assert ok is False
     assert "build" in reason
+
+
+def test_ci_error_blocks_by_default(git_fake):
+    """An unconsultable CI API (state='error') blocks the gate by default.
+
+    Fail-safe: never treat a failed CI read as a pass.
+    """
+    task = make_task()
+    vcs = _vcs(ci_state="error", summary="could not read CI status")
+    ok, reason = preflight_pr(task, {}, {}, vcs=vcs)
+    assert ok is False
+    assert "PR_CI_ERROR_POLICY=block" in reason
+
+
+def test_ci_error_blocks_when_policy_block(git_fake):
+    task = make_task()
+    vcs = _vcs(ci_state="error", summary="could not read CI status")
+    ok, reason = preflight_pr(task, {"PR_CI_ERROR_POLICY": "block"}, {}, vcs=vcs)
+    assert ok is False
+
+
+def test_ci_error_passes_when_policy_open(git_fake):
+    """PR_CI_ERROR_POLICY=open is the explicit opt-out to ship when CI can't
+    be verified."""
+    task = make_task()
+    vcs = _vcs(ci_state="error", summary="could not read CI status")
+    ok, reason = preflight_pr(task, {"PR_CI_ERROR_POLICY": "open"}, {}, vcs=vcs)
+    assert ok is True
+    assert reason == ""
+
+
+def test_ci_error_repo_override_policy_open_beats_cfg(git_fake):
+    """A per-repo pr_ci_error_policy override beats the cfg-level policy."""
+    task = make_task()
+    vcs = _vcs(ci_state="error", summary="could not read CI status")
+    ok, reason = preflight_pr(
+        task, {"PR_CI_ERROR_POLICY": "block"}, {"pr_ci_error_policy": "open"}, vcs=vcs,
+    )
+    assert ok is True
+
+
+def test_ci_stale_pending_blocks_with_note(git_fake):
+    """A stale pending verdict (build predates branch head) blocks like an
+    in-flight build, with a note explaining why."""
+    task = make_task()
+    vcs = _vcs(ci_state="pending", stale=True, pending_count=0)
+    ok, reason = preflight_pr(task, {}, {}, vcs=vcs)
+    assert ok is False
+    assert "stale" in reason.lower()
+
+
+# ---------------------------------------------------------------------------
+# _policy — per-repo override resolution for string policies
+# ---------------------------------------------------------------------------
+
+def test_policy_defaults_when_neither_set():
+    assert _policy("PR_CI_ERROR_POLICY", {}, {}, "block") == "block"
+
+
+def test_policy_uses_cfg_value():
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "open"}, {}, "block") == "open"
+
+
+def test_policy_repo_override_beats_cfg():
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "block"},
+                   {"pr_ci_error_policy": "open"}, "block") == "open"
+
+
+def test_policy_normalises_case_and_whitespace():
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "  OPEN  "}, {}, "block") == "open"
+
+
+def test_policy_empty_value_falls_back_to_default():
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": ""}, {}, "block") == "block"
 
 
 def test_ci_gate_disabled_ignores_failure(git_fake):

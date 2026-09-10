@@ -79,11 +79,28 @@ class CIStatus:
     ``state`` priority when reducing multiple checks: any failure wins,
     else any pending/in-progress wins, else success if at least one check
     passed, else "none" (no CI configured — never blocks a PR).
+
+    ``"error"`` means the CI API could not be consulted (network failure,
+    missing permission, unresolvable branch head). It is **never** treated
+    as a pass and **never** triggers an auto-fix — the PR gate blocks on it
+    unless the repo opts into ``PR_CI_ERROR_POLICY=open``.
+
+    ``head_sha`` is the commit this verdict is for. ``stale`` is True when
+    the verdict belongs to a different commit than the one requested (e.g.
+    the latest Azure build predates the branch head) — a stale verdict
+    blocks like ``pending`` rather than trusting an out-of-date result.
+    ``neutral`` counts checks that ran but verified nothing
+    (``neutral``/``skipped`` conclusions) — reported separately instead of
+    being collapsed into "no CI".
     """
 
-    state: Literal["success", "pending", "failure", "none"]
+    state: Literal["success", "pending", "failure", "none", "error"]
+    head_sha: str | None = None
+    stale: bool = False
+    url: str | None = None
     total: int = 0
     failing: list[str] = field(default_factory=list)
+    neutral: int = 0
     pending_count: int = 0
     summary: str = ""
 
@@ -195,6 +212,11 @@ class VCSProvider(Protocol):
         provider resolves the current tip of *branch*. A repo with no CI
         configured returns ``CIStatus(state="none")`` — treated as a pass by
         callers so autoSWE doesn't block forever on repos without checks.
+
+        When the CI API could not be consulted at all (error, 403,
+        unresolvable branch head), providers return
+        ``CIStatus(state="error")`` — a distinct, fail-safe state the gate
+        blocks on by default. Never fabricate "none" from a failed read.
         """
 
     def commit_url(self, commit_sha: str) -> str | None:

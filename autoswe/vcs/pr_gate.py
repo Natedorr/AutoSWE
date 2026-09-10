@@ -5,6 +5,13 @@ Shared by explicit ``/pr`` (``ship.open_pr``) and auto-PR-after-``/fix``
 default to on and are controlled by ``PR_REQUIRE_SYNC`` / ``PR_REQUIRE_CI``
 in ``cfg``, with optional per-repo overrides (same keys, lowercased) in
 ``repo_cfg``.
+
+The CI gate treats ``CIStatus.state="error"`` (the CI API could not be
+consulted — network failure, bad PAT, unresolvable head) as blocking by
+default; the ``PR_CI_ERROR_POLICY`` key (``block`` | ``open``, default
+``block``) is the explicit opt-out to let a PR through when CI cannot be
+verified. A *stale* ``pending`` verdict (build predates the branch head)
+blocks like an in-flight build.
 """
 from __future__ import annotations
 
@@ -26,6 +33,22 @@ def _flag(name: str, cfg: dict, repo_cfg: dict, default: bool = True) -> bool:
     if override is not None:
         return bool(override)
     return bool(cfg.get(name, default))
+
+
+def _policy(name: str, cfg: dict, repo_cfg: dict, default: str) -> str:
+    """Resolve a string policy: a per-repo override (lowercase key) beats cfg.
+
+    Mirrors ``_flag`` for non-boolean values (e.g. ``PR_CI_ERROR_POLICY``).
+    The value is normalised (stripped, lowercased); an empty value falls back
+    to *default* so a stray ``""`` override can't disable the policy.
+    """
+    value = repo_cfg.get(name.lower())
+    if value is None:
+        value = cfg.get(name)
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    return normalized or default
 
 
 def preflight_pr(
@@ -62,8 +85,12 @@ def preflight_pr(
         if ci.state == "failure":
             return False, f"CI failing: {ci.summary}"
         if ci.state == "pending":
-            return False, f"CI still running ({ci.pending_count} pending) — retry /pr when green"
-        # "success" and "none" (no CI configured) both pass
+            stale_note = " (stale — build predates branch head)" if ci.stale else ""
+            return False, f"CI still running ({ci.pending_count} pending) — retry /pr when green{stale_note}"
+        if ci.state == "error" and _policy("PR_CI_ERROR_POLICY", cfg, repo_cfg, "block") == "block":
+            # Fail-safe: an unconsultable CI API is not a pass.
+            return False, f"CI status unavailable ({ci.summary}) — PR_CI_ERROR_POLICY=block"
+        # "success", "none" (no CI configured), and (policy "open") "error" pass
 
     return True, ""
 

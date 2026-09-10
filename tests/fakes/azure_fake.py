@@ -107,8 +107,9 @@ class AzureFake:
     def set_ci_status(self, state: str, name: str = "CI") -> None:
         """Configure the CI status served by the build/builds route.
 
-        *state* is one of ``"success"``, ``"pending"``, ``"failure"``, ``"none"``
-        (no builds found — the default).
+        *state* is one of ``"success"``, ``"pending"``, ``"failure"``,
+        ``"none"`` (no builds found — the default), or ``"error"`` (the
+        builds endpoint raises so the provider returns state="error").
         """
         self._ci_state = state
         self._ci_name = name
@@ -307,6 +308,8 @@ class AzureFake:
 
         # ---- GET build/builds (CI status query) ----
         if "build/builds" in path and method == "GET":
+            if self._ci_state == "error":
+                raise RuntimeError(f"ADO API {path} -> HTTP 503: unavailable")
             if self._ci_state == "none":
                 return {"count": 0, "value": []}
             template = copy.deepcopy(T.azure_list_builds())

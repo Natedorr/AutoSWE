@@ -10,6 +10,7 @@
       "id": 1,
       "status": "completed",
       "result": "succeeded",
+      "sourceVersion": "abc1234def5678abc1234def5678abc1234def5678",
       "definition": {
         "id": 1,
         "name": "CI"
