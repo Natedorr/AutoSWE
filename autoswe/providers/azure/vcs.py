@@ -12,6 +12,7 @@ from autoswe.providers.azure.api import (
     _encode_path_segment,
     _normalize_azure_parts,
     ado_get,
+    ado_patch_json,
     ado_post,
 )
 from autoswe.providers.base import Capability, CIStatus, LinkageState, PRResult
@@ -289,22 +290,25 @@ class AzureVCS:
         return ids
 
     def link_pr_to_issue(self, issue_number: int, pr_number: int) -> None:
-        """Establish the PR<->work-item edge (edge E3) by re-PUTting the PR.
+        """Establish the PR<->work-item edge (edge E3) via a PATCH update.
 
         The ``.../pullrequests/{id}/workitems`` endpoint is read-only; the only
-        write path is ``workItemRefs`` on the PR update body, which is
-        *replace-semantics* — the full desired list must be sent. Read the
-        current set, add the id if absent, and PUT the complete list. A no-op
-        when the id is already present keeps this idempotent and cheap.
+        write path is ``workItemRefs`` on the PR *detail* resource. ADO's
+        "Update Pull Request" operation is **PATCH** (plain-JSON body, replace
+        semantics — the full desired list must be sent); a POST to the detail
+        URL is not a defined operation and 405s on real ADO. Read the current
+        set, add the id if absent, and PATCH the complete list. A no-op when
+        the id is already present keeps this idempotent and cheap.
         """
         linked = self._linked_work_item_ids(pr_number)
         if issue_number in linked:
             return
         linked.add(issue_number)
         work_item_refs = [{"id": wi} for wi in sorted(linked)]
-        # ado_post on the PR detail URL performs the update (PUT-equivalent);
-        # ADO accepts a JSON body with the fields to update.
-        ado_post(
+        # The detail-URL update is PATCH (plain JSON), not POST: ADO's
+        # "Update Pull Request" operation. workItemRefs is replace-semantics,
+        # so the full list is sent.
+        ado_patch_json(
             self._pullrequest_url(pr_number),
             self._pat,
             body={"workItemRefs": work_item_refs},
@@ -335,15 +339,22 @@ class AzureVCS:
             return state
 
         state.pr_number = pr.get("pullRequestId") or pr_number
-        state.head_sha = (pr.get("sourceRef") or "").replace("refs/heads/", "") or None
+        # ADO exposes the head commit as ``headSha`` (a SHA, parallel to
+        # GitHub's head["sha"]). ``sourceRef`` is the *branch name*, not a SHA,
+        # so it must never be stored in head_sha. Leave None if the shape
+        # lacks the field.
+        state.head_sha = pr.get("headSha") or None
         state.merged = bool(pr.get("isMerged"))
 
         # mergeState: ADO's status.mergeStatus — clean / conflicts / pending.
+        # ADO's conflict value is "conflicted" (the documented enum is
+        # notApplicable|queued|succeeded|conflicted|blocked); accept the legacy
+        # "conflicts" spelling too so a tolerant match still classifies it.
         status = pr.get("status") or {}
         merge_status = status.get("mergeStatus")
         if state.merged or merge_status in (None, "notApplicable", "succeeded"):
             state.merge_state = "clean"
-        elif merge_status == "conflicts":
+        elif merge_status in ("conflicted", "conflicts"):
             state.merge_state = "conflicts"
         else:  # "queued" or any unknown value
             state.merge_state = "pending"

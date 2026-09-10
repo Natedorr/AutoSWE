@@ -157,12 +157,23 @@ def test_open_pull_request_omits_work_item_refs_when_no_issue(vcs, mock_ado_requ
     assert "workItemRefs" not in call["body"]
 
 
-# -- get_linkage: reads sourceRef / isMerged / status.mergeStatus (edges E4/E5) --
+# -- get_linkage: reads headSha / isMerged / status.mergeStatus (edges E4/E5) --
 
-def _pr_detail(merge_status="succeeded", is_merged=False, source_ref="refs/heads/autoswe/issue-100"):
-    """A PR-detail payload as the fake's detail route would serve it."""
+def _pr_detail(
+    merge_status="succeeded",
+    is_merged=False,
+    head_sha="abc1234def5678",
+    source_ref="refs/heads/autoswe/issue-100",
+):
+    """A PR-detail payload as the fake's detail route would serve it.
+
+    ``headSha`` is the real ADO field for the head commit SHA; ``sourceRef`` is
+    the source *branch name* (kept in the payload for realism but must not be
+    mistaken for a SHA).
+    """
     return {
         "pullRequestId": 42,
+        "headSha": head_sha,
         "sourceRef": source_ref,
         "isMerged": is_merged,
         "status": {"mergeStatus": merge_status, "isMergeBlocked": False},
@@ -191,15 +202,58 @@ def test_get_linkage_merges_merge_status_clean(vcs, mock_ado_request, ado_route_
     state = vcs.get_linkage(100, "autoswe/issue-100", 42)
 
     assert state.pr_number == 42
-    assert state.head_sha == "autoswe/issue-100"  # refs/heads/ stripped
+    # head_sha is the commit SHA (headSha), not the source branch name.
+    assert state.head_sha == "abc1234def5678"
+    assert state.head_sha != "autoswe/issue-100"
     assert state.merged is False
     assert state.merge_state == "clean"
     assert state.pr_linked is True
     assert "pr_link" not in state.missing
 
 
-def test_get_linkage_merge_status_conflicts(vcs, mock_ado_request, ado_route_table):
-    """status.mergeStatus=conflicts -> merge_state conflicts."""
+def test_get_linkage_head_sha_is_sha_not_branch_name(vcs, mock_ado_request, ado_route_table):
+    """head_sha comes from headSha (a SHA); the branch name (sourceRef) is never
+    stored in the SHA field — a branch name in head_sha is the bug this pins."""
+    base = "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests"
+    ado_route_table[("GET", f"{base}/42/workitems")] = {"count": 1, "value": [{"id": "100"}]}
+    ado_route_table[("GET", f"{base}/42")] = _pr_detail(
+        merge_status="succeeded", head_sha="0f1e2d3c4b5a6978",
+    )
+
+    state = vcs.get_linkage(100, "autoswe/issue-100", 42)
+
+    assert state.head_sha == "0f1e2d3c4b5a6978"
+    assert "issue" not in (state.head_sha or "")
+
+
+def test_get_linkage_head_sha_absent_is_none(vcs, mock_ado_request, ado_route_table):
+    """A PR-detail payload with no headSha yields head_sha=None, not a branch name."""
+    base = "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests"
+    ado_route_table[("GET", f"{base}/42/workitems")] = {"count": 1, "value": [{"id": "100"}]}
+    # Drop the headSha key entirely from the served payload.
+    detail = _pr_detail(merge_status="succeeded")
+    del detail["headSha"]
+    ado_route_table[("GET", f"{base}/42")] = detail
+
+    state = vcs.get_linkage(100, "autoswe/issue-100", 42)
+
+    assert state.head_sha is None
+
+
+def test_get_linkage_merge_status_conflicted(vcs, mock_ado_request, ado_route_table):
+    """status.mergeStatus=conflicted (the real ADO enum value) -> merge_state
+    conflicts. This is the primary row — real ADO reports 'conflicted', not
+    'conflicts'."""
+    base = "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests"
+    ado_route_table[("GET", f"{base}/42/workitems")] = {"count": 1, "value": [{"id": "100"}]}
+    ado_route_table[("GET", f"{base}/42")] = _pr_detail(merge_status="conflicted")
+
+    state = vcs.get_linkage(100, "autoswe/issue-100", 42)
+    assert state.merge_state == "conflicts"
+
+
+def test_get_linkage_merge_status_conflicts_legacy_spelling(vcs, mock_ado_request, ado_route_table):
+    """Tolerance pin: the legacy 'conflicts' spelling still maps to conflicts."""
     base = "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests"
     ado_route_table[("GET", f"{base}/42/workitems")] = {"count": 1, "value": [{"id": "100"}]}
     ado_route_table[("GET", f"{base}/42")] = _pr_detail(merge_status="conflicts")
@@ -250,30 +304,64 @@ def test_get_linkage_pr_read_failure_reports_all_missing(vcs, mock_ado_request, 
 
 # -- link_pr_to_issue: replace-semantics workItemRefs (edge E3) --
 
-def test_link_pr_to_issue_posts_replace_semantics(vcs, mock_ado_request, ado_route_table):
-    """link_pr_to_issue reads current refs, adds the id, and POSTs the full list."""
+def test_link_pr_to_issue_uses_patch_replace_semantics(vcs, mock_ado_request, ado_route_table):
+    """link_pr_to_issue reads current refs, adds the id, and PATCHes the full list.
+
+    The PR detail resource is updated via PATCH (plain JSON) — ADO's "Update
+    Pull Request" operation. A POST on the detail URL is not a defined operation
+    and would 405; this test locks the verb so it cannot regress to POST.
+    """
     base = "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests"
     # PR already linked to work item 7; we link it to 100.
     ado_route_table[("GET", f"{base}/42/workitems")] = {"count": 1, "value": [{"id": "7"}]}
-    ado_route_table[("POST", f"{base}/42")] = {"pullRequestId": 42}
+    ado_route_table[("PATCH", f"{base}/42")] = {"pullRequestId": 42}
 
     vcs.link_pr_to_issue(100, 42)
 
-    post = [c for c in mock_ado_request.calls if c["method"] == "POST"][0]
+    # No POST on the detail URL — the update must be PATCH.
+    assert not [c for c in mock_ado_request.calls if c["method"] == "POST"], \
+        "link_pr_to_issue must not POST to the PR detail URL (405 on real ADO)"
+    patch = [c for c in mock_ado_request.calls if c["method"] == "PATCH"][0]
     # Replace semantics: the full desired list (7 + 100), sorted.
-    assert post["body"]["workItemRefs"] == [{"id": 7}, {"id": 100}]
+    assert patch["body"]["workItemRefs"] == [{"id": 7}, {"id": 100}]
+
+
+def test_link_pr_to_issue_post_on_detail_url_is_rejected(
+    vcs, mock_ado_request, ado_route_table,
+):
+    """A POST to the PR detail URL is not a defined ADO operation (405).
+
+    Pins the fake's rejection so a wrong-verb self-heal write cannot be silently
+    accepted: only PATCH updates the detail resource, so a POST route is absent
+    and any POST there is unstubbed -> loud failure.
+    """
+    base = "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests"
+    # No POST route registered for the detail URL; only the workitems read.
+    ado_route_table[("GET", f"{base}/42/workitems")] = {"count": 0, "value": []}
+
+    # Force a POST at the detail URL directly (mirrors what a wrong-verb
+    # implementation would do). It must not be accepted.
+    import autoswe.providers.azure.api as api
+
+    with pytest.raises(RuntimeError, match="unstubbed ado request: POST"):
+        api._ado_request(
+            "POST",
+            _ado_api_version(f"{base}/42"),
+            "fake_pat_123",
+            body={"workItemRefs": [{"id": 100}]},
+        )
 
 
 def test_link_pr_to_issue_no_op_when_already_linked(vcs, mock_ado_request, ado_route_table):
-    """Already-linked PR: no update POST is issued (idempotent and cheap)."""
+    """Already-linked PR: no update is issued (idempotent and cheap)."""
     base = "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests"
     ado_route_table[("GET", f"{base}/42/workitems")] = {"count": 1, "value": [{"id": "100"}]}
-    ado_route_table[("POST", f"{base}/42")] = {"pullRequestId": 42}
+    ado_route_table[("PATCH", f"{base}/42")] = {"pullRequestId": 42}
 
     vcs.link_pr_to_issue(100, 42)
 
-    assert not [c for c in mock_ado_request.calls if c["method"] == "POST"], \
-        "link_pr_to_issue must not POST when the id is already present"
+    assert not [c for c in mock_ado_request.calls if c["method"] in ("POST", "PATCH")], \
+        "link_pr_to_issue must not write when the id is already present"
 
 
 def test_link_pr_to_issue_degrades_on_read_failure(vcs, mock_ado_request, ado_route_table):
@@ -284,12 +372,12 @@ def test_link_pr_to_issue_degrades_on_read_failure(vcs, mock_ado_request, ado_ro
         raise RuntimeError("Azure API /pullrequests/42/workitems -> HTTP 500")
 
     ado_route_table[("GET", f"{base}/42/workitems")] = boom
-    ado_route_table[("POST", f"{base}/42")] = {"pullRequestId": 42}
+    ado_route_table[("PATCH", f"{base}/42")] = {"pullRequestId": 42}
 
     vcs.link_pr_to_issue(100, 42)
 
-    post = [c for c in mock_ado_request.calls if c["method"] == "POST"][0]
-    assert post["body"]["workItemRefs"] == [{"id": 100}]
+    patch = [c for c in mock_ado_request.calls if c["method"] == "PATCH"][0]
+    assert patch["body"]["workItemRefs"] == [{"id": 100}]
 
 
 # -- clone_url with partial repo_cfg (worktree.py inline dict pattern) --
@@ -739,17 +827,49 @@ def test_azure_fake_unlinked_pr_self_heals_with_one_update(azure_fake, monkeypat
     assert state.pr_linked is False
     assert "pr_link" in state.missing
 
-    # 3. Heal: exactly one update POST, carrying the full ref list (replace).
+    # 3. Heal: exactly one update PATCH, carrying the full ref list (replace).
+    # The update must be PATCH — a POST on the detail URL is 405 on real ADO and
+    # the fake now rejects it, so a wrong-verb heal would raise here.
     calls_before = len(azure_fake.recorded_calls)
     vcs.link_pr_to_issue(43, pr.number)
     updates = [
         c for c in azure_fake.recorded_calls[calls_before:]
-        if c["method"] == "POST" and f"/pullrequests/{pr.number}?" in c["path"]
+        if c["method"] == "PATCH" and f"/pullrequests/{pr.number}?" in c["path"]
     ]
-    assert len(updates) == 1, f"expected exactly one update POST, got {len(updates)}"
+    assert len(updates) == 1, f"expected exactly one update PATCH, got {len(updates)}"
     assert updates[0]["body"]["workItemRefs"] == [{"id": 43}]
 
     # 4. The read-back now reports the edge as established.
     state = vcs.get_linkage(43, "autoswe/issue-43", pr.number)
     assert state.pr_linked is True
     assert "pr_link" not in state.missing
+
+
+def test_azure_fake_rejects_post_on_pr_detail_url(azure_fake, monkeypatch):
+    """The fake rejects POST on the PR detail URL (405), matching real ADO.
+
+    This is the mask the E3 self-heal bug hid behind: a POST here used to
+    round-trip workItemRefs, so a wrong-verb write passed. It must now fail the
+    way real ADO does, so a regression to POST cannot be silently accepted.
+    """
+    import autoswe.providers.azure.api as ado_module
+    azure_fake.load({
+        "org": "testorg", "project": "testproj", "repo": "testrepo",
+    })
+    monkeypatch.setattr(ado_module, ado_module._ado_request.__name__, azure_fake.handle_request)
+    vcs = AzureVCS({
+        "provider": "azure", "org": "testorg", "project": "testproj",
+        "repo": "testrepo", "pat": "pat",
+    })
+    pr = vcs.open_pull_request("autoswe/issue-9", "main", "t", "body")
+
+    with pytest.raises(RuntimeError, match="HTTP 405"):
+        ado_module._ado_request(
+            "POST",
+            _ado_api_version(
+                "https://dev.azure.com/testorg/testproj/_apis/git/repositories/"
+                f"testrepo/pullrequests/{pr.number}"
+            ),
+            "pat",
+            body={"workItemRefs": [{"id": 9}]},
+        )

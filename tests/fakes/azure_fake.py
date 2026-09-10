@@ -330,10 +330,21 @@ class AzureFake:
                 return {}
             return copy.deepcopy(pr)
 
-        # ---- POST PR update (e.g. AzureVCS.link_pr_to_issue rewrites
+        # ---- POST on the PR detail URL is NOT a defined ADO operation ----
+        # ADO's "Update Pull Request" is PATCH; POST to .../pullrequests/{id}
+        # returns 405. The fake rejects it the same way so a wrong-verb write
+        # cannot be silently accepted (this is what unmasked the E3 self-heal
+        # bug — a POST here used to round-trip workItemRefs, masking a 405).
+        if m_pr_detail and method == "POST":
+            raise RuntimeError(
+                f"ADO API {path} -> HTTP 405: POST is not a defined operation "
+                f"on the pull-request detail resource (use PATCH to update)"
+            )
+
+        # ---- PATCH PR update (e.g. AzureVCS.link_pr_to_issue rewrites
         # workItemRefs) — replace semantics, before the create route below,
         # which also POSTs to .../pullrequests ----
-        if m_pr_detail and method == "POST":
+        if m_pr_detail and method == "PATCH":
             pr_num = int(m_pr_detail.group(1))
             pr = self.pulls.get(pr_num)
             if pr is None:

@@ -2422,7 +2422,16 @@ def build_queue_task(row: dict, provider: str) -> dict | None:
     if provider == "azure":
         task["id"] = "ado:testorg_testproj/testrepo_42"
         task["owner"] = "testorg"
-        task["repo"] = "testproj"
+        # Production mirrors the loop's partitioned ``repo`` verbatim onto the
+        # queue entry: ``owner, _, repo = repo_path.partition("/")`` on the
+        # 3-part ``org/project/repo`` repos.json key yields ``repo="testproj/
+        # testrepo"`` (loop._ensure_queue_entry). Phase 2.5 (merge observation)
+        # and the label mirror compare ``task["repo"] != repo`` against that
+        # same value, so the old 1-segment ``"testproj"`` made those phases
+        # silently skip every Azure task — masking E5 (a merged ADO PR never
+        # closed its work item). The provider re-normalises this back to
+        # ``testrepo`` for API calls, so the queue value is production-accurate.
+        task["repo"] = "testproj/testrepo"
         task["provider"] = "azure"
     else:
         task["id"] = "gh:owner_repo_42"

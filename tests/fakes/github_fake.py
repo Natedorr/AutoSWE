@@ -130,6 +130,23 @@ class GitHubFake:
             self._owned_repos = [copy.deepcopy(r) for r in state["owned_repos"]]
         if state.get("ci_status"):
             self.set_ci_status(state["ci_status"])
+        # Pre-seeded PRs: a list of PR payload dicts (each with a ``number``)
+        # or a dict keyed by PR number. Mirrors AzureFake.load so a scenario
+        # can start from a state where a PR already exists (e.g. merged, or with
+        # a closing keyword in the body) — the merge-observation linkage rows
+        # (E5) rely on this.
+        if state.get("pulls"):
+            seeded = state["pulls"]
+            if isinstance(seeded, dict):
+                for pr_num, pr in seeded.items():
+                    self.pulls[int(pr_num)] = copy.deepcopy(pr)
+            else:
+                for pr in seeded:
+                    pr = copy.deepcopy(pr)
+                    pr_num = pr.get("number", self._next_pr_number)
+                    pr["number"] = pr_num
+                    self.pulls[pr_num] = pr
+                    self._next_pr_number = max(self._next_pr_number, pr_num + 1)
 
     def set_ci_status(self, state: str, name: str = "CI") -> None:
         """Configure the CI status served by check-runs/status/commit routes.
@@ -268,6 +285,18 @@ class GitHubFake:
                 return out
             return {}
 
+        # ---- PATCH /repos/{o}/{r}/issues/{n} (update: state / state_reason) ----
+        # GitHub's real "Update an issue" endpoint. Previously absent from the
+        # fake, so the provider's ``close_issue`` (gh_patch state=closed) fell
+        # through to the default no-op handler and the issue stayed open
+        # forever — masking the merge-observation close path (E5). Applied
+        # after the more specific comments/labels/assignees sub-routes above,
+        # so a bare ``/issues/{n}`` PATCH is the issue update itself.
+        if method in ("PATCH", "PUT") and issue_num is not None and path.rstrip("/").endswith(f"/issues/{issue_num}"):
+            if issue_num in self.issues and isinstance(body, dict):
+                self.issues[issue_num].update(body)
+            return {}
+
         # ---- PUT /repos/{o}/{r}/issues/{n}/labels ----
         if method == "PUT" and issue_num is not None and f"/issues/{issue_num}/labels" in path:
             if body and "labels" in body:
@@ -348,16 +377,16 @@ class GitHubFake:
             return [copy.deepcopy(pr) for pr in self.pulls.values()]
 
         # ---- GET /repos/{o}/{r}/pulls/{n} ----
-        if method == "GET" and re.match(r"^/repos/[^/]+/[^/]+/pulls/\d+", path):
-            parts = path.split("/")
-            if len(parts) >= 7:
-                try:
-                    pr_num = int(parts[6])
-                    pr = self.pulls.get(pr_num)
-                    if pr:
-                        return copy.deepcopy(pr)
-                except ValueError:
-                    pass
+        # The number is the last path segment of the canonical REST path
+        # ``/repos/{o}/{r}/pulls/{n}``; extract it from the match, not from a
+        # fixed index (an index-based read assumed a 7-segment path and
+        # returned {} for the 6-segment REST shape, so get_linkage could never
+        # read a seeded PR — merge_state/merged always came back unknown/False).
+        m_pull = re.match(r"^/repos/[^/]+/[^/]+/pulls/(\d+)(?:/.*)?$", path)
+        if method == "GET" and m_pull:
+            pr = self.pulls.get(int(m_pull.group(1)))
+            if pr:
+                return copy.deepcopy(pr)
             return {}
 
         # ---- POST /repos/{o}/{r}/pulls/{n}/comments (inline review) ----
