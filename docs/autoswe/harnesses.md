@@ -335,6 +335,7 @@ Access is instead controlled by a single explicit switch, `bypass_approvals` (pr
 - ``cost_usd`` is an **estimate** from a maintained price table (`codex_pricing.py`). Returns ``None`` for unknown models — never guesses.
 - ``plan_file_path`` is always ``None`` — Codex doesn't write a native plan file (Claude Code's `~/.claude/plans/` is reached via `claude_code.plan_file_dir()`; Codex has no equivalent).
 - ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting yet.
+- **Large JSONL line handling (issue #251).** The subprocess is spawned with a StreamReader ``limit=_MAX_STREAM_BYTES + 1`` (16 MiB + 1) so that either pipe can hold a legitimately large single JSONL line — the asyncio default is only 64 KiB. If a line still exceeds that limit, ``readline()`` raises ``ValueError``; the backend catches it, flags the turn failed, and drains the rest of stdout, so the run surfaces as ``subtype="error"`` instead of the uncaught exception propagating out of the runner and crashing the poller.
 - Duration is tracked via ``time.monotonic()`` locally.
 
 #### `pi`
@@ -520,6 +521,7 @@ There is no price table analogous to `codex_pricing.py`.
 - ``plan_file_path`` is always ``None`` — pi doesn't write a native plan file (the planner's `~/.claude/plans/` scan stays skipped; the `plan_file` capability is not advertised).
 - ``plan_posted`` / ``question_posted`` are set from the `autoswe_comment` MCP `tool_execution_start` events when a run names that server (direct or proxy shapes — see the "MCP comment posting via the pi-mcp-adapter" section above); they stay ``False`` otherwise.
 - **Question-terminal precedence (issue #230):** once `post_question` is observed in a run, any later `post_plan` in the *same* run is ignored (``plan_posted`` stays ``False``), keeping `question_posted` authoritative. This mirrors the planner's question>plan check so a plan model that continues past its own question and self-posts a plan cannot flip the run back to "posted a plan."
+- **Large JSON line handling (issue #251).** The subprocess (and the MCP warm-up) is spawned with a StreamReader ``limit=_MAX_STREAM_BYTES + 1`` (16 MiB + 1) so that either pipe can hold a legitimately large single JSON line — the asyncio default is only 64 KiB. If a line still exceeds that limit, ``readline()`` raises ``ValueError``; the backend catches it, sets the run's error flag, and drains the rest of stdout, so the run surfaces as ``subtype="error"`` instead of the uncaught exception propagating out of the runner and crashing the poller.
 - Duration is tracked via ``time.monotonic()`` locally.
 
 ### Shared RunSpec → RunResult contract (backends/base.py)

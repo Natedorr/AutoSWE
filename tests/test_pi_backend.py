@@ -72,11 +72,18 @@ def _run_pi(spec, fake, backend=None):
     return asyncio.run(_inner()), fake
 
 
-def _mock_process(stdout: str = "", stderr: str = "", returncode: int = 0):
+def _mock_process(stdout: str = "", stderr: str = "", returncode: int = 0, limit: int | None = None):
     """A controllable process whose stdout is line-oriented, stderr is chunked.
 
     Mirrors the shape of PiBackend's readers: ``stdout.readline()`` for the
     JSONL loop and ``stderr.read(n)`` for the chunked stderr collector.
+
+    ``limit`` models the asyncio StreamReader limit (issue #251).  When set, a
+    line longer than ``limit`` makes ``readline()`` raise ``ValueError`` exactly
+    as the real StreamReader does on a limit overrun, so tests can prove the
+    backend's ``limit=_MAX_STREAM_BYTES + 1`` kwarg keeps a large single line
+    readable.  ``None`` (default) leaves ``readline()`` unbounded (pre-fix
+    mock behaviour).
     """
 
     class _Stdout:
@@ -90,6 +97,10 @@ def _mock_process(stdout: str = "", stderr: str = "", returncode: int = 0):
             if self._pos < len(self._lines):
                 line = self._lines[self._pos]
                 self._pos += 1
+                if limit is not None and len(line) > limit:
+                    # Real StreamReader on overrun: raise ValueError wrapping the
+                    # LimitOverrunError; the loop buffer is then drained via read().
+                    raise ValueError("Separator is not found, and chunk exceed the limit")
                 return line
             return b""
 
@@ -1413,6 +1424,144 @@ def test_run_stderr_bound_truncates_no_crash(monkeypatch):
 
     result = asyncio.run(_run())
     assert result.subtype == "success"
+
+
+# ---------- StreamReader limit (issue #251 — large single JSON line) ----------
+
+
+def test_pi_spawn_passes_stream_reader_limit():
+    """create_subprocess_exec is called with limit=_MAX_STREAM_BYTES + 1.
+
+    Without this, asyncio uses the default 64 KiB StreamReader limit and a
+    single JSON line larger than that makes readline() raise ValueError
+    (uncaught, not retryable) — crashing the poller.
+    """
+    stream = _jsonl(
+        {"type": "session", "id": "pi-sm", "version": 3},
+        {"type": "agent_end"},
+    )
+    proc = _mock_process(stdout=stream, returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await PiBackend().run(_spec())
+        return mock_exec
+
+    mock_exec = asyncio.run(_run())
+    assert mock_exec.call_count == 1
+    # limit is a kwarg to create_subprocess_exec, so it lands in call_args.kwargs
+    # (not in the *cmd spread positional args).
+    assert mock_exec.call_args.kwargs.get("limit") == _MAX_STREAM_BYTES + 1
+
+
+def test_pi_large_unicode_json_line_parses_successfully():
+    """A single JSON line whose UTF-8 bytes exceed 64 KiB parses to success.
+
+    Regression for issue #251: with the StreamReader limit raised to
+    _MAX_STREAM_BYTES + 1, a legitimately large event (here a 200 KiB
+    multi-byte Unicode payload in the assistant message) is read by
+    readline() and parsed — not truncated by the old 64 KiB default limit.
+
+    The mock reader enforces the *actual* limit the backend passes to
+    create_subprocess_exec, so this is a genuine guard: if the backend ever
+    stops raising the limit, the reader regains the 64 KiB default and the
+    >64 KiB line raises ValueError, failing the run to error.
+    """
+    big_text = "€" * 200_000  # 3 bytes/char → ~600 KB of UTF-8 on one line
+    stream = _jsonl(
+        {"type": "session", "id": "pi-big", "version": 3},
+        {"type": "message_end",
+         "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": big_text}]}},
+        {"type": "agent_end"},
+    )
+    # The message_end line alone is well past the old 64 KiB limit.
+    big_line_bytes = max(len(line.encode("utf-8")) for line in stream.splitlines())
+    assert big_line_bytes > 64 * 1024, "test line must exceed the old 64 KiB limit"
+
+    # Mirror the real spawn limit back into the mock reader. When the backend
+    # omits ``limit`` we fall back to the real asyncio StreamReader default
+    # (asyncio.streams._DEFAULT_LIMIT == 64 KiB) so the mock models the
+    # pre-fix behaviour exactly — making this a genuine regression guard.
+    default = asyncio.streams._DEFAULT_LIMIT
+
+    async def _run():
+        def _spawn(*cmd, **kwargs):
+            return _mock_process(stdout=stream, returncode=0,
+                                 limit=kwargs.get("limit", default))
+
+        mock_exec = AsyncMock(side_effect=_spawn)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await PiBackend().run(_spec())
+
+    result = asyncio.run(_run())
+    assert result.subtype == "success"
+    assert result.session_id == "pi-big"
+    # The large multi-byte payload round-trips intact.
+    assert big_text in result.text
+
+
+def test_pi_readline_valueerror_degrades_to_error_and_drains():
+    """A single line over the StreamReader limit yields an error, not a crash.
+
+    Simulates readline() raising ValueError (the wrapped LimitOverrunError
+    that asyncio raises when a line exceeds the configured limit) on the
+    first line, then verifies the backend: flags has_error, drains the
+    remaining stdout (via read(), not readline()), returns subtype='error',
+    and lets no exception escape.
+    """
+
+    class _OverLimitStdoutReader:
+        """readline() raises ValueError on first call, then read() drains to EOF."""
+
+        def __init__(self, residual: bytes):
+            self._residual = residual
+            self._res_pos = 0
+            self.readline_calls = 0
+            self.read_calls = 0
+            self.read_bytes_total = 0
+
+        async def readline(self) -> bytes:
+            self.readline_calls += 1
+            # Real StreamReader clears its internal buffer on the limit error,
+            # so any subsequent readline() would see an (already-drained) fresh
+            # stream. We track the call count to prove the backend does NOT
+            # re-loop readline() after the error — it breaks and drains via
+            # read() instead, so an unterminated pathological write can't hang.
+            if self.readline_calls == 1:
+                raise ValueError("Separator is not found, and chunk exceed the limit")
+            return b""
+
+        async def read(self, size: int = -1) -> bytes:
+            self.read_calls += 1
+            out = self._residual[self._res_pos:self._res_pos + size]
+            self._res_pos += len(out)
+            self.read_bytes_total += len(out)
+            return out
+
+    residual = b"trailing-data\n" * 100  # ~1.8 KB to drain after the failure
+    reader = _OverLimitStdoutReader(residual)
+    proc = _mock_process(stdout="", returncode=0)
+    proc.stdout = reader
+
+    async def _run():
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            return await PiBackend().run(_spec())
+
+    # No exception escapes — this is the whole point of issue #251.
+    result = asyncio.run(_run())
+    assert result.subtype == "error", "an over-limit line must produce subtype=error"
+    assert result.ok is False
+    # readline() was attempted exactly once (it raised the limit error); the
+    # backend then broke and drained via read() — it did NOT re-loop readline(),
+    # which on a pathological unterminated stream could block forever.
+    assert reader.readline_calls == 1, (
+        f"readline() must be called exactly once, got {reader.readline_calls}"
+    )
+    # The drain loop consumed the residual via read() (not readline()).
+    assert reader.read_calls >= 1
+    assert reader.read_bytes_total == len(residual), "all residual data must be drained"
 
 
 # ---------- Failure surfaces ----------
