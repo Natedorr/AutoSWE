@@ -695,6 +695,46 @@ def test_codex_basic_run():
     assert result.duration_seconds >= 0
 
 
+def test_codex_returncode_read_via_wait_not_attribute():
+    """A successful run is reaped via ``await process.wait()``, not the attribute.
+
+    Regression for the Windows proactor loop: after the pipe drain the
+    ``process.returncode`` attribute is still ``None`` (the child has not been
+    reaped yet), so reading it directly misclassifies a clean exit as
+    ``subtype: error``. The backend must call ``await process.wait()`` to obtain
+    the real exit code. This mock models that: the attribute stays ``None``
+    until ``wait()`` is awaited, which then sets it and returns the code.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix the bug", cwd="/tmp/repo",
+                   model="gpt-5.6-terra", mode="read_write")
+    jsonl = _make_success_jsonl(thread_id="sess-wait", agent_texts=["ok"])
+
+    class _UnreapedProcess(_MockProcess):
+        def __init__(self, stdout: str):
+            super().__init__(stdout=stdout)
+            self.returncode = None  # not yet reaped
+            self._final = 0
+
+        async def wait(self) -> int:
+            self.returncode = self._final
+            return self.returncode
+
+    proc = _UnreapedProcess(jsonl)
+    assert proc.returncode is None  # precondition: not reaped
+
+    async def _run():
+        with patch("asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.subtype == "success", (
+        f"a clean exit must be reaped to success, got {result.subtype}"
+    )
+    assert result.ok is True
+
+
 def test_codex_run_calls_with_correct_flags(monkeypatch):
     """CodexBackend builds the correct command-line flags (Option A: no --sandbox).
 

@@ -104,6 +104,7 @@ def _is_autoswe_bot_comment(comment: CommentLike) -> bool:
 # ever contained, so on Azure — where the marker is stripped — a progress
 # comment was misread as a user reply and drove a bogus resume).
 _BOT_CONTENT_PATTERNS = (
+    "autoSWE picked up this issue",  # welcome comment (orch/loop._build_welcome_comment)
     "## Questions",             # planner WAITING output
     "## Plan\n",                # planner PLAN_READY output (## Plan followed by newline)
     "## Claude's response",     # planner WAITING:see comment fallback

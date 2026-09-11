@@ -545,7 +545,9 @@ def test_commit_and_push_multi_fix_preserves_history(tmp_path, monkeypatch):
     amend_calls = [c for c in call_order if "--amend" in c]
     assert len(amend_calls) == 1
 
-    # The ahead check should target origin/{branch}, NOT origin/{base_branch}
+    # The ahead check should target origin/{branch}, NOT origin/{base_branch}.
+    # (Local is not behind origin here, so no reset fires and the probe runs
+    # once.)
     ahead_checks = [c for c in call_order
                     if "log" in c and "origin/autoswe/issue-1..HEAD" in " ".join(c)]
     assert len(ahead_checks) == 1
@@ -553,6 +555,210 @@ def test_commit_and_push_multi_fix_preserves_history(tmp_path, monkeypatch):
     base_ahead_checks = [c for c in call_order
                          if "log" in c and "origin/main..HEAD" in " ".join(c)]
     assert len(base_ahead_checks) == 0, "Must not check origin/main..HEAD — would re-squash history"
+
+
+def test_commit_and_push_detects_pushed_session_commit_with_before_sha(tmp_path, monkeypatch):
+    """A weaker backend (pi) that commits AND pushes during the session must
+    still be detected as real work (issue #180 / pi E2E).
+
+    By the time commit_and_push runs, its ``git fetch`` has already synced
+    ``origin/{branch}`` up to the agent's push, so ``origin/{branch}..HEAD`` is
+    empty and the tree is clean. Without the pre-session ``before_sha`` baseline
+    this looks identical to "the agent did nothing" and the run is misreported
+    as "no changes detected" — skipping the post-fix test gate. Baslining against
+    ``before_sha`` makes the pushed commit visible, so the run amends it with the
+    proper message, force-pushes, and reports ``committed: True``.
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+
+    call_order = []
+
+    def fake_run(args, cwd=None, check=True):
+        call_order.append(list(args))
+        result = MagicMock()
+        cmd_str = " ".join(args)
+        # Agent committed AND pushed: origin/autoswe/issue-1 == HEAD, so the
+        # origin baseline sees no new commits (the bug's "invisible" state).
+        if "HEAD..origin/autoswe/issue-1" in cmd_str or "origin/autoswe/issue-1..HEAD" in cmd_str:
+            result.stdout = ""  # not behind, nothing ahead of origin
+        # But ahead of the pre-session baseline there IS one new commit.
+        elif "aaa0000..HEAD" in cmd_str:
+            result.stdout = "bbb1111 agent pushed its own commit\n"
+        elif "--parents" in cmd_str:
+            result.stdout = "bbb1111 aaa0000\n"  # 1 parent -> not a merge
+        elif "rev-parse" in cmd_str:
+            result.stdout = "ccc2222"
+        else:
+            result.stdout = ""
+        result.returncode = 0
+        return result
+
+    wt_dir = tmp_path / "worktree"
+    wt_dir.mkdir()
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import commit_and_push
+        result = commit_and_push(
+            wt_dir, "o", "r", 1, "Fixes #1: autoswe automated fix", "main",
+            before_sha="aaa0000",
+        )
+
+    # The pushed session commit must be detected as real work — not "no changes".
+    assert result["committed"] is True
+    assert result["commit_sha"] == "ccc2222"
+    assert result["branch"] == "autoswe/issue-1"
+
+    # It reworded the agent's commit with the proper message and force-pushed.
+    amend_calls = [c for c in call_order if "--amend" in c]
+    assert len(amend_calls) == 1, "Should amend the agent's pushed commit"
+    push_calls = [c for c in call_order if "push" in c and "-f" in c]
+    assert len(push_calls) == 1, "Should force-push after amending"
+
+    # The decisive check used the pre-session baseline, not origin. (Local is
+    # NOT behind origin here, so no reset fires and the baseline probe runs
+    # once.)
+    baseline_checks = [c for c in call_order if "log" in c and "aaa0000..HEAD" in " ".join(c)]
+    assert len(baseline_checks) == 1, "Must check ahead against before_sha"
+
+
+def test_commit_and_push_detects_pushed_commit_when_local_ref_behind_origin(tmp_path, monkeypatch):
+    """The exact failure the pi E2E hit on work item 182.
+
+    pi commits via its bash tool and pushes WITHOUT moving the local branch
+    ref, so origin/autoswe/issue-1 lands ahead of HEAD:
+      - ``HEAD..origin``       -> non-empty  ("behind")
+      - ``before_sha..HEAD``   -> empty      (local HEAD still == before_sha)
+
+    A forward ``reset --hard origin`` is therefore required to land the pushed
+    commit on the local ref. The pre-reset ``before_sha..HEAD`` probe is empty,
+    but the *post*-reset ahead-check (also ``before_sha..HEAD``, recomputed) is
+    non-empty — the pushed commit is exposed and detected, so the run amends it
+    and reports ``committed: True`` instead of the old "no changes detected".
+
+    (The earlier bug reused the pre-reset ahead value, so the forward reset's
+    effect was lost. Regression test for that.)
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+
+    call_order = []
+    state = {"reset_done": False}
+
+    def fake_run(args, cwd=None, check=True):
+        call_order.append(list(args))
+        result = MagicMock()
+        cmd_str = " ".join(args)
+        # Track the forward reset so we can flip the ahead-check result.
+        if "reset" in cmd_str and "--hard" in cmd_str:
+            state["reset_done"] = True
+        # Local branch is BEHIND origin: one commit on origin not on local HEAD.
+        if "HEAD..origin/autoswe/issue-1" in cmd_str:
+            result.stdout = "bbb1111 pi pushed this commit\n"
+        # The session-baseline ahead check. Before the reset the local HEAD is
+        # still at before_sha (empty); after the forward reset it's at the
+        # pushed commit (populated).
+        elif "aaa0000..HEAD" in cmd_str:
+            result.stdout = (
+                "bbb1111 pi pushed this commit\n" if state["reset_done"] else ""
+            )
+        elif "origin/autoswe/issue-1..HEAD" in cmd_str:
+            result.stdout = ""  # nothing ahead of origin
+        elif "--parents" in cmd_str:
+            result.stdout = "bbb1111 aaa0000\n"  # 1 parent -> not a merge
+        elif "rev-parse" in cmd_str:
+            result.stdout = "ccc2222"
+        else:
+            result.stdout = ""
+        result.returncode = 0
+        return result
+
+    wt_dir = tmp_path / "worktree"
+    wt_dir.mkdir()
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import commit_and_push
+        result = commit_and_push(
+            wt_dir, "o", "r", 1, "Fixes #1: autoswe automated fix", "main",
+            before_sha="aaa0000",
+        )
+
+    # The pushed (but locally-behind) session commit must be detected.
+    assert result["committed"] is True
+    assert result["commit_sha"] == "ccc2222"
+    assert result["branch"] == "autoswe/issue-1"
+
+    # A forward reset to origin MUST have happened to expose the commit.
+    assert state["reset_done"] is True, "Forward reset to origin required"
+    # The ahead-check was recomputed AFTER the reset (two baseline probes).
+    baseline_checks = [c for c in call_order
+                       if "log" in c and "aaa0000..HEAD" in " ".join(c)]
+    assert len(baseline_checks) == 2, "Ahead must be probed pre- and post-reset"
+    # It then reworded the exposed commit with the proper message and pushed.
+    amend_calls = [c for c in call_order if "--amend" in c]
+    assert len(amend_calls) == 1
+    push_calls = [c for c in call_order if "push" in c and "-f" in c]
+    assert len(push_calls) == 1
+
+
+def test_commit_and_push_before_sha_none_pushed_commit_invisible(tmp_path, monkeypatch):
+    """Document the legacy baseline: with no ``before_sha`` and a clean tree
+    where the agent's push already moved origin up, the work is INVISIBLE —
+    ``commit_and_push`` reports no changes. This is the exact state the pi E2E
+    reached before the before_sha fix, and the reason the fix is required.
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        cmd_str = " ".join(args)
+        # Agent pushed: origin/autoswe/issue-1 == HEAD; clean tree.
+        if "origin/autoswe/issue-1..HEAD" in cmd_str or "HEAD..origin/autoswe/issue-1" in cmd_str:
+            result.stdout = ""
+        elif "--cached" in cmd_str:
+            result.returncode = 0  # nothing staged
+        else:
+            result.returncode = 0
+            result.stdout = ""
+        return result
+
+    wt_dir = tmp_path / "worktree"
+    wt_dir.mkdir()
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import commit_and_push
+        result = commit_and_push(wt_dir, "o", "r", 1, "test commit", "main")
+
+    assert result["committed"] is False
+
+
+def test_commit_and_push_before_sha_no_changes(tmp_path, monkeypatch):
+    """No false positive: when a pre-session baseline is supplied but the agent
+    made no change (HEAD == before_sha, clean tree), the run must still report
+    ``committed: False`` rather than inventing a commit.
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        cmd_str = " ".join(args)
+        if "aaa0000..HEAD" in cmd_str:
+            result.stdout = ""  # HEAD == before_sha: nothing new
+        elif "origin/autoswe/issue-1..HEAD" in cmd_str or "HEAD..origin/autoswe/issue-1" in cmd_str:
+            result.stdout = ""
+        elif "--cached" in cmd_str:
+            result.returncode = 0  # clean tree, nothing staged
+        else:
+            result.returncode = 0
+            result.stdout = ""
+        return result
+
+    wt_dir = tmp_path / "worktree"
+    wt_dir.mkdir()
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import commit_and_push
+        result = commit_and_push(wt_dir, "o", "r", 1, "test commit", "main", before_sha="aaa0000")
+
+    assert result["committed"] is False
 
 
 # ---------------------------------------------------------------------------

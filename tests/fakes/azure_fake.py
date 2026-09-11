@@ -205,6 +205,26 @@ class AzureFake:
         # ---- PATCH work item (update fields/tags) ----
         if wi_num is not None and method in ("PATCH", "PUT"):
             if wi_num in self.work_items and body and isinstance(body, list):
+                # Faithful to ADO (issue #235 follow-up): a field may be
+                # touched by at most ONE op per patch body. Two ops on the same
+                # /fields/<F> path (e.g. the old remove-then-add tag pair) is
+                # rejected with HTTP 400 VS403691 — raising the same
+                # RuntimeError the real ``_ado_request`` produces, so a
+                # two-op tag write fails the offline suite instead of the
+                # production box.
+                seen_paths: set[str] = set()
+                for op in body:
+                    op_path = op.get("path", "")
+                    if not op_path.startswith("/fields/"):
+                        continue
+                    if op_path in seen_paths:
+                        raise RuntimeError(
+                            f"Azure API {path} -> HTTP 400: "
+                            "VS403691 — A field cannot be updated more than "
+                            "once in the same update."
+                        )
+                    seen_paths.add(op_path)
+
                 fields = self.work_items[wi_num].setdefault("fields", {})
                 for op in body:
                     op_type = op.get("op", "")
@@ -218,21 +238,24 @@ class AzureFake:
                         fields[field] = ""
                     elif op_type in ("add", "replace"):
                         if field == "System.Tags":
-                            # Faithful to ADO: ``add`` on System.Tags is
-                            # ADDITIVE — the value is merged into the existing
-                            # tag set, not a replace (issue #235). A true
-                            # replace requires a preceding ``remove``.
-                            existing = fields.get("System.Tags", "") or ""
-                            existing_tags = [
-                                t.strip() for t in existing.split(";") if t.strip()
-                            ]
+                            # ``add`` on System.Tags is ADDITIVE — the value is
+                            # merged into the existing tag set. ``replace`` is
+                            # an EXACT SET (the value becomes the whole set);
+                            # this is why the tracker uses a lone ``replace``.
                             new_tags = [
                                 t.strip() for t in (value or "").split(";") if t.strip()
                             ]
-                            for t in new_tags:
-                                if t not in existing_tags:
-                                    existing_tags.append(t)
-                            fields["System.Tags"] = "; ".join(existing_tags)
+                            if op_type == "add":
+                                existing = fields.get("System.Tags", "") or ""
+                                existing_tags = [
+                                    t.strip() for t in existing.split(";") if t.strip()
+                                ]
+                                for t in new_tags:
+                                    if t not in existing_tags:
+                                        existing_tags.append(t)
+                                fields["System.Tags"] = "; ".join(existing_tags)
+                            else:  # replace
+                                fields["System.Tags"] = "; ".join(new_tags)
                         else:
                             fields[field] = value
             return copy.deepcopy(self.work_items.get(wi_num, {}))

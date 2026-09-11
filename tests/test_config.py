@@ -65,12 +65,18 @@ def test_pi_mcp_json_bakes_python_not_token():
 
 def test_pi_mcp_json_path():
     """pi_mcp_json_path joins the agent dir with mcp.json (and expands ~)."""
-    from pathlib import Path
+    from pathlib import Path, PurePath
 
     from autoswe.harness.mcp_config import pi_mcp_json_path
 
     assert pi_mcp_json_path("/tmp/agent") == Path("/tmp/agent") / "mcp.json"
-    assert str(pi_mcp_json_path("~/.pi/agent")).endswith(".pi/agent/mcp.json")
+    # Expand ``~`` and assert on the path parts, not the separator string — on
+    # Windows the expanded path uses ``\`` (e.g. C:\Users\<u>\.pi\agent), so a
+    # POSIX ``endswith(".pi/agent/mcp.json")`` check fails there.
+    expanded = PurePath(pi_mcp_json_path("~/.pi/agent"))
+    assert expanded.name == "mcp.json"
+    assert expanded.parent.name == "agent"
+    assert expanded.parent.parent.name == ".pi"
 
 
 def test_autoswe_repo_root_points_at_mcp_servers():

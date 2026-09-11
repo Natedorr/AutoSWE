@@ -785,7 +785,12 @@ class CodexBackend:
             log(f"[CODEX] timeout after {spec.timeout}s — killed process")
             raise
 
-        returncode = process.returncode
+        # Reap the process so `returncode` is set. On the Windows proactor
+        # event loop, draining the pipes does not reliably mark the process
+        # exited, so reading `process.returncode` here can yield `None` and
+        # turn a successful run into `subtype: error`. `wait()` is a no-op
+        # once the process has already exited (e.g. after a timeout kill).
+        returncode = await process.wait()
         duration = time.monotonic() - t0
 
         if returncode != 0:

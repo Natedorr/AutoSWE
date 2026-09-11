@@ -248,6 +248,13 @@ class AzureTracker:
                     id=c.get("id"),
                 )
             )
+        # ADO's comments API returns comments newest-first (descending by id),
+        # unlike GitHub which returns oldest-first. Every downstream consumer
+        # (watermark detection, _find_last_completion_id's reversed() scan,
+        # resume detection) assumes ascending order, so sort by comment id
+        # (monotonically increasing) ascending at the source. A None id sorts
+        # last — it can't anchor a watermark anyway.
+        results.sort(key=lambda c: (c.id is None, c.id if c.id is not None else 0))
         return results
 
     # ---- Pure helpers (no network) ----
@@ -355,13 +362,17 @@ class AzureTracker:
         GETs the current work item, strips existing autoswe:* tags,
         appends the new status tag, and PATCHes via JSON-Patch.
 
-        The write is a two-op patch — ``remove`` then ``add`` on
-        ``/fields/System.Tags``. ADO applies ``op: "add"`` on ``System.Tags``
-        additively (it merges the value into the existing tag set instead of
-        replacing the field), so a lone ``add`` re-merges the tags we just
-        stripped and the status tags accumulate across transitions. Clearing
-        the field first guarantees the written value is the complete tag set
-        (issue #235).
+        The write is a **single** ``op: "replace"`` on
+        ``/fields/System.Tags`` whose value is the complete tag set. Two
+        constraints force this shape:
+
+        - ADO rejects two operations on the same field in one patch body
+          (HTTP 400 VS403691 — "A field cannot be updated more than once in
+          the same update"), so the old remove-then-add pair failed the whole
+          write and no tag was ever posted (issue #235 follow-up).
+        - ``op: "add"`` on ``System.Tags`` is additive on the server (it
+          merges into the existing set), so a lone ``add`` re-merges the tags
+          we stripped. ``replace`` is the only op that sets the field exactly.
         """
         _validate_status(status)
         # Read current tags
@@ -381,17 +392,16 @@ class AzureTracker:
         new_tags = [t for t in tags if not t.startswith(_PREFIX)]
         new_tags.append(f"{_PREFIX}{normalized_status}")
 
-        # PATCH via JSON-Patch: remove first, then add. ``add`` on System.Tags
-        # is additive on the server (see docstring), so the ``remove`` is what
-        # makes this a true replace of the tag set.
+        # PATCH via JSON-Patch: a single ``replace`` on System.Tags. A second
+        # op on the same field in one body is rejected (VS403691), and ``add``
+        # is additive, so ``replace`` is what makes this a true set (docstring).
         patch_path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
         )
         ado_patch(
             patch_path, self._pat,
             body=[
-                {"op": "remove", "path": "/fields/System.Tags"},
-                {"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
+                {"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
             ],
         )
 

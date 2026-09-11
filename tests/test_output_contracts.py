@@ -252,16 +252,16 @@ class TestAzureOutputContracts:
     """Verify Azure DevOps API request body shapes."""
 
     def test_patch_tags_json_patch(self, isolated_autoswe_dir, azure_fake):
-        """PATCH workitem (tags) must be JSON-Patch array with autoswe tags.
+        """PATCH workitem (tags) must be a single-op JSON-Patch with autoswe tags.
 
-        Production writes tags with a two-op patch (remove then add) because ADO
-        treats a lone ``add`` on System.Tags additively (issue #235).
+        Production writes tags with a lone ``replace`` on System.Tags: ADO
+        rejects two ops on one field in a body (VS403691), and a lone ``add``
+        is additive, so ``replace`` is the true set (issue #235 follow-up).
         """
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
-            {"op": "remove", "path": "/fields/System.Tags"},
-            {"op": "add", "path": "/fields/System.Tags",
+            {"op": "replace", "path": "/fields/System.Tags",
              "value": "tag1; autoswe:planned"},
         ]
         azure_fake.handle_request(
@@ -274,18 +274,16 @@ class TestAzureOutputContracts:
         assert calls, "Expected PATCH workitem call"
         body = calls[-1]["body"]
         assert isinstance(body, list), "PATCH body should be JSON-Patch array"
-        assert body[0]["op"] == "remove"
+        assert len(body) == 1
+        assert body[0]["op"] == "replace"
         assert body[0]["path"] == "/fields/System.Tags"
-        assert body[1]["op"] == "add"
-        assert body[1]["path"] == "/fields/System.Tags"
 
     def test_patch_tags_content_type(self, isolated_autoswe_dir, azure_fake):
         """PATCH workitem must use application/json-patch+json content type."""
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
-            {"op": "remove", "path": "/fields/System.Tags"},
-            {"op": "add", "path": "/fields/System.Tags", "value": "autoswe:fixed"},
+            {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:fixed"},
         ]
         azure_fake.handle_request(
             "PATCH",
@@ -298,26 +296,25 @@ class TestAzureOutputContracts:
         assert calls[-1]["content_type"] == "application/json-patch+json"
 
     def test_patch_strips_old_autoswe_tags(self, isolated_autoswe_dir, azure_fake):
-        """Two-op tag write (remove then add) leaves no old autoswe:* tag behind.
+        """A single ``replace`` tag write leaves no old autoswe:* tag behind.
 
-        Mirrors production set_status: the client strips autoswe:* tags and the
-        fake models ADO's additive ``add``. Only the leading ``remove`` makes the
-        strip stick — assert on the *stored* tag set, not the request body.
+        Mirrors production set_status: the client strips autoswe:* tags, then
+        writes the complete set with one ``replace`` op (the fake models ADO's
+        exact-set ``replace``). Assert on the *stored* tag set, not the body.
         """
         azure_fake.load({
             **_AZ_PLAN_STATE,
             "tags": ["autoswe:pending", "tag1"],
         })
 
-        # Simulate what set_status does: read tags, strip autoswe, add new
+        # Simulate what set_status does: read tags, strip autoswe, append new.
         tags_raw = azure_fake.work_items[1]["fields"]["System.Tags"]
         tags = [t.strip() for t in tags_raw.split(";") if t.strip()]
         new_tags = [t for t in tags if not t.startswith("autoswe:")]
         new_tags.append("autoswe:fixed")
 
         patch_body = [
-            {"op": "remove", "path": "/fields/System.Tags"},
-            {"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
+            {"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
         ]
         azure_fake.handle_request(
             "PATCH",
