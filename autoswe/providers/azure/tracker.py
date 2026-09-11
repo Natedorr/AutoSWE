@@ -93,6 +93,13 @@ class AzureTracker:
         }
     """
 
+    # ADO does not advance ``System.ChangedDate`` when a comment is posted —
+    # only field changes (state, tags) do. So the poller's "unchanged
+    # timestamp -> skip comment fetch" shortcut would silently drop a user's
+    # new slash command (the only way a task moves is a comment). Tell
+    # read_api to always re-fetch comments (providers/adapter.py).
+    comments_bump_updated = False
+
     def __init__(self, repo_cfg: dict):
         self._repo_cfg = repo_cfg
         # Accept the PAT under either key so hand-built repo_cfg dicts (e.g. the

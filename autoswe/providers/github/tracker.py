@@ -27,6 +27,11 @@ class GitHubTracker:
     on the tracker instance).
     """
 
+    # A GitHub comment advances the issue's `updated_at`, so read_api can rely
+    # on the unchanged-timestamp shortcut to skip the comment fetch. (Contrast
+    # Azure, whose comments do not bump System.ChangedDate — see AzureTracker.)
+    comments_bump_updated = True
+
     def __init__(self, repo_cfg: dict):
         self._repo_cfg = repo_cfg
         self._owner = repo_cfg.get("owner", "")
