@@ -15,6 +15,15 @@ offline) test environment:
   PowerShell (``pwsh`` or ``powershell``) is on PATH.  These verify the actual
   Unicode / stderr / exit-code behavior on any box that does have PowerShell
   5.1 or 7.
+
+Native-command invocation gotcha (learned the hard way, see #251 CI):
+PowerShell stringifies an ``@(...)`` argument array when used as the command
+— ``& @('cmd','/c','exit','3')`` looks up the *whole* string
+``"cmd /c exit 3"`` as one command name and fails.  The command must be a
+scalar with the rest passed as separate positional args (the form the
+production ``poller.ps1`` itself uses: ``& $PYTHON $AUTOSWE_PY poller ...``),
+so the inline snippets below branch on ``$env:OS`` and call
+``cmd /c "..."`` or ``/bin/sh -c "..."`` directly, cross-platform.
 """
 import os
 import shutil
@@ -145,11 +154,16 @@ def test_poller_utf8_append_has_no_bom(tmp_path):
 @requires_pwsh
 def test_poller_exit_code_propagation():
     """`exit $LASTEXITCODE` propagates a native command's nonzero exit code."""
+    # Command is a scalar with separate positional args (NOT an @() array —
+    # PowerShell stringifies an array command into one name and fails; see the
+    # module docstring). Mirrors the production poller's `& $PYTHON ...`.
     script = (
         "$ErrorActionPreference = 'Stop'\n"
-        "if ($env:OS -eq 'Windows_NT') { $native = @('cmd','/c','exit','3') } "
-        "else { $native = @('/bin/sh','-c','exit 3') }\n"
-        "$null = & $native\n"
+        "if ($env:OS -eq 'Windows_NT') {\n"
+        "    $null = cmd /c \"exit 3\"\n"
+        "} else {\n"
+        "    $null = /bin/sh -c \"exit 3\"\n"
+        "}\n"
         "exit [int]$LASTEXITCODE\n"
     )
     proc = _run_pwsh(script)
@@ -164,14 +178,18 @@ def test_poller_stderr_captured_without_abort():
     a native command that writes stderr via 2>&1, capture it, restore the
     preference, and reach a trailing sentinel (proof the script did not abort).
     """
+    # Native stderr command: scalar + literal args, NOT an @() array (see the
+    # module docstring for the stringification gotcha).
     script = (
         "$ErrorActionPreference = 'Stop'\n"
         "$prev = $ErrorActionPreference\n"
         "$ErrorActionPreference = 'Continue'\n"
         "try {\n"
-        "    if ($env:OS -eq 'Windows_NT') { $cmd = @('cmd','/c','echo','boom 1>&2') } "
-        "else { $cmd = @('/bin/sh','-c','echo boom 1>&2') }\n"
-        "    $output = & $cmd 2>&1\n"
+        "    if ($env:OS -eq 'Windows_NT') {\n"
+        "        $output = cmd /c \"echo boom 1>&2\" 2>&1\n"
+        "    } else {\n"
+        "        $output = /bin/sh -c \"echo boom 1>&2\" 2>&1\n"
+        "    }\n"
         "    $null = $LASTEXITCODE\n"
         "} finally {\n"
         "    $ErrorActionPreference = $prev\n"

@@ -83,19 +83,33 @@ def _make_success_jsonl(
 
 
 class _MockStdoutReader:
-    """Fake stdout reader supporting both readline() and read() (drain path)."""
+    """Fake stdout reader supporting both readline() and read() (drain path).
 
-    def __init__(self, data: bytes):
+    Optionally models the asyncio StreamReader ``limit`` (issue #251).  When
+    ``limit`` is set, a line longer than ``limit`` makes ``readline()`` raise
+    ``ValueError`` exactly as the real StreamReader does on a limit overrun,
+    so tests can prove that the backend's ``limit=_MAX_STREAM_BYTES + 1``
+    kwarg genuinely keeps a large single line readable rather than
+    silently passing with an unbounded reader.  ``limit=None`` (the default)
+    leaves ``readline()`` unbounded, matching the pre-fix mock behaviour.
+    """
+
+    def __init__(self, data: bytes, limit: int | None = None):
         self._data = data
         self._pos = 0
         self._lines = data.splitlines(keepends=True)
         self._line_pos = 0
+        self._limit = limit
 
     async def readline(self) -> bytes:
         if self._line_pos < len(self._lines):
             line = self._lines[self._line_pos]
             self._line_pos += 1
             self._pos += len(line)
+            if self._limit is not None and len(line) > self._limit:
+                # Real StreamReader on overrun: raise ValueError wrapping the
+                # LimitOverrunError; the loop buffer is then drained via read().
+                raise ValueError("Separator is not found, and chunk exceed the limit")
             return line
         return b""
 
@@ -127,16 +141,22 @@ class _MockStderrReader:
 
 
 class _MockProcess:
-    """Fake asyncio subprocess process with controllable stdout/stderr."""
+    """Fake asyncio subprocess process with controllable stdout/stderr.
+
+    ``limit`` is the StreamReader limit to hand the stdout reader, mirroring
+    the ``limit=`` kwarg the backend passes to ``create_subprocess_exec``.
+    ``None`` (default) keeps the reader unbounded (pre-fix mock behaviour).
+    """
 
     def __init__(
         self,
         stdout: str = "",
         stderr: str = "",
         returncode: int = 0,
+        limit: int | None = None,
     ):
         self.returncode = returncode
-        self.stdout = _MockStdoutReader(stdout.encode() if stdout else b"")
+        self.stdout = _MockStdoutReader(stdout.encode() if stdout else b"", limit=limit)
         self.stderr = _MockStderrReader(stderr.encode() if stderr else b"")
 
     async def wait(self) -> int:
@@ -2067,6 +2087,11 @@ def test_codex_large_unicode_jsonl_line_parses_successfully():
     _MAX_STREAM_BYTES + 1, a legitimately large event (here a 200 KiB
     multi-byte Unicode payload) is read by readline() and parsed — not
     truncated by the old 64 KiB default limit.
+
+    The mock reader enforces the *actual* limit the backend passes to
+    create_subprocess_exec, so this is a genuine guard: if the backend ever
+    stops raising the limit, the reader regains the 64 KiB default and the
+    >64 KiB line raises ValueError, failing the run to error.
     """
     backend = CodexBackend()
     spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
@@ -2080,7 +2105,17 @@ def test_codex_large_unicode_jsonl_line_parses_successfully():
     assert big_line_bytes > 64 * 1024, "test line must exceed the old 64 KiB limit"
 
     async def _run():
-        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        # Mirror the real spawn limit back into the mock reader. The backend
+        # calls create_subprocess_exec(*cmd, limit=...), so the cmd arrives as
+        # positional args and the limit as a kwarg.  When the backend omits
+        # ``limit`` we fall back to the real asyncio StreamReader default
+        # (asyncio.streams._DEFAULT_LIMIT == 64 KiB) so the mock models the
+        # pre-fix behaviour exactly — making this a genuine regression guard.
+        default = asyncio.streams._DEFAULT_LIMIT
+        def _spawn(*cmd, **kwargs):
+            return _MockProcess(stdout=jsonl, limit=kwargs.get("limit", default))
+
+        mock_exec = AsyncMock(side_effect=_spawn)
         with patch("asyncio.create_subprocess_exec", mock_exec):
             return await _run_backend(backend, spec)
 
