@@ -178,12 +178,15 @@ def test_poller_stderr_captured_without_abort():
         "}\n"
         "Write-Output 'SENTINEL_OK'\n"
         "if (($output -join ',') -notmatch 'boom') { exit 99 }\n"
+        "Write-Output ($output -join ',')\n"
         "exit 0\n"
     )
     proc = _run_pwsh(script)
     out = proc.stdout.decode(errors="replace")
     # The script ran to completion (sentinel emitted → no abort on stderr).
     assert "SENTINEL_OK" in out, f"script aborted before sentinel: {out} {proc.stderr.decode(errors='replace')}"
-    # The stderr text was captured into the output array.
+    # The captured stderr is echoed to stdout AFTER the script's own guard
+    # (`$output -join ',' -notmatch 'boom' → exit 99`) passes, so reaching the
+    # echo means the capture genuinely held the stderr text.
     assert "boom" in out, "native stderr must be captured as data"
     assert proc.returncode == 0

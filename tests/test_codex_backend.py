@@ -2109,13 +2109,18 @@ def test_codex_readline_valueerror_degrades_to_error_and_drains(monkeypatch):
         def __init__(self, residual: bytes):
             self._residual = residual
             self._res_pos = 0
-            self.readline_raised = False
+            self.readline_calls = 0
             self.read_calls = 0
             self.read_bytes_total = 0
 
         async def readline(self) -> bytes:
-            if not self.readline_raised:
-                self.readline_raised = True
+            self.readline_calls += 1
+            # Real StreamReader clears its internal buffer on the limit error,
+            # so any subsequent readline() would see an (already-drained) fresh
+            # stream. We track the call count to prove the backend does NOT
+            # re-loop readline() after the error — it breaks and drains via
+            # read() instead, so an unterminated pathological write can't hang.
+            if self.readline_calls == 1:
                 raise ValueError("Separator is not found, and chunk exceed the limit")
             return b""
 
@@ -2138,9 +2143,14 @@ def test_codex_readline_valueerror_degrades_to_error_and_drains(monkeypatch):
 
     # No exception escapes — this is the whole point of issue #251.
     result = asyncio.run(_run())
-    assert reader.readline_raised, "readline() must have been attempted (and raised)"
     assert result.subtype == "error", "an over-limit line must produce subtype=error"
     assert result.ok is False
+    # readline() was attempted exactly once (it raised the limit error); the
+    # backend then broke and drained via read() — it did NOT re-loop readline(),
+    # which on a pathological unterminated stream could block forever.
+    assert reader.readline_calls == 1, (
+        f"readline() must be called exactly once, got {reader.readline_calls}"
+    )
     # The drain loop consumed the residual via read() (not readline()).
     assert reader.read_calls >= 1
     assert reader.read_bytes_total == len(residual), "all residual data must be drained"
