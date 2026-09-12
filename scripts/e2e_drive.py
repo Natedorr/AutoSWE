@@ -12,10 +12,10 @@ import json
 import sys
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
 from autoswe.core.config import load_config, load_repos_config
 from autoswe.providers.factory import get_tracker
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 REPO = "Natedorr/testProject/testProject"
 
@@ -56,7 +56,8 @@ def cmd_read(ids: list[int]) -> None:
             who = "BOT" if "autoswe-bot" in (c.body or "") else c.author_login
             print(f"   [{c.id}] {who} | {c.body.replace(chr(10), ' / ')[:150]}")
         print()
-    q = json.load(open("data/queue.json"))
+    with open("data/queue.json") as f:
+        q = json.load(f)
     for k, task in q.items():
         if k.startswith("ado:") and task.get("issue_number") in ids:
             print(

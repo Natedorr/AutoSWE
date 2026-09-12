@@ -7,10 +7,10 @@ Usage: e2e_seed_tmp.py            (seed + post step-1)
 """
 import sys
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
 from autoswe.core.config import load_config, load_repos_config
 from autoswe.providers.factory import get_tracker
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 REPO = "Natedorr/testProject/testProject"
 

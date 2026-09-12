@@ -2,10 +2,10 @@
 import json
 import sys
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
 from autoswe.core.config import load_config, load_repos_config
 from autoswe.providers.factory import get_tracker
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 REPO = "Natedorr/testProject/testProject"
 
@@ -26,7 +26,8 @@ def main() -> None:
             print(f"   [{c.id}] {c.author_login} | {body}")
         print()
 
-    q = json.load(open("data/queue.json"))
+    with open("data/queue.json") as f:
+        q = json.load(f)
     for k, t in q.items():
         if k.startswith("ado:"):
             print(

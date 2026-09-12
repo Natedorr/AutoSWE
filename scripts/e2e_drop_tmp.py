@@ -2,17 +2,19 @@
 
 Usage: e2e_drop_tmp.py 188 190 ...   (defaults to 188 189 190)
 """
+import json
 import sys
+from urllib.parse import quote
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
+from autoswe.core.config import load_repos_config
 from autoswe.providers.azure.api import (
     _ado_api_version,
     _ado_request,
     _encode_path_segment,
     ado_get,
 )
-from autoswe.core.config import load_repos_config
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 REPO = "Natedorr/testProject/testProject"
 QUEUE = "data/queue.json"
@@ -46,7 +48,6 @@ def main() -> None:
 
     # 2) delete branches (ADO uses POST /refs with action=delete; needs the
     # ref's current objectId as newObjectId)
-    from urllib.parse import quote
     for i in ids:
         ref = f"refs/heads/autoswe/issue-{i}"
         refinfo = ado_get(_ado_api_version(f"{base}/refs?filterContains={quote(ref, safe='')}"), pat)
@@ -75,12 +76,13 @@ def main() -> None:
                 raise
 
     # 4) clear queue entries
-    import json
-    q = json.load(open(QUEUE))
+    with open(QUEUE) as f:
+        q = json.load(f)
     removed = [k for k in list(q) if any(f"_{i}" in k for i in ids)]
     for k in removed:
         del q[k]
-    json.dump(q, open(QUEUE, "w"), indent=2)
+    with open(QUEUE, "w") as f:
+        json.dump(q, f, indent=2)
     print("removed queue keys:", removed)
     print("done")
 
