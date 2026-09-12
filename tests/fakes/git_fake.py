@@ -88,10 +88,11 @@ class GitFake:
 
     def commit_and_push(self, wt: Path, owner: str, repo: str, issue_num: int,
                         msg: str, base_branch: str = "main",
-                        provider: str = "github") -> dict:
+                        provider: str = "github", *, before_sha: str | None = None) -> dict:
         self.calls.append({"func": "commit_and_push", "wt": str(wt), "owner": owner,
                            "repo": repo, "issue_num": issue_num, "msg": msg,
-                           "base_branch": base_branch, "provider": provider})
+                           "base_branch": base_branch, "provider": provider,
+                           "before_sha": before_sha})
         result = (self._scripted_commits[self._commit_index]
                   if self._commit_index < len(self._scripted_commits)
                   else {"committed": True, "commit_sha": "abc1234",

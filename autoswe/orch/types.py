@@ -57,6 +57,7 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("session_id", "session_id", None),
     TaskField("last_good_session_id", "last_good_session_id", None),
     TaskField("last_good_session_backend", "last_good_session_backend", None),
+    TaskField("last_replayed_command", "last_replayed_command", None),
     TaskField("pr_number", "pr_number", None),
     TaskField("guard_blocked", "_guard_blocked", False),
     TaskField("gh_closed", "gh_closed", False),
@@ -157,6 +158,14 @@ class TaskState:
     # fix (the SDK can't resolve a foreign-backend session id). Never cleared on
     # FAILED, mirroring last_good_session_id.
     last_good_session_backend: str | None = None
+    # The slash command a /retry actually REPLAYED (after its fallback rules:
+    # non-replayable -> /fix, /review on failed -> /fix). Set by emit() only for
+    # kind="retry"; a subsequent /retry follows THIS (the last substantive command
+    # that ran) instead of last_dispatched_command, which stays the literal
+    # "/retry" so the re-dispatch dedup in decide() can match it. A plain
+    # /plan / /fix / /review dispatch clears it (see emit()) so it never dangles
+    # past the retry that set it. None otherwise.
+    last_replayed_command: str | None = None
     created_at: str = ""
     last_synced: str = ""
     provider: str = "github"

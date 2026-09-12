@@ -271,6 +271,44 @@ def test_fetch_comments_empty(tracker, mock_ado_request, ado_route_table):
     assert result == []
 
 
+def test_fetch_comments_returns_ascending_despite_ado_descending_order(
+    tracker, mock_ado_request, ado_route_table
+):
+    """ADO's comments API returns newest-first; fetch_comments must return oldest-first.
+
+    Regression for the ADO auto-re-review bug: ADO returns comments descending
+    by id (unlike GitHub's ascending order), and every downstream consumer —
+    watermark detection, _find_last_completion_id's reversed() scan, resume
+    detection — assumes ascending order. Without the sort, the *oldest*
+    completion is treated as the last one, so a freshly-consumed /fix is
+    misread as a new user command and the post-fix auto re-review never fires.
+
+    The canonical fixture (list_workitem_comments.json) is descending; the
+    per-workitem fixtures were ascending, which masked this.
+    """
+    raw = {
+        "comments": [
+            # newest first — as ADO actually returns it
+            {"id": 3, "createdDate": "2026-04-01T10:35:00Z", "createdBy": {"uniqueName": "n@e.com"},
+             "text": "Completed with command `/fix`.<!-- autoswe-bot -->"},
+            {"id": 2, "createdDate": "2026-04-01T10:30:05Z", "createdBy": {"uniqueName": "n@e.com"},
+             "text": "/fix with guidance"},
+            {"id": 1, "createdDate": "2026-04-01T10:30:00Z", "createdBy": {"uniqueName": "n@e.com"},
+             "text": "/plan"},
+        ]
+    }
+    workitem = load_ado_fixture("workitem_open_with_plan.json")
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/42/comments")] = raw
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = workitem
+
+    result = tracker.fetch_comments(42)
+
+    # Ascending by id regardless of the API's descending order.
+    assert [c.id for c in result] == [1, 2, 3]
+    assert result[0].body == "/plan"
+    assert result[-1].body.startswith("Completed with command")
+
+
 def test_fetch_comments_same_author_normalization(tracker, mock_ado_request, ado_route_table):
     """When all comments share the same PAT author, bot/user must still be distinguished.
 
@@ -633,15 +671,14 @@ def test_set_status_preserves_non_autoswe_tags(tracker, mock_ado_request, ado_ro
     patch_call = mock_ado_request.calls[1]
     assert patch_call["method"] == "PATCH"
     patch_body = patch_call["body"]
-    # Two-op JSON-Patch: remove the field first, then add the full new set.
-    # (``add`` on System.Tags is additive on the server — the remove is what
-    # makes the write a true replace, issue #235.)
-    assert len(patch_body) == 2
-    assert patch_body[0] == {"op": "remove", "path": "/fields/System.Tags"}
-    assert patch_body[1]["op"] == "add"
-    assert patch_body[1]["path"] == "/fields/System.Tags"
+    # Single-op JSON-Patch: a lone ``replace`` on System.Tags sets the full
+    # tag set. ADO rejects two ops on the same field in one body (VS403691),
+    # and ``add`` is additive, so ``replace`` is what makes this a true set.
+    assert len(patch_body) == 1
+    assert patch_body[0]["op"] == "replace"
+    assert patch_body[0]["path"] == "/fields/System.Tags"
     # Should have feature; bug; autoswe:fixed (no autoswe:pending)
-    new_tags = patch_body[1]["value"]
+    new_tags = patch_body[0]["value"]
     assert "feature" in new_tags
     assert "bug" in new_tags
     assert "autoswe:fixed" in new_tags
@@ -661,8 +698,7 @@ def test_set_status_no_existing_tags(tracker, mock_ado_request, ado_route_table)
     assert len(mock_ado_request.calls) == 2
     patch_call = mock_ado_request.calls[1]
     assert patch_call["body"] == [
-        {"op": "remove", "path": "/fields/System.Tags"},
-        {"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending"},
+        {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:pending"},
     ]
 
 
@@ -682,7 +718,7 @@ def test_set_status_with_full_label_no_double_prefix(tracker, mock_ado_request, 
     tracker.set_status(100, "autoswe:pending")
 
     patch_call = mock_ado_request.calls[1]
-    tag_value = patch_call["body"][1]["value"]  # op[0] is the remove
+    tag_value = patch_call["body"][0]["value"]  # single replace op
     assert tag_value == "autoswe:pending"
     assert "autoswe:autoswe:pending" not in tag_value
 
@@ -698,11 +734,60 @@ def test_set_status_full_label_replaces_old_full_label(tracker, mock_ado_request
     tracker.set_status(100, "autoswe:fixing")
 
     patch_call = mock_ado_request.calls[1]
-    tag_value = patch_call["body"][1]["value"]  # op[0] is the remove
+    tag_value = patch_call["body"][0]["value"]  # single replace op
     assert "autoswe:fixing" in tag_value
     assert "autoswe:pending" not in tag_value
     assert "feature" in tag_value
     assert "bug" in tag_value
+
+
+def test_set_status_retries_once_on_patch_failure(tracker, mock_ado_request, ado_route_table):
+    """A transient PATCH failure (e.g. a race with another set_status call) is
+    retried once with a fresh GET, not lost silently.
+
+    Regression: live E2E on the Azure project showed work items landing with
+    no autoswe:* tag at all after a fast status transition, with no error in
+    the logs — the three unsynchronized set_status call sites in orch/loop.py
+    can race, and a failed PATCH used to just propagate/vanish without a
+    second attempt.
+    """
+    raw = {"id": 100, "fields": {"System.Tags": ""}}
+    patch_calls = {"n": 0}
+
+    def flaky_patch(method, path, pat, body=None):
+        patch_calls["n"] += 1
+        if patch_calls["n"] == 1:
+            raise RuntimeError("Azure API ... -> HTTP 400: conflict")
+        return {"id": 100, "rev": 2}
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = flaky_patch
+
+    tracker.set_status(100, "pending")
+
+    assert patch_calls["n"] == 2
+    # Retry re-GETs before the second PATCH: 2 GETs + 2 PATCHes = 4 calls.
+    assert len(mock_ado_request.calls) == 4
+    final_patch = [c for c in mock_ado_request.calls if c["method"] == "PATCH"][-1]
+    assert final_patch["body"] == [
+        {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:pending"},
+    ]
+
+
+def test_set_status_raises_after_retry_exhausted(tracker, mock_ado_request, ado_route_table):
+    """When both attempts fail, set_status raises rather than swallowing the
+    failure — callers (orch/loop.py) log it instead of losing the tag write
+    with no trace."""
+    raw = {"id": 100, "fields": {"System.Tags": ""}}
+
+    def always_fails(method, path, pat, body=None):
+        raise RuntimeError("Azure API ... -> HTTP 400: conflict")
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = always_fails
+
+    with pytest.raises(RuntimeError):
+        tracker.set_status(100, "pending")
 
 
 def test_set_status_removes_old_status_tag_on_server(ado_repo_cfg, azure_fake, monkeypatch):
@@ -710,9 +795,9 @@ def test_set_status_removes_old_status_tag_on_server(ado_repo_cfg, azure_fake, m
     tag on the work item.
 
     Runs the REAL AzureTracker.set_status against the stateful AzureFake, which
-    models ADO's additive ``add`` on System.Tags. If set_status ever regressed
-    to a single ``add`` op, the old tag would survive the write and this
-    assertion would fail.
+    models ADO's exact-set ``replace`` on System.Tags. If set_status ever
+    regressed to a single additive ``add`` op, the old tag would survive the
+    write and this assertion would fail.
     """
     import autoswe.providers.azure.api as ado_module
     from autoswe.providers.azure.tracker import AzureTracker
@@ -746,6 +831,48 @@ def test_set_status_removes_old_status_tag_on_server(ado_repo_cfg, azure_fake, m
         f"old autoswe:* tag survived the write (accumulation): {tags!r}"
     )
     assert "feature" in tags
+
+
+def test_azure_fake_rejects_duplicate_field_in_one_patch(azure_fake, monkeypatch):
+    """The fake enforces VS403691: two ops on one field in a patch body 400.
+
+    Faithful to ADO — the old two-op remove-then-add tag write was rejected
+    with HTTP 400 VS403691 ("A field cannot be updated more than once in the
+    same update"). The fake raises the same ``RuntimeError`` the real
+    ``_ado_request`` would surface, so a two-op tag write fails the offline
+    suite instead of the production box.
+    """
+    import autoswe.providers.azure.api as ado_module
+
+    azure_fake.load({
+        "org": "my-org", "project": "my-project", "repo": "repo",
+        "work_item": {"id": 42, "fields": {
+            "System.Id": 42, "System.State": "Active", "System.Title": "T",
+        }},
+        "tags": ["feature"], "comments": [],
+    })
+
+    def route_to_fake(method, path, pat, body=None,
+                      content_type="application/json", max_retries=3):
+        return azure_fake.handle_request(
+            method, path, pat, body=body, content_type=content_type
+        )
+
+    monkeypatch.setattr(ado_module, "_ado_request", route_to_fake)
+
+    # A two-op patch touching System.Tags twice must fail exactly like ADO.
+    with pytest.raises(RuntimeError, match="VS403691"):
+        route_to_fake(
+            "PATCH",
+            "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/42",
+            "pat",
+            body=[
+                {"op": "remove", "path": "/fields/System.Tags"},
+                {"op": "add", "path": "/fields/System.Tags", "value": "feature"},
+            ],
+        )
+    # The rejected write must not have mutated the tag set.
+    assert azure_fake.work_items[42]["fields"]["System.Tags"] == "feature"
 
 
 # -- assign_to_user --

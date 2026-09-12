@@ -16,6 +16,7 @@ from autoswe.harness.backends.base import RunResult, RunSpec
 from autoswe.harness.backends.codex import (
     _BYPASS_APPROVALS_AND_SANDBOX,
     _BYPASS_ENV_VAR,
+    _MAX_STREAM_BYTES,
     CodexBackend,
     _bypass_approvals,
     _CodexAccumulator,
@@ -82,19 +83,33 @@ def _make_success_jsonl(
 
 
 class _MockStdoutReader:
-    """Fake stdout reader supporting both readline() and read() (drain path)."""
+    """Fake stdout reader supporting both readline() and read() (drain path).
 
-    def __init__(self, data: bytes):
+    Optionally models the asyncio StreamReader ``limit`` (issue #251).  When
+    ``limit`` is set, a line longer than ``limit`` makes ``readline()`` raise
+    ``ValueError`` exactly as the real StreamReader does on a limit overrun,
+    so tests can prove that the backend's ``limit=_MAX_STREAM_BYTES + 1``
+    kwarg genuinely keeps a large single line readable rather than
+    silently passing with an unbounded reader.  ``limit=None`` (the default)
+    leaves ``readline()`` unbounded, matching the pre-fix mock behaviour.
+    """
+
+    def __init__(self, data: bytes, limit: int | None = None):
         self._data = data
         self._pos = 0
         self._lines = data.splitlines(keepends=True)
         self._line_pos = 0
+        self._limit = limit
 
     async def readline(self) -> bytes:
         if self._line_pos < len(self._lines):
             line = self._lines[self._line_pos]
             self._line_pos += 1
             self._pos += len(line)
+            if self._limit is not None and len(line) > self._limit:
+                # Real StreamReader on overrun: raise ValueError wrapping the
+                # LimitOverrunError; the loop buffer is then drained via read().
+                raise ValueError("Separator is not found, and chunk exceed the limit")
             return line
         return b""
 
@@ -126,16 +141,22 @@ class _MockStderrReader:
 
 
 class _MockProcess:
-    """Fake asyncio subprocess process with controllable stdout/stderr."""
+    """Fake asyncio subprocess process with controllable stdout/stderr.
+
+    ``limit`` is the StreamReader limit to hand the stdout reader, mirroring
+    the ``limit=`` kwarg the backend passes to ``create_subprocess_exec``.
+    ``None`` (default) keeps the reader unbounded (pre-fix mock behaviour).
+    """
 
     def __init__(
         self,
         stdout: str = "",
         stderr: str = "",
         returncode: int = 0,
+        limit: int | None = None,
     ):
         self.returncode = returncode
-        self.stdout = _MockStdoutReader(stdout.encode() if stdout else b"")
+        self.stdout = _MockStdoutReader(stdout.encode() if stdout else b"", limit=limit)
         self.stderr = _MockStderrReader(stderr.encode() if stderr else b"")
 
     async def wait(self) -> int:
@@ -672,6 +693,46 @@ def test_codex_basic_run():
     assert result.session_id == "sess-codex-1"
     assert result.subtype == "success"
     assert result.duration_seconds >= 0
+
+
+def test_codex_returncode_read_via_wait_not_attribute():
+    """A successful run is reaped via ``await process.wait()``, not the attribute.
+
+    Regression for the Windows proactor loop: after the pipe drain the
+    ``process.returncode`` attribute is still ``None`` (the child has not been
+    reaped yet), so reading it directly misclassifies a clean exit as
+    ``subtype: error``. The backend must call ``await process.wait()`` to obtain
+    the real exit code. This mock models that: the attribute stays ``None``
+    until ``wait()`` is awaited, which then sets it and returns the code.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(prompt="Fix the bug", cwd="/tmp/repo",
+                   model="gpt-5.6-terra", mode="read_write")
+    jsonl = _make_success_jsonl(thread_id="sess-wait", agent_texts=["ok"])
+
+    class _UnreapedProcess(_MockProcess):
+        def __init__(self, stdout: str):
+            super().__init__(stdout=stdout)
+            self.returncode = None  # not yet reaped
+            self._final = 0
+
+        async def wait(self) -> int:
+            self.returncode = self._final
+            return self.returncode
+
+    proc = _UnreapedProcess(jsonl)
+    assert proc.returncode is None  # precondition: not reaped
+
+    async def _run():
+        with patch("asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=proc)):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.subtype == "success", (
+        f"a clean exit must be reaped to success, got {result.subtype}"
+    )
+    assert result.ok is True
 
 
 def test_codex_run_calls_with_correct_flags(monkeypatch):
@@ -2028,6 +2089,146 @@ def test_codex_stream_limit_drains_pipe_after_truncation(monkeypatch):
         f"Reader should drain all data: pos={tracked._pos}, total={len(stdout_data)}"
     )
     assert result.subtype == "error"
+
+
+# ---------------------------------------------------------------------------
+# StreamReader limit tests — issue #251 (large single JSONL line)
+
+
+def test_codex_spawn_passes_stream_reader_limit(monkeypatch):
+    """create_subprocess_exec is called with limit=_MAX_STREAM_BYTES + 1.
+
+    Without this, asyncio uses the default 64 KiB StreamReader limit and a
+    single JSONL line larger than that makes readline() raise ValueError
+    (uncaught, not retryable) — crashing the poller.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    jsonl = _make_success_jsonl()
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(stdout=jsonl))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec
+
+    mock_exec = asyncio.run(_run())
+    assert mock_exec.call_count == 1
+    # limit is a kwarg to create_subprocess_exec, so it lands in call_args.kwargs
+    # (not in the *cmd spread positional args).
+    assert mock_exec.call_args.kwargs.get("limit") == _MAX_STREAM_BYTES + 1
+
+
+def test_codex_large_unicode_jsonl_line_parses_successfully():
+    """A single JSONL line whose UTF-8 bytes exceed 64 KiB parses to success.
+
+    Regression for issue #251: with the StreamReader limit raised to
+    _MAX_STREAM_BYTES + 1, a legitimately large event (here a 200 KiB
+    multi-byte Unicode payload) is read by readline() and parsed — not
+    truncated by the old 64 KiB default limit.
+
+    The mock reader enforces the *actual* limit the backend passes to
+    create_subprocess_exec, so this is a genuine guard: if the backend ever
+    stops raising the limit, the reader regains the 64 KiB default and the
+    >64 KiB line raises ValueError, failing the run to error.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    # A 200 KiB run of 2-byte UTF-8 chars (€ = 3 bytes) — well past the old
+    # 64 KiB StreamReader default and comfortably under _MAX_STREAM_BYTES.
+    big_text = "€" * 200_000
+    jsonl = _make_success_jsonl(thread_id="thread-big", agent_texts=[big_text])
+    # The agent_message line alone is ~600 KB of UTF-8 bytes on one line.
+    big_line_bytes = max(len(line.encode("utf-8")) for line in jsonl.splitlines())
+    assert big_line_bytes > 64 * 1024, "test line must exceed the old 64 KiB limit"
+
+    async def _run():
+        # Mirror the real spawn limit back into the mock reader. The backend
+        # calls create_subprocess_exec(*cmd, limit=...), so the cmd arrives as
+        # positional args and the limit as a kwarg.  When the backend omits
+        # ``limit`` we fall back to the real asyncio StreamReader default
+        # (asyncio.streams._DEFAULT_LIMIT == 64 KiB) so the mock models the
+        # pre-fix behaviour exactly — making this a genuine regression guard.
+        default = asyncio.streams._DEFAULT_LIMIT
+        def _spawn(*cmd, **kwargs):
+            return _MockProcess(stdout=jsonl, limit=kwargs.get("limit", default))
+
+        mock_exec = AsyncMock(side_effect=_spawn)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    result = asyncio.run(_run())
+    assert result.subtype == "success"
+    assert result.session_id == "thread-big"
+    # The large multi-byte payload round-trips intact.
+    assert big_text in result.text
+
+
+def test_codex_readline_valueerror_degrades_to_error_and_drains(monkeypatch):
+    """A single line over the StreamReader limit yields an error, not a crash.
+
+    Simulates readline() raising ValueError (the wrapped LimitOverrunError
+    that asyncio raises when a line exceeds the configured limit) on the
+    first line, then verifies the backend: flags turn_failed, drains the
+    remaining stdout (via read(), not readline()), returns subtype='error',
+    and lets no exception escape.
+    """
+    backend = CodexBackend()
+    spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
+
+    class _OverLimitStdoutReader:
+        """readline() raises ValueError on first call, then read() drains to EOF."""
+
+        def __init__(self, residual: bytes):
+            self._residual = residual
+            self._res_pos = 0
+            self.readline_calls = 0
+            self.read_calls = 0
+            self.read_bytes_total = 0
+
+        async def readline(self) -> bytes:
+            self.readline_calls += 1
+            # Real StreamReader clears its internal buffer on the limit error,
+            # so any subsequent readline() would see an (already-drained) fresh
+            # stream. We track the call count to prove the backend does NOT
+            # re-loop readline() after the error — it breaks and drains via
+            # read() instead, so an unterminated pathological write can't hang.
+            if self.readline_calls == 1:
+                raise ValueError("Separator is not found, and chunk exceed the limit")
+            return b""
+
+        async def read(self, size: int = -1) -> bytes:
+            self.read_calls += 1
+            out = self._residual[self._res_pos:self._res_pos + size]
+            self._res_pos += len(out)
+            self.read_bytes_total += len(out)
+            return out
+
+    residual = b"trailing-data\n" * 100  # ~1.8 KB to drain after the failure
+    reader = _OverLimitStdoutReader(residual)
+    proc = _MockProcess(stdout="", returncode=0)
+    proc.stdout = reader
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await _run_backend(backend, spec)
+
+    # No exception escapes — this is the whole point of issue #251.
+    result = asyncio.run(_run())
+    assert result.subtype == "error", "an over-limit line must produce subtype=error"
+    assert result.ok is False
+    # readline() was attempted exactly once (it raised the limit error); the
+    # backend then broke and drained via read() — it did NOT re-loop readline(),
+    # which on a pathological unterminated stream could block forever.
+    assert reader.readline_calls == 1, (
+        f"readline() must be called exactly once, got {reader.readline_calls}"
+    )
+    # The drain loop consumed the residual via read() (not readline()).
+    assert reader.read_calls >= 1
+    assert reader.read_bytes_total == len(residual), "all residual data must be drained"
 
 
 # ---------------------------------------------------------------------------

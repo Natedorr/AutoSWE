@@ -2,8 +2,15 @@
 
 Before a plan/fix/review dispatch, this module checks whether the target
 worktree has a CLAUDE.md.  If not, it runs a short, backend-agnostic
-coding session to analyze the repo and write one.  The file is committed
-to the issue branch so it persists across runs and shows up in the PR.
+coding session to analyze the repo and write one, so the coding agent has
+a project guide for the session.
+
+The file is **git-excluded, not committed**: ``autoswe.vcs.worktree``
+writes ``CLAUDE.md`` into the shared repo-local git exclude (finding C2),
+so it stays in the worktree for the agent but is never added to the
+per-issue branch.  The ``commit_and_push`` call below is therefore a
+natural no-op in the normal case (no non-excluded changes to commit) and
+is kept only as a fallback should the exclude ever be absent.
 
 The entire flow is **non-fatal**: any failure logs a warning and returns,
 letting the actual dispatch proceed normally.
@@ -50,15 +57,26 @@ def ensure_claude_md(
     if os.environ.get("AUTOSWE_SKIP_INIT_SESSION"):
         return
 
-    claude_md = wt / "CLAUDE.md"
-    if claude_md.exists():
-        return  # Already present — nothing to do
-
     owner = task["owner"]
     repo = task["repo"]
     issue_num = task["issue_number"]
     base_branch = task.get("base_branch", "main")
     provider = repo_cfg.get("provider", "github")
+
+    # Ensure the shared repo-local git exclude is in place BEFORE any session
+    # runs. This is the reliable hook (runs on every phase, including reused
+    # worktrees that never re-invoke ensure_clone): it keeps build artifacts and
+    # the CLAUDE.md we're about to generate off the per-issue branch so the
+    # reviewer never flags them (finding C2). No-op if the main clone is absent.
+    from autoswe.vcs.worktree import _ensure_repo_exclude, main_clone_path
+
+    main = main_clone_path(owner, repo, cfg, provider)
+    if (main / ".git").exists():
+        _ensure_repo_exclude(main)
+
+    claude_md = wt / "CLAUDE.md"
+    if claude_md.exists():
+        return  # Already present — nothing to do
 
     try:
         if progress_callback:

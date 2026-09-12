@@ -231,17 +231,48 @@ class FakeStreamReader:
         return b""
 
 
+class FakeStdin:
+    """Async stdin sink that records the bytes the backend writes to it.
+
+    The PiBackend delivers the prompt over stdin (not the command line) so a
+    /fix-sized prompt never hits Windows' ``cmd /c`` ~8191-char limit. This
+    records what is written so tests can assert the prompt went to stdin
+    (and that the command line stayed short). ``record`` is a callback handed
+    the decoded prompt text so the owning call record can capture it.
+    """
+
+    def __init__(self, record=None):
+        self._record = record
+        self._buf = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self._buf.extend(data)
+
+    async def drain(self) -> None:
+        """When all buffered data is "flushed", hand the prompt to record."""
+        if self._record is not None and self._buf:
+            self._record(self._buf.decode("utf-8"))
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeProcess:
     """Subprocess stand-in for asyncio.create_subprocess_exec.
 
     The PiBackend reads ``process.stdout.readline()`` in a loop and
-    ``process.stderr.read()`` concurrently. This fake feeds prebuilt
-    ``--mode json`` lines on stdout and empty stderr.
+    ``process.stderr.read()`` concurrently, and writes the prompt to
+    ``process.stdin`` (merged by pi into the initial message). This fake
+    feeds prebuilt ``--mode json`` lines on stdout, empty stderr, and a
+    stdin sink that records the written prompt via *record*.
     """
 
-    def __init__(self, stdout_lines: list[str], returncode: int = 0):
+    def __init__(self, stdout_lines: list[str], returncode: int = 0,
+                 record_prompt=None):
         self.stdout = FakeStreamReader(stdout_lines)
         self.stderr = FakeStreamReader([])  # stderr always empty
+        self.stdin = FakeStdin(record=record_prompt)
         self.returncode = returncode
         self.killed = False
 
@@ -282,10 +313,16 @@ def _parse_command(cmd: list[str]) -> dict:
     Records the session flags (``--session-id`` fresh / ``--session`` resume /
     ``--fork`` + ``--session-id`` fork), the tool allowlist/denylist, the
     project-trust ``--approve`` flag, the model/provider, the ``--api-key``
-    value, and the prompt (the arg after the ``--`` separator).  Convenience
-    booleans ``is_fresh`` / ``is_resume`` / ``is_fork`` mirror the three
-    session cases; ``prefix`` records a Windows ``["cmd", "/c"]`` shim prefix
-    when one was prepended for a ``.cmd``/``.bat`` executable.
+    value, and the flags' presence.  The prompt is NOT on the command line —
+    the backend delivers it over stdin (pi merges piped stdin into the initial
+    message), so it is recorded separately on the call dict under ``prompt``
+    (populated by the FakeStdin sink) rather than parsed from argv.  This also
+    means the command line stays short regardless of prompt length, which is
+    exactly the property under test (Windows ``cmd /c`` caps the command line
+    at ~8191 chars).  Convenience booleans ``is_fresh`` / ``is_resume`` /
+    ``is_fork`` mirror the three session cases; ``prefix`` records a Windows
+    ``["cmd", "/c"]`` shim prefix when one was prepended for a ``.cmd``/``.bat``
+    executable.
     """
     result: dict[str, Any] = {"cmd": list(cmd)}
 
@@ -330,12 +367,14 @@ def _parse_command(cmd: list[str]) -> dict:
 
     result.setdefault("approve", False)
 
-    # Prompt is after the "--" separator.
-    try:
-        sep_idx = cmd.index("--")
-        result["prompt_prefix"] = (cmd[sep_idx + 1] if sep_idx + 1 < len(cmd) else "")[:80]
-    except ValueError:
-        result["prompt_prefix"] = ""
+    # The prompt is delivered over stdin, not the command line, so it is NOT
+    # parsed from argv here. ``prompt`` / ``prompt_prefix`` are seeded empty and
+    # filled in by the FakeStdin sink when the backend writes the prompt (see
+    # FakeProcess / _make_process). This is the whole point of the stdin
+    # transport: no matter how long the prompt is, it never appears in `cmd`,
+    # so the command line stays under Windows' ~8191-char `cmd /c` limit.
+    result["prompt"] = ""
+    result["prompt_prefix"] = ""
 
     result["is_fork"] = "fork" in result
     result["is_resume"] = "resume" in result
@@ -526,12 +565,21 @@ class PiFake:
             handles the await).
             """
             # Record the parsed command
-            self.calls.append(_parse_command(list(cmd)))
+            call = _parse_command(list(cmd))
+            self.calls.append(call)
 
             # Build the JSONL response
             lines, returncode = self._next_jsonl()
             self._call_index += 1
-            return FakeProcess(lines, returncode=returncode)
+            # The prompt arrives on stdin, not argv: when the backend writes it
+            # to the fake stdin, record it on the call dict so tests can assert
+            # it (and confirm the command line stayed short).
+            def _record_prompt(text: str) -> None:
+                call["prompt"] = text
+                call["prompt_prefix"] = text[:80]
+
+            return FakeProcess(lines, returncode=returncode,
+                               record_prompt=_record_prompt)
 
         async def fake_create_subprocess_exec(*cmd, **kwargs):
             return _make_process(cmd)

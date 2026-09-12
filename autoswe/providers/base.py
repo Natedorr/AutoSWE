@@ -123,6 +123,17 @@ class IssueTracker(Protocol):
     def fetch_issue(self, issue_number: int) -> NormalizedIssue:
         """Fetch a single issue by number."""
 
+    # Capability: does posting a comment advance the issue's "last updated"
+    # timestamp?  The poller's comment-fetch skip (providers/adapter.read_api)
+    # relies on the work item / issue's updated timestamp to decide whether to
+    # re-fetch comments.  On GitHub a comment advances `updated_at`, so the skip
+    # is sound; on Azure DevOps a comment does NOT advance `System.ChangedDate`
+    # (only field changes do), so a comment-only change would never re-trigger
+    # the fetch and the poller would miss the user's slash command.  Providers
+    # where comments do not bump the timestamp must set this to False so
+    # read_api always re-fetches.
+    comments_bump_updated: bool = True
+
     def fetch_comments(self, issue_number: int) -> list[NormalizedComment]:
         """Fetch all comments on an issue."""
 

@@ -49,6 +49,16 @@ def read_api(
     prev_updated = prev_updated or {}
     force_fetch = force_fetch or set()
 
+    # Whether the provider advances the issue's updated timestamp when a
+    # comment is posted.  The "unchanged timestamp -> skip" shortcut below is
+    # only sound when that is true (GitHub: a comment bumps `updated_at`).  On
+    # Azure DevOps a comment does NOT bump `System.ChangedDate`, so relying on
+    # it means a user's new `/fix`/`/pr` is never re-fetched and the poller
+    # stalls (issue: comments not seen after autoSWE's own tag write advanced
+    # the stored timestamp).  Providers without the capability default to True
+    # so the GitHub fast path is unchanged.
+    comments_bump = getattr(tracker, "comments_bump_updated", True)
+
     issues = tracker.list_open_issues()
 
     result: dict[int, ApiState] = {}
@@ -60,6 +70,8 @@ def read_api(
         # - issue is force-fetched
         # - no stored timestamp or provider gave no timestamp
         # - timestamp changed
+        # - provider doesn't bump the timestamp on comments (Azure) — the
+        #   timestamp can't signal a new comment, so always re-fetch
         stored = prev_updated.get(num)
         current = issue.last_updated
         should_fetch = (
@@ -68,6 +80,7 @@ def read_api(
             or stored is None
             or current is None
             or current != stored
+            or not comments_bump
         )
 
         if should_fetch:

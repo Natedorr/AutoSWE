@@ -189,6 +189,96 @@ class TestWorkingTree:
 
 
 # ------------------------------------------------------------------
+# Group B7: Build-artifact / CLAUDE.md exclusion (finding C2)
+# ------------------------------------------------------------------
+
+
+def _tracked(wt: Path) -> set[str]:
+    """Set of repo-relative paths currently tracked (committed) in the worktree."""
+    out = subprocess.run(
+        ["git", "-C", str(wt), "ls-files"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    return {line for line in out.splitlines() if line.strip()}
+
+
+class TestArtifactExclusion:
+    """B7: build artifacts + auto-generated CLAUDE.md stay off the branch.
+
+    The shared repo-local git exclude (written by ensure_clone) plus the
+    pathspec on commit_and_push's `git add -A` keep __pycache__/, *.pyc,
+    .pytest_cache/ and CLAUDE.md out of every issue branch — the root cause of
+    the review_failed loop in live E2E finding C2.
+    """
+
+    def test_B7a_repo_exclude_written_by_ensure_clone(self, git_world: GitWorld):
+        """B7a: ensure_clone (via make_main_clone) seeds main/.git/info/exclude."""
+        world = git_world
+        world.init_remote(initial_files={"README.md": "# test"})
+        main = world.make_main_clone()
+
+        exclude = main / ".git" / "info" / "exclude"
+        assert exclude.exists()
+        body = exclude.read_text(encoding="utf-8")
+        for line in ("__pycache__/", "*.pyc", ".pytest_cache/", "CLAUDE.md"):
+            assert line in body
+
+    def test_B7b_commit_and_push_skips_build_artifacts_and_claude_md(
+        self, git_world: GitWorld,
+    ):
+        """B7b: a /fix commit carries the source change, not pycache/CLAUDE.md."""
+        world = git_world
+        world.init_remote(initial_files={"src/toolbox.py": "x = 1\n"})
+        world.make_main_clone()
+        wt = world.make_worktree(1)
+
+        # The real code change.
+        world.write(wt, "src/toolbox.py", "x = 2\n")
+        # Artifacts a pytest run leaves behind, plus the auto-generated guide.
+        world.write(wt, "src/__pycache__/toolbox.cpython-312.pyc", "junk")
+        world.write(wt, ".pytest_cache/CACHEDIR.TAG", "junk")
+        world.write(wt, "CLAUDE.md", "generated project guide")
+
+        result = commit_and_push(wt, world.owner, world.repo, 1, "add change")
+
+        assert result["committed"] is True
+        tracked = _tracked(wt)
+        assert "src/toolbox.py" in tracked
+        assert "src/__pycache__/toolbox.cpython-312.pyc" not in tracked
+        assert ".pytest_cache/CACHEDIR.TAG" not in tracked
+        assert "CLAUDE.md" not in tracked
+        # The excluded files remain on disk for the next session.
+        assert (wt / "CLAUDE.md").exists()
+        assert (wt / "src/__pycache__/toolbox.cpython-312.pyc").exists()
+
+    def test_B7c_claude_md_survives_review_clean_fd(self, git_world: GitWorld):
+        """B7c: an excluded CLAUDE.md survives the review's `git clean -fd`.
+
+        The review phase runs ensure_worktree_unchanged, which `git clean -fd`s
+        the worktree. If CLAUDE.md were merely untracked (not git-ignored) the
+        clean would delete it and flag the worktree dirty, regenerating the
+        churn. Git-ignoring it keeps the worktree clean and the file intact.
+        """
+        world = git_world
+        world.init_remote(initial_files={"README.md": "# test"})
+        world.make_main_clone()
+        wt = world.make_worktree(1)
+
+        world.write(wt, "CLAUDE.md", "generated project guide")
+
+        from autoswe.vcs.worktree import ensure_worktree_unchanged
+
+        head_before = subprocess.run(
+            ["git", "-C", str(wt), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        rolled_back = ensure_worktree_unchanged(wt, head_before)
+
+        assert (wt / "CLAUDE.md").exists(), "CLAUDE.md was deleted by git clean -fd"
+        assert rolled_back is False, "worktree flagged dirty for the (excluded) CLAUDE.md"
+
+
+# ------------------------------------------------------------------
 # Group C: Local-vs-remote divergence
 # ------------------------------------------------------------------
 

@@ -146,7 +146,9 @@ def _build_welcome_comment(slash_cmd: str, guidance: str, slug: str, bot_name: s
     else:
         template = (
             "autoSWE picked up this issue (`{{SLUG}}`).\n\n"
-            "**Available Commands:**\n"
+            "<details>\n"
+            "<summary>Commands</summary>\n"
+            "\n"
             "- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n"
             "- `/plan --branch <name>` - Plan on a specific branch (default: main)\n"
             "- `/fix` - Implement the fix (runs Claude with code-editing permissions; restarts a failed/error task)\n"
@@ -158,8 +160,11 @@ def _build_welcome_comment(slash_cmd: str, guidance: str, slug: str, bot_name: s
             "- `/sync` - Pull the branch from upstream to keep it up to date\n"
             "- `/retry` - Retry a failed task (resets attempt counter)\n"
             "- `/skip` - Skip this issue\n"
-            "- `/abort` - Cancel the current task\n\n"
+            "- `/abort` - Cancel the current task\n"
+            "\n"
             "You can add guidance: `/fix with performance focus`\n"
+            "\n"
+            "</details>\n"
             "\n<!-- autoswe-bot -->"
         )
         template = template.replace("{bot_name}", bot_name)
@@ -990,8 +995,10 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                         )
                     )
                     task_entry["autoswe_status"] = closed_status
-                    with contextlib.suppress(RuntimeError):
+                    try:
                         tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
+                    except RuntimeError as e:
+                        log(f"[WARN] {slug}: could not set closed-status tag {closed_status!r}: {e}")
                     log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
                 continue
             if task_entry.get("gh_closed", False):
@@ -1013,10 +1020,12 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             if qs in _MIRROR_STATUSES:
                 api_state = api_states.get(task_entry["issue_number"])
                 if api_state is not None and api_state.issue.status != qs:
-                    with contextlib.suppress(RuntimeError):
+                    try:
                         tracker.set_status(
                             task_entry["issue_number"], f"autoswe:{qs}"
                         )
+                    except RuntimeError as e:
+                        log(f"[WARN] {slug}: could not mirror status tag {qs!r}: {e}")
 
         # --- Phase 4: Auto-purge worktrees for gone remote branches ---
         # When a remote autoswe/issue-N branch is deleted (PR merged +

@@ -544,3 +544,87 @@ def test_build_conflict_resolution_prompt_uses_custom_template(
     assert "Plan" in prompt
 
 
+# ---------------------------------------------------------------------------
+# {{OUTPUT_FORMAT_NOTE}} gating on the structured_output capability
+# ---------------------------------------------------------------------------
+
+
+def test_output_format_note_present_only_for_structured_output():
+    """The JSON-schema note is emitted only when the backend has the capability.
+
+    pi/codex have no ``structured_output`` capability and never receive an
+    ``output_format``, so the note must be dropped for them — otherwise the
+    prompt still tells the model to emit a JSON blob the backend will never
+    parse (issue #235 follow-up).
+    """
+    from autoswe.harness.prompts import _output_format_note
+
+    # structured_output backend (Claude Code): note present, distinct per kind.
+    review = _output_format_note(True, "review")
+    plan = _output_format_note(True, "plan")
+    assert "JSON schema" in review
+    assert "report_markdown" in review
+    assert "JSON schema" in plan
+    assert "is_plan_ready" in plan
+    assert review != plan
+
+    # Non-structured-output backend (pi/codex): note dropped, empty string.
+    assert _output_format_note(False, "review") == ""
+    assert _output_format_note(False, "plan") == ""
+
+
+def test_bundled_review_prompt_omits_schema_note_for_pi():
+    """Building a review prompt for a non-structured-output backend renders the
+    bundled review.txt with no JSON-schema instruction and no leaked placeholder.
+    """
+    from autoswe.harness.prompts import _output_format_note, build_review_prompt
+
+    repo_root = Path(__file__).resolve().parent.parent
+    review_txt = repo_root / "config" / "prompts" / "review.txt"
+
+    task = {
+        "owner": "o", "repo": "r", "issue_number": 235,
+        "title": "T", "body": "B", "base_branch": "main", "_token": "tok",
+    }
+    # pi has no structured_output capability → empty note.
+    prompt = build_review_prompt(
+        task,
+        repo_root="/tmp",
+        repo_cfg={"review_prompt": str(review_txt)},
+        plan_text="Plan",
+        diff_stat="stat",
+        diff_text="diff",
+        output_format_note=_output_format_note(False, "review"),
+    )
+    assert "JSON schema" not in prompt
+    assert "report_markdown" not in prompt
+    assert "{{" not in prompt  # placeholder erased, not left dangling
+
+
+def test_bundled_review_prompt_includes_schema_note_for_claude_code():
+    """A structured-output backend keeps the JSON-schema instruction in the
+    bundled review prompt (no behavior change for Claude Code).
+    """
+    from autoswe.harness.prompts import _output_format_note, build_review_prompt
+
+    repo_root = Path(__file__).resolve().parent.parent
+    review_txt = repo_root / "config" / "prompts" / "review.txt"
+
+    task = {
+        "owner": "o", "repo": "r", "issue_number": 235,
+        "title": "T", "body": "B", "base_branch": "main", "_token": "tok",
+    }
+    prompt = build_review_prompt(
+        task,
+        repo_root="/tmp",
+        repo_cfg={"review_prompt": str(review_txt)},
+        plan_text="Plan",
+        diff_stat="stat",
+        diff_text="diff",
+        output_format_note=_output_format_note(True, "review"),
+    )
+    assert "JSON schema" in prompt
+    assert "report_markdown" in prompt
+    assert "{{" not in prompt
+
+
