@@ -6,7 +6,7 @@
 # is the TypeScript package), so capping adds churn without protection.
 # Minimum CLI to run everything: v2.1.233 (CLAUDE_CODE_ENABLE_TODO_TOOLS floor;
 # also satisfies the Opus 5 floor). tests/test_sdk_version.py enforces this floor.
-claude-agent-sdk>=0.2.137
+claude-agent-sdk>=0.2.152
 # Pinned to the 1.x line: that is the major exercised by CI and by
 # mcp_servers/autoswe_inline_comment_server.py (unconditional v1 imports).
 # The mcp>=2.0 branch in mcp_servers/autoswe_comment_server.py is a
