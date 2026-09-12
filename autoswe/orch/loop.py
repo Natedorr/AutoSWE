@@ -995,8 +995,10 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                         )
                     )
                     task_entry["autoswe_status"] = closed_status
-                    with contextlib.suppress(RuntimeError):
+                    try:
                         tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
+                    except RuntimeError as e:
+                        log(f"[WARN] {slug}: could not set closed-status tag {closed_status!r}: {e}")
                     log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
                 continue
             if task_entry.get("gh_closed", False):
@@ -1018,10 +1020,12 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             if qs in _MIRROR_STATUSES:
                 api_state = api_states.get(task_entry["issue_number"])
                 if api_state is not None and api_state.issue.status != qs:
-                    with contextlib.suppress(RuntimeError):
+                    try:
                         tracker.set_status(
                             task_entry["issue_number"], f"autoswe:{qs}"
                         )
+                    except RuntimeError as e:
+                        log(f"[WARN] {slug}: could not mirror status tag {qs!r}: {e}")
 
         # --- Phase 4: Auto-purge worktrees for gone remote branches ---
         # When a remote autoswe/issue-N branch is deleted (PR merged +

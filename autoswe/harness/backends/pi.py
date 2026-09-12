@@ -886,16 +886,26 @@ def _parse_line(line: str, acc: _PiAccumulator, callback) -> None:
             if callback:
                 callback(f"Tool: {_tool_label(event)}")
         else:
-            # End: surface a failing tool so the operator sees it live.  Per
-            # the plan, a tool result carrying isError: true sets the run's
-            # error flag (mirrors how a tool failure is a signal something
-            # went wrong).  Tradeoff: a routine nonzero-exit tool (e.g. a
-            # grep that matches nothing) also flips the subtype to "error" —
-            # accepted per the explicit spec ("extension_error and isError set
-            # the error flag").
+            # End: surface a failing tool so the operator sees it live.
+            #
+            # A tool result with isError: true is NOT a run-level failure. pi's
+            # contract is that a tool error is "caught, reported to the LLM
+            # with isError: true, and execution continues" (docs/pi/extensions.md)
+            # — the model sees the failure and normally recovers (retries the
+            # command, works around it). Sinking the whole run's subtype to
+            # "error" on any isError therefore mislabels a run that completed
+            # cleanly (rc 0, agent_end reached, valid final message) as a
+            # failure: a single transient bash nonzero exit — e.g. a grep that
+            # matched nothing, or a pytest run the agent then fixed — would
+            # discard real, verified work and force a /retry. Whether the fix
+            # actually landed is decided downstream by whether it produced
+            # committable changes (commit_and_push's committed flag) and the
+            # post-fix test gate, not by a mid-run tool exit code. So we log
+            # the failure for the operator but do NOT set the run's error flag.
+            # (extension_error / error events and stream overflow DO set
+            # has_error — those are genuine process-level failures.)
             if event.get("isError"):
-                log(f"[PI] tool {event.get('toolName')} failed (isError)")
-                acc.has_error = True
+                log(f"[PI] tool {event.get('toolName')} failed (isError) — run continues")
             elif callback:
                 callback(f"Tool done: {_tool_label(event)}")
 

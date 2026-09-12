@@ -741,6 +741,55 @@ def test_set_status_full_label_replaces_old_full_label(tracker, mock_ado_request
     assert "bug" in tag_value
 
 
+def test_set_status_retries_once_on_patch_failure(tracker, mock_ado_request, ado_route_table):
+    """A transient PATCH failure (e.g. a race with another set_status call) is
+    retried once with a fresh GET, not lost silently.
+
+    Regression: live E2E on the Azure project showed work items landing with
+    no autoswe:* tag at all after a fast status transition, with no error in
+    the logs — the three unsynchronized set_status call sites in orch/loop.py
+    can race, and a failed PATCH used to just propagate/vanish without a
+    second attempt.
+    """
+    raw = {"id": 100, "fields": {"System.Tags": ""}}
+    patch_calls = {"n": 0}
+
+    def flaky_patch(method, path, pat, body=None):
+        patch_calls["n"] += 1
+        if patch_calls["n"] == 1:
+            raise RuntimeError("Azure API ... -> HTTP 400: conflict")
+        return {"id": 100, "rev": 2}
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = flaky_patch
+
+    tracker.set_status(100, "pending")
+
+    assert patch_calls["n"] == 2
+    # Retry re-GETs before the second PATCH: 2 GETs + 2 PATCHes = 4 calls.
+    assert len(mock_ado_request.calls) == 4
+    final_patch = [c for c in mock_ado_request.calls if c["method"] == "PATCH"][-1]
+    assert final_patch["body"] == [
+        {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:pending"},
+    ]
+
+
+def test_set_status_raises_after_retry_exhausted(tracker, mock_ado_request, ado_route_table):
+    """When both attempts fail, set_status raises rather than swallowing the
+    failure — callers (orch/loop.py) log it instead of losing the tag write
+    with no trace."""
+    raw = {"id": 100, "fields": {"System.Tags": ""}}
+
+    def always_fails(method, path, pat, body=None):
+        raise RuntimeError("Azure API ... -> HTTP 400: conflict")
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = raw
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/100")] = always_fails
+
+    with pytest.raises(RuntimeError):
+        tracker.set_status(100, "pending")
+
+
 def test_set_status_removes_old_status_tag_on_server(ado_repo_cfg, azure_fake, monkeypatch):
     """Regression (#235): a status transition must not leave the old autoswe:*
     tag on the work item.

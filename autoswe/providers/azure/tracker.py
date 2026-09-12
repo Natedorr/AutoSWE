@@ -380,8 +380,27 @@ class AzureTracker:
         - ``op: "add"`` on ``System.Tags`` is additive on the server (it
           merges into the existing set), so a lone ``add`` re-merges the tags
           we stripped. ``replace`` is the only op that sets the field exactly.
+
+        There are three independent call sites for this method across a
+        dispatch cycle (running-status at dispatch start, the terminal status
+        from emit(), and the sync-phase closed/mirror passes), each doing its
+        own unsynchronized GET-then-PATCH. Back-to-back calls can race — the
+        second call's GET can miss the first call's PATCH — so this retries
+        once with a fresh GET on a PATCH failure instead of losing the write
+        silently (issue: live E2E showed work items land with no autoswe tag
+        at all after a fast status transition, with no error surfaced).
         """
         _validate_status(status)
+        last_error: RuntimeError | None = None
+        for _attempt in range(2):
+            try:
+                self._set_status_once(issue_number, status)
+                return
+            except RuntimeError as e:
+                last_error = e
+        raise last_error
+
+    def _set_status_once(self, issue_number: int, status: str) -> None:
         # Read current tags
         get_path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"

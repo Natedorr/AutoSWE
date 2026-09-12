@@ -83,6 +83,51 @@ def _run(args: list, cwd: Path | None = None, check: bool = True) -> subprocess.
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check, **GIT_TEXT_ARGS)
 
 
+# Lines written to the shared repo-local git exclude. These keep build
+# artifacts (from any pytest run a coding session does) and the auto-generated
+# CLAUDE.md out of the per-issue branch:
+#   - __pycache__ / *.pyc / .pytest_cache: never staged by `git add -A`, so
+#     autoSWE and the agent's own commits both skip them.
+#   - CLAUDE.md: the initializer (autoswe.harness.initializer) generates it for
+#     the coding agent's benefit but must NOT commit it to the feature branch.
+#     Git-ignoring it (vs. merely leaving it untracked) is what lets it survive
+#     the review phase's `git clean -fd` backstop (ensure_worktree_unchanged)
+#     without re-dirtying the branch every cycle (finding C2).
+_REPO_EXCLUDE_LINES = (
+    "__pycache__/",
+    "*.pyc",
+    ".pytest_cache/",
+    "CLAUDE.md",
+)
+
+
+def _ensure_repo_exclude(main: Path) -> None:
+    """Idempotently append autoSWE's exclusion lines to the shared repo exclude.
+
+    ``main`` is the per-repo full clone. Its ``.git/info/exclude`` is *shared*
+    by every linked issue worktree (``git worktree add``), so writing it here
+    once covers all worktrees for the repo and both providers. It is a local,
+    non-committed override, so it never appears in a PR. Pure Python; never
+    raises (best-effort — a failure here should not block a worktree build).
+    """
+    exclude = main / ".git" / "info" / "exclude"
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        present = {
+            line.strip() for line in existing.splitlines() if line.strip() and not line.strip().startswith("#")
+        }
+        missing = [ln for ln in _REPO_EXCLUDE_LINES if ln not in present]
+        if not missing:
+            return
+        block = "\n".join(missing)
+        if existing and not existing.endswith("\n"):
+            block = "\n" + block
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text((existing + block + "\n").lstrip("\n"), encoding="utf-8")
+    except Exception as e:  # Non-fatal: a missing/readonly exclude must not block work.
+        dbg.debug("ensure_repo_exclude failed (non-fatal): %s", e)
+
+
 def _get_default_branch(main: Path, base_branch: str) -> str:
     """Determine the repo's actual default branch for _main checkout.
 
@@ -163,6 +208,11 @@ def ensure_clone(
 
         _run(["git", "-C", str(main), "checkout", branch_for_main])
         _run(["git", "-C", str(main), "reset", "--hard", f"origin/{branch_for_main}"])
+
+    # Regardless of fresh-clone vs. reuse, keep the shared repo-local exclude
+    # current so build artifacts and the auto-generated CLAUDE.md stay out of
+    # every issue worktree's branch (finding C2).
+    _ensure_repo_exclude(main)
 
 
 def is_dirty(wt: Path) -> bool:
@@ -645,7 +695,16 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
         log(f"[WORKTREE] git commit ({commit_sha[:8]}) on {branch}: {msg[:60]!r}")
         return {"committed": True, "commit_sha": commit_sha, "branch": branch}
 
-    _run(["git", "-C", str(wt), "add", "-A"])
+    # Stage everything EXCEPT build artifacts. The shared repo-local exclude
+    # (see _ensure_repo_exclude) already keeps these out for worktrees built after
+    # this change; the pathspec is defense-in-depth so a /fix commit is clean even
+    # on a worktree whose main clone predates that write. CLAUDE.md is NOT excluded
+    # here — it is git-ignored via the repo exclude (not a stage-exclusion) so it
+    # survives the review's `git clean -fd` backstop without being committed.
+    _run([
+        "git", "-C", str(wt), "add", "-A",
+        ":(exclude)**/__pycache__/", ":(exclude)**/*.pyc", ":(exclude)**/.pytest_cache/",
+    ])
     diff = _run(["git", "-C", str(wt), "diff", "--cached", "--quiet"], check=False)
     if diff.returncode == 0:
         log(f"[WORKTREE] No changes to commit in {wt}")

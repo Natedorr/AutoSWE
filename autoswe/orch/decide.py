@@ -106,16 +106,27 @@ def _has_user_reply_after(
     Handles mixed watermark types: when the fallback returns a timestamp
     (str), compares by created_at. When IDs are available (int), compares
     by ID.
+
+    A comment whose body is empty or whitespace-only is not a reply — it
+    carries no steer. Without this guard an empty OWNER comment (which the
+    Azure UI can produce) would fall through to the plain-text resume path
+    in ``_handle_reply`` with ``user_reply_text=""`` and re-run the current
+    phase for no input (issue: spurious /plan resume).
     """
     # Determine comparison mode: if after_id is int, compare by ID.
     # If after_id is str (timestamp fallback), compare by timestamp.
     use_ids = isinstance(after_id, int)
 
+    def _is_real_reply(c) -> bool:
+        # not a bot AND carries non-whitespace body text (issue: empty
+        # OWNER comment must not resume the phase).
+        return not _is_autoswe_bot_comment(c) and bool((c.body or "").strip())
+
     if use_ids:
         user_after = [
             c
             for c in comments
-            if not _is_autoswe_bot_comment(c)
+            if _is_real_reply(c)
             and c.id is not None
             and c.id > (after_id or 0)
             and c.id > (last_consumed or 0)
@@ -127,7 +138,7 @@ def _has_user_reply_after(
         user_after = [
             c
             for c in comments
-            if not _is_autoswe_bot_comment(c)
+            if _is_real_reply(c)
             and c.created_at > after_ts
             and c.created_at > consumed_ts
         ]

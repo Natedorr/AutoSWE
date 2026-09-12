@@ -857,15 +857,21 @@ def test_parse_tool_execution_end_success_fires_done():
     assert not acc.has_error
 
 
-def test_parse_tool_execution_end_is_error_sets_flag():
-    """A tool result with isError: true flips the error flag (spec-documented tradeoff)."""
+def test_parse_tool_execution_end_is_error_does_not_flag_run():
+    """A tool result with isError: true does NOT set the run's error flag.
+
+    pi reports a tool error to the LLM and continues (docs/pi/extensions.md);
+    the agent normally recovers. Sinking the run to "error" on a transient tool
+    nonzero exit discarded clean, verified runs, so isError now logs but leaves
+    has_error untouched. extension_error / error events still set the flag.
+    """
     acc = _PiAccumulator()
     cb = Mock()
     _parse_line(json.dumps({
         "type": "tool_execution_end",
         "toolCallId": "t1", "toolName": "grep", "args": {}, "isError": True,
     }), acc, cb)
-    assert acc.has_error is True
+    assert acc.has_error is False
     # A failing tool does not fire the "Tool done" success line.
     assert not any("Tool done" in c[0][0] for c in cb.call_args_list)
 
@@ -1352,11 +1358,13 @@ def test_run_subtype_killed_text_fallback():
     assert result.text == "Half done,"
 
 
-def test_run_iserror_tool_flips_success_to_error():
-    """A tool result with isError: true flips an rc-0 run to subtype error.
+def test_run_iserror_tool_does_not_flip_success():
+    """A tool result with isError: true on an rc-0 run does NOT sink the subtype.
 
-    This is the documented tradeoff (memory: pi-backend-iserror-tradeoff): any
-    failing tool, even a routine nonzero-exit grep, marks the run as errored.
+    pi reports the tool error to the LLM and continues; the agent typically
+    recovers. A clean rc-0 run that emitted a valid final message_end is
+    "success" even though a mid-run tool had a nonzero exit — the transient
+    failure no longer discards the run's real output.
     """
     stream = _jsonl(
         {"type": "session", "id": "pi-tool", "version": 3},
@@ -1372,7 +1380,8 @@ def test_run_iserror_tool_flips_success_to_error():
             return await PiBackend().run(_spec())
 
     result = asyncio.run(_run())
-    assert result.subtype == "error"
+    assert result.subtype == "success"
+    assert result.ok is True
     assert result.text == "done"
 
 
