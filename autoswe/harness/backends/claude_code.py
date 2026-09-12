@@ -507,6 +507,19 @@ class ClaudeCodeBackend:
         return cls.CAPABILITIES.copy()
 
     @classmethod
+    def comment_tool_names(cls) -> dict[str, str]:
+        """The autoswe_comment tool names, keyed by logical role.
+
+        Derived from ``_MCP_COMMENT_TOOLS`` (the allowlist entries) by stripping
+        the ``mcp__autoswe_comment__`` prefix, so the tool names the agent is
+        granted and the names the prompt template references can never drift
+        apart. Claude Code's adapter prefixes each tool with a double
+        underscore (``mcp__autoswe_comment__post_plan``).
+        """
+        prefix = "mcp__autoswe_comment__"
+        return {tool[len(prefix):]: tool for tool in _MCP_COMMENT_TOOLS}
+
+    @classmethod
     def retryable_subtypes(cls) -> set[str]:
         # Claude retries via SDK exceptions (retryable_exceptions), not subtypes.
         return set()
@@ -684,6 +697,7 @@ class ClaudeCodeBackend:
         captured_plan_file: str | None = None
         captured_plan_text: str | None = None
         plan_posted, question_posted = False, False
+        plan_posted_body: str | None = None
         structured_output: dict | None = None
         progress_state = ProgressState()
 
@@ -708,6 +722,10 @@ class ClaudeCodeBackend:
                                     if block.name == "mcp__autoswe_comment__post_plan":
                                         if (block.input or {}).get("body", "").strip():
                                             plan_posted = True
+                                            # Capture the body so the planner can finalize the
+                                            # sticky planning comment in place after the loop —
+                                            # the last call's body wins (issue #241).
+                                            plan_posted_body = str((block.input or {}).get("body", ""))
                                     elif block.name == "mcp__autoswe_comment__post_question":
                                         if (block.input or {}).get("body", "").strip():
                                             question_posted = True
@@ -783,6 +801,7 @@ class ClaudeCodeBackend:
             plan_file_path=captured_plan_file,
             plan_posted=plan_posted,
             question_posted=question_posted,
+            plan_posted_body=plan_posted_body,
             plan_text=captured_plan_text,
             structured_output=structured_output,
         )

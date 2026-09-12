@@ -154,7 +154,12 @@ def _update_wi(wid):
 
 
 def _set_tags():
-    payload = [{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending; test-tag"}]
+    # Two-op: ADO treats a lone ``add`` on System.Tags additively, so clear the
+    # field first to make this a true replace (issue #235).
+    payload = [
+        {"op": "remove", "path": "/fields/System.Tags"},
+        {"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending; test-tag"},
+    ]
     r = ado_patch(_ado_api_version(f"https://dev.azure.com/{ORG}/{PROJECT}/_apis/wit/workitems/1"), PAT, body=payload)
     assert r["id"] == 1
 
@@ -366,7 +371,12 @@ def _bad_project():
 
 
 def _multi_tags():
-    payload = [{"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending; tag1; tag2"}]
+    # Two-op: clear the field first so ``add`` doesn't merge onto existing tags
+    # (issue #235).
+    payload = [
+        {"op": "remove", "path": "/fields/System.Tags"},
+        {"op": "add", "path": "/fields/System.Tags", "value": "autoswe:pending; tag1; tag2"},
+    ]
     r = ado_patch(_ado_api_version(f"https://dev.azure.com/{ORG}/{PROJECT}/_apis/wit/workitems/1"), PAT, body=payload)
     assert r["id"] == 1
 

@@ -346,6 +346,136 @@ def test_run_review_sdk_error_returns_failed(tmp_path, mock_gh_post_comment):
 
 
 # ---------------------------------------------------------------------------
+# _run_git / _get_git_head — UTF-8 decoding (issue #238, Windows CP1252 crash)
+# ---------------------------------------------------------------------------
+
+_EM_DASH = "—"  # em dash; UTF-8 E2 80 94 — 0x9D is undefined in CP1252
+
+
+def _fake_default_encoding_cp1252(monkeypatch):
+    """Pretend the platform default text encoding is CP1252 (Windows).
+
+    ``subprocess.run(text=True, ...)`` with no explicit ``encoding`` resolves
+    the codec through ``subprocess._text_encoding()``; pointing it at CP1252
+    makes a UTF-8 byte undefined in CP1252 kill the reader thread exactly as
+    on Windows (issue #238). Callers that pin ``encoding="utf-8"`` are
+    unaffected.
+    """
+    import subprocess
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+
+
+def test_git_text_args_pin_utf8_replace():
+    """GIT_TEXT_ARGS must pin UTF-8 + replace — the crash-proof decode."""
+    from autoswe.core.constants import GIT_TEXT_ARGS
+
+    assert GIT_TEXT_ARGS == {"encoding": "utf-8", "errors": "replace"}
+
+
+def test_run_git_passes_explicit_encoding_to_subprocess(monkeypatch, tmp_path):
+    """_run_git must not rely on the platform-locale default codec."""
+    import subprocess
+
+    from autoswe.core.constants import GIT_TEXT_ARGS
+    from autoswe.harness import reviewer
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="stat output", stderr="")
+
+    monkeypatch.setattr(reviewer.subprocess, "run", fake_run)
+    result = reviewer._run_git(tmp_path, ["diff", "--stat"])
+    assert result == "stat output"
+    assert captured.get("encoding") == GIT_TEXT_ARGS["encoding"]
+    assert captured.get("errors") == GIT_TEXT_ARGS["errors"]
+
+
+def test_get_git_head_passes_explicit_encoding_to_subprocess(monkeypatch, tmp_path):
+    """_get_git_head must not rely on the platform-locale default codec."""
+    import subprocess
+
+    from autoswe.harness import reviewer
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, stdout="abc123\n", stderr="")
+
+    monkeypatch.setattr(reviewer.subprocess, "run", fake_run)
+    result = reviewer._get_git_head(tmp_path)
+    assert result == "abc123"
+    assert captured.get("encoding") == "utf-8"
+    assert captured.get("errors") == "replace"
+
+
+def test_run_git_survives_utf8_diff_under_cp1252_locale(monkeypatch, tmp_path):
+    """Regression (issue #238): a UTF-8 diff (em dash byte 0x9D undefined in
+    CP1252) must not kill subprocess's reader thread.
+
+    Before the fix, text=True resolved the codec to the platform default
+    (CP1252 on Windows); the reader thread raised
+    ``UnicodeDecodeError: "charmap" codec can't decode byte 0x9d``, stdout
+    stayed None, and .strip() raised TypeError. With the pinned UTF-8
+    decode the same bytes return the em dash intact.
+    """
+    import subprocess
+
+    from autoswe.harness import reviewer
+
+    # Simulate the pre-fix codec failure: on a Windows host the platform
+    # default is CP1252, in which byte 0x9D is UNDEFINED. Pre-fix, subprocess's
+    # reader thread raised UnicodeDecodeError on that byte, stdout stayed
+    # None, and .strip() raised TypeError — exactly the issue #238 crash.
+    _fake_default_encoding_cp1252(monkeypatch)
+
+    # Real git subprocess: the diff payload contains both a UTF-8 em dash and
+    # the UTF-8 encoding of U+009D (bytes C2 9D — the malformed em-dash form
+    # from the issue; its 0x9D byte is the one CP1252 cannot decode).
+    wt = tmp_path / "repo"
+    wt.mkdir()
+    _git_init(wt, "initial")
+    (wt / "doc.md").write_bytes(f"line one\nadd {_EM_DASH} em dash\n".encode() + b"\xc2\x9d\n")
+    _git(wt, ["add", "doc.md"])
+    _git(wt, ["commit", "-m", f"docs: add note {_EM_DASH} em dash"])
+
+    diff = reviewer._run_git(wt, ["diff", "HEAD~1", "HEAD"])
+    assert _EM_DASH in diff
+    assert "\u009d" in diff  # the C2 9D bytes decoded as UTF-8 (U+009D)
+
+    logline = reviewer._run_git(wt, ["log", "--oneline", "-1"])
+    assert _EM_DASH in logline
+
+    head = reviewer._get_git_head(wt)
+    assert head is not None and len(head) == 40
+    # Sanity: the default-encoding fake is still in effect, so the fix (not
+    # the environment) is what kept these calls alive.
+    assert subprocess._text_encoding() == "cp1252"
+
+
+def _git_repo_env():
+    """Git environment with identity pinned (no global config in CI sandboxes)."""
+    import os
+    return dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+
+def _git_init(wt, message):
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=wt, check=True, env=_git_repo_env(),
+                   capture_output=True)
+    _git(wt, ["commit", "--allow-empty", "-m", message])
+
+
+def _git(wt, args):
+    import subprocess
+    subprocess.run(["git", *args], cwd=wt, check=True, env=_git_repo_env(),
+                   capture_output=True)
+
+
+# ---------------------------------------------------------------------------
 # _truncate helper
 # ---------------------------------------------------------------------------
 

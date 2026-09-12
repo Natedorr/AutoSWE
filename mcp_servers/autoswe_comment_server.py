@@ -9,8 +9,9 @@ Reads env vars:
     AUTOSWE_REPO       — repo name / project
     AUTOSWE_ISSUE_NUMBER — issue number
     AUTOSWE_TOKEN      — PAT for the provider API
-    AUTOSWE_COMMENT_ID — optional; when set, update_claude_comment edits this
-                         comment in-place (sticky progress).
+    AUTOSWE_COMMENT_ID — optional; when set, update_progress and post_plan
+                         edit this comment in-place (sticky progress) instead
+                         of posting a new comment (issue #241).
 
 Registered tool names (Claude SDK prefix):
     mcp__autoswe_comment__update_progress
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from mcp.types import TextContent
@@ -33,6 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from autoswe.providers.factory import get_tracker  # noqa: E402
+from autoswe.tracking.comments import normalize_plan_comment  # noqa: E402
 
 # mcp SDK version tolerance:
 #   mcp >= 2.0 exposes the high-level MCPServer (.tool() decorator, run_stdio_async)
@@ -52,6 +55,16 @@ except ImportError:
     _MCP_V2 = False
 
 BOT_MARKER = "<!-- autoswe-bot -->"
+
+# The three tools all take a single `body: str`.  Used by the low-level mcp 1.x
+# path's hand-rolled tools/list + dispatching tools/call handler (see the
+# _MCP_V2 gate below): the 1.x Server registers neither from the @tool()
+# decorator the way the high-level MCPServer does.
+_BODY_SCHEMA = {
+    "type": "object",
+    "properties": {"body": {"type": "string"}},
+    "required": ["body"],
+}
 
 
 def _tag(body: str) -> str:
@@ -102,10 +115,9 @@ def _update_comment(comment_id: str, body: str) -> None:
     tracker.update_comment(ISSUE_NUMBER, int(comment_id), _tag(body))
 
 
-# ---- MCP Tools (registered on the version-specific `server` from the header) ----
+# ---- MCP Tools ----
 
 
-@_tool()
 async def update_progress(*, body: str) -> list[TextContent]:
     """Update the sticky progress comment with current tool-use status.
 
@@ -126,25 +138,40 @@ async def update_progress(*, body: str) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error updating progress: {e}")]
 
 
-@_tool()
 async def post_plan(*, body: str) -> list[TextContent]:
-    """Post the implementation plan as a comment on the issue.
+    """Post the implementation plan onto the planning comment on the issue.
 
     Call this when you have a complete plan. The plan should include the
     approach, files to modify, and any questions for the user.
+
+    When the sticky planning comment exists (``AUTOSWE_COMMENT_ID`` is set —
+    the "Dispatching `plan`…" comment the dispatch posted), the plan is patched
+    INTO that comment in place so the user sees the plan on the same comment
+    autoSWE has been using, not a separate new one (issue #241). The body is
+    normalized to start with ``## Plan`` so ``/fix`` / ``/review`` can extract
+    it. Only when there is no sticky comment (or the in-place edit fails) is a
+    new comment posted as a fallback.
     """
     if not body or not body.strip():
         return [TextContent(type="text", text="Error: body cannot be empty — provide the plan content")]
     if SUPPRESS_POSTING:
         return [TextContent(type="text", text="suppressed (minimal posting)")]
+    normalized = normalize_plan_comment(body)
+    if COMMENT_ID:
+        try:
+            _update_comment(COMMENT_ID, normalized)
+            return [TextContent(type="text", text="Plan posted to planning comment")]
+        except Exception as e:
+            # Sticky edit failed (provider can't edit / comment gone): fall back
+            # to a new comment so the plan is never lost.
+            print(f"[autoswe-comment] post_plan in-place edit failed ({e}); posting new comment", file=sys.stderr)
     try:
-        cid = _post_comment(body)
+        cid = _post_comment(normalized)
         return [TextContent(type="text", text=f"Plan posted (comment_id={cid})")]
     except Exception as e:
         return [TextContent(type="text", text=f"Error posting plan: {e}")]
 
 
-@_tool()
 async def post_question(*, body: str) -> list[TextContent]:
     """Post a question to the user as a comment on the issue.
 
@@ -160,6 +187,54 @@ async def post_question(*, body: str) -> list[TextContent]:
         return [TextContent(type="text", text=f"Question posted (comment_id={cid})")]
     except Exception as e:
         return [TextContent(type="text", text=f"Error posting question: {e}")]
+
+
+# The name -> (handler, description) map.  The three tools all share the
+# ``_BODY_SCHEMA`` input shape, so one dispatch table covers registration and
+# dispatch on the low-level 1.x path.
+_TOOLS: dict[str, tuple[Callable[..., Awaitable[list[TextContent]]], str]] = {
+    "update_progress": (update_progress, "Update the sticky progress comment with current tool-use status."),
+    "post_plan": (post_plan, "Post the implementation plan onto the planning comment on the issue "
+                              "(patches the sticky planning comment in place when one exists)."),
+    "post_question": (post_question, "Post a question to the user as a comment on the issue."),
+}
+
+
+# ---- Registration ----
+#
+# The mcp 2.x high-level server auto-registers both tools/list and tools/call
+# from the @server.tool() decorators, so register each tool individually there.
+#
+# The mcp 1.x low-level Server is different in two ways, both of which break a
+# tools/list-based client like pi-mcp-adapter, so the 1.x path registers by hand:
+#   * it does NOT answer tools/list from the @call_tool() decorator — clients
+#     that discover tools that way see zero tools.
+#   * @call_tool() overwrites the single CallToolRequest handler slot on every
+#     registration, so three separate @call_tool() tools leave only the LAST
+#     one reachable (every call routes to it) — the others are silently dropped.
+# So on 1.x we register one dispatching tools/call handler (routed via _TOOLS)
+# plus a hand-rolled tools/list, instead of three colliding decorators.
+if _MCP_V2:
+    for _name in _TOOLS:
+        @_tool()
+        async def _v2_tool(name=_name, *, body: str) -> list[TextContent]:
+            return await _TOOLS[name][0](body)
+else:
+    @server.list_tools()
+    async def _list_tools() -> list:
+        from mcp.types import Tool
+
+        return [
+            Tool(name=name, description=desc, inputSchema=_BODY_SCHEMA)
+            for name, (_, desc) in _TOOLS.items()
+        ]
+
+    @server.call_tool()
+    async def _dispatch_call_tool(name: str, arguments: dict) -> list[TextContent]:
+        handler = _TOOLS.get(name, (None,))[0]
+        if handler is None:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        return await handler(body=str(arguments.get("body", "")))
 
 
 # ---- Entry point ----

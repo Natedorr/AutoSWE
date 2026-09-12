@@ -27,6 +27,7 @@ from tests.scenarios.harness import (
 )
 from tests.scenarios.transitions import (
     CODEX_TRANSITIONS,
+    PI_TRANSITIONS,
     TRANSITIONS,
     build_azure_state,
     build_github_state,
@@ -37,6 +38,16 @@ from tests.scenarios.transitions import (
 # Parametrization
 
 transition_names = [row["name"] for row in TRANSITIONS]
+
+# The three direct MCP comment tools, in the order pi appends them to the
+# --tools allowlist when the dispatch carries a sticky progress comment
+# (issue #226). Kept here so the plan/fix allowlist assertions read clearly
+# instead of as one long literal string.
+_MCP_COMMENT_TOOLS = (
+    "mcp__autoswe_comment_post_plan,"
+    "mcp__autoswe_comment_post_question,"
+    "mcp__autoswe_comment_update_progress"
+)
 
 
 def _get_row(name: str) -> dict:
@@ -258,6 +269,169 @@ def test_transition_codex(
             assert_codex_calls(hw.codex, [{"is_resume": True}])
         else:
             assert_codex_calls(hw.codex, [{"bypass": True}])
+
+    # Git call assertions
+    if git_calls:
+        assert_git_calls(hw.git, git_calls)
+    elif expect.get("no_git_calls"):
+        assert_no_git_calls(hw.git)
+
+
+# ---------------------------------------------------------------------------
+# Pi backend — parametrized test
+
+pi_transition_names = list(PI_TRANSITIONS)
+
+
+@pytest.mark.transition
+@pytest.mark.parametrize("transition_name", pi_transition_names)
+def test_transition_pi(
+    transition_name: str,
+    isolated_autoswe_dir: Path,
+    capsys,
+):
+    """Run a curated pi transition row through the real PiBackend.
+
+    Verifies the orchestrator behaves correctly when driven by the pi
+    backend — end-to-end through PiBackend → --mode json parser → RunResult
+    → coder/planner/reviewer → emit → label/comment/queue.
+
+    Asserts the two pi-specific divergences:
+    * plan phase uses REAL read-only enforcement (``--tools read,grep,find,ls``)
+      and does NOT emit the loud-degrade warning (pi advertises "mode");
+    * /retry forks from a pi checkpoint (``--fork``), and the provenance gate
+      accepts a pi checkpoint but rejects a foreign (codex) one.
+
+    Azure is excluded to avoid the matrix blowup; pi + GitHub suffices to
+    assert the backend-divergent paths.
+    """
+    row = _get_row(transition_name)
+    expect = row.get("expect", {})
+    provider = "github"
+
+    state = build_github_state(row)
+    queue_task = build_queue_task(row, provider)
+
+    # Seed queue
+    seed_queue(isolated_autoswe_dir, queue_task)
+
+    # Set up repos.json (row may override the repo config, e.g. test_command)
+    setup_repos(isolated_autoswe_dir, provider, state, repos_extra=row.get("repos"))
+
+    # Build config with pi backend
+    cfg = build_test_cfg(isolated_autoswe_dir, provider, backend="pi")
+
+    claude_responses = row.get("claude_responses", [])
+    git_calls = row.get("git_calls", [])
+
+    with patched_world(
+        provider,
+        state=state,
+        claude_responses=claude_responses,
+        scripted_git=git_calls,
+        isolated_dir=isolated_autoswe_dir,
+        row_meta=row.get("meta"),
+        backend="pi",
+    ) as hw:
+        from tests.scenarios.runner import run_one_turn
+
+        owner, repo = state["owner"], state["repo"]
+        run_one_turn(owner, repo, cfg, isolated_autoswe_dir)
+
+    # ---- Assertions (label/queue/comments: same as Claude/Codex) ----
+    issue_num = 42
+
+    if "label_after" in expect:
+        assert_label_is(hw.fake, issue_num, expect["label_after"])
+
+    queue_fields = {}
+    for key in ("autoswe_status", "session_id", "pending_command", "attempt_count",
+                "plan_branch", "rereview_after_fix", "pr_number"):
+        if key in expect:
+            queue_fields[key] = expect[key]
+    if queue_fields:
+        task_id = queue_task["id"] if queue_task else f"gh:{state['owner']}_{state['repo']}_{issue_num}"
+        assert_queue_task(isolated_autoswe_dir, task_id, queue_fields)
+
+    if "comment_contains" in expect:
+        assert_comments_posted(hw.fake, [{"body_contains": expect["comment_contains"]}])
+
+    # ---- Pi-specific call assertions (per-row shape is authoritative) ----
+    no_pi = expect.get("no_claude_calls", False)
+    if no_pi:
+        assert len(hw.pi.calls) == 0, "Expected no pi calls"
+        return
+
+    assert len(hw.pi.calls) > 0, f"{transition_name}: expected pi calls, got none"
+    call = hw.pi.calls[0]
+
+    if transition_name == "fresh_plan_command":
+        # Real read-only enforcement: the --tools allowlist is the read-only
+        # recipe, extended with the three MCP comment tools when the dispatch
+        # carries a sticky progress comment (_comment_id, issue #226). This is
+        # the pi ≠ codex distinction (codex emits no --tools).
+        assert call["is_fresh"] is True
+        assert call.get("tools") == "read,grep,find,ls," + _MCP_COMMENT_TOOLS, (
+            f"plan must pin the read-only --tools allowlist (+MCP comment tools); "
+            f"got {call.get('tools')!r}"
+        )
+        # No loud-degrade warning: pi advertises "mode", so the planner must
+        # NOT log the "no read-only enforcement" degrade line.
+        captured = capsys.readouterr()
+        assert "no read-only enforcement" not in captured.out, (
+            "plan on pi must NOT loudly degrade (pi enforces read-only via --tools)"
+        )
+    elif transition_name == "fresh_fix_command":
+        # Fix phase: the full working --tools allowlist (write/bash allowed).
+        assert call["is_fresh"] is True
+        tools = call.get("tools", "")
+        assert "edit" in tools and "write" in tools and "bash" in tools, (
+            f"fix must pin the read_write --tools allowlist; got {tools!r}"
+        )
+    elif transition_name == "pi_retry_forks_from_pi_checkpoint":
+        # pi forks from the pi checkpoint: --fork <checkpoint> --session-id <new>.
+        assert call["is_fork"] is True
+        assert call.get("fork") == "s-pi-plan-good-42", (
+            f"--fork must carry the pi checkpoint id; got {call.get('fork')!r}"
+        )
+        assert call.get("session_id") is not None
+        assert call.get("session_id") != "s-pi-plan-good-42", (
+            "a fork must mint a NEW session id, distinct from the checkpoint"
+        )
+    elif transition_name == "retry_no_fork_when_checkpoint_backend_mismatches":
+        # A codex checkpoint must NOT be forked by pi: fresh session, no --fork.
+        assert call["is_fork"] is False
+        assert "fork" not in call, (
+            "must not emit --fork for a foreign-backend (codex) checkpoint"
+        )
+        assert call["is_fresh"] is True, (
+            "a foreign-backend checkpoint degrades to a fresh pi session"
+        )
+    elif transition_name == "waiting_resume_mcp_post_plan":
+        # Plan resume on the pi axis: a waiting task resumes its session
+        # (--session <id>, not a fresh --session-id) and the MCP post_plan
+        # tool_execution_start event drives PLAN_READY even though the
+        # assistant text carries no <AUTOSWE_PLAN> tag. Since issue #226 the
+        # dispatch carries the sticky comment _comment_id, so the three
+        # mcp__autoswe_comment_* tools are appended to the read-only recipe —
+        # and the parser's classification is allowlist-independent, so the
+        # post_plan event still drives PLAN_READY.
+        assert call["is_resume"] is True
+        assert call.get("resume") == "s-plan-42", (
+            f"plan resume must re-open the checkpoint session; got {call.get('resume')!r}"
+        )
+        assert call["is_fresh"] is False
+        # The read-only plan recipe plus the MCP comment tools (sticky comment
+        # present in this dispatch).
+        assert call.get("tools") == "read,grep,find,ls," + _MCP_COMMENT_TOOLS, (
+            f"plan must pin the read-only --tools allowlist (+MCP comment tools); "
+            f"got {call.get('tools')!r}"
+        )
+
+    # (The per-row pi call shape above is the authoritative assertion; the
+    # row's ``claude_calls`` axis describes the DEFAULT claude_code behavior,
+    # which intentionally diverges for the pi fork row and is asserted by
+    # the generic test_transition instead.)
 
     # Git call assertions
     if git_calls:

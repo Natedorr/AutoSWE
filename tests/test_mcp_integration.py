@@ -1,6 +1,7 @@
 """Tests for MCP comment server integration in planner and coder."""
 
 import sys
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from autoswe.harness.runner import RunResult
@@ -463,3 +464,160 @@ def test_mcp_post_question_accepts_real_body():
         result = asyncio.run(srv.post_question(body="Is this approach correct?"))
 
     assert any("suppressed" in c.text for c in result)
+
+
+# ---------------------------------------------------------------------------
+# MCP server post_plan — sticky in-place patch (issue #241)
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _load_comment_server(env: dict):
+    """Import (reload) the comment server with a controlled env + patched tracker."""
+    import importlib
+    import os
+    from unittest.mock import MagicMock, patch
+
+    tracker = MagicMock()
+    tracker.post_comment.return_value = 999
+    with patch.dict(os.environ, env):
+        import mcp_servers.autoswe_comment_server as srv
+        importlib.reload(srv)
+        with patch.object(srv, "get_tracker", return_value=tracker):
+            yield srv, tracker
+
+
+def test_mcp_post_plan_patches_sticky_in_place():
+    """post_plan edits the sticky comment in place when AUTOSWE_COMMENT_ID is set.
+
+    No new comment is posted; the body is normalized to start with '## Plan'
+    and carries the bot marker.
+    """
+    import asyncio
+
+    env = {
+        "AUTOSWE_PROVIDER": "github",
+        "AUTOSWE_OWNER": "o",
+        "AUTOSWE_REPO": "r",
+        "AUTOSWE_ISSUE_NUMBER": "1",
+        "AUTOSWE_TOKEN": "tok",
+        "AUTOSWE_COMMENT_ID": "12345",
+        "AUTOSWE_SUPPRESS_POSTING": "0",
+    }
+    with _load_comment_server(env) as (srv, tracker):
+        result = asyncio.run(srv.post_plan(body="Step 1: fix A\nStep 2: test"))
+
+    assert any("Plan posted to planning comment" in c.text for c in result)
+    tracker.update_comment.assert_called_once()
+    args, _ = tracker.update_comment.call_args
+    assert args[0] == 1
+    assert args[1] == 12345
+    assert args[2].startswith("## Plan\n\n")
+    assert "Step 1: fix A" in args[2]
+    assert srv.BOT_MARKER in args[2]
+    tracker.post_comment.assert_not_called()
+
+
+def test_mcp_post_plan_normalizes_existing_plan_header_idempotently():
+    """A body that already starts with '## Plan' is not double-headed."""
+    import asyncio
+
+    env = {
+        "AUTOSWE_PROVIDER": "github",
+        "AUTOSWE_OWNER": "o",
+        "AUTOSWE_REPO": "r",
+        "AUTOSWE_ISSUE_NUMBER": "1",
+        "AUTOSWE_TOKEN": "tok",
+        "AUTOSWE_COMMENT_ID": "12345",
+        "AUTOSWE_SUPPRESS_POSTING": "0",
+    }
+    with _load_comment_server(env) as (srv, tracker):
+        asyncio.run(srv.post_plan(body="## Plan\n\nBody text"))
+
+    args, _ = tracker.update_comment.call_args
+    body = args[2]
+    assert body.startswith("## Plan\n\nBody text")
+    assert body.count("## Plan") == 1
+
+
+def test_mcp_post_plan_falls_back_to_post_without_comment_id():
+    """post_plan posts a new (normalized) comment when no sticky comment exists."""
+    import asyncio
+
+    env = {
+        "AUTOSWE_PROVIDER": "github",
+        "AUTOSWE_OWNER": "o",
+        "AUTOSWE_REPO": "r",
+        "AUTOSWE_ISSUE_NUMBER": "1",
+        "AUTOSWE_TOKEN": "tok",
+        "AUTOSWE_COMMENT_ID": "",
+        "AUTOSWE_SUPPRESS_POSTING": "0",
+    }
+    with _load_comment_server(env) as (srv, tracker):
+        result = asyncio.run(srv.post_plan(body="Plan body"))
+
+    assert any("Plan posted (comment_id=999)" in c.text for c in result)
+    tracker.post_comment.assert_called_once()
+    args, _ = tracker.post_comment.call_args
+    assert args[1].startswith("## Plan\n\nPlan body")
+    tracker.update_comment.assert_not_called()
+
+
+def test_mcp_post_plan_falls_back_to_post_when_sticky_edit_fails():
+    """When the in-place edit raises, post_plan degrades to a new comment so the
+    plan is never lost (mirrors ProgressComment._flush's post-on-edit-failure)."""
+    import asyncio
+
+    env = {
+        "AUTOSWE_PROVIDER": "github",
+        "AUTOSWE_OWNER": "o",
+        "AUTOSWE_REPO": "r",
+        "AUTOSWE_ISSUE_NUMBER": "1",
+        "AUTOSWE_TOKEN": "tok",
+        "AUTOSWE_COMMENT_ID": "12345",
+        "AUTOSWE_SUPPRESS_POSTING": "0",
+    }
+    with _load_comment_server(env) as (srv, tracker):
+        tracker.update_comment.side_effect = RuntimeError("edit not supported")
+        result = asyncio.run(srv.post_plan(body="Plan body"))
+
+    assert any("Plan posted (comment_id=999)" in c.text for c in result)
+    tracker.update_comment.assert_called_once()
+    tracker.post_comment.assert_called_once()
+    args, _ = tracker.post_comment.call_args
+    assert args[1].startswith("## Plan\n\nPlan body")
+
+
+def test_mcp_post_plan_suppressed_when_minimal_posting():
+    """SUPPRESS_POSTING makes post_plan a no-op — no sticky write, no post."""
+    import asyncio
+
+    env = {
+        "AUTOSWE_PROVIDER": "github",
+        "AUTOSWE_OWNER": "o",
+        "AUTOSWE_REPO": "r",
+        "AUTOSWE_ISSUE_NUMBER": "1",
+        "AUTOSWE_TOKEN": "tok",
+        "AUTOSWE_COMMENT_ID": "12345",
+        "AUTOSWE_SUPPRESS_POSTING": "1",
+    }
+    with _load_comment_server(env) as (srv, tracker):
+        result = asyncio.run(srv.post_plan(body="Plan body"))
+
+    assert any("suppressed" in c.text for c in result)
+    tracker.update_comment.assert_not_called()
+    tracker.post_comment.assert_not_called()
+
+
+def test_normalize_plan_comment():
+    """normalize_plan_comment guarantees the '## Plan' header, idempotently."""
+    from autoswe.tracking.comments import normalize_plan_comment
+
+    assert normalize_plan_comment("Body only").startswith("## Plan\n\nBody only")
+    # Existing header is not duplicated
+    out = normalize_plan_comment("## Plan\n\nBody")
+    assert out == "## Plan\n\nBody"
+    # Tolerates leading whitespace and trailing header whitespace
+    out = normalize_plan_comment("   ## Plan   \nBody")
+    assert out == "## Plan\n\nBody"
+    # Header-only body collapses to the bare header, never the empty string
+    assert normalize_plan_comment("## Plan") == "## Plan"

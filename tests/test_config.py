@@ -2,6 +2,96 @@
 
 
 # ---------------------------------------------------------------------------
+# pi mcp.json builder (autoswe.harness.mcp_config) — Phase 1 of PLAN-pi-mcp.md
+# ---------------------------------------------------------------------------
+
+
+def test_pi_mcp_json_shape():
+    """build_pi_mcp_json emits the plan's Phase 1 shape.
+
+    command/args/cwd point at the comment server module; toolPrefix is "mcp";
+    the three body-only tools are the directTools; settings freeze the tools
+    and disable sampling/elicitation (non-interactive).
+    """
+    from autoswe.harness.mcp_config import build_pi_mcp_json
+
+    cfg = build_pi_mcp_json("/usr/bin/python3", "/opt/autoswe")
+    assert set(cfg.keys()) == {"mcpServers", "settings"}
+
+    server = cfg["mcpServers"]["autoswe_comment"]
+    assert server["command"] == "/usr/bin/python3"
+    assert server["args"] == ["-m", "mcp_servers.autoswe_comment_server"]
+    assert server["cwd"] == "/opt/autoswe"
+    assert server["toolPrefix"] == "mcp"
+    assert server["directTools"] == ["post_plan", "post_question", "update_progress"]
+
+    # No per-task values leak into the file — only stable python path + repo root.
+    assert "env" not in server
+    assert "AUTOSWE_TOKEN" not in str(cfg)
+
+    assert cfg["settings"] == {"freezeDirectTools": True, "sampling": False, "elicitation": False}
+
+
+def test_pi_mcp_comment_server_entry():
+    """pi_mcp_comment_server returns just the autoswe_comment mcpServers value."""
+    from autoswe.harness.mcp_config import pi_mcp_comment_server
+
+    server = pi_mcp_comment_server("/usr/bin/python3", "/opt/autoswe")
+    assert server == {
+        "command": "/usr/bin/python3",
+        "args": ["-m", "mcp_servers.autoswe_comment_server"],
+        "cwd": "/opt/autoswe",
+        "toolPrefix": "mcp",
+        "directTools": ["post_plan", "post_question", "update_progress"],
+    }
+    # It is the same entry build_pi_mcp_json nests under mcpServers.autoswe_comment.
+    from autoswe.harness.mcp_config import build_pi_mcp_json
+    assert build_pi_mcp_json("/usr/bin/python3", "/opt/autoswe")["mcpServers"]["autoswe_comment"] == server
+
+
+def test_pi_mcp_json_bakes_python_not_token():
+    """command is a resolved path, not a ${AUTOSWE_PYTHON} token.
+
+    The pi-mcp-adapter uses `command` verbatim (no ${VAR} interpolation), so a
+    token would fail to spawn. The token is only meaningful in args/env/cwd.
+    """
+    from autoswe.harness.mcp_config import build_pi_mcp_json
+
+    cfg = build_pi_mcp_json("/home/u/.venv/bin/python", "/opt/autoswe")
+    server = cfg["mcpServers"]["autoswe_comment"]
+    assert server["command"] == "/home/u/.venv/bin/python"
+    assert "${" not in server["command"]
+
+
+def test_pi_mcp_json_path():
+    """pi_mcp_json_path joins the agent dir with mcp.json (and expands ~)."""
+    from pathlib import Path, PurePath
+
+    from autoswe.harness.mcp_config import pi_mcp_json_path
+
+    assert pi_mcp_json_path("/tmp/agent") == Path("/tmp/agent") / "mcp.json"
+    # Expand ``~`` and assert on the path parts, not the separator string — on
+    # Windows the expanded path uses ``\`` (e.g. C:\Users\<u>\.pi\agent), so a
+    # POSIX ``endswith(".pi/agent/mcp.json")`` check fails there.
+    expanded = PurePath(pi_mcp_json_path("~/.pi/agent"))
+    assert expanded.name == "mcp.json"
+    assert expanded.parent.name == "agent"
+    assert expanded.parent.parent.name == ".pi"
+
+
+def test_autoswe_repo_root_points_at_mcp_servers():
+    """autoswe_repo_root() is the checkout containing the mcp_servers package."""
+    from autoswe.harness.mcp_config import autoswe_repo_root
+
+    root = autoswe_repo_root()
+    assert root  # non-empty path
+    # The mcp_servers package must be importable from this root — it is where
+    # `python -m mcp_servers.autoswe_comment_server` resolves.
+    import os
+    assert os.path.isdir(os.path.join(root, "mcp_servers"))
+
+
+# ---------------------------------------------------------------------------
 # _as_bool helper (T7 DRY refactor)
 # ---------------------------------------------------------------------------
 
@@ -605,7 +695,9 @@ def test_load_harnesses_config_parses_json(isolated_autoswe_dir):
     """Valid harnesses.json → validated profiles."""
     harnesses_json = isolated_autoswe_dir / "config" / "harnesses.json"
     harnesses_json.write_text(
-        '{"claude-opus": {"backend": "claude_code", "model": "claude-opus-4-8"}, "my-codex": {"backend": "codex", "model": "gpt-5"}}',
+        '{"claude-opus": {"backend": "claude_code", "model": "claude-opus-4-8"}, '
+        '"my-codex": {"backend": "codex", "model": "gpt-5"}, '
+        '"my-pi": {"backend": "pi", "model": "claude-sonnet-4-5"}}',
         encoding="utf-8",
     )
 
@@ -617,6 +709,39 @@ def test_load_harnesses_config_parses_json(isolated_autoswe_dir):
     assert result["claude-opus"]["model"] == "claude-opus-4-8"
     assert "my-codex" in result
     assert result["my-codex"]["backend"] == "codex"
+    assert "my-pi" in result
+    assert result["my-pi"]["backend"] == "pi"
+    assert result["my-pi"]["model"] == "claude-sonnet-4-5"
+
+
+def test_load_harnesses_config_accepts_pi_backend(isolated_autoswe_dir):
+    """pi is a known backend and its profile fields load through validation."""
+    harnesses_json = isolated_autoswe_dir / "config" / "harnesses.json"
+    harnesses_json.write_text(
+        '{"pi-sonnet": {"backend": "pi", "model": "claude-sonnet-4-5", '
+        '"provider": "anthropic", "api_key": "${ANTHROPIC_API_KEY}", '
+        '"thinking": "medium", "cli_path": "/usr/bin/pi", '
+        '"agent_dir": "~/.pi/agent", "session_dir": "~/.pi/sessions", '
+        '"timeout": 3600, "approve_project": true, '
+        '"append_system_prompt": "extra", "env": {"FOO": "bar"}}}',
+        encoding="utf-8",
+    )
+
+    from autoswe.core.config import load_harnesses_config
+
+    result = load_harnesses_config()
+    assert "pi-sonnet" in result
+    profile = result["pi-sonnet"]
+    assert profile["backend"] == "pi"
+    assert profile["model"] == "claude-sonnet-4-5"
+    assert profile["provider"] == "anthropic"
+    assert profile["thinking"] == "medium"
+    assert profile["cli_path"] == "/usr/bin/pi"
+    assert profile["agent_dir"] == "~/.pi/agent"
+    assert profile["session_dir"] == "~/.pi/sessions"
+    assert profile["timeout"] == 3600
+    assert profile["approve_project"] is True
+    assert profile["env"] == {"FOO": "bar"}
 
 
 def test_load_harnesses_config_skips_underscore_keys(isolated_autoswe_dir):
@@ -692,6 +817,15 @@ def test_load_harnesses_config_backend_case_insensitive(isolated_autoswe_dir):
 
     result = load_harnesses_config()
     assert result["upper"]["backend"] == "claude_code"
+
+
+def test_known_backends_pins_three_backends():
+    """KNOWN_BACKENDS is exactly {claude_code, codex, pi} — the enumeration
+    axis every backend-aware test must agree on.  Adding a fourth backend
+    must update this pin (and the factory, and the test axes)."""
+    from autoswe.core.config import KNOWN_BACKENDS
+
+    assert {"claude_code", "codex", "pi"} == KNOWN_BACKENDS
 
 
 # ---------------------------------------------------------------------------
@@ -918,6 +1052,19 @@ def test_resolve_harness_codex_profile(isolated_autoswe_dir):
     result = resolve_harness("fix", repo_cfg, cfg, harnesses=harnesses)
     assert result["backend"] == "codex"
     assert result["model"] == "gpt-5"
+
+
+def test_resolve_harness_pi_profile(isolated_autoswe_dir):
+    """resolve_harness returns a pi backend profile when specified."""
+    from autoswe.core.config import resolve_harness
+
+    harnesses = {"my-pi": {"backend": "pi", "model": "claude-sonnet-4-5"}}
+    cfg = {"FIX_HARNESS": ""}
+    repo_cfg = {"fix_harness": "my-pi"}
+
+    result = resolve_harness("fix", repo_cfg, cfg, harnesses=harnesses)
+    assert result["backend"] == "pi"
+    assert result["model"] == "claude-sonnet-4-5"
 
 
 def test_load_harnesses_config_with_list_values(isolated_autoswe_dir):

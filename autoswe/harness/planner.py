@@ -3,16 +3,17 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from autoswe.core.config import resolve_harness
+from autoswe.core.config import resolve_harness, resolve_max_turns
+from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool, post_question_fallback
 from autoswe.harness.mcp_config import build_mcp_comment_server
-from autoswe.harness.prompts import BOT_MARKER, build_plan_prompt
+from autoswe.harness.prompts import BOT_MARKER, _output_format_note, build_plan_prompt
 from autoswe.harness.runner import HandlerResult
 from autoswe.harness.schemas import PLAN_SCHEMA, output_format_for
 from autoswe.providers.factory import get_tracker
-from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
+from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE, normalize_plan_comment
 from autoswe.vcs.worktree import create_worktree, ensure_worktree_unchanged
 
 dbg = get_debug_logger()
@@ -117,6 +118,16 @@ def _interpret_plan_result(
                     plan_text = pf.read_text(encoding="utf-8").strip()
                     if not _plan_file_is_pending(plan_text):
                         plan_file_path = str(pf)
+            # The MCP server has already patched the plan into the sticky
+            # planning comment in place (issue #241). Push the plan through the
+            # progress callback as the LAST write so the coalesced raw tool
+            # event in the final 10s (ProgressComment._pending_body) cannot be
+            # flushed over it by drain() after the handler returns. Skip when
+            # the sticky is frozen (a posted question must stay the last
+            # thing the sticky shows — issue #184).
+            if result.plan_posted_body and progress_callback is not None \
+                    and not getattr(progress_callback, "frozen", False):
+                progress_callback(normalize_plan_comment(result.plan_posted_body) + BOT_MARKER)
             return "PLAN_READY", plan_file_path
 
     # 3. Structured output (schema-validated, NOT yet posted) — the handler posts
@@ -313,7 +324,7 @@ def _get_git_head(wt: Path) -> str | None:
     """Return git HEAD SHA of the worktree, or None on error."""
     result = subprocess.run(
         ["git", "-C", str(wt), "rev-parse", "HEAD"],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, **GIT_TEXT_ARGS,
     )
     if result.returncode == 0:
         return result.stdout.strip()
@@ -392,6 +403,7 @@ def _plan_session(
             resume=resume_session_id,
             model=harness.get("model"),
             mode="plan",
+            max_turns=resolve_max_turns("plan", repo_cfg, cfg or {}, harness),
             mcp_servers=build_mcp_comment_server(task, repo_cfg),
             progress_callback=progress_callback,
             can_use_tool=cut,
@@ -451,9 +463,25 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
     dbg.debug("PLAN: model=%s guidance=%s", plan_model or "default", guidance)
     label = f"session=NEW model={plan_model or 'default'} guidance_len={len(guidance or '')}"
 
+    # Phase 3 (PLAN-pi-mcp.md): thread the backend's comment tool names into the
+    # prompt so the {{POST_PLAN_TOOL}} / {{POST_QUESTION_TOOL}} placeholders
+    # render to the tools this backend's adapter actually exposes.
+    tool_names = runner.comment_tool_names(harness)
+
+    # Gate the JSON-schema output note on the backend's structured_output
+    # capability — pi/codex never receive an output_format, so the note is
+    # dropped for them (issue #235 follow-up). The harness is already resolved
+    # above, so the note can be computed here.
+    output_format_note = _output_format_note(
+        runner.backend_has_capability(harness, "structured_output"), "plan",
+    )
+
     return _plan_session(
         task, repo_cfg, cfg or {},
-        prompt_factory=lambda wt: build_plan_prompt(task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance),
+        prompt_factory=lambda wt: build_plan_prompt(
+            task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance,
+            tool_names=tool_names, output_format_note=output_format_note,
+        ),
         resume_session_id=None,
         label=label,
         timeout_msg="timeout during plan phase",
@@ -471,10 +499,17 @@ def resume_plan(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progre
     """
     session_id = task.get("session_id")
 
+    # Phase 3 (PLAN-pi-mcp.md): name the post_plan tool the way this backend's
+    # adapter exposes it rather than hardcoding the Claude Code spelling.
+    harness = resolve_harness("plan", repo_cfg, cfg or {})
+    post_plan_tool = runner.comment_tool_names(harness).get(
+        "post_plan", "mcp__autoswe_comment__post_plan"
+    )
+
     resume_prompt = (
         f"The user replied to your last question(s):\n\n{user_text}\n\n"
         "Continue planning. If you now have enough information, call the "
-        "`mcp__autoswe_comment__post_plan` tool with your plan.\n\n"
+        f"`{post_plan_tool}` tool with your plan.\n\n"
         "If you need clarification, use the `AskUserQuestion` tool — "
         "the user will reply via an issue comment and your session will resume.\n\n"
         "Fallback (only if MCP tools are unavailable): output a <AUTOSWE_PLAN> or "

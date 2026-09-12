@@ -1,18 +1,19 @@
-"""Backend parity contract — Claude Code vs Codex honor the same interface.
+"""Backend parity contract — all three backends honor the same interface.
 
 Mirrors the provider parity pattern (test_fake_parity.py, test_tracker_parity.py):
-assert both CodingBackend implementations obey the RunSpec→RunResult contract
-and advertise honest capability sets.
+assert every CodingBackend implementation (claude_code, codex, pi) obeys the
+RunSpec→RunResult contract and advertises honest capability sets.
 
 Parity dimensions:
-1. **Protocol conformance** — both classes have ``capabilities()``,
+1. **Protocol conformance** — every class has ``capabilities()``,
    ``retryable_subtypes()`` and ``retryable_exceptions()`` and ``run()``.
-2. **RunResult shape** — both backends return the same dataclass, incl. the
+2. **RunResult shape** — every backend returns the same dataclass, incl. the
    normalized ``ok`` flag (S6 / issue #169 F-10).
 3. **Capability honesty** — advertised capabilities match what each backend
-   actually supports (Claude = full feature set, Codex = resume + progress only).
+   actually supports (Claude = full feature set, Codex = resume + progress
+   only, pi = mode + resume + session_fork + progress).
 4. **Behavioral read-only** — a ``mode="plan"`` run cannot leave the worktree
-   dirty, asserted the same way for BOTH backends (S6 / issue #169 F-21).
+   dirty, asserted the same way for EVERY backend (S6 / issue #169 F-21).
 """
 from __future__ import annotations
 
@@ -30,9 +31,37 @@ from autoswe.harness.backends.base import CodingBackend, RunResult, RunSpec
 # 1. Protocol conformance
 # ---------------------------------------------------------------------------
 
+# The three backends held to the same contract. codex/pi are CLI backends that
+# require a model in the profile; claude_code is SDK-based and takes none.
+BACKENDS = ("claude_code", "codex", "pi")
+
+
+def _harness_cfg(backend: str) -> dict:
+    """A minimal valid harness profile for *backend* (what the factory needs)."""
+    if backend == "codex":
+        return {"backend": "codex", "model": "gpt-5.6-terra"}
+    if backend == "pi":
+        return {"backend": "pi", "model": "claude-sonnet-4-5"}
+    return {"backend": "claude_code"}
+
+
+def _backend_class(backend: str):
+    """Return the backend class for a parity-axis name (via the factory's imports)."""
+    if backend == "codex":
+        from autoswe.harness.backends.codex import CodexBackend
+
+        return CodexBackend
+    if backend == "pi":
+        from autoswe.harness.backends.pi import PiBackend
+
+        return PiBackend
+    from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+
+    return ClaudeCodeBackend
+
 
 class TestProtocolConformance:
-    """Both backends must satisfy the CodingBackend Protocol."""
+    """Every backend must satisfy the CodingBackend Protocol."""
 
     def test_claude_code_is_coding_backend(self):
         """ClaudeCodeBackend satisfies runtime_checkable CodingBackend."""
@@ -52,39 +81,44 @@ class TestProtocolConformance:
             "CodexBackend should satisfy CodingBackend Protocol"
         )
 
-    def test_both_have_capabilities_classmethod(self):
-        """Both backends expose capabilities as a classmethod returning set."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
+    def test_pi_is_coding_backend(self):
+        """PiBackend satisfies runtime_checkable CodingBackend."""
+        from autoswe.harness.backends.pi import PiBackend
 
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            assert hasattr(cls, "capabilities"), f"{cls.__name__} missing capabilities()"
-            assert isinstance(cls.capabilities(), set), (
-                f"{cls.__name__}.capabilities() must return a set"
-            )
+        backend = PiBackend()
+        assert isinstance(backend, CodingBackend), (
+            "PiBackend should satisfy CodingBackend Protocol"
+        )
 
-    def test_both_have_retryable_exceptions_classmethod(self):
-        """Both backends expose retryable_exceptions() returning a tuple.
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_have_capabilities_classmethod(self, backend):
+        """Every backend exposes capabilities as a classmethod returning set."""
+        cls = _backend_class(backend)
+        assert hasattr(cls, "capabilities"), f"{cls.__name__} missing capabilities()"
+        assert isinstance(cls.capabilities(), set), (
+            f"{cls.__name__}.capabilities() must return a set"
+        )
+
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_have_retryable_exceptions_classmethod(self, backend):
+        """Every backend exposes retryable_exceptions() returning a tuple.
 
         S6 / issue #169 F-09: the exception-based twin of
         ``retryable_subtypes()``.  Each backend declares its OWN retryable
         exception set; runner.run() must not hard-code Claude's tuple.
         """
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
-
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            assert hasattr(cls, "retryable_exceptions"), (
-                f"{cls.__name__} missing retryable_exceptions()"
+        cls = _backend_class(backend)
+        assert hasattr(cls, "retryable_exceptions"), (
+            f"{cls.__name__} missing retryable_exceptions()"
+        )
+        ret = cls.retryable_exceptions()
+        assert isinstance(ret, tuple), (
+            f"{cls.__name__}.retryable_exceptions() must return a tuple"
+        )
+        for exc in ret:
+            assert isinstance(exc, type) and issubclass(exc, BaseException), (
+                f"{cls.__name__}.retryable_exceptions() yielded non-exception {exc!r}"
             )
-            ret = cls.retryable_exceptions()
-            assert isinstance(ret, tuple), (
-                f"{cls.__name__}.retryable_exceptions() must return a tuple"
-            )
-            for exc in ret:
-                assert isinstance(exc, type) and issubclass(exc, BaseException), (
-                    f"{cls.__name__}.retryable_exceptions() yielded non-exception {exc!r}"
-                )
 
     def test_codex_retryable_exceptions_are_its_own(self):
         """Codex retries on asyncio.TimeoutError / OSError, not on Claude's set.
@@ -107,46 +141,156 @@ class TestProtocolConformance:
         assert len(claude_exc) > 0
         assert set(codex_exc) != set(claude_exc)
 
-    def test_both_have_run_method(self):
-        """Both backends have a run(spec) method returning an awaitable."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
-
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_have_run_method(self, backend):
+        """Every backend has a run(spec) method returning an awaitable."""
+        cls = _backend_class(backend)
         spec = RunSpec(prompt="test", cwd="/tmp")
 
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            backend = cls()
-            assert hasattr(backend, "run"), f"{cls.__name__} missing run()"
-            assert callable(backend.run), f"{cls.__name__}.run not callable"
-            coro = backend.run(spec)
-            assert asyncio.iscoroutine(coro), (
-                f"{cls.__name__}.run() must return an awaitable"
-            )
-            coro.close()
+        backend = cls()
+        assert hasattr(backend, "run"), f"{cls.__name__} missing run()"
+        assert callable(backend.run), f"{cls.__name__}.run not callable"
+        coro = backend.run(spec)
+        assert asyncio.iscoroutine(coro), (
+            f"{cls.__name__}.run() must return an awaitable"
+        )
+        coro.close()
 
-    def test_capabilities_is_classmethod(self):
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_capabilities_is_classmethod(self, backend):
         """capabilities() works on both the class and an instance."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
+        cls = _backend_class(backend)
+        class_caps = cls.capabilities()
+        inst_caps = cls().capabilities()
+        assert class_caps == inst_caps, (
+            f"{cls.__name__}: class and instance capabilities() should match"
+        )
 
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            class_caps = cls.capabilities()
-            inst_caps = cls().capabilities()
-            assert class_caps == inst_caps, (
-                f"{cls.__name__}: class and instance capabilities() should match"
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_capabilities_returns_copy(self, backend):
+        """capabilities() returns a copy so callers can't mutate shared state."""
+        cls = _backend_class(backend)
+        a = cls.capabilities()
+        b = cls.capabilities()
+        assert a is not b, "capabilities() should return a new set each call"
+        a.add("__tamper__")
+        assert "__tamper__" not in b
+
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_have_comment_tool_names(self, backend):
+        """Every backend exposes comment_tool_names() returning a role-keyed dict.
+
+        Phase 3 (PLAN-pi-mcp.md): the single source of truth for MCP tool naming.
+        The keys are the stable logical roles; the values are the full,
+        backend-specific tool names the agent actually calls.
+        """
+        cls = _backend_class(backend)
+        assert hasattr(cls, "comment_tool_names"), (
+            f"{cls.__name__} missing comment_tool_names()"
+        )
+        names = cls.comment_tool_names()
+        assert isinstance(names, dict), (
+            f"{cls.__name__}.comment_tool_names() must return a dict"
+        )
+        expected_roles = {"post_plan", "post_question", "update_progress"}
+        assert expected_roles <= set(names), (
+            f"{cls.__name__}.comment_tool_names() missing roles: "
+            f"{expected_roles - set(names)}"
+        )
+        for role, full in names.items():
+            assert isinstance(full, str) and full, (
+                f"{cls.__name__}.comment_tool_names()[{role!r}] must be a non-empty str"
             )
 
-    def test_capabilities_returns_copy(self):
-        """capabilities() returns a copy so callers can't mutate shared state."""
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_comment_tool_names_returns_copy(self, backend):
+        """comment_tool_names() returns a fresh dict so callers can't mutate it."""
+        cls = _backend_class(backend)
+        a = cls.comment_tool_names()
+        b = cls.comment_tool_names()
+        assert a is not b, "comment_tool_names() should return a new dict each call"
+        a["__tamper__"] = "x"
+        assert "__tamper__" not in b
+
+
+# ---------------------------------------------------------------------------
+# 1b. comment_tool_names value parity (Phase 3, PLAN-pi-mcp.md)
+# ---------------------------------------------------------------------------
+
+
+class TestCommentToolNamesParity:
+    """Each backend names the autoswe_comment tools the way its adapter does.
+
+    The names come from each backend's own allowlist constant, so the names the
+    agent is granted, the names the stream parser matches, and the names the
+    prompt references can never drift. This pins the *values* so a silent
+    rename of an allowlist entry (which would break prompt rendering and/or
+    stream detection) fails loudly here.
+    """
+
+    def test_claude_code_double_underscore_names(self):
+        """Claude Code prefixes each tool with a double underscore."""
         from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+
+        assert ClaudeCodeBackend.comment_tool_names() == {
+            "post_plan": "mcp__autoswe_comment__post_plan",
+            "post_question": "mcp__autoswe_comment__post_question",
+            "update_progress": "mcp__autoswe_comment__update_progress",
+        }
+
+    def test_pi_single_underscore_names(self):
+        """pi's adapter uses toolPrefix 'mcp' + a single underscore."""
+        from autoswe.harness.backends.pi import PiBackend
+
+        assert PiBackend.comment_tool_names() == {
+            "post_plan": "mcp__autoswe_comment_post_plan",
+            "post_question": "mcp__autoswe_comment_post_question",
+            "update_progress": "mcp__autoswe_comment_update_progress",
+        }
+
+    def test_codex_returns_claude_default(self):
+        """Codex (no MCP) returns the Claude default so prompts render concretely."""
+        from autoswe.harness.backends.base import CLAUDE_COMMENT_TOOL_NAMES
         from autoswe.harness.backends.codex import CodexBackend
 
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            a = cls.capabilities()
-            b = cls.capabilities()
-            assert a is not b, "capabilities() should return a new set each call"
-            a.add("__tamper__")
-            assert "__tamper__" not in b
+        assert CodexBackend.comment_tool_names() == CLAUDE_COMMENT_TOOL_NAMES
+
+    def test_pi_names_differ_from_claude(self):
+        """The whole point of Phase 3: pi and Claude spell the names differently."""
+        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
+        from autoswe.harness.backends.pi import PiBackend
+
+        assert PiBackend.comment_tool_names() != ClaudeCodeBackend.comment_tool_names()
+
+    def test_names_match_backend_allowlists(self):
+        """The returned names must each be the backend's own allowlist spelling.
+
+        Guards against the returned dict drifting from the allowlist constant the
+        parser/allowlist actually use (the two must stay in lockstep).
+        """
+        from autoswe.harness.backends.claude_code import _MCP_COMMENT_TOOLS, ClaudeCodeBackend
+        from autoswe.harness.backends.pi import _MCP_COMMENT_TOOL_NAMES, PiBackend
+
+        assert set(ClaudeCodeBackend.comment_tool_names().values()) == set(_MCP_COMMENT_TOOLS)
+        assert set(PiBackend.comment_tool_names().values()) == set(_MCP_COMMENT_TOOL_NAMES)
+
+    def test_runner_dispatch_returns_backend_names(self):
+        """runner.comment_tool_names() resolves through the factory per backend."""
+        from autoswe.harness.runner import comment_tool_names
+
+        assert comment_tool_names({"backend": "claude_code"})[
+            "post_plan"
+        ] == "mcp__autoswe_comment__post_plan"
+        assert comment_tool_names(
+            {"backend": "pi", "model": "claude-sonnet-4-5"}
+        )["post_plan"] == "mcp__autoswe_comment_post_plan"
+
+    def test_runner_dispatch_defaults_to_claude(self):
+        """With no harness cfg, runner.comment_tool_names() gives the Claude default."""
+        from autoswe.harness.backends.base import CLAUDE_COMMENT_TOOL_NAMES
+        from autoswe.harness.runner import comment_tool_names
+
+        assert comment_tool_names(None) == CLAUDE_COMMENT_TOOL_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +310,8 @@ class TestRunResultShape:
         """RunResult has the expected set of fields."""
         expected = {
             "text", "session_id", "subtype", "cost_usd", "duration_seconds",
-            "ok", "plan_file_path", "plan_posted", "question_posted", "plan_text",
+            "ok", "plan_file_path", "plan_posted", "question_posted",
+            "plan_posted_body", "plan_text",
             "structured_output",
         }
         actual = {f.name for f in fields(RunResult)}
@@ -180,6 +325,7 @@ class TestRunResultShape:
         assert r.plan_file_path is None
         assert r.plan_posted is False
         assert r.question_posted is False
+        assert r.plan_posted_body is None
         assert r.structured_output is None
 
     def test_runresult_ok_resolved_from_subtype(self):
@@ -226,23 +372,21 @@ class TestRunResultShape:
 class TestRunSpecCompatibility:
     """Both backends must accept the same RunSpec without special-casing."""
 
-    def test_both_accept_minimal_spec(self):
-        """A spec with only prompt+cwd is valid for both backends."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
-
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_accept_minimal_spec(self, backend):
+        """A spec with only prompt+cwd is valid for every backend."""
+        cls = _backend_class(backend)
         spec = RunSpec(prompt="do the thing", cwd="/tmp")
 
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            backend = cls()
-            coro = backend.run(spec)
-            assert asyncio.iscoroutine(coro)
-            coro.close()
+        backend_obj = cls()
+        coro = backend_obj.run(spec)
+        assert asyncio.iscoroutine(coro)
+        coro.close()
 
-    def test_both_accept_full_spec(self):
-        """A fully-populated RunSpec is accepted by both backends."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_accept_full_spec(self, backend):
+        """A fully-populated RunSpec is accepted by every backend."""
+        cls = _backend_class(backend)
 
         spec = RunSpec(
             prompt="implement feature",
@@ -254,19 +398,18 @@ class TestRunSpecCompatibility:
             timeout=300,
             env_overrides={"TEST_KEY": "test_val"},
             progress_callback=lambda x: None,
-            state={"_harness_cfg": {}},
+            state={"_harness_cfg": _harness_cfg(backend)},
         )
 
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            backend = cls()
-            coro = backend.run(spec)
-            assert asyncio.iscoroutine(coro)
-            coro.close()
+        backend_obj = cls()
+        coro = backend_obj.run(spec)
+        assert asyncio.iscoroutine(coro)
+        coro.close()
 
-    def test_both_accept_resume_spec(self):
-        """A resume spec (session_id set) is accepted by both backends."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_accept_resume_spec(self, backend):
+        """A resume spec (session_id set) is accepted by every backend."""
+        cls = _backend_class(backend)
 
         spec = RunSpec(
             prompt="continue",
@@ -275,26 +418,24 @@ class TestRunSpecCompatibility:
             mode="read_write",
         )
 
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            backend = cls()
-            coro = backend.run(spec)
-            assert asyncio.iscoroutine(coro)
-            coro.close()
+        backend_obj = cls()
+        coro = backend_obj.run(spec)
+        assert asyncio.iscoroutine(coro)
+        coro.close()
 
-    def test_both_accept_all_modes(self):
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_accept_all_modes(self, backend):
         """All three mode values are accepted without raising."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
+        cls = _backend_class(backend)
 
         for mode in ("plan", "read_only", "read_write"):
             spec = RunSpec(prompt="test", cwd="/tmp", mode=mode)
-            for cls in (ClaudeCodeBackend, CodexBackend):
-                backend = cls()
-                coro = backend.run(spec)
-                assert asyncio.iscoroutine(coro), (
-                    f"{cls.__name__} rejected mode={mode!r}"
-                )
-                coro.close()
+            backend_obj = cls()
+            coro = backend_obj.run(spec)
+            assert asyncio.iscoroutine(coro), (
+                f"{cls.__name__} rejected mode={mode!r}"
+            )
+            coro.close()
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +448,7 @@ class TestCapabilityHonesty:
 
     Claude Code = full feature set.
     Codex (Phase 4) = resume + progress_stream only.
+    pi = mode + resume + session_fork + progress_stream.
 
     These tests encode the expected capability matrix so that when a backend
     gains or loses a capability, the test failure makes the drift obvious.
@@ -363,6 +505,48 @@ class TestCapabilityHonesty:
             "CodexBackend advertises unknown capability"
         )
 
+    def test_pi_capabilities(self):
+        """PiBackend advertises mode + resume + session_fork + progress_stream + mcp.
+
+        pi does REAL read-only enforcement via the ``--tools`` allowlist
+        derived from RunSpec.mode (so it claims "mode", unlike Codex), and it
+        has a fork primitive (``--fork``) that Codex lacks.  Phase 2 adds the
+        "mcp" capability: pi reaches the autoswe_comment server through the
+        pi-mcp-adapter and parses its tool_execution_start events into the
+        RunResult.plan_posted / question_posted flags.  It still has no
+        per-tool approval callback (``ask_question`` is excluded) and no
+        plan-file / structured-output support.
+        """
+        from autoswe.harness.backends.pi import PiBackend
+
+        caps = PiBackend.capabilities()
+        expected = {"mode", "resume", "session_fork", "progress_stream", "mcp"}
+        assert caps == expected, (
+            f"PiBackend capabilities changed: got {caps}"
+        )
+        assert caps.issubset(self.ALL_CAPABILITIES), (
+            "PiBackend advertises unknown capability"
+        )
+
+    def test_pi_lacks_mcp_and_claude_exclusives(self):
+        """pi must NOT advertise capabilities it doesn't support.
+
+        "mcp" is now supported (Phase 2) and therefore absent from this set;
+        the remaining Claude-exclusive capabilities stay unsupported.
+        """
+        from autoswe.harness.backends.pi import PiBackend
+
+        caps = PiBackend.capabilities()
+        # No per-tool approval (ask_question is excluded in --mode json), no
+        # plan-file or structured-output support.  "mcp" is now advertised.
+        unsupported = {"can_use_tool", "plan_permission", "plan_file",
+                       "structured_output"}
+        overlap = caps & unsupported
+        assert not overlap, (
+            f"PiBackend advertises unsupported capabilities: {overlap}. "
+            "Update this test when pi gains the capability."
+        )
+
     def test_codex_lacks_claude_exclusives(self):
         """Codex must NOT advertise capabilities it doesn't support yet."""
         from autoswe.harness.backends.codex import CodexBackend
@@ -382,26 +566,25 @@ class TestCapabilityHonesty:
             "Update this test when Codex gains the capability."
         )
 
-    def test_both_share_resume_and_progress(self):
-        """Both backends share at least resume + progress_stream."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_share_resume_and_progress(self, backend):
+        """Every backend shares at least resume + progress_stream."""
+        cls = _backend_class(backend)
+        caps = cls.capabilities()
+        assert "resume" in caps, f"{cls.__name__} should support resume"
+        assert "progress_stream" in caps, (
+            f"{cls.__name__} should support progress_stream"
+        )
 
-        shared = ClaudeCodeBackend.capabilities() & CodexBackend.capabilities()
-        assert "resume" in shared, "Both backends should support resume"
-        assert "progress_stream" in shared, "Both backends should support progress_stream"
-
-    def test_no_stray_capabilities(self):
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_no_stray_capabilities(self, backend):
         """No backend advertises a capability outside the known universe."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
-
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            stray = cls.capabilities() - self.ALL_CAPABILITIES
-            assert not stray, (
-                f"{cls.__name__} advertises unknown capabilities: {stray}. "
-                "Add them to ALL_CAPABILITIES in this test."
-            )
+        cls = _backend_class(backend)
+        stray = cls.capabilities() - self.ALL_CAPABILITIES
+        assert not stray, (
+            f"{cls.__name__} advertises unknown capabilities: {stray}. "
+            "Add them to ALL_CAPABILITIES in this test."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -412,19 +595,17 @@ class TestCapabilityHonesty:
 class TestRetryableSubtypesParity:
     """Each backend must implement retryable_subtypes() with the correct contract."""
 
-    def test_both_have_retryable_subtypes(self):
-        """Both backends expose retryable_subtypes as a classmethod."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
-
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            assert hasattr(cls, "retryable_subtypes"), (
-                f"{cls.__name__} missing retryable_subtypes()"
-            )
-            result = cls.retryable_subtypes()
-            assert isinstance(result, set), (
-                f"{cls.__name__}.retryable_subtypes() must return a set"
-            )
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_have_retryable_subtypes(self, backend):
+        """Every backend exposes retryable_subtypes as a classmethod."""
+        cls = _backend_class(backend)
+        assert hasattr(cls, "retryable_subtypes"), (
+            f"{cls.__name__} missing retryable_subtypes()"
+        )
+        result = cls.retryable_subtypes()
+        assert isinstance(result, set), (
+            f"{cls.__name__}.retryable_subtypes() must return a set"
+        )
 
     def test_claude_retryable_subtypes_is_empty(self):
         """ClaudeCodeBackend.retryable_subtypes() returns empty (uses exceptions)."""
@@ -441,17 +622,29 @@ class TestRetryableSubtypesParity:
             f"CodexBackend.retryable_subtypes() changed: got {result}"
         )
 
-    def test_retryable_subtypes_returns_copy(self):
-        """retryable_subtypes() must return a copy so callers can't mutate state."""
-        from autoswe.harness.backends.claude_code import ClaudeCodeBackend
-        from autoswe.harness.backends.codex import CodexBackend
+    def test_pi_retryable_subtypes(self):
+        """PiBackend.retryable_subtypes() returns {'error', 'killed'}.
 
-        for cls in (ClaudeCodeBackend, CodexBackend):
-            a = cls.retryable_subtypes()
-            b = cls.retryable_subtypes()
-            assert a is not b, f"{cls.__name__}.retryable_subtypes() must return a new set"
-            a.add("__tamper__")
-            assert "__tamper__" not in b
+        Same CLI-subprocess failure surface as Codex: a nonzero / in-stream
+        error exits as subtype 'error', a signal kill as 'killed' — both
+        retryable by the runner.
+        """
+        from autoswe.harness.backends.pi import PiBackend
+
+        result = PiBackend.retryable_subtypes()
+        assert result == {"error", "killed"}, (
+            f"PiBackend.retryable_subtypes() changed: got {result}"
+        )
+
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_retryable_subtypes_returns_copy(self, backend):
+        """retryable_subtypes() must return a copy so callers can't mutate state."""
+        cls = _backend_class(backend)
+        a = cls.retryable_subtypes()
+        b = cls.retryable_subtypes()
+        assert a is not b, f"{cls.__name__}.retryable_subtypes() must return a new set"
+        a.add("__tamper__")
+        assert "__tamper__" not in b
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +669,13 @@ class TestFactoryParity:
         backend = get_backend({"backend": "codex", "model": "gpt-5.6-terra"})
         assert isinstance(backend, CodingBackend)
 
+    def test_factory_pi_is_backend(self):
+        """Factory pi backend satisfies CodingBackend."""
+        from autoswe.harness.backends.factory import get_backend
+
+        backend = get_backend({"backend": "pi", "model": "claude-sonnet-4-5"})
+        assert isinstance(backend, CodingBackend)
+
     def test_factory_default_is_claude_code(self):
         """Missing backend key defaults to claude_code."""
         from autoswe.harness.backends.claude_code import ClaudeCodeBackend
@@ -484,21 +684,18 @@ class TestFactoryParity:
         backend = get_backend({})
         assert isinstance(backend, ClaudeCodeBackend)
 
-    def test_factory_backends_return_runresult(self):
+    @pytest.mark.parametrize("backend", BACKENDS)
+    def test_factory_backends_return_runresult(self, backend):
         """Factory-produced backends accept RunSpec and return coroutine."""
         from autoswe.harness.backends.factory import get_backend
 
-        for backend_name in ("claude_code", "codex"):
-            cfg = {"backend": backend_name}
-            if backend_name == "codex":
-                cfg["model"] = "gpt-5.6-terra"
-            backend = get_backend(cfg)
-            spec = RunSpec(prompt="test", cwd="/tmp")
-            coro = backend.run(spec)
-            assert asyncio.iscoroutine(coro), (
-                f"Factory backend '{backend_name}' should return awaitable"
-            )
-            coro.close()
+        backend_obj = get_backend(_harness_cfg(backend))
+        spec = RunSpec(prompt="test", cwd="/tmp")
+        coro = backend_obj.run(spec)
+        assert asyncio.iscoroutine(coro), (
+            f"Factory backend '{backend}' should return awaitable"
+        )
+        coro.close()
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +704,7 @@ class TestFactoryParity:
 
 
 class TestRunnerDispatcherParity:
-    """runner.run() routes correctly for both backends."""
+    """runner.run() routes correctly for all backends."""
 
     def test_runner_backend_has_capability_claude(self):
         """backend_has_capability returns True for Claude features."""
@@ -531,6 +728,26 @@ class TestRunnerDispatcherParity:
         assert backend_has_capability(harness, "resume")
         assert backend_has_capability(harness, "progress_stream")
 
+    def test_runner_backend_has_capability_pi(self):
+        """backend_has_capability returns correct values for pi.
+
+        pi advertises "mode" (real --tools allowlist enforcement) and
+        "session_fork" (--fork) — both gaps Codex leaves open — plus
+        resume + progress_stream + mcp (Phase 2).  It has no per-tool approval.
+        """
+        from autoswe.harness.runner import backend_has_capability
+
+        harness = {"backend": "pi", "model": "claude-sonnet-4-5"}
+        assert backend_has_capability(harness, "mode")
+        assert backend_has_capability(harness, "resume")
+        assert backend_has_capability(harness, "session_fork")
+        assert backend_has_capability(harness, "progress_stream")
+        assert backend_has_capability(harness, "mcp")
+        assert not backend_has_capability(harness, "can_use_tool")
+        assert not backend_has_capability(harness, "plan_permission")
+        assert not backend_has_capability(harness, "plan_file")
+        assert not backend_has_capability(harness, "structured_output")
+
     def test_runner_backend_has_capability_unknown(self):
         """backend_has_capability handles unknown capability gracefully."""
         from autoswe.harness.runner import backend_has_capability
@@ -552,8 +769,10 @@ class TestModeTranslationParity:
     Codex: mode is accepted for contract parity but no longer maps to a
     ``--sandbox`` flag (issue #129 — the per-mode sandbox was dead weight,
     neutralized by the always-on bypass flag).
+    pi: mode → a real ``--tools`` allowlist (the only CLI backend with
+    genuine read-only enforcement).
 
-    Both must handle all three modes without raising.
+    All three must handle all three modes without raising.
     """
 
     def test_claude_mode_config_coverage(self):
@@ -583,6 +802,54 @@ class TestModeTranslationParity:
 
         assert not hasattr(codex_mod, "_MODE_SANDBOX")
         assert not hasattr(codex_mod, "_mode_to_sandbox")
+
+    def test_pi_mode_tools_coverage(self, monkeypatch):
+        """PiBackend _MODE_TOOLS covers all three modes with real enforcement.
+
+        Unlike Codex, pi translates mode into a real ``--tools`` allowlist:
+        plan/read_only get the documented read-only recipe, read_write gets
+        the full working set, and ask_question is excluded from every allowlist
+        (a non-interactive run would block on it — there is no per-tool
+        approval in --mode json).
+        """
+        # Pin the platform so the spec→allowlist assertions below match the
+        # base _MODE_TOOLS table exactly. On a Windows host _tools_for_spec
+        # additionally appends `powershell` for read_write (covered by
+        # test_tools_windows_read_write_adds_powershell); without the pin the
+        # equality to the static table fails on native-Windows runners.
+        monkeypatch.setattr("autoswe.harness.backends.pi.os.name", "posix")
+        from autoswe.harness.backends.pi import _MODE_TOOLS, _tools_for_spec
+
+        for mode in ("plan", "read_only", "read_write"):
+            assert mode in _MODE_TOOLS, (
+                f"PiBackend missing mode translation for {mode!r}"
+            )
+            tools = _MODE_TOOLS[mode]
+            assert len(tools) > 0, f"--tools allowlist for {mode!r} should not be empty"
+            assert "ask_question" not in tools, (
+                f"ask_question must never be allowed (mode={mode!r})"
+            )
+
+        # plan and read_only must be the same read-only recipe (no write/bash).
+        assert set(_MODE_TOOLS["plan"]) == set(_MODE_TOOLS["read_only"])
+        read_only_set = set(_MODE_TOOLS["plan"])
+        assert not ({"bash", "edit", "write"} & read_only_set), (
+            "plan/read_only allowlist must exclude write-capable tools"
+        )
+        read_write_set = set(_MODE_TOOLS["read_write"])
+        assert {"edit", "write", "bash"} <= read_write_set, (
+            "read_write allowlist must include write-capable tools"
+        )
+
+        # spec.mode feeds the allowlist; an unset mode falls back to read_write.
+        assert _tools_for_spec(RunSpec(prompt="p", cwd="/tmp", mode="plan")) == \
+            list(_MODE_TOOLS["plan"])
+        assert _tools_for_spec(RunSpec(prompt="p", cwd="/tmp", mode="read_only")) == \
+            list(_MODE_TOOLS["read_only"])
+        assert _tools_for_spec(RunSpec(prompt="p", cwd="/tmp", mode="read_write")) == \
+            list(_MODE_TOOLS["read_write"])
+        assert _tools_for_spec(RunSpec(prompt="p", cwd="/tmp")) == \
+            list(_MODE_TOOLS["read_write"])
 
 
 # ---------------------------------------------------------------------------
@@ -623,17 +890,17 @@ def _worktree_porcelain(root):
 
 
 class TestReadOnlyBehavioralParity:
-    """The behavioral read-only guarantee, asserted identically on both backends.
+    """The behavioral read-only guarantee, asserted identically on all backends.
 
     S6 / issue #169 F-21: no test previously asserted the *behavioral*
     property that a ``mode="plan"`` run cannot write to the worktree.  This
     is the single canonical copy of that assertion (previously duplicated in
-    test_planner_readonly.py); it runs against BOTH backends because the
+    test_planner_readonly.py); it runs against every backend because the
     backstop — ``ensure_worktree_unchanged`` — is the actual guarantee and
     runs regardless of which backend performed the (unforced) read-only phase.
     """
 
-    @pytest.mark.parametrize("backend", ["codex", "claude_code"])
+    @pytest.mark.parametrize("backend", ["codex", "claude_code", "pi"])
     def test_plan_run_cannot_write_to_worktree(self, backend, tmp_path, mock_gh_post_comment):
         """A mode="plan" run must not leave the worktree dirty, on either backend.
 
@@ -661,10 +928,12 @@ class TestReadOnlyBehavioralParity:
             "title": "Test", "body": "/plan", "base_branch": "master",
             "session_id": None, "_token": "ghp_fake",
         }
-        harness = (
-            {"backend": "codex", "model": "gpt-5.6-terra"}
-            if backend == "codex" else {"backend": "claude_code"}
-        )
+        if backend == "codex":
+            harness = {"backend": "codex", "model": "gpt-5.6-terra"}
+        elif backend == "pi":
+            harness = {"backend": "pi", "model": "claude-sonnet-4-5"}
+        else:
+            harness = {"backend": "claude_code"}
 
         with patch("autoswe.harness.planner.create_worktree", return_value=wt):
             with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):

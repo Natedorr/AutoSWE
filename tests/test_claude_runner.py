@@ -140,6 +140,69 @@ def test_run_uses_repo_agent_timeout():
     assert mock_async_run.called
 
 
+def _capture_wait_for_timeout(harness_cfg, cfg, repo_cfg):
+    """Drive runner.run() with a patched asyncio.wait_for and return the timeout
+    value it received.  This isolates the timeout-resolution logic from the
+    backend's actual execution."""
+    captured = {}
+
+    async def fake_wait_for(coro, timeout=None):
+        captured["timeout"] = timeout
+        coro.close()  # Discard the backend's unawaited coroutine.
+        from autoswe.harness.backends.base import RunResult
+        return RunResult(text="text", session_id="sess-1", subtype="success")
+
+    with patch.object(asyncio, "wait_for", side_effect=fake_wait_for):
+        from autoswe.harness.runner import run
+        run(
+            "test prompt", cwd="/tmp", cfg=cfg, repo_cfg=repo_cfg,
+            harness_cfg=harness_cfg,
+        )
+    return captured["timeout"]
+
+
+def test_run_honors_profile_timeout_field():
+    """A harness profile 'timeout' is the highest-priority timeout source.
+
+    It overrides both the per-repo agent_timeout and the global AGENT_TIMEOUT."""
+    timeout = _capture_wait_for_timeout(
+        {"backend": "claude_code", "timeout": 123},
+        cfg={"AGENT_TIMEOUT": 7200},
+        repo_cfg={"agent_timeout": 600},
+    )
+    assert timeout == 123
+
+
+def test_run_profile_timeout_absent_falls_back_to_repo():
+    """No profile 'timeout' → per-repo agent_timeout wins over AGENT_TIMEOUT."""
+    timeout = _capture_wait_for_timeout(
+        {"backend": "claude_code"},
+        cfg={"AGENT_TIMEOUT": 7200},
+        repo_cfg={"agent_timeout": 600},
+    )
+    assert timeout == 600
+
+
+def test_run_profile_timeout_invalid_falls_back_to_repo():
+    """A non-integer profile 'timeout' is not honored; fall back gracefully."""
+    timeout = _capture_wait_for_timeout(
+        {"backend": "claude_code", "timeout": "soon"},
+        cfg={"AGENT_TIMEOUT": 7200},
+        repo_cfg={"agent_timeout": 600},
+    )
+    assert timeout == 600
+
+
+def test_run_profile_timeout_accepts_numeric_string():
+    """A numeric-string profile 'timeout' is coerced to an int."""
+    timeout = _capture_wait_for_timeout(
+        {"backend": "pi", "model": "claude-sonnet-4-5", "timeout": "900"},
+        cfg={"AGENT_TIMEOUT": 7200},
+        repo_cfg={"agent_timeout": 600},
+    )
+    assert timeout == 900
+
+
 # ---------------------------------------------------------------------------
 # Model resolution order (highest → lowest)
 # ---------------------------------------------------------------------------
@@ -504,6 +567,92 @@ def test_extract_plan_file_path_server_tool_block_returns_none():
 
 # Async generator crash handling (Ollama issue)
 # ---------------------------------------------------------------------------
+
+def test_post_plan_tool_use_captures_plan_posted_body():
+    """A post_plan ToolUseBlock with a body must surface as RunResult.plan_posted
+    AND plan_posted_body (the body the MCP server patched into the sticky), so
+    the planner can re-finalize the sticky after the loop (issue #241)."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage, ToolUseBlock
+
+    from autoswe.harness.runner import RunResult, _run_async
+
+    plan_body = "## Plan\n\nStep 1: fix\nStep 2: test"
+
+    async def fake_query_post_plan(prompt, options):
+        yield AssistantMessage(
+            content=[
+                ToolUseBlock(
+                    id="t1",
+                    name="mcp__autoswe_comment__post_plan",
+                    input={"body": plan_body},
+                ),
+            ],
+            model="test",
+        )
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=500,
+            duration_api_ms=500,
+            is_error=False,
+            num_turns=1,
+            session_id="sess-post-plan",
+            total_cost_usd=0.0,
+        )
+
+    async def run_it():
+        sdk = sys.modules["claude_agent_sdk"]
+        with patch.object(sdk, "query", fake_query_post_plan):
+            return await _run_async(
+                "test prompt",
+                cwd="/tmp",
+                permission_mode="default",
+                allowed_tools=["Read"],
+            )
+
+    result = asyncio.run(run_it())
+    assert isinstance(result, RunResult)
+    assert result.plan_posted is True
+    assert result.plan_posted_body == plan_body
+
+
+def test_post_plan_empty_body_does_not_set_plan_posted_body():
+    """A post_plan call with a whitespace body must not set plan_posted /
+    plan_posted_body (the server rejects empty bodies, so nothing landed)."""
+    from claude_agent_sdk import AssistantMessage, ResultMessage, ToolUseBlock
+
+    from autoswe.harness.runner import RunResult, _run_async
+
+    async def fake_query_empty_plan(prompt, options):
+        yield AssistantMessage(
+            content=[
+                ToolUseBlock(
+                    id="t1",
+                    name="mcp__autoswe_comment__post_plan",
+                    input={"body": "   "},
+                ),
+            ],
+            model="test",
+        )
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=100,
+            duration_api_ms=100,
+            is_error=False,
+            num_turns=1,
+            session_id="sess-empty",
+            total_cost_usd=0.0,
+        )
+
+    async def run_it():
+        sdk = sys.modules["claude_agent_sdk"]
+        with patch.object(sdk, "query", fake_query_empty_plan):
+            return await _run_async("p", cwd="/tmp", permission_mode="default")
+
+    result = asyncio.run(run_it())
+    assert isinstance(result, RunResult)
+    assert result.plan_posted is False
+    assert result.plan_posted_body is None
+
 
 def test_async_generator_crash_returns_partial_results_no_can_use_tool():
     """When the query generator raises RuntimeError with 'async generator' or

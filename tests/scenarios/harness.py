@@ -35,6 +35,7 @@ from tests.fakes.claude_fake import ClaudeFake
 from tests.fakes.codex_fake import CodexFake
 from tests.fakes.git_fake import GitFake
 from tests.fakes.github_fake import GitHubFake
+from tests.fakes.pi_fake import PiFake
 from tests.scenarios.runner import (  # noqa: F401
     assert_claude_calls,
     assert_codex_calls,
@@ -42,6 +43,7 @@ from tests.scenarios.runner import (  # noqa: F401
     assert_git_calls,
     assert_label_is,
     assert_no_git_calls,
+    assert_pi_calls,
     assert_queue_task,
     discover_scenarios,
     load_scenario,
@@ -60,6 +62,7 @@ class HarnessWorld:
     fake: GitHubFake | AzureFake
     claude: ClaudeFake | None
     codex: CodexFake | None
+    pi: PiFake | None
     git: GitFake
     autoswe_dir: Path
     concurrent: bool = False
@@ -178,6 +181,17 @@ class _PatchManager:
 
         self.add(restore)
 
+    def patch_pi(self, pi_fake: PiFake) -> None:
+        """Patch asyncio.create_subprocess_exec for the pi backend."""
+
+        orig = pi_fake._get_real_create()
+        asyncio_mod, _ = pi_fake.patch()
+
+        def restore():
+            asyncio_mod.create_subprocess_exec = orig
+
+        self.add(restore)
+
     def patch_concurrent(self, force: bool) -> None:
         """Stub _is_task_running to simulate a concurrent dispatch."""
         import autoswe.orch.loop as loop_mod
@@ -251,6 +265,35 @@ def _setup_codex_harness(isolated_dir: Path) -> None:
     cfg_mod._harnesses_cache.clear()
 
 
+def _setup_pi_harness(isolated_dir: Path) -> None:
+    """Write harnesses.json with a pi profile for scenario tests.
+
+    Mirrors ``_setup_codex_harness``: creates ``config/harnesses.json`` with a
+    ``"pi"`` profile so ``resolve_harness`` returns a pi backend for all
+    phases.  pi, like codex, requires a model in the profile.
+    """
+    import json
+
+    harnesses_dir = isolated_dir / "config"
+    harnesses_dir.mkdir(parents=True, exist_ok=True)
+
+    harnesses_cfg = {
+        "pi": {
+            "backend": "pi",
+            "model": "claude-sonnet-4-5",
+        }
+    }
+
+    harnesses_path = harnesses_dir / "harnesses.json"
+    harnesses_path.write_text(json.dumps(harnesses_cfg, indent=2), encoding="utf-8")
+
+    # Clear the harnesses cache so the next load picks up our file
+    import autoswe.core.config as cfg_mod
+
+    cfg_mod.HARNESSES_CONFIG_FILE = harnesses_path
+    cfg_mod._harnesses_cache.clear()
+
+
 @contextmanager
 def patched_world(
     provider: str,
@@ -280,10 +323,11 @@ def patched_world(
         involves ``resolve_sync_conflicts`` (the resolver invokes subprocess
         directly for the post-resolution push).
     :param isolated_dir: The per-test AUTOSWE_DIR path.
-    :param backend: ``"claude_code"`` (default, patches ``runner.run``) or
-        ``"codex"`` (patches ``asyncio.create_subprocess_exec`` so the real
-        CodexBackend runs end-to-end).  When ``"codex"``, the existing
-        ``claude_responses`` dicts are fed through ``CodexFake``.
+    :param backend: ``"claude_code"`` (default, patches ``runner.run``),
+        ``"codex"`` or ``"pi"`` (both patch
+        ``asyncio.create_subprocess_exec`` so the real CLI backend runs
+        end-to-end).  When ``"codex"``/``"pi"``, the existing
+        ``claude_responses`` dicts are fed through ``CodexFake``/``PiFake``.
     :yields: ``HarnessWorld`` with access to all fakes.
     """
     claude_responses = claude_responses or []
@@ -295,6 +339,7 @@ def patched_world(
 
     if backend == "codex":
         cx_fake = CodexFake()
+        pi_fake = None
         cl_fake = None
         # Feed the existing claude_responses dicts through CodexFake
         for resp in claude_responses:
@@ -303,8 +348,41 @@ def patched_world(
                 session_id=resp.get("session_id", "s1"),
                 subtype=resp.get("subtype", "success"),
             )
+    elif backend == "pi":
+        cx_fake = None
+        pi_fake = PiFake()
+        cl_fake = None
+        # Feed the existing claude_responses dicts through PiFake.
+        # A response dict may carry an ``"mcp_tool"`` key naming one of the
+        # autoswe_comment direct tools ("post_plan" / "post_question") so a
+        # transition row can script a ``tool_execution_start`` MCP event; the
+        # row's "text" is then the tag-free assistant text that accompanied the
+        # tool call (the plan body is on the thread via MCP, not in the text).
+        for resp in claude_responses:
+            mcp_tool = resp.get("mcp_tool")
+            if mcp_tool:
+                # The script_mcp_* builders are success-only (the MCP tool call
+                # is the whole point of the row), so no subtype is threaded.
+                scripter = {
+                    "post_plan": pi_fake.script_mcp_plan,
+                    "post_question": pi_fake.script_mcp_question,
+                }[mcp_tool]
+                # Thread plan_posted_body through so the pi axis tests the
+                # same body as the claude axis (issue #241 review); fall back
+                # to the text when a row does not script a separate body.
+                scripter(
+                    resp.get("plan_posted_body") or resp["text"],
+                    session_id=resp.get("session_id", "s1"),
+                )
+            else:
+                pi_fake.script_response(
+                    resp["text"],
+                    session_id=resp.get("session_id", "s1"),
+                    subtype=resp.get("subtype", "success"),
+                )
     else:
         cx_fake = None
+        pi_fake = None
         cl_fake = ClaudeFake()
         for resp in claude_responses:
             cl_fake.script_response(
@@ -313,6 +391,7 @@ def patched_world(
                 subtype=resp.get("subtype", "success"),
                 plan_posted=resp.get("plan_posted", False),
                 question_posted=resp.get("question_posted", False),
+                plan_posted_body=resp.get("plan_posted_body"),
             )
 
     # Load state into the API fake
@@ -332,9 +411,11 @@ def patched_world(
     ):
         fake_subprocess = True
 
-    # For codex backend, write harnesses.json and set cfg harness vars
+    # For codex/pi backends, write harnesses.json and set cfg harness vars
     if backend == "codex":
         _setup_codex_harness(isolated_dir)
+    elif backend == "pi":
+        _setup_pi_harness(isolated_dir)
 
     # ---- Apply all patches ----
     with _PatchManager() as pm:
@@ -344,6 +425,8 @@ def patched_world(
 
         if backend == "codex":
             pm.patch_codex(cx_fake)
+        elif backend == "pi":
+            pm.patch_pi(pi_fake)
         else:
             pm.patch_claude(cl_fake)
 
@@ -355,6 +438,7 @@ def patched_world(
             fake=fake,
             claude=cl_fake,
             codex=cx_fake,
+            pi=pi_fake,
             git=gt_fake,
             autoswe_dir=isolated_dir,
             concurrent=concurrent,
@@ -417,9 +501,9 @@ def _script_git_ops(
 def build_test_cfg(isolated_dir: Path, provider: str = "github", backend: str = "claude_code") -> dict:
     """Build a standard config dict for scenario tests.
 
-    When *backend* is ``"codex"``, the returned config sets ``PLAN_HARNESS``,
-    ``FIX_HARNESS``, and ``REVIEW_HARNESS`` to ``"codex"`` so that all three
-    phases resolve to the Codex backend.
+    When *backend* is ``"codex"`` or ``"pi"``, the returned config sets
+    ``PLAN_HARNESS``, ``FIX_HARNESS``, and ``REVIEW_HARNESS`` to that backend
+    so that all three phases resolve to the corresponding CLI backend.
     """
     # Disable the CLAUDE.md init session in tests — it would consume a
     # scripted ClaudeFake response and break the transition matrix.
@@ -443,10 +527,10 @@ def build_test_cfg(isolated_dir: Path, provider: str = "github", backend: str = 
         "ANTHROPIC_BASE_URL": "",
         "WORKTREE_DIR": str(isolated_dir / "worktrees"),
     }
-    if backend == "codex":
-        cfg["PLAN_HARNESS"] = "codex"
-        cfg["FIX_HARNESS"] = "codex"
-        cfg["REVIEW_HARNESS"] = "codex"
+    if backend in ("codex", "pi"):
+        cfg["PLAN_HARNESS"] = backend
+        cfg["FIX_HARNESS"] = backend
+        cfg["REVIEW_HARNESS"] = backend
     return cfg
 
 

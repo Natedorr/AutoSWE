@@ -324,6 +324,10 @@ def test_run_retry_replays_plan():
     assert isinstance(result, DispatchResult)
     assert result.done_content == "PLAN_READY"
     mock_plan.assert_called_once()
+    # The replayed command is threaded so emit records it (not the literal
+    # "/retry") — a subsequent /retry then re-replays /plan instead of falling
+    # back to /fix (regression: "a failed plan is retried as a plan").
+    assert result.replayed_command == "/plan"
 
 
 def test_run_retry_after_pr_falls_back_to_fix():
@@ -463,6 +467,38 @@ def test_fork_session_false_for_codex_fix_backend():
         assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") is None
 
 
+def test_fork_session_true_for_pi_checkpoint_with_pi_fix_backend():
+    """A pi checkpoint produced by a pi fix backend (which advertises
+    session_fork) → the gate returns the checkpoint id. This is the pi ≠
+    codex divergence: pi's --fork primitive makes the provenance gate accept
+    a pi checkpoint, whereas a codex checkpoint is never forked by codex."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-pi-plan",
+        "last_good_session_backend": "pi",
+    }
+    cfg = {"FIX_HARNESS": "pi_profile"}
+    with patch("autoswe.orch.run.resolve_harness", return_value={
+        "backend": "pi", "model": "claude-sonnet-4-5",
+    }):
+        assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") == "s-pi-plan"
+
+
+def test_fork_session_false_when_pi_checkpoint_codex_fix_backend():
+    """A pi checkpoint must NOT be forked by a codex fix backend: codex lacks
+    session_fork, so a foreign pi session id is unusable → fresh session."""
+    from autoswe.orch.run import _fork_session_for_retry
+    task = {
+        "last_good_session_id": "s-pi-plan",
+        "last_good_session_backend": "pi",
+    }
+    cfg = {"FIX_HARNESS": "codex_profile"}
+    with patch("autoswe.orch.run.resolve_harness", return_value={
+        "backend": "codex", "model": "gpt-5.6-terra",
+    }):
+        assert _fork_session_for_retry(task, {"provider": "github"}, cfg, "slug") is None
+
+
 def test_fork_session_returns_session_id_when_no_last_good():
     """When only session_id is set (no last_good_session_id yet), the gate
     returns that session id as the checkpoint to fork from."""
@@ -514,6 +550,130 @@ def test_build_task_dict_carries_plan_file_path():
     action = Action(kind="fix", slug="owner/repo_42")
     task = _build_task_dict(world, action)
     assert task["plan_file_path"] == "/home/me/.claude/plans/abc.md"
+
+
+# ------ Progress comment -> task dict (_comment_id plumbing, issue #226) ------
+#
+# Regression for the live-dispatch bug where spec.mcp_servers never contained
+# autoswe_comment: _comment_id was set on the mutable queue entry in loop.py
+# but TaskState.to_handler_dict() excluded it as transient, so the handler
+# task dict built from the TaskState snapshot never carried it and
+# build_mcp_comment_server() returned None. These tests drive the REAL
+# run() path with a ProgressComment-shaped callback (not a synthetic task
+# dict that carries _comment_id directly, which is how Phase 5 tests missed
+# it) and assert the handler receives a task dict from which the comment
+# server config builds.
+
+
+class _FakeProgress:
+    """ProgressComment-shaped stub: carries a comment_id and is callable.
+
+    run() must read ``progress_callback.comment_id`` and inject it onto the
+    handler task dict — exactly the contract loop.py's ProgressComment exposes.
+    """
+
+    def __init__(self, comment_id, minimal_posting=False):
+        self._comment_id = comment_id
+        self._minimal_posting = minimal_posting
+
+    @property
+    def comment_id(self):
+        return self._comment_id
+
+    def __call__(self, body: str) -> None:
+        pass
+
+
+def test_run_injects_comment_id_from_progress_callback():
+    """run() must carry the dispatch-time progress comment onto the handler
+    task dict so build_mcp_comment_server() returns a server config instead
+    of None. Without this, every live plan/fix run silently fell back to the
+    deprecated text tag (issue #226)."""
+    from autoswe.harness.mcp_config import build_mcp_comment_server
+
+    world = _make_world()
+    action = Action(kind="plan", slug=world.task.slug, plan_branch="dev")
+    seen: dict = {}
+
+    def _capture_plan(task, *a, **kw):
+        seen["task"] = task
+        return HandlerResult("PLAN_READY")
+
+    with patch("autoswe.orch.run._run_plan_with_sync", side_effect=_capture_plan):
+        run(action, world, progress_callback=_FakeProgress(comment_id=12345))
+
+    task = seen["task"]
+    assert task["_comment_id"] == 12345
+    server = build_mcp_comment_server(task, world.repo_cfg)
+    assert server is not None
+    assert "autoswe_comment" in server
+    assert server["autoswe_comment"]["env"]["AUTOSWE_COMMENT_ID"] == "12345"
+    assert server["autoswe_comment"]["env"]["AUTOSWE_TOKEN"] == "ghp_fake"
+
+
+def test_run_injects_comment_id_on_fix_path():
+    """The fix path (coder.run_fix) gets _comment_id too — same seam, so the
+    codex/claude/pi backends all build the comment server for /fix."""
+    from autoswe.harness.mcp_config import build_mcp_comment_server
+
+    world = _make_world(plan_branch="autoswe/issue-42")
+    action = Action(kind="fix", slug=world.task.slug)
+    seen: dict = {}
+
+    def _capture_fix(task, *a, **kw):
+        seen["task"] = task
+        return HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+
+    with patch("autoswe.orch.run._run_fix_with_sync", side_effect=_capture_fix):
+        run(action, world, progress_callback=_FakeProgress(comment_id=999))
+
+    task = seen["task"]
+    assert task["_comment_id"] == 999
+    assert build_mcp_comment_server(task, world.repo_cfg) is not None
+
+
+def test_run_injects_minimal_posting_from_cfg():
+    """_minimal_posting mirrors the dispatch's MINIMAL_POSTING config so the
+    MCP server's AUTOSWE_SUPPRESS_POSTING env var is set correctly."""
+    world = _make_world()
+    world = World(
+        api=world.api, task=world.task,
+        cfg={"ANTHROPIC_API_KEY": "sk-fake", "MINIMAL_POSTING": True},
+        repo_cfg=world.repo_cfg,
+    )
+    action = Action(kind="plan", slug=world.task.slug, plan_branch="dev")
+    seen: dict = {}
+
+    def _capture_plan(task, *a, **kw):
+        seen["task"] = task
+        return HandlerResult("PLAN_READY")
+
+    with patch("autoswe.orch.run._run_plan_with_sync", side_effect=_capture_plan):
+        run(action, world, progress_callback=_FakeProgress(comment_id=7))
+
+    assert seen["task"]["_minimal_posting"] is True
+
+
+def test_run_no_progress_callback_leaves_comment_id_absent():
+    """No progress comment (sync-only / non-sticky dispatch) → no _comment_id
+    is injected and build_mcp_comment_server still returns None — the
+    no-progress path must be unchanged by the fix."""
+    from autoswe.harness.mcp_config import build_mcp_comment_server
+
+    world = _make_world()
+    action = Action(kind="plan", slug=world.task.slug, plan_branch="dev")
+    seen: dict = {}
+
+    def _capture_plan(task, *a, **kw):
+        seen["task"] = task
+        return HandlerResult("PLAN_READY")
+
+    with patch("autoswe.orch.run._run_plan_with_sync", side_effect=_capture_plan):
+        run(action, world, progress_callback=None)
+
+    task = seen["task"]
+    assert "_comment_id" not in task
+    assert build_mcp_comment_server(task, world.repo_cfg) is None
 
 
 def test_to_dispatch_carries_plan_file_path():

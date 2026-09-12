@@ -323,6 +323,42 @@ def assert_codex_calls(cx_fake, expected_calls: list[dict]) -> None:
             )
 
 
+def assert_pi_calls(pi_fake, expected_calls: list[dict]) -> None:
+    """Assert pi subprocess calls match expectations.
+
+    Each entry in *expected_calls* is a dict with optional keys (see
+    ``PiFake._parse_command`` for the recorded fields):
+        tools - the comma-joined ``--tools`` allowlist (pi's read-only
+            enforcement; e.g. ``"read,grep,find,ls"`` for plan/read_only)
+        is_fresh - True for a fresh run (``--session-id <uuid>``)
+        is_resume - True for an in-place resume (``--session <id>``)
+        is_fork - True for a fork (``--fork <src> --session-id <new>``)
+        fork - the source session id a ``--fork`` branches from
+        resume - the session id a plain ``--session`` continues
+        session_id - the pinned ``--session-id`` (fresh / fork)
+        model - expected model
+        approve - whether the ``--approve`` project-trust flag is present
+    """
+    if not expected_calls:
+        return
+
+    for i, exp in enumerate(expected_calls):
+        if i >= len(pi_fake.calls):
+            raise AssertionError(
+                f"Expected {len(expected_calls)} pi call(s), "
+                f"only {len(pi_fake.calls)} made."
+            )
+
+        call = pi_fake.calls[i]
+        for key in ("tools", "is_fresh", "is_resume", "is_fork",
+                    "fork", "resume", "session_id", "model", "approve"):
+            if key in exp:
+                assert call.get(key) == exp[key], (
+                    f"Call {i}: expected {key}={exp[key]!r}, "
+                    f"got {call.get(key)!r}"
+                )
+
+
 def assert_queue_task(autoswe_dir: Path, task_id: str,
                       expected_fields: dict[str, Any]) -> None:
     """Assert specific fields on a queue task match expectations."""

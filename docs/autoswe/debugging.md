@@ -76,6 +76,73 @@ Session state lives at `~/.claude/projects/<encoded-worktree-path>/<session-id>.
 | Stale PID | stuck at RUNNING status | Process crashed without cleanup | Delete `.pid` file, re-sync |
 | No dispatch | `autoswe:pending` sits | `MAX_CONCURRENT` reached | Check `running/` for active jobs |
 | Wrong model | plan/fix uses unexpected model | Model resolution order | Check repos.json phase-specific → env phase-specific → repos.json generic |
+| `Exception in thread ...` with no traceback | `autoswe:error` | Subprocess output decode failure (historically: CP1252 default codec on Windows hitting a UTF-8 git byte, e.g. `0x9D`) | Fixed in #238 — all git/gh subprocess calls pin `encoding="utf-8", errors="replace"`; see below |
+
+### Subprocess output decoding (Windows / CP1252, issue #238)
+
+`subprocess.run(text=True)` with no `encoding` decodes child output using the
+platform locale — **CP1252 on Windows**. Git always emits UTF-8, so a byte
+undefined in CP1252 (e.g. `0x9D`, seen when an em dash was mis-decoded and
+re-encoded) made CPython's internal reader thread raise
+`UnicodeDecodeError` and die *silently*: `stdout` stayed `None`, the next
+`.strip()` raised `TypeError`, and — because that second exception is what
+escapes the handler — only the bare `Exception in thread ...` line reached the
+log, hiding the real traceback. It could compound: the error-diagnostics path
+(`autoswe/core/error_utils.py`) previously ran its own bare `text=True` git
+calls and could fail the same way *inside* the error capture.
+
+Fix: every git/gh subprocess call in `autoswe/` passes
+`encoding="utf-8", errors="replace"` (shared constant `GIT_TEXT_ARGS` in
+`autoswe/core/constants.py`). Un-decodable bytes surface as `U+FFFD` instead
+of crashing. Regression tests monkeypatch `subprocess._text_encoding` to
+`cp1252` to reproduce the failure mode on Linux CI. If you ever add a new
+subprocess call that reads git/gh output, pass `**GIT_TEXT_ARGS`.
+
+### Large single-line JSONL events (Codex/Pi backends, issue #251)
+
+The Codex and Pi backends stream the child's stdout line-by-line via
+`asyncio.create_subprocess_exec(..., stdout=PIPE)`. By default asyncio bounds
+the `StreamReader` to **64 KiB per line**; a single JSONL event larger than
+that makes `readline()` raise `ValueError` (it wraps `LimitOverrunError`).
+That `ValueError` is *not* in the backends' retryable set
+(`asyncio.TimeoutError, OSError`), so it escaped the runner and **crashed the
+poller** mid-run.
+
+Fix (issue #251): the subprocess is now spawned with
+`limit=_MAX_STREAM_BYTES + 1` (16 MiB + 1, threads to both stdout and stderr
+pipes), so any line the backends' byte budget allows is readable. If a line
+*still* exceeds the limit, `read_stdout_jsonl` catches the `ValueError`,
+flags the run (`turn_failed` / `has_error`), and drains the rest of stdout
+(discarding data, via `read()` not `readline()` so an unterminated write can't
+block), so the run returns `subtype="error"` instead of the poller dying.
+
+### Windows poller hardening (poller.ps1, issue #251)
+
+`poller.ps1` runs under Windows PowerShell 5.1 (Task Scheduler). Three
+failure modes were hardened:
+
+- **UTF-8 without BOM.** The script now pins `[System.Text.UTF8Encoding]::new($false)`
+  for the log (via `[System.IO.File]::AppendAllText`, which replaces the
+  UTF-16/BOM-prone `Add-Content`), sets `[Console]::InputEncoding`/`OutputEncoding`
+  (best-effort — console-encoding assignment can fail under a Task Scheduler
+  redirect, so it's non-fatal), and sets `PYTHONIOENCODING=utf-8` +
+  `PYTHONUTF8=1` for the child Python so non-ASCII poller output can't be
+  mangled by the OEM/CP1252 code page (the same class of issue as #238).
+- **Redirected stderr no longer aborts the run.** The default
+  `$ErrorActionPreference="Stop"` would treat native stderr redirected through
+  `2>&1` as a terminating error. The script temporarily lowers it to `Continue`
+  around the `& $PYTHON ... poller --drain 2>&1` call and restores it in a
+  `finally`, so stderr is captured as log data.
+- **Exit code propagation.** The script captures `$LASTEXITCODE` right after
+  the poller call and ends with `exit $pollerExitCode` (a PowerShell-level
+  `catch` sets it to `1`). Previously the script always exited 0 unless a
+  PowerShell-level `catch` fired, so a failed `python autoswe.py poller` was
+  invisible to Task Scheduler / monitoring.
+
+Regression tests live in `tests/test_poller_windows.py`: static contract
+assertions that run everywhere (no PowerShell required), plus functional
+Unicode/stderr/exit-code tests that run when `pwsh`/`powershell` is on PATH and
+skip cleanly otherwise (the default Linux CI box has no PowerShell).
 
 ## Testing
 

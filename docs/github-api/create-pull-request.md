@@ -2,6 +2,8 @@
 
 Source: https://docs.github.com/en/rest/pulls/pulls
 
+> See guide: [Issue ↔ Branch ↔ PR Linking & CI Results](issue-pr-linking-and-ci.md) — closing keywords in the PR body (`Closes #N`), branch naming conventions, and how to verify the issue link after creation.
+
 ## Create a pull request
 
 ```

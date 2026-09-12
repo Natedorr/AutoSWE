@@ -281,6 +281,30 @@ TRANSITIONS: list[dict[str, Any]] = [
             "comment_contains": ["Failed:", "/retry"],
         },
     },
+    {
+        "name": "fix_max_turns_no_work_fails",
+        "description": (
+            "The fix agent hits its turn budget (error_max_turns) but leaves no "
+            "committable work in the worktree. The commit-on-cap rescue "
+            "(issue #222) only fires when there is a non-empty diff AND a green "
+            "gate — with no work there is nothing to commit, so the run falls "
+            "through to the normal FAILED state with the /retry hint. The "
+            "committable-work check short-circuits before the test gate runs."
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "queue_task": None,
+        },
+        "claude_responses": [
+            {"text": "reached the turn limit", "session_id": "s-fix-42", "subtype": "error_max_turns"},
+        ],
+        "git_calls": ["create_worktree"],
+        "expect": {
+            "label_after": "autoswe:failed",
+            "autoswe_status": "failed",
+            "comment_contains": ["error_max_turns", "/retry"],
+        },
+    },
     # ---- Resume transitions ----
     {
         "name": "plan_ready_then_fix",
@@ -1652,6 +1676,67 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "pi_retry_forks_from_pi_checkpoint",
+        "description": (
+            "pi-specific: /retry from failed state forks from a checkpoint "
+            "produced by the pi backend (last_good_session_backend='pi'). "
+            "Unlike codex (no fork primitive), pi forks (--fork). The "
+            "provenance gate must ACCEPT a pi checkpoint when the fix harness "
+            "is pi — the pi ≠ codex divergence this row isolates."
+        ),
+        "start": {
+            "issue": {"body": "/fix"},
+            "labels": ["autoswe:failed"],
+            "comments": [
+                {
+                    "body": "Failed: timeout\n\nPost `/retry` to continue.\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/fix",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 2,
+                "last_dispatched_command": "/fix",
+                # The surviving known-good checkpoint was produced by pi, so
+                # the provenance gate must accept it when the fix harness is pi.
+                "session_id": None,
+                "last_good_session_id": "s-pi-plan-good-42",
+                "last_good_session_backend": "pi",
+                "first_dispatched_at": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tFixed\tabc1234", "session_id": "s-pi-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["create_worktree", "commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["Completed with command"],
+            # Under the DEFAULT claude_code axis this row is a provenance
+            # MISMATCH: the checkpoint was produced by pi, so the claude_code
+            # fix backend must NOT fork it (foreign-backend session id).  The
+            # fork-accept path is asserted by test_transition_pi (backend="pi"),
+            # where the fix harness is pi and the gate accepts the pi checkpoint.
+            "claude_calls": [
+                {"resume": None, "fork_session": False},
+            ],
+        },
+    },
+    {
         "name": "dispatched_command_noop",
         "description": "Task in planning state; new /fix command → noop",
         "start": {
@@ -2098,7 +2183,7 @@ TRANSITIONS: list[dict[str, Any]] = [
     # ---- WI #150: waiting -> planned via MCP post_plan during resume ----
     {
         "name": "waiting_resume_mcp_post_plan",
-        "description": "Task at waiting; user reply resumes plan; Claude calls MCP post_plan -> planned",
+        "description": "Task at waiting; user reply resumes plan; agent calls MCP post_plan -> planned (dual-axis: ClaudeFake honors plan_posted, pi branch maps mcp_tool to script_mcp_plan). The captured post_plan body (issue #241) is re-pushed through the sticky progress comment, so the plan lands on the thread as a '## Plan' comment via the PATCH channel.",
         "meta": {"mcp_plan_posted": True},
         "start": {
             "issue": {"body": "/plan"},
@@ -2130,7 +2215,8 @@ TRANSITIONS: list[dict[str, Any]] = [
             },
         },
         "claude_responses": [
-            {"text": "Thanks! Here is the plan.", "session_id": "s-plan-42", "subtype": "success", "plan_posted": True},
+            {"text": "Thanks! Here is the plan. Use Django.", "session_id": "s-plan-42", "subtype": "success",
+             "plan_posted": True, "mcp_tool": "post_plan", "plan_posted_body": "Use Django."},
         ],
         "git_calls": ["create_worktree"],
         "expect": {
@@ -2138,6 +2224,11 @@ TRANSITIONS: list[dict[str, Any]] = [
             "autoswe_status": "planned",
             "session_id": "s-plan-42",
             "claude_permission": "plan",
+            # issue #241: the captured post_plan body is re-pushed through the
+            # sticky planning comment (the "Resuming `plan` session…" PATCH
+            # channel), so the plan lands on the thread as a "## Plan" comment
+            # instead of a separate new POST.
+            "comment_contains": ["## Plan", "Use Django."],
         },
     },
     # ---- Issue #27: waiting resume with stale last_phase ----
@@ -2279,6 +2370,24 @@ CODEX_TRANSITIONS: list[str] = [
     "attempts_guard_fires_on_restart",     # MAX_ATTEMPTS guard fires (decide-level, backend-agnostic)
     "failed_then_fix_restarts",            # /fix on a failed task re-dispatches (issue #192)
     "fix_red_suite_marks_test_failed",     # Post-fix test gate red → test_failed (backend-agnostic gate in _finalize_fix)
+]
+
+
+# ---------------------------------------------------------------------------
+# Pi backend transition rows
+
+# Curated set of transition names to run against the pi backend.
+# These cover the pi-specific divergences: REAL read-only enforcement via the
+# --tools allowlist (plan phase — no loud-degrade, no worktree-rollback
+# reliance), the pi --fork primitive on /retry (a gap Codex leaves open), and
+# the provenance gate accepting a pi checkpoint.
+
+PI_TRANSITIONS: list[str] = [
+    "fresh_plan_command",                              # Plan phase: real --tools read-only enforcement (no degrade)
+    "fresh_fix_command",                               # Fix phase: --tools read_write allowlist
+    "pi_retry_forks_from_pi_checkpoint",               # /retry: pi forks (--fork) from a pi checkpoint
+    "retry_no_fork_when_checkpoint_backend_mismatches",  # codex checkpoint vs pi fix → fresh (provenance gate rejects)
+    "waiting_resume_mcp_post_plan",                    # waiting -> planned via MCP post_plan on the pi axis (MCP event drives PLAN_READY, no tag in text)
 ]
 
 

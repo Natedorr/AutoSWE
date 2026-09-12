@@ -2,14 +2,14 @@
 
 autoSWE uses an 11-layer test strategy, from canonical API fixtures to state-machine transitions to infrastructure edge cases. All offline tests run via `pytest -q -m "not live"`.
 
-> **Live layer — lives in [`e2e/`](../../e2e/README.md), not here.** Everything below proves the
-> state machine against *fakes*. The `e2e/` directory at the repo root proves the same machine
-> against a real provider and a real coding backend: an external agent (openclaw) opens issues
-> on a purpose-built testbed, drives `e2e/scenarios.json`, and `e2e/monitor.py` scores every
-> path from `data/queue.json` on cron. It is deliberately self-contained and indexed by
-> `e2e/MANIFEST.json` so an outside agent can find it without walking `docs/`.
-> When a live scenario finds a bug, the fix lands in **both** places — add the transition row
-> to `tests/scenarios/transitions.py` *and* keep the scenario in `e2e/scenarios.json`.
+> **Live layer — lives in [`tests/e2e/`](../../tests/e2e/README.md), not here.** Everything below
+> proves the state machine against *fakes*. `tests/e2e/` proves the same machine against a real
+> provider and a real coding backend: it is a corpus of test cases — each one an issue to create
+> in a real test project, the comments to post on it, and the process autoSWE must follow in
+> response — driven by an external agent (openclaw) that reports what diverges. Nothing there
+> executes; there are no scripts and no cron files.
+> When a live case finds a bug, the fix lands in **both** places — add the transition row to
+> `tests/scenarios/transitions.py` *and* keep the case in `tests/e2e/cases/`.
 
 ## Layer 0 — Canonical API Fixtures
 
@@ -398,7 +398,7 @@ The fakes monkeypatch these internal functions:
 | `_gh_request` | `autoswe.tracking.api` | `GitHubFake` |
 | `_ado_request` | `autoswe.providers.azure.api` | `AzureFake` |
 | `runner.run` | `autoswe.harness.runner` | `ClaudeFake` |
-| `asyncio.create_subprocess_exec` | `asyncio` | `CodexFake` |
+| `asyncio.create_subprocess_exec` | `asyncio` | `CodexFake` / `PiFake` |
 | `worktree.*` | `autoswe.vcs.worktree` | `GitFake` |
 | `gh_post_comment` | `autoswe.tracking.api` + import sites | harness |
 
@@ -427,18 +427,69 @@ fake.script_killed(session_id="s-kill")
 
 **Fidelity guard:** `tests/test_codex_fake.py` feeds CodexFake JSONL through the real `CodexBackend` and asserts the resulting `RunResult`. This pins the fake to the real parser — if the JSONL format changes, the fidelity test fails before transitions do.
 
+### PiFake — Subprocess-Level Fake
+
+`tests/fakes/pi_fake.py` replaces `asyncio.create_subprocess_exec` with a stub returning a `FakeProcess` that feeds `--mode json` event lines (session header, agent/turn lifecycle, `message_start`/`update`/`end`, `tool_execution_*`, `agent_end`, cumulative `usage`). Like CodexFake, it lets the **real** factory → `PiBackend` → JSONL parser → `RunResult` path run unmodified — the same fidelity contract as CodexFake.
+
+**Builder API** (mirrors `ClaudeFake`/`CodexFake` so existing transition-row response dicts work verbatim):
+
+```python
+fake = PiFake()
+fake.script_response("text", session_id="s1", subtype="success")
+fake.script_plan("1. Fix it", session_id="s-plan")
+fake.script_questions("What?", session_id="s-plan")
+fake.script_fix("DONE_SUMMARY\t...\t<sha>", session_id="s-fix")
+fake.script_fail(session_id="s-err", error_msg="timeout")
+fake.script_killed(session_id="s-kill")
+```
+
+**MCP comment fixtures (Phase 2 of `docs/autoswe/PLAN-pi-mcp.md`).** The pi-mcp-adapter's
+`tool_execution_start` events for the `autoswe_comment` server exist in three
+shapes, and the fake's builders pin all three so the real parser's
+classification (`pi.py:_classify_mcp_comment_call`) stays covered:
+
+| Builder / fixture | `toolName` | `args` | `proxy=` |
+|---|---|---|---|
+| direct (the spike-pi-mcp.md fact-1/3 shape; `body` verbatim) | `mcp__autoswe_comment_<tool>` | `{"body": ...}` | `"direct"` |
+| generic `mcp` proxy (cold-cache fallback) | `"mcp"` | `{"tool": <tool>, "args": {"body": ...}}` | `"generic"` |
+| `mcp__autoswe_comment` namespace proxy (cold-cache fallback) | `"mcp__autoswe_comment"` | `{"tool": <tool>, "args": {"body": ...}}` | `"namespace"` |
+
+The tool event is emitted right before the assistant message blocks of the
+scripted response, so the real parser sets the resulting `RunResult` flags:
+`post_plan` → `plan_posted` (plus the `body` argument → `plan_posted_body`),
+`post_question` → `question_posted`, `update_progress` → progress callback.
+
+```python
+fake = PiFake()
+# Warm-cache shape: the direct mcp__autoswe_comment_post_plan tool.
+fake.script_mcp_plan("## Plan", session_id="s-plan")
+# Cold-cache shape: same call through the generic mcp proxy.
+fake.script_mcp_plan("## Plan", session_id="s-plan-2", proxy="generic")
+# Namespace proxy + question / progress variants:
+fake.script_mcp_question("What framework?", session_id="s-plan-3", proxy="namespace")
+fake.script_mcp_update_progress("Reading files...")
+# Or hand-roll any shape (the fake's _mcp_comment_tool_event / _tool_execution_start
+# builders are the fixture of record):
+fake.script_response("", session_id="s1",
+    tool_event=pi_fake._mcp_comment_tool_event("post_plan", "## Plan", "direct"))
+```
+
+**`.calls` tracking:** Each pi command is parsed and recorded for flag/session/tool assertions (e.g. the `--tools` allowlist, the `--session`/`--session-id`/`--fork` session flags). When a run names the `autoswe_comment` server, the assertion surface includes the three `mcp__autoswe_comment_*` names appended to `--tools` for every mode (`tests/test_pi_backend.py::test_tools_mcp_comment_adds_three_names` and friends pin that).
+
+**Fidelity guard:** `tests/test_pi_fake.py` feeds PiFake `--mode json` lines through the real `PiBackend` and asserts the resulting `RunResult` — including the direct + proxy `tool_execution_start` fixtures above (the plan/question/progress flags must come out of the genuine parser, not the fake). This pins the fake to the real parser — if the pi stream shape changes, the fidelity test fails before transitions do.
+
 ### Backend Axis in Scenario Harness
 
-The `patched_world()` context manager accepts a `backend` parameter (`"claude_code"` or `"codex"`). When set to `"codex"`:
+The `patched_world()` context manager accepts a `backend` parameter (`"claude_code"`, `"codex"`, or `"pi"`). When set to `"codex"` or `"pi"`:
 
-- A `CodexFake` is created (not `ClaudeFake`) and patched at the subprocess level.
-- `config/harnesses.json` is written with a `"codex"` profile.
-- Config `PLAN_HARNESS`, `FIX_HARNESS`, `REVIEW_HARNESS` are set to `"codex"` so `resolve_harness()` returns CodexBackend for all phases.
+- A `CodexFake` / `PiFake` (not `ClaudeFake`) is created and patched at the subprocess level (both patch `asyncio.create_subprocess_exec` so the real CLI backend runs end-to-end).
+- `config/harnesses.json` is written with a `"codex"` / `"pi"` profile (pi, like codex, requires a `model`).
+- Config `PLAN_HARNESS`, `FIX_HARNESS`, `REVIEW_HARNESS` are set to that backend so `resolve_harness()` returns the matching backend for all phases.
 - The `_harnesses_config` cache is cleared to pick up the test-specific config.
 
-The `HarnessWorld` exposes `hw.codex` (the `CodexFake` instance) and `hw.backend` (`"codex"`). Use `assert_codex_calls(hw.codex, [{"sandbox": "read-only"}])` for per-backend assertions.
+The `HarnessWorld` exposes `hw.codex` / `hw.pi` (the fake instance) and `hw.backend`. Use `assert_codex_calls(hw.codex, [{"sandbox": "read-only"}])` / `assert_pi_calls(hw.pi, [...])` for per-backend assertions.
 
-The transition test suite runs `CODEX_TRANSITIONS` (a curated subset of `TRANSITIONS`) against the Codex backend via `test_transition_codex`. Azure is excluded (GitHub-only) to keep the matrix manageable.
+The transition test suite runs `CODEX_TRANSITIONS` (a curated subset of `TRANSITIONS`) against the Codex backend via `test_transition_codex`, and `PI_TRANSITIONS` (a curated subset that exercises the paths where pi diverges from codex — plan/review **with** read-only enforcement, and a `/retry` that forks from a checkpoint) against the pi backend via `test_transition_pi`. Azure is excluded (GitHub-only) to keep the matrix manageable.
 
 ## Three-Layer Test Fixtures
 

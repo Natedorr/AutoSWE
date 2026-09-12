@@ -31,6 +31,15 @@ def main():
     p_setup = sub.add_parser("setup", help="Interactive first-run setup wizard")
     p_setup.add_argument("--force", action="store_true", help="Overwrite existing config without prompting")
 
+    p_warmup = sub.add_parser(
+        "warmup",
+        help="Populate the pi-mcp-adapter cache (pi Phase 4 cold-start warm-up)",
+    )
+    p_warmup.add_argument(
+        "--profile", metavar="NAME",
+        help="Warm up only this harness profile (default: all pi profiles with an agent_dir)",
+    )
+
     p_queue = sub.add_parser("queue", help="Queue management")
     q_sub = p_queue.add_subparsers(dest="queue_cmd", required=True)
     p_ls = q_sub.add_parser("list")
@@ -58,6 +67,8 @@ def main():
         _cmd_dispatch(args, cfg)
     elif args.command == "setup":
         setup.cmd_setup(args, cfg)
+    elif args.command == "warmup":
+        _cmd_warmup(args, cfg)
     elif args.command == "queue":
         {"list": _cmd_queue_list, "status": _cmd_queue_status, "prune": _cmd_queue_prune}[args.queue_cmd](args, cfg)
 
@@ -92,6 +103,59 @@ def _cmd_dispatch(args, cfg):
     """Process pending tasks (one full poll cycle)."""
     tasks_processed = orch_poll(cfg, mode="full")
     log(f"[DISPATCH] Dispatch complete, {tasks_processed} task(s)")
+
+
+def _cmd_warmup(args, cfg):
+    """Populate the pi-mcp-adapter cache for each pi harness profile (pi Phase 4).
+
+    Cold start: the first pi run against a new agent dir has no
+    ``autoswe_comment`` entry in the pi-mcp-adapter's ``mcp-cache.json``, so it
+    falls back to the generic proxy tool shapes instead of the direct
+    ``mcp__autoswe_comment_*`` tools. This runs a lightweight pi against each
+    pi profile's agent dir to write that cache entry up front.
+    """
+    # Deferred import: only loads the pi backend when a warm-up is requested,
+    # keeping claude_code-only deploys from importing the pi subprocess path.
+    from autoswe.core.config import load_harnesses_config
+    from autoswe.harness.backends.pi import pi_warmup_targets
+
+    harnesses = load_harnesses_config()
+    profile = str(getattr(args, "profile", None) or "").strip()
+    if profile:
+        if profile not in harnesses:
+            log(f"[WARMUP] harness profile '{profile}' not found in harnesses.json")
+            sys.exit(1)
+        cfg_p = harnesses[profile]
+        if str(cfg_p.get("backend", "")).lower() != "pi":
+            log(f"[WARMUP] harness profile '{profile}' is not a pi profile (backend={cfg_p.get('backend')!r}); nothing to warm up")
+            return
+        targets = [(profile, cfg_p)]
+    else:
+        targets = pi_warmup_targets(harnesses)
+
+    if not targets:
+        log("[WARMUP] no pi harness profiles with an agent_dir to warm up")
+        return
+
+    log(f"[WARMUP] warming up {len(targets)} pi profile(s)")
+    import asyncio
+    warm = asyncio.run(_run_warmups(targets))
+    if warm:
+        log("[WARMUP] done — subsequent pi runs use the direct mcp__autoswe_comment_* tools")
+    else:
+        log("[WARN][WARMUP] finished with a cold cache — first pi run will use proxy tool shapes")
+
+
+async def _run_warmups(targets: list[tuple[str, dict]]) -> bool:
+    """Warm up each pi profile's agent dir; True when at least one ends warm."""
+    from autoswe.harness.backends.pi import warm_up_mcp_cache
+
+    any_warm = False
+    for name, harness_cfg in targets:
+        log(f"[WARMUP] profile '{name}' agent_dir={harness_cfg.get('agent_dir')}")
+        if await warm_up_mcp_cache(harness_cfg):
+            any_warm = True
+    return any_warm
 
 
 def _cmd_queue_list(args, cfg):

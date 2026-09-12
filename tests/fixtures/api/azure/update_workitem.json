@@ -7,6 +7,10 @@
   },
   "data": [
     {
+      "op": "remove",
+      "path": "/fields/System.Tags"
+    },
+    {
       "op": "add",
       "path": "/fields/System.Tags",
       "value": "tag1; autoswe:pending"

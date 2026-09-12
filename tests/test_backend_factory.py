@@ -5,6 +5,7 @@ from autoswe.harness.backends.base import CodingBackend
 from autoswe.harness.backends.claude_code import ClaudeCodeBackend
 from autoswe.harness.backends.codex import CodexBackend
 from autoswe.harness.backends.factory import get_backend
+from autoswe.harness.backends.pi import PiBackend
 
 
 def test_get_backend_defaults_to_claude_code():
@@ -33,6 +34,27 @@ def test_unknown_backend_raises_value_error():
         get_backend({"backend": "unknown_backend"})
 
 
+def test_get_backend_resolves_all_three_backends():
+    """Every KNOWN_BACKENDS profile resolves to its CodingBackend.
+
+    Enumeration axis: all three backends (claude_code, codex, pi) must
+    resolve through the factory to a CodingBackend instance.  codex/pi are
+    CLI backends that require a model; claude_code is SDK-based.
+    """
+    from autoswe.core.config import KNOWN_BACKENDS
+
+    profiles = {
+        "claude_code": {"backend": "claude_code"},
+        "codex": {"backend": "codex", "model": "gpt-5.6-terra"},
+        "pi": {"backend": "pi", "model": "claude-sonnet-4-5"},
+    }
+    expected = {"claude_code": ClaudeCodeBackend, "codex": CodexBackend, "pi": PiBackend}
+    for name in KNOWN_BACKENDS:
+        backend = get_backend(profiles[name])
+        assert isinstance(backend, expected[name]), f"{name} resolved to {type(backend)}"
+        assert isinstance(backend, CodingBackend), f"{name} is not a CodingBackend"
+
+
 def test_get_backend_codex_without_model_raises():
     """A codex profile with no model (or empty model) fails fast."""
     with pytest.raises(ValueError, match="missing required 'model'"):
@@ -48,6 +70,45 @@ def test_get_backend_codex_with_model():
     backend = get_backend({"backend": "codex", "model": "gpt-5.6-terra"})
     assert isinstance(backend, CodexBackend)
     assert isinstance(backend, CodingBackend)
+
+
+def test_get_backend_pi_without_model_raises():
+    """A pi profile with no model (or empty model) fails fast — pi would otherwise
+    silently pick a settings default, which is unacceptable for reproducibility."""
+    with pytest.raises(ValueError, match="missing required 'model'"):
+        get_backend({"backend": "pi"})
+    with pytest.raises(ValueError, match="missing required 'model'"):
+        get_backend({"backend": "pi", "model": ""})
+    with pytest.raises(ValueError, match="missing required 'model'"):
+        get_backend({"backend": "pi", "model": "   "})
+
+
+def test_get_backend_pi_case_insensitive():
+    """backend field is case-insensitive for pi too."""
+    for val in ("pi", "PI", "Pi"):
+        backend = get_backend({"backend": val, "model": "claude-sonnet-4-5"})
+        assert isinstance(backend, PiBackend)
+
+
+def test_get_backend_pi_with_model():
+    """A pi profile with a model returns a PiBackend."""
+    backend = get_backend({"backend": "pi", "model": "claude-sonnet-4-5"})
+    assert isinstance(backend, PiBackend)
+    assert isinstance(backend, CodingBackend)
+
+
+def test_get_backend_pi_with_provider_and_key():
+    """Extra pi profile fields (provider, api_key, thinking, approve_project) are
+    tolerated — the backend resolves them at run time, not construction time."""
+    backend = get_backend({
+        "backend": "pi",
+        "model": "gpt-5.6-terra",
+        "provider": "openai",
+        "api_key": "sk-test",
+        "thinking": "medium",
+        "approve_project": True,
+    })
+    assert isinstance(backend, PiBackend)
 
 
 def test_get_backend_passes_with_extra_fields():

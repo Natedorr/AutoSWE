@@ -21,13 +21,13 @@ autoSWE is **queue-driven**, not label-driven:
 | [labels.md](labels.md) | The `autoswe:*` labels as a read-only mirror of `autoswe_status`; bot-marker convention |
 | [slash-commands.md](slash-commands.md) | User-facing commands, parsing, auto-resume, multi-command-last-wins |
 | [config.md](config.md) | autoswe.env keys, repos.json fields, model resolution, prompt templates |
-| [harnesses.md](harnesses.md) | Harness profiles (`harnesses.json`), pluggable coding backends (`claude_code`, `codex`), per-phase resolution, capability degradation |
+| [harnesses.md](harnesses.md) | Harness profiles (`harnesses.json`), pluggable coding backends (`claude_code`, `codex`, `pi`), per-phase resolution, capability degradation |
 | [providers.md](providers.md) | IssueTracker/VCSProvider protocols, GitHub + Azure backends, factory |
 | [git-worktrees.md](git-worktrees.md) | Per-repo clones, per-issue worktrees, branch naming, GC |
 | [safeguards.md](safeguards.md) | MAX_CONCURRENT, MAX_ATTEMPTS, time limits, completion anchor |
 | [debugging.md](debugging.md) | Live log inspection, queue state, unsticking zombies, session files |
 | [testing.md](testing.md) | Test harness, pytest structure, test seams, CI strategy |
-| [../../e2e/README.md](../../e2e/README.md) | **Lives outside this folder.** The live E2E harness — testbed repos, per-issue scenarios, the openclaw driver script, cron scoring. Self-contained in `e2e/` so an outside agent can find it without walking `docs/` |
+| [../../tests/e2e/README.md](../../tests/e2e/README.md) | **Lives outside this folder.** The live E2E suite — one file per test case (the issue, the steps, the process autoSWE must follow), driven by an agent against a real GitHub/Azure test project |
 | [technical-reference.md](technical-reference.md) | Consolidated pipeline internals (CLI entry points, status transitions, three-layer architecture) |
 
 ## Derivation Rule

@@ -155,7 +155,15 @@ class AzureVCS:
         return f"autoswe/issue-{issue_number}"
 
     def find_existing_pr(self, branch: str) -> PRResult | None:
-        """Check if an active PR for the branch already exists."""
+        """Check if an active PR for the branch already exists.
+
+        Returns the PR's **web** URL (see :meth:`_web_pr_url`), not the raw
+        ``url`` field the list API returns — that field is the ``_apis/...``
+        request URL, which is not the clickable link the user expects. The
+        fresh-create path (:meth:`open_pull_request`) builds the same web URL,
+        so a re-dispatched ``/pr`` posts a consistent link (issue #252 follow-up:
+        the idempotent "already exists" comment used to show the raw API URL).
+        """
         path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories/"
             f"{self._repo_enc}/pullrequests"
@@ -166,11 +174,24 @@ class AzureVCS:
         prs = result.get("value", [])
         if prs:
             pr = prs[0]
+            pr_id = pr.get("pullRequestId")
             return PRResult(
-                number=pr.get("pullRequestId"),
-                url=pr.get("url", ""),
+                number=pr_id,
+                url=self._web_pr_url(pr_id),
             )
         return None
+
+    def _web_pr_url(self, pr_id: int | None) -> str:
+        """Build the clickable ADO web URL for a PR id.
+
+        ADO's REST responses expose the ``_apis/...`` request URL in ``url``,
+        which is not what a human wants to click. The web form is
+        ``.../_git/{repo}/pullrequest/{id}`` — the same shape the browser and
+        the open-PR path produce.
+        """
+        if not pr_id:
+            return ""
+        return f"https://dev.azure.com/{self._org}/{self._project}/_git/{self._repo}/pullrequest/{pr_id}"
 
     def open_pull_request(
         self,
@@ -195,7 +216,7 @@ class AzureVCS:
         pr_id = result.get("pullRequestId")
         return PRResult(
             number=pr_id,
-            url=f"https://dev.azure.com/{self._org}/{self._project}/_git/{self._repo}/pullrequest/{pr_id}" if pr_id else "",
+            url=self._web_pr_url(pr_id),
         )
 
     def link_branch_to_issue(

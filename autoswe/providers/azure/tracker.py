@@ -93,6 +93,13 @@ class AzureTracker:
         }
     """
 
+    # ADO does not advance ``System.ChangedDate`` when a comment is posted —
+    # only field changes (state, tags) do. So the poller's "unchanged
+    # timestamp -> skip comment fetch" shortcut would silently drop a user's
+    # new slash command (the only way a task moves is a comment). Tell
+    # read_api to always re-fetch comments (providers/adapter.py).
+    comments_bump_updated = False
+
     def __init__(self, repo_cfg: dict):
         self._repo_cfg = repo_cfg
         # Accept the PAT under either key so hand-built repo_cfg dicts (e.g. the
@@ -198,9 +205,13 @@ class AzureTracker:
         - User comments matching the PAT authenticated user → ``"OWNER"``
         - Everything else → raw ``uniqueName`` (email)
         """
-        path = _ado_api_version(
+        # The work-item comments resource is under preview on hosted ADO:
+        # stable 7.1 returns HTTP 400 asking for the -preview flag
+        # (regression tracked in issue 022). format=Markdown so the `text`
+        # field round-trips the stored Markdown.
+        path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments"
+            f"{issue_number}/comments?format=Markdown&api-version=7.1-preview"
         )
         raw = ado_get(path, self._pat)
         comments_raw = raw.get("comments", [])
@@ -244,6 +255,13 @@ class AzureTracker:
                     id=c.get("id"),
                 )
             )
+        # ADO's comments API returns comments newest-first (descending by id),
+        # unlike GitHub which returns oldest-first. Every downstream consumer
+        # (watermark detection, _find_last_completion_id's reversed() scan,
+        # resume detection) assumes ascending order, so sort by comment id
+        # (monotonically increasing) ascending at the source. A None id sorts
+        # last — it can't anchor a watermark anyway.
+        results.sort(key=lambda c: (c.id is None, c.id if c.id is not None else 0))
         return results
 
     # ---- Pure helpers (no network) ----
@@ -310,7 +328,7 @@ class AzureTracker:
         """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments?format=Markdown&api-version=7.1"
+            f"{issue_number}/comments?format=Markdown&api-version=7.1-preview"
         )
         result = ado_post(path, self._pat, body={"text": redact_outbound(body)})
         return result.get("id") if result else None
@@ -319,13 +337,14 @@ class AzureTracker:
         """Edit a comment on a work item via PATCH.
 
         ``PATCH .../comments/{id}`` has no refreshed reference page in
-        docs/azure-devops-api/; its availability at stable 7.1 is covered by
-        the live round-trip test in tests/test_azure_live.py (if it ever
-        regresses, re-introduce the preview version here — tracked in issue 022).
+        docs/azure-devops-api/; the live round-trip test in
+        tests/test_azure_live.py covers it. The comments resource is under
+        preview on hosted ADO, so this uses 7.1-preview (regression tracked
+        in issue 022).
         """
         path = (
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
-            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1"
+            f"{issue_number}/comments/{comment_id}?format=Markdown&api-version=7.1-preview"
         )
         ado_patch_json(path, self._pat, body={"text": redact_outbound(body)})
 
@@ -349,8 +368,39 @@ class AzureTracker:
 
         GETs the current work item, strips existing autoswe:* tags,
         appends the new status tag, and PATCHes via JSON-Patch.
+
+        The write is a **single** ``op: "replace"`` on
+        ``/fields/System.Tags`` whose value is the complete tag set. Two
+        constraints force this shape:
+
+        - ADO rejects two operations on the same field in one patch body
+          (HTTP 400 VS403691 — "A field cannot be updated more than once in
+          the same update"), so the old remove-then-add pair failed the whole
+          write and no tag was ever posted (issue #235 follow-up).
+        - ``op: "add"`` on ``System.Tags`` is additive on the server (it
+          merges into the existing set), so a lone ``add`` re-merges the tags
+          we stripped. ``replace`` is the only op that sets the field exactly.
+
+        There are three independent call sites for this method across a
+        dispatch cycle (running-status at dispatch start, the terminal status
+        from emit(), and the sync-phase closed/mirror passes), each doing its
+        own unsynchronized GET-then-PATCH. Back-to-back calls can race — the
+        second call's GET can miss the first call's PATCH — so this retries
+        once with a fresh GET on a PATCH failure instead of losing the write
+        silently (issue: live E2E showed work items land with no autoswe tag
+        at all after a fast status transition, with no error surfaced).
         """
         _validate_status(status)
+        last_error: RuntimeError | None = None
+        for _attempt in range(2):
+            try:
+                self._set_status_once(issue_number, status)
+                return
+            except RuntimeError as e:
+                last_error = e
+        raise last_error
+
+    def _set_status_once(self, issue_number: int, status: str) -> None:
         # Read current tags
         get_path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
@@ -368,13 +418,17 @@ class AzureTracker:
         new_tags = [t for t in tags if not t.startswith(_PREFIX)]
         new_tags.append(f"{_PREFIX}{normalized_status}")
 
-        # PATCH via JSON-Patch
+        # PATCH via JSON-Patch: a single ``replace`` on System.Tags. A second
+        # op on the same field in one body is rejected (VS403691), and ``add``
+        # is additive, so ``replace`` is what makes this a true set (docstring).
         patch_path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
         )
         ado_patch(
             patch_path, self._pat,
-            body=[{"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)}],
+            body=[
+                {"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
+            ],
         )
 
     def normalize_comment_body(self, comment: NormalizedComment) -> tuple[str, bool]:

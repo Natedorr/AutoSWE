@@ -1,6 +1,7 @@
 """Tests for autoswe.harness.planner handler return values."""
 
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 from autoswe.harness.runner import RunResult
@@ -585,6 +586,94 @@ def test_extract_plan_output_unit():
         comment, done, used_file = _extract_plan_output("<AUTOSWE_QUESTIONS>\n1. Q?\n</AUTOSWE_QUESTIONS>")
         assert done == "WAITING: questions"
         assert "Q?" in comment
+        assert used_file is None
+
+
+# ---------------------------------------------------------------------------
+# Fallback tag regexes tolerate stray whitespace inside the brackets
+# (regression: pi E2E 2026-09-07, qwen3.8:27b emitted "< AUTOSWE_PLAN>")
+# ---------------------------------------------------------------------------
+
+def test_plan_tags_tolerate_interior_whitespace():
+    """Whitespace inside the brackets must not escape detection.
+
+    Some backends (qwen3.8:27b via pi) emit "< AUTOSWE_PLAN>" with a space
+    after the opening bracket. These tags are the *fallback* for backends
+    without the MCP comment server, so any small model quirk must still be
+    detected — and clean tags keep matching unchanged.
+    """
+    from autoswe.tracking.comments import _PLAN_RE, _QUESTIONS_RE
+
+    # Opening-tag variants: clean / one space / multiple spaces
+    for tag in ["<AUTOSWE_PLAN>", "< AUTOSWE_PLAN>", "<  AUTOSWE_PLAN>"]:
+        m = _PLAN_RE.search(tag + "\nBody\n</AUTOSWE_PLAN>")
+        assert m, f"opening tag not matched: {tag!r}"
+        assert m.group(1) == "\nBody\n", f"group(1) changed for {tag!r}"
+
+    # Closing-tag variants
+    for tag in ["</AUTOSWE_PLAN>", "</ AUTOSWE_PLAN>", "</  AUTOSWE_PLAN>"]:
+        m = _PLAN_RE.search("<AUTOSWE_PLAN>Body" + tag)
+        assert m, f"closing tag not matched: {tag!r}"
+        assert m.group(1) == "Body", f"group(1) changed for {tag!r}"
+
+    # Whitespace on both ends at once
+    m = _PLAN_RE.search("< AUTOSWE_PLAN>Both</ AUTOSWE_PLAN>")
+    assert m and m.group(1) == "Both"
+
+    # QUESTIONS gets the same treatment
+    for tag in ["<AUTOSWE_QUESTIONS>", "< AUTOSWE_QUESTIONS>"]:
+        m = _QUESTIONS_RE.search(tag + "1. Q?</AUTOSWE_QUESTIONS>")
+        assert m, f"questions tag not matched: {tag!r}"
+        assert m.group(1) == "1. Q?"
+
+    # Not so tolerant that wrong names match: no space *inside* the tag name
+    assert _PLAN_RE.search("<AUTOSWE PLAN>body</AUTOSWE PLAN>") is None
+    assert _PLAN_RE.search("<AUTOSWEPLAN>body</AUTOSWEPLAN>") is None
+    assert _QUESTIONS_RE.search("<AUTOSWE QUESTIONS>body</AUTOSWE QUESTIONS>") is None
+
+
+def test_regression_pi_6f4cb4a0_plan_classifies_plan_ready():
+    """The exact 5275-char plan from pi session 6f4cb4a0 (2026-09-07 E2E)
+    must classify as PLAN_READY, not fall through to the raw fallback.
+
+    The session (Natedorr/testProject#96, qwen3.8:27b) emitted the opening
+    fallback tag as '< AUTOSWE_PLAN>' — a space after the bracket — which the
+    old regexes missed, sending a complete plan to 'WAITING: see comment'.
+    """
+    from autoswe.harness.planner import _extract_plan_output
+
+    fixture = Path(__file__).parent / "fixtures" / "pi_regressions" / "plan_6f4cb4a0.txt"
+    text = fixture.read_text(encoding="utf-8")
+    assert len(text) == 5275
+    assert text.lstrip().startswith("< AUTOSWE_PLAN>")  # the stray-space tag
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(text)
+        assert done == "PLAN_READY", f"expected PLAN_READY, got {done!r}"
+        assert "## Plan" in comment
+        assert "sliding-window moving average" in comment
+        assert "## Claude's response" not in comment  # must not use raw fallback
+        assert used_file is None
+
+
+def test_regression_pi_6f4cb4a0_questions_tag_matched():
+    """First-run questions in the same session also used '< AUTOSWE_QUESTIONS>'.
+
+    Before the fix the tag failed to match and the issue only reached WAITING
+    via the raw fallback — which happened to produce the right label and
+    masked the bug. The questions path must match directly.
+    """
+    from autoswe.harness.planner import _extract_plan_output
+
+    text = ("< AUTOSWE_QUESTIONS>\n"
+            "1. Before I plan the sliding-window moving-average helper for "
+            "`src/toolbox.py`, which semantics should I use?\n"
+            "</AUTOSWE_QUESTIONS>")
+
+    with patch("autoswe.harness.planner._find_latest_plan_file", return_value=None):
+        comment, done, used_file = _extract_plan_output(text)
+        assert done == "WAITING: questions", f"expected WAITING: questions, got {done!r}"
+        assert "## Questions" in comment
         assert used_file is None
 
 
@@ -1251,6 +1340,32 @@ def test_run_plan_returns_plan_ready_on_post_plan_tool_use(tmp_path, mock_gh_pos
     assert result.done_content == "PLAN_READY"
 
 
+def test_run_plan_pi_mcp_plan_posted_returns_plan_ready_no_tag(tmp_path, mock_gh_post_comment):
+    """pi advertises the ``mcp`` capability, so a ``tool_execution_start``
+    ``post_plan`` event on the RunResult (``plan_posted=True``) makes the planner
+    return PLAN_READY even when the final assistant text carries no
+    ``<AUTOSWE_PLAN>`` tag — the plan already went out as an issue comment via the
+    comment MCP server, so the tag-scrape fallback must not fire (issue #216)."""
+    task = make_task()
+    tag_free_text = "Posted the plan to the issue."  # no <AUTOSWE_PLAN> tag
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.planner.resolve_harness",
+                       return_value={"backend": "pi", "model": "claude-sonnet-4-5"}):
+                with patch("autoswe.harness.runner.run",
+                           return_value=RunResult(
+                               tag_free_text, "sess-1", "success", plan_posted=True,
+                           )):
+                    from autoswe.harness.planner import run_plan
+                    result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    # The plan is already on the thread via MCP — the tag-scrape path must not
+    # post a second comment from the tag-free assistant text.
+    assert len(mock_gh_post_comment.posted) == 0
+
+
 def test_run_plan_returns_waiting_on_post_question_tool_use(tmp_path, mock_gh_post_comment):
     """When RunResult has question_posted=True, run_plan should return WAITING: questions."""
     task = make_task()
@@ -1306,6 +1421,105 @@ def test_run_plan_question_posted_beats_plan_posted(tmp_path, mock_gh_post_comme
 
     assert result.done_content.startswith("WAITING:")
     assert "questions" in result.done_content
+
+
+# ---------------------------------------------------------------------------
+# MCP post_plan finalizes the sticky planning comment in place (issue #241)
+# ---------------------------------------------------------------------------
+
+
+def test_run_plan_mcp_post_plan_finalizes_sticky(tmp_path, mock_gh_post_comment):
+    """When the backend reports plan_posted with a captured body, the planner
+    pushes the normalized plan through the progress callback as the LAST sticky
+    write (so drain() flushes the plan, not a coalesced raw tool event) — and
+    posts no new comment (the MCP server already patched the sticky)."""
+    task = make_task()
+    plan_md = "Step 1: fix the bug\nStep 2: add tests"
+
+    sticky_bodies = []
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult(
+                           "Posted the plan.", "sess-1", "success",
+                           plan_posted=True, plan_posted_body=plan_md,
+                       )):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"},
+                                  progress_callback=sticky_bodies.append)
+
+    assert result.done_content == "PLAN_READY"
+    # No separate plan comment — the plan lives on the sticky comment.
+    assert len(mock_gh_post_comment.posted) == 0
+    # The plan was pushed through the sticky callback, normalized and tagged.
+    assert len(sticky_bodies) == 1
+    assert sticky_bodies[0].startswith("## Plan\n\n")
+    assert "Step 1: fix the bug" in sticky_bodies[0]
+    assert "<!-- autoswe-bot -->" in sticky_bodies[0]
+
+
+def test_run_plan_mcp_post_plan_no_push_without_body(tmp_path, mock_gh_post_comment):
+    """plan_posted without a captured body (older backend) keeps the previous
+    behavior: plain PLAN_READY, no sticky push, no new comment."""
+    task = make_task()
+
+    sticky_bodies = []
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult("text", "sess-1", "success", plan_posted=True)):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"},
+                                  progress_callback=sticky_bodies.append)
+
+    assert result.done_content == "PLAN_READY"
+    assert sticky_bodies == []
+    assert len(mock_gh_post_comment.posted) == 0
+
+
+def test_run_plan_mcp_post_plan_no_push_when_no_progress_callback(tmp_path, mock_gh_post_comment):
+    """Without a sticky progress callback there is nothing to finalize — no push,
+    no new comment (MCP already handled the comment)."""
+    task = make_task()
+
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult("text", "sess-1", "success",
+                                               plan_posted=True, plan_posted_body="Step 1")):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"})
+
+    assert result.done_content == "PLAN_READY"
+    assert len(mock_gh_post_comment.posted) == 0
+
+
+def test_run_plan_mcp_post_plan_no_push_when_sticky_frozen(tmp_path, mock_gh_post_comment):
+    """When the sticky is frozen on a posted question (issue #184), the plan must
+    NOT be pushed through it — the question stays the last thing the sticky
+    shows."""
+    task = make_task()
+
+    class FrozenSticky:
+        frozen = True
+
+        def __init__(self):
+            self.bodies = []
+
+        def __call__(self, body):
+            self.bodies.append(body)
+
+    sticky = FrozenSticky()
+    with _patch_worktree(tmp_path):
+        with FETCH_COMMENTS_PATCH:
+            with patch("autoswe.harness.runner.run",
+                       return_value=RunResult("text", "sess-1", "success",
+                                               plan_posted=True, plan_posted_body="Step 1")):
+                from autoswe.harness.planner import run_plan
+                result = run_plan(task, {}, {"GITHUB_TOKEN": "tok"}, progress_callback=sticky)
+
+    assert result.done_content == "PLAN_READY"
+    assert sticky.bodies == []
 
 
 # ---------------------------------------------------------------------------

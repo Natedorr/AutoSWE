@@ -62,6 +62,31 @@ def backend_has_capability(harness_cfg: dict, capability: str) -> bool:
     return capability in backend.capabilities()
 
 
+def comment_tool_names(harness_cfg: dict | None = None) -> dict[str, str]:
+    """Return the autoswe_comment MCP tool names for the resolved backend.
+
+    PLAN-pi-mcp.md Phase 3: the single source of truth for MCP tool naming.
+    Resolves the backend via the factory and returns its
+    ``comment_tool_names()`` dict (``{"post_plan": ..., "post_question": ...,
+    "update_progress": ...}``), so prompts and handlers name the tools the way
+    the resolved backend's adapter actually exposes them instead of hardcoding
+    the Claude Code spelling.
+
+    Defaults to ClaudeCodeBackend when *harness_cfg* is None — matching
+    ``backend_has_capability`` — so callers that don't yet pass a harness
+    profile get the Claude default (and existing custom prompt files that
+    hardcode the Claude names keep working).
+    """
+    if harness_cfg is not None:
+        # Deferred import: avoids loading the backend factory when default path runs.
+        from autoswe.harness.backends.factory import get_backend
+
+        backend = get_backend(harness_cfg)
+    else:
+        backend = ClaudeCodeBackend()
+    return backend.comment_tool_names()
+
+
 def has_read_only_enforcement(harness_cfg: dict) -> bool:
     """Return True if the backend for *harness_cfg* enforces read-only phases.
 
@@ -157,7 +182,10 @@ def run(
     permission_mode: str = "default",
     allowed_tools: list | None = None,
     disallowed_tools: list | None = None,
-    max_turns: int = 200,
+    # When omitted (None), the effective cap is resolved from the harness
+    # profile / per-repo / global config (issue #222) via resolve_max_turns.
+    # An explicit caller value always wins (e.g. a handler pinning a lower cap).
+    max_turns: int | None = None,
     model: str | None = None,
     cli_path: str | None = None,
     env_overrides: dict | None = None,
@@ -183,9 +211,32 @@ def run(
     *allowed_tools* / *disallowed_tools* triple.
     """
     rc = repo_cfg or {}
-    timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
+    # Wall-clock timeout precedence (highest → lowest):
+    #   1. harness profile "timeout" field (per-profile, documented in
+    #      docs/autoswe/harnesses.md — "Backend-specific timeout in seconds")
+    #   2. repo_cfg "agent_timeout" (per-repo)
+    #   3. cfg "AGENT_TIMEOUT" (global)
+    #   4. 7200s default
+    profile_timeout = (harness_cfg or {}).get("timeout")
+    if profile_timeout is not None:
+        try:
+            timeout = int(profile_timeout)
+        except (TypeError, ValueError):
+            log(f"[RUNNER] harness profile 'timeout'={profile_timeout!r} is not a "
+                "valid integer; falling back to agent_timeout/AGENT_TIMEOUT")
+            timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
+    else:
+        timeout = int(rc.get("agent_timeout", cfg.get("AGENT_TIMEOUT", 7200)))
     max_retries = int(rc.get("agent_retry_on_failure", cfg.get("AGENT_RETRY_ON_FAILURE", 0)))
     raw_subtype_override = rc.get("agent_retry_on_subtype", cfg.get("AGENT_RETRY_ON_SUBTYPE", ""))
+
+    # Turn cap (issue #222). Handlers resolve the effective cap for their phase
+    # via config.resolve_max_turns() and pass it here; an explicit value always
+    # wins. Callers that omit it get the historical 200 default so that direct
+    # runner.run() use (tests, one-off scripts) is unchanged when no profile /
+    # per-repo / global override is set.
+    if max_turns is None:
+        max_turns = 200
 
     # Thread harness_cfg into spec.state so the backend can read
     # backend-specific fields (cli_path, anthropic_api_key, etc.).

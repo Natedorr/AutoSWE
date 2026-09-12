@@ -6,7 +6,7 @@ This file provides guidance when working with code in this repository.
 
 autoSWE lets a user steer real coding from GitHub or Azure DevOps issue comments — without sitting in front of a terminal. It runs from cron, discovers issues carrying slash commands (`/plan`, `/fix`, `/review`, `/pr`, `/sync`, `/retry`, `/skip`, `/abort`), and drives them through an agentic coding workflow: the agent writes the plan and the code on a per-issue branch; the slash commands in the comments steer it. It is **queue-driven** — `data/queue.json` (the `autoswe_status` enum per task, derived from issue comments) is the source of truth for what runs; `autoswe:*` labels are a one-way mirror for humans and are never read back to make a decision. **Comment IDs are the state-machine identity unit** — watermarks (`last_dispatched_command_id`, `last_consumed_reply_id`) compare provider comment IDs, not timestamps. The intended deployment is a dedicated, isolated machine (the `/fix` agent runs with full permissions on purpose — see `docs/autoswe/safeguards.md`).
 
-**Pluggable coding backends.** The agent that does the work is no longer hard-wired to Claude Code. A **harness profile** (`config/harnesses.json`) binds each phase (`plan`/`fix`/`review`) to a backend — `claude_code` (Claude Agent SDK) or `codex` (OpenAI Codex CLI) — plus its model. Backends live behind a single `CodingBackend` protocol in `autoswe/harness/backends/` (`base.py`, `claude_code.py`, `codex.py`, `factory.py`); handlers (`planner`, `coder`, `reviewer`) call the resolved backend through `RunSpec → RunResult` and degrade gracefully when a backend lacks a capability (e.g. Codex has no MCP, so the planner falls back to text parsing). See [docs/autoswe/harnesses.md](docs/autoswe/harnesses.md).
+**Pluggable coding backends.** The agent that does the work is no longer hard-wired to Claude Code. A **harness profile** (`config/harnesses.json`) binds each phase (`plan`/`fix`/`review`) to a backend — `claude_code` (Claude Agent SDK), `codex` (OpenAI Codex CLI), or `pi` (pi CLI, `--mode json`) — plus its model. Backends live behind a single `CodingBackend` protocol in `autoswe/harness/backends/` (`base.py`, `claude_code.py`, `codex.py`, `pi.py`, `factory.py`); handlers (`planner`, `coder`, `reviewer`) call the resolved backend through `RunSpec → RunResult` and degrade gracefully when a backend lacks a capability (e.g. Codex has no MCP and no read-only enforcement, so the planner falls back to text parsing; pi enforces read-only via a tool allowlist, supports session fork, and gets MCP comment posting through the pi-mcp-adapter). See [docs/autoswe/harnesses.md](docs/autoswe/harnesses.md).
 
 ## Where to Look
 
@@ -26,7 +26,7 @@ All architecture, data shapes, and process documentation lives in `docs/autoswe/
 | Safeguards (limits, loop protection) | [docs/autoswe/safeguards.md](docs/autoswe/safeguards.md) |
 | Debugging & operations | [docs/autoswe/debugging.md](docs/autoswe/debugging.md) |
 | Testing strategy | [docs/autoswe/testing.md](docs/autoswe/testing.md) |
-| Live E2E suite (real repos, real backends) | [e2e/README.md](e2e/README.md) — self-contained in `e2e/`, indexed by `e2e/MANIFEST.json` |
+| Live E2E suite (real project, real backends) | [tests/e2e/README.md](tests/e2e/README.md) — a corpus of test cases an agent drives against a real GitHub/Azure project; no scripts to run |
 
 ## Working Rules for Claude
 
@@ -50,6 +50,7 @@ autoSWE's correctness rests on a layered offline test suite — fully documented
   - `GitHubFake` / `AzureFake` patch `_gh_request` / `_ado_request` (the only network calls).
   - `ClaudeFake` patches `runner.run` (Claude Code path).
   - `CodexFake` patches `asyncio.create_subprocess_exec` and feeds canonical JSONL, so the **real** factory → `CodexBackend` → JSONL parser → `RunResult` path runs unmodified.
+  - `PiFake` patches `asyncio.create_subprocess_exec` and feeds canonical `pi --mode json` event lines, so the **real** factory → `PiBackend` → stream parser → `RunResult` path runs unmodified.
   - `GitFake` patches `vcs.worktree.*`; the real-git harness (`GitWorld`, marker `git_scenario`) runs actual `git` subprocesses for states mocks can't catch.
 - **decide / emit fixtures** (`tests/fixtures/decide`, `tests/fixtures/emit`) — pure state-machine assertions: `world.json → expected_action.json` and `action.json → expected_effects.json`.
 - **Transition matrix** (`tests/scenarios/transitions.py`, `test_transitions.py`) — the declarative `TRANSITIONS` list, each row a full start-state → event → outcome, parametrised over `["github", "azure"]`. A curated `CODEX_TRANSITIONS` subset also runs every backend-divergent path against the Codex backend via the `patched_world(backend="codex")` axis.
@@ -80,6 +81,8 @@ When autoSWE processes an issue that touches any `autoswe/` module, the work **m
 | SDK / CLI version floors | `test_sdk_version.py`, `test_cli_version.py` |
 | Codex backend (JSONL parsing, subprocess, pricing) | `test_codex_backend.py`, `test_codex_pricing.py` |
 | `CodexFake` fidelity to the real parser | `test_codex_fake.py` |
+| pi backend (`--mode json` parsing, subprocess, flag mapping) | `test_pi_backend.py` |
+| `PiFake` fidelity to the real parser | `test_pi_fake.py` |
 | Queue store invariants, crash recovery | `test_queue_store.py` |
 | PID contention, repo locks, concurrency races | `test_concurrency.py` |
 | Queue/API drift scenarios | `test_drift_detection.py` |

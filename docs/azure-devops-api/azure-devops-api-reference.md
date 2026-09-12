@@ -237,8 +237,9 @@ Azure DevOps uses JSON Patch for creating and updating work items. This is NOT a
 
 | Operation | Description |
 |---|---|
-| `add` | Set or change a field value (also when the field already has a value) |
+| `add` | Set or change a scalar field value. **Note:** on `System.Tags` `add` is additive — it merges into the existing tag set. To replace tags, use a single `replace` (see [replace-tags-on-work-item.md](replace-tags-on-work-item.md)). |
 | `remove` | Clear a field (no `value` needed) |
+| `replace` | Set a field exactly to `value`. **Use this for `System.Tags`** — it overwrites the whole tag set. You cannot combine two ops on the same field in one body (HTTP 400 VS403691). |
 
 ### Content-Type
 
@@ -277,3 +278,11 @@ Most Azure DevOps API responses include:
 7. **POST returns 200** — Creating work items returns 200 (not 201) for the create endpoint.
 8. **Rate limiting headers** — No `X-RateLimit-*` headers. Use `x-ms-credletailers-ms` instead.
 9. **$filter syntax** — Uses OData-style filtering: `$filter=WorkItemTypeId eq 'Bug'`, not `?type=Bug`.
+
+---
+
+## Deep-dive Guides
+
+| Guide | Covers |
+|---|---|
+| [workitem-pr-linking-and-builds.md](workitem-pr-linking-and-builds.md) | How work items tie to branches/PRs/commits, the PR work-items + relation APIs, reading build/pipeline results, why ADO does **not** auto-close work items on merge, and a full linkage recipe. GitHub counterpart: [../github-api/issue-pr-linking-and-ci.md](../github-api/issue-pr-linking-and-ci.md) |

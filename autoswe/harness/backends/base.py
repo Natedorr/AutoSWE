@@ -26,6 +26,26 @@ from typing import Literal, Protocol, runtime_checkable
 # configuration (Claude Code permission modes, Codex sandbox flags, etc.).
 Mode = Literal["plan", "read_only", "read_write"]
 
+# ---------- MCP comment tool names ----------
+
+# The autoswe_comment server's three tools, named the way the Claude Code
+# backend exposes them (double-underscore before the tool, e.g.
+# mcp__autoswe_comment__post_plan). These are the DEFAULT values for the
+# prompt placeholders {{POST_PLAN_TOOL}} / {{POST_QUESTION_TOOL}} /
+# {{UPDATE_PROGRESS_TOOL}} (PLAN-pi-mcp.md Phase 3): existing custom prompt
+# files in config/prompts/ that hardcode the Claude names keep working
+# unchanged when a placeholder is rendered against these defaults.
+#
+# Backends whose adapter names the tools differently (pi: single-underscore
+# mcp__autoswe_comment_post_plan) override comment_tool_names(); backends with
+# no MCP server return this default so a prompt always renders to a concrete
+# tool name and the missing-tool case degrades to the text fallback.
+CLAUDE_COMMENT_TOOL_NAMES: dict[str, str] = {
+    "post_plan": "mcp__autoswe_comment__post_plan",
+    "post_question": "mcp__autoswe_comment__post_question",
+    "update_progress": "mcp__autoswe_comment__update_progress",
+}
+
 # ---------- Shared dataclasses ----------
 
 
@@ -52,6 +72,14 @@ class RunResult:
     plan_file_path: str | None = None
     plan_posted: bool = False
     question_posted: bool = False
+    # The ``body`` argument of the ``post_plan`` MCP tool call, captured from
+    # the run's stream. ``None`` when the tool was not called with a
+    # non-empty body or the backend has no MCP. The planner uses it to finalize
+    # the sticky planning comment in place so the plan is the last write — a
+    # coalesced raw tool event in the last 10s would otherwise be flushed by
+    # ProgressComment.drain() on top of the plan the MCP server just patched
+    # in (issue #241).
+    plan_posted_body: str | None = None
     # Plan markdown captured from an ExitPlanMode tool call. The model often
     # exits plan mode via the native ExitPlanMode tool (even though it is
     # disallowed, the tool-use block — and its plan content — still appears in
@@ -229,6 +257,27 @@ class CodingBackend(Protocol):
     @classmethod
     def capabilities(cls) -> set[str]:
         """Return the set of supported capability strings."""
+        ...
+
+    @classmethod
+    def comment_tool_names(cls) -> dict[str, str]:
+        """Return the autoswe_comment MCP tool names as ``{tool: full name}``.
+
+        The keys are the stable logical roles ``{"post_plan", "post_question",
+        "update_progress"}``; the values are the full, backend-specific tool
+        names the agent actually calls. This is the single source of truth for
+        MCP tool naming (PLAN-pi-mcp.md Phase 3) — handlers and prompt
+        templates read it instead of hardcoding the Claude Code spelling.
+
+        - Claude Code: ``mcp__autoswe_comment__post_plan`` (double-underscore
+          before the tool).
+        - pi: ``mcp__autoswe_comment_post_plan`` (the pi-mcp-adapter's
+          ``toolPrefix`` of ``"mcp"`` + a single underscore).
+        - Codex (no MCP): the Claude default, so a prompt still renders to a
+          concrete name and the missing-tool case degrades to the text fallback.
+
+        Returns a fresh dict each call (callers must not mutate the backend).
+        """
         ...
 
     @classmethod

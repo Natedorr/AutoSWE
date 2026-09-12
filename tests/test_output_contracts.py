@@ -252,11 +252,16 @@ class TestAzureOutputContracts:
     """Verify Azure DevOps API request body shapes."""
 
     def test_patch_tags_json_patch(self, isolated_autoswe_dir, azure_fake):
-        """PATCH workitem (tags) must be JSON-Patch array with autoswe tags."""
+        """PATCH workitem (tags) must be a single-op JSON-Patch with autoswe tags.
+
+        Production writes tags with a lone ``replace`` on System.Tags: ADO
+        rejects two ops on one field in a body (VS403691), and a lone ``add``
+        is additive, so ``replace`` is the true set (issue #235 follow-up).
+        """
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
-            {"op": "add", "path": "/fields/System.Tags",
+            {"op": "replace", "path": "/fields/System.Tags",
              "value": "tag1; autoswe:planned"},
         ]
         azure_fake.handle_request(
@@ -269,7 +274,8 @@ class TestAzureOutputContracts:
         assert calls, "Expected PATCH workitem call"
         body = calls[-1]["body"]
         assert isinstance(body, list), "PATCH body should be JSON-Patch array"
-        assert body[0]["op"] == "add"
+        assert len(body) == 1
+        assert body[0]["op"] == "replace"
         assert body[0]["path"] == "/fields/System.Tags"
 
     def test_patch_tags_content_type(self, isolated_autoswe_dir, azure_fake):
@@ -277,7 +283,7 @@ class TestAzureOutputContracts:
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
-            {"op": "add", "path": "/fields/System.Tags", "value": "autoswe:fixed"},
+            {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:fixed"},
         ]
         azure_fake.handle_request(
             "PATCH",
@@ -290,20 +296,25 @@ class TestAzureOutputContracts:
         assert calls[-1]["content_type"] == "application/json-patch+json"
 
     def test_patch_strips_old_autoswe_tags(self, isolated_autoswe_dir, azure_fake):
-        """PATCH workitem (tags) should strip old autoswe:* tags before adding new."""
+        """A single ``replace`` tag write leaves no old autoswe:* tag behind.
+
+        Mirrors production set_status: the client strips autoswe:* tags, then
+        writes the complete set with one ``replace`` op (the fake models ADO's
+        exact-set ``replace``). Assert on the *stored* tag set, not the body.
+        """
         azure_fake.load({
             **_AZ_PLAN_STATE,
             "tags": ["autoswe:pending", "tag1"],
         })
 
-        # Simulate what set_status does: read tags, strip autoswe, add new
+        # Simulate what set_status does: read tags, strip autoswe, append new.
         tags_raw = azure_fake.work_items[1]["fields"]["System.Tags"]
         tags = [t.strip() for t in tags_raw.split(";") if t.strip()]
         new_tags = [t for t in tags if not t.startswith("autoswe:")]
         new_tags.append("autoswe:fixed")
 
         patch_body = [
-            {"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
+            {"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
         ]
         azure_fake.handle_request(
             "PATCH",
@@ -311,11 +322,10 @@ class TestAzureOutputContracts:
             "pat", body=patch_body, content_type="application/json-patch+json",
         )
 
-        calls = _find_patch_workitem(azure_fake)
-        value = calls[-1]["body"][0]["value"]
-        assert "autoswe:pending" not in value, "Old autoswe:pending should be stripped"
-        assert "autoswe:fixed" in value, "New autoswe:fixed should be present"
-        assert "tag1" in value, "Non-autoswe tags should be preserved"
+        stored = azure_fake.work_items[1]["fields"]["System.Tags"]
+        assert "autoswe:pending" not in stored, "Old autoswe:pending should be stripped"
+        assert "autoswe:fixed" in stored, "New autoswe:fixed should be present"
+        assert "tag1" in stored, "Non-autoswe tags should be preserved"
 
     def test_post_comment_azure_format(self, isolated_autoswe_dir, azure_fake):
         """POST comment on Azure workitem must use 'text' key and format=Markdown query param."""

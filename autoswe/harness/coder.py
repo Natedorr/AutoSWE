@@ -3,7 +3,8 @@ import re
 import subprocess
 from pathlib import Path
 
-from autoswe.core.config import resolve_harness
+from autoswe.core.config import resolve_harness, resolve_max_turns
+from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool, post_question_fallback
@@ -22,13 +23,6 @@ from autoswe.vcs.worktree import (
 
 dbg = get_debug_logger()
 
-
-_MCP_COMMENT_TOOL_PREFIX = "mcp__autoswe_comment__"
-_MCP_COMMENT_TOOLS = [
-    f"{_MCP_COMMENT_TOOL_PREFIX}update_progress",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_plan",
-    f"{_MCP_COMMENT_TOOL_PREFIX}post_question",
-]
 
 _MCP_INLINE_COMMENT_TOOLS = [
     "mcp__autoswe_inline_comment__post_inline_comment",
@@ -118,12 +112,106 @@ def _parse_commit_message(text: str) -> tuple[str | None, str | None]:
     return subject, body
 
 
+def _worktree_has_committable_work(wt: Path, branch: str) -> bool:
+    """Return True when the worktree holds work ``commit_and_push`` would act on.
+
+    Mirrors the two sources ``commit_and_push`` actually commits (worktree.py):
+
+    1. **Uncommitted** working-tree / index changes (``git status --porcelain``)
+       — the classic ``error_max_turns`` case (#216): the agent finished the
+       diff but the run died before the commit step.
+    2. **Auto-commits ahead of origin** — Claude Code commits during the session;
+       anything ahead of ``origin/<branch>`` is new work from this dispatch cycle.
+
+    A False result means the cap was hit with nothing to ship, so the run falls
+    through to the normal FAILED path rather than committing an empty commit.
+    """
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(wt), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10, **GIT_TEXT_ARGS,
+        )
+        if status.returncode == 0 and status.stdout.strip():
+            return True
+        ahead = subprocess.run(
+            ["git", "-C", str(wt), "log", f"origin/{branch}..HEAD", "--oneline"],
+            capture_output=True, text=True, timeout=10, check=False, **GIT_TEXT_ARGS,
+        )
+        if ahead.returncode == 0 and ahead.stdout.strip():
+            return True
+    except Exception as e:  # Best-effort: a git timeout/ref error means "no rescue".
+        # A probe failure must never take the dispatch down — degrade to the
+        # normal FAILED path rather than raise out of the rescue.
+        dbg.debug("_worktree_has_committable_work: probe failed: %s", e)
+    return False
+
+
+def _try_max_turns_rescue(
+    task: dict,
+    run_result,
+    wt: Path,
+    owner: str,
+    repo: str,
+    issue_num: int,
+    base_branch: str,
+    provider: str,
+    token: str,
+    repo_cfg: dict,
+    cfg: dict,
+    *,
+    progress_callback=None,
+) -> HandlerResult | None:
+    """Attempt to salvage a run that died at ``error_max_turns`` (issue #222).
+
+    The turn budget can be consumed *after* the coding work is done but before
+    the commit step runs (Natedorr/AutoSWE#216: diff complete, only the commit
+    left, $96 burned). This checks, in order:
+
+    1. Does the worktree hold committable work? (uncommitted changes, or
+       auto-commits ahead of origin). If not — the cap hit with nothing to
+       ship — return ``None`` so the caller emits the normal FAILED result.
+    2. Is the post-fix test gate green in that tree? A red gate means the
+       partial run must NOT be committed as ``fixed`` — return ``None`` so the
+       run fails exactly as before (with the ``/retry`` hint the emit layer
+       appends).
+
+    Only when BOTH hold does it commit + push through the normal finalize path
+    (with the gate re-run suppressed, since it just ran green) and return the
+    resulting ``HandlerResult`` — typically ``DONE_SUMMARY`` reaching
+    ``autoswe:fixed``, or ``TESTS_FAILED`` if the pre-check and the finalize
+    gate disagree. ``None`` signals "no rescue" to the caller.
+    """
+    branch = get_vcs(
+        {"owner": owner, "repo": repo, "token": "", "provider": provider}
+    ).branch_name(issue_num)
+
+    if not _worktree_has_committable_work(wt, branch):
+        log(f"[FIX] {task['id']} error_max_turns but no committable work in worktree — "
+            "no rescue; failing as usual")
+        return None
+
+    gate = run_test_gate(wt, cfg, repo_cfg, progress_callback=progress_callback)
+    if not gate.ok:
+        log(f"[FIX] {task['id']} error_max_turns: gate RED ({gate.reason}) — "
+            "refusing to commit partial run; failing as usual")
+        return None
+
+    log(f"[FIX] {task['id']} max_turns rescue: gate green, committing partial run")
+    return _finalize_fix(
+        task, run_result, wt, owner, repo, issue_num,
+        base_branch, provider, token, repo_cfg, cfg,
+        session_id=run_result.session_id,
+        progress_callback=progress_callback,
+        run_gate=False,
+    )
+
+
 def _get_branch_head_sha(wt, branch: str) -> str | None:
     """Get the latest commit SHA on a branch."""
     try:
         result = subprocess.run(
             ["git", "-C", str(wt), "rev-parse", branch],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, **GIT_TEXT_ARGS,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -168,6 +256,16 @@ def _run_fix_session(
     harness = resolve_harness("fix", rc, cfg or {})
     fix_model = harness.get("model") or fix_model
 
+    # Capture the branch head BEFORE the session so commit_and_push can tell
+    # "the agent committed (and maybe pushed) this session's work" from "the
+    # agent did nothing." A weaker backend (pi) may commit AND push during the
+    # session; against the post-fetch origin/{branch} baseline that pushed work
+    # is invisible (issue #180 / pi E2E). Best-effort: a None baseline falls
+    # back to the legacy origin/{branch} check inside commit_and_push.
+    before_sha = _get_branch_head_sha(wt, get_vcs(
+        {"owner": owner, "repo": repo, "token": "", "provider": provider}
+    ).branch_name(issue_num))
+
     try:
         run_result = runner.run(
             prompt,
@@ -177,6 +275,7 @@ def _run_fix_session(
             resume=resume_id,
             fork_session=fork_session,
             model=fix_model,
+            max_turns=resolve_max_turns("fix", rc, cfg or {}, harness),
             mode="read_write",
             extra_tools=extra_tools,
             mcp_servers=mcp_servers,
@@ -212,6 +311,31 @@ def _run_fix_session(
         )
 
     if not run_result.ok:
+        # Graceful commit-on-cap (issue #222): a run that spent its whole turn
+        # budget can still hold a complete, uncommitted diff (the #216 failure
+        # mode — work done, commit step left over, $96 burned). Before emitting
+        # FAILED for error_max_turns, check whether the worktree actually holds
+        # committable work AND the post-fix test gate is green in that tree.
+        # When both hold, rescue it through the normal finalize path (commit +
+        # push) so the task still reaches `fixed`. Any other outcome — no work,
+        # or a red gate — falls through to the FAILED result unchanged.
+        if run_result.subtype == "error_max_turns":
+            # Best-effort: the rescue probes git state and runs the gate; if it
+            # itself blows up (git timeout, a red gate that raises, an unknown
+            # provider) that must never take the dispatch down. Degrade to the
+            # normal FAILED path on any exception.
+            try:
+                rescue = _try_max_turns_rescue(
+                    task, run_result, wt, owner, repo, issue_num,
+                    base_branch, provider, token, rc, cfg or {},
+                    progress_callback=progress_callback,
+                )
+            except Exception as e:
+                log(f"[FIX] {task['id']} max_turns rescue raised — "
+                    f"degrading to normal FAILED: {e}")
+                rescue = None
+            if rescue is not None:
+                return rescue
         return HandlerResult(
             f"FAILED: agent ended with subtype={run_result.subtype}",
             session_id=run_result.session_id,
@@ -222,6 +346,7 @@ def _run_fix_session(
         base_branch, provider, token, rc, cfg or {},
         session_id=run_result.session_id,
         progress_callback=progress_callback,
+        before_sha=before_sha,
     )
 
 
@@ -312,7 +437,15 @@ def run_fix(task: dict, guidance: str | None = None, repo_cfg: dict | None = Non
             dbg.warning("FIX: plan file %s unreadable (%s); recovering plan from comments", plan_file_path, e)
             use_fresh_session = True
 
-    prompt = build_fix_prompt(task, guidance, repo_root=str(wt), plan_text=plan_text_override, repo_cfg=rc)
+    # Phase 3 (PLAN-pi-mcp.md): name the MCP comment tools the way this
+    # backend's adapter exposes them (the prompt's {{UPDATE_PROGRESS_TOOL}} /
+    # {{POST_PLAN_TOOL}} / {{POST_QUESTION_TOOL}} placeholders render from this),
+    # rather than hardcoding the Claude Code spelling in the prompt files.
+    harness = resolve_harness("fix", rc, cfg or {})
+    prompt = build_fix_prompt(
+        task, guidance, repo_root=str(wt), plan_text=plan_text_override, repo_cfg=rc,
+        tool_names=runner.comment_tool_names(harness),
+    )
 
     if conflict_files:
         files_block = "\n".join(f"  - {f}" for f in conflict_files)
@@ -436,10 +569,23 @@ def _finalize_fix(
     *,
     session_id: str | None = None,
     progress_callback=None,
+    run_gate: bool = True,
+    before_sha: str | None = None,
 ) -> HandlerResult:
     """Commit, push, run the post-fix test gate, and return the final HandlerResult.
 
     Shared by run_fix and resume_fix to avoid duplicating the commit/push flow.
+
+    *run_gate* (issue #222): when a caller has already run the post-fix test
+    gate before committing (the ``error_max_turns`` rescue path), pass
+    ``run_gate=False`` so the suite is not executed twice. The commit/push
+    flow itself is identical either way.
+
+    *before_sha*: the branch head captured BEFORE the coding session ran,
+    handed to ``commit_and_push`` so it can still detect work the agent
+    committed AND pushed during the session (a pushed commit would otherwise
+    be invisible against the post-fetch ``origin/{branch}`` baseline — issue
+    #180 / pi E2E). ``None`` when the caller has no pre-session baseline.
     """
     # Build the human-facing summary from the response WITHOUT the internal
     # <AUTOSWE_COMMIT> block, so the "Summary:" issue comment and the PR body
@@ -466,7 +612,7 @@ def _finalize_fix(
     log(f"[FIX] {task['id']} committing subject={subject!r}")
     dbg.debug("FIX: committing with subject=%r", subject)
     try:
-        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider)
+        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider, before_sha=before_sha)
     except Exception as e:  # Commit/push boundary — any provider or git error surfaces to the task result.
         dbg.error("_finalize_fix: commit/push failed: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: commit/push error: {e}")
@@ -487,6 +633,16 @@ def _finalize_fix(
     # It runs AFTER commit_and_push so the work is never lost — a red suite
     # lands in the non-terminal `test_failed` state with a comment carrying
     # the failure, and /pr stays blocked until a /fix re-runs it green.
+    # The error_max_turns rescue path (issue #222) pre-ran the gate to decide
+    # whether to commit; pass run_gate=False to skip the redundant re-run.
+    if not run_gate:
+        log(f"[FIX] {task['id']} test gate already ran (rescue path) — skipping re-run")
+        return HandlerResult(
+            f"DONE_SUMMARY\t{summary_text}\t{commit_result['commit_sha']}",
+            cost_usd=run_result.cost_usd,
+            duration_seconds=run_result.duration_seconds,
+            session_id=session_id,
+        )
     gate = run_test_gate(wt, cfg, repo_cfg, progress_callback=progress_callback)
     if not gate.ok:
         log(f"[FIX] {task['id']} test gate RED: {gate.reason} — refusing terminal `fixed`")
@@ -585,6 +741,7 @@ def resolve_sync_conflicts(
             repo_cfg=rc,
             resume=session_id,  # None if first conflict with no prior session
             model=fix_model,
+            max_turns=resolve_max_turns("fix", rc, cfg or {}, harness),
             mode="read_write",
             extra_tools=extra_tools,
             disallowed_tools_override=["AskUserQuestion"],
@@ -630,7 +787,7 @@ def resolve_sync_conflicts(
     try:
         subprocess.run(
             ["git", "-C", str(wt), "push", "origin", branch],
-            capture_output=True, text=True, timeout=60, check=True,
+            capture_output=True, text=True, timeout=60, check=True, **GIT_TEXT_ARGS,
         )
     except Exception as e:  # subprocess can raise TimeoutExpired, CalledProcessError, OSError
         return HandlerResult(
@@ -644,7 +801,7 @@ def resolve_sync_conflicts(
     try:
         short_sha_result = subprocess.run(
             ["git", "-C", str(wt), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=10, check=True,
+            capture_output=True, text=True, timeout=10, check=True, **GIT_TEXT_ARGS,
         )
         short_sha = short_sha_result.stdout.strip()
     except Exception:  # Subprocess call (git rev-parse) is best-effort; fallback to "unknown".
@@ -653,7 +810,7 @@ def resolve_sync_conflicts(
     try:
         ahead_result = subprocess.run(
             ["git", "-C", str(wt), "log", f"origin/{sync_base}..HEAD", "--oneline"],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True, text=True, timeout=10, check=False, **GIT_TEXT_ARGS,
         )
         ahead_count = len(ahead_result.stdout.strip().split("\n")) if ahead_result.stdout.strip() else 0
     except Exception:  # Subprocess call (git log) is best-effort; fallback to 0.

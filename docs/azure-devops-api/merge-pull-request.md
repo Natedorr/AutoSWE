@@ -12,6 +12,8 @@ PATCH /{org}/{project}/_apis/git/repositories/{repositoryId}/pullRequests/{pullR
 
 Completes (merges) a pull request into the target branch. This is the recommended approach over setting `status: completed` via PATCH, as it provides control over merge strategy, source branch cleanup, and the merge commit message.
 
+> **Note:** Completing a PR does **not** change the state of linked work items — Azure DevOps has no auto-close mechanic. Complete work items explicitly via `PATCH /_apis/wit/workitems/{id}` after merge. See [workitem-pr-linking-and-builds.md](workitem-pr-linking-and-builds.md) (section 3).
+
 ### Parameters
 
 #### Headers

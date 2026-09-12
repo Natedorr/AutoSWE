@@ -27,6 +27,28 @@ Path helpers (`vcs/worktree.py`):
 
 1. If `_main/` doesn't exist → `git clone` via VCS `clone_url()` (token embedded)
 2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch + checkout base_branch + reset --hard origin/{base_branch}`
+3. `_ensure_repo_exclude(_main)` — idempotently seeds the shared repo-local git exclude (see below)
+
+### Repo-local git exclude (`_ensure_repo_exclude`)
+
+`autoSWE` writes `__pycache__/`, `*.pyc`, `.pytest_cache/`, and `CLAUDE.md` into
+`_main/.git/info/exclude` (a **local, non-committed** override, so it never appears in a
+PR). This is shared by every linked issue worktree (`git worktree add` has no per-worktree
+`info/exclude`), so one write covers all worktrees for the repo. It keeps two classes of
+file out of the per-issue branch (finding C2):
+
+- **Build artifacts** — any `pytest` run a coding session does leaves untracked
+  `__pycache__/`/`.pytest_cache/`; without the exclude, `git add -A` (autoSWE's and the
+  agent's) sweeps them into the branch and the reviewer rejects them.
+- **The auto-generated `CLAUDE.md`** — `ensure_claude_md` writes it for the coding agent's
+  benefit but must not commit it to the feature branch. Git-*ignoring* it (vs. merely
+  leaving it untracked) is what lets it survive the review phase's `git clean -fd` backstop
+  (`ensure_worktree_unchanged`) without re-dirtying the branch every cycle.
+
+The exclude is written in **two places** so it is always present: at the end of
+`ensure_clone` (fresh clone), and — because the dispatch **reuses** the pre-synced
+worktree and never re-runs `ensure_clone` — at the top of `ensure_claude_md`, which runs on
+every plan/fix/review phase.
 
 ### `create_worktree(owner, repo, issue_num, base_branch, token, cfg, provider)`
 
@@ -42,7 +64,11 @@ Path helpers (`vcs/worktree.py`):
 1. Fetch latest remote state
 2. If local branch is behind remote (`HEAD..origin/{branch}`) → `reset --hard origin/{branch}`
 3. If HEAD ahead of `origin/{branch}` (Claude auto-committed during this session) → amend the last commit's message with the proper "Fixes #N" message, preserving all other auto-commits as a commit trail
-4. Otherwise → `git add -A`, check diff, commit, push `-u origin <branch>`
+4. Otherwise → `git add -A` with `:(exclude)` pathspecs for build artifacts
+   (`__pycache__/`, `*.pyc`, `.pytest_cache/`), check diff, commit, push `-u origin <branch>`.
+   (Defense-in-depth on top of the repo-local exclude — keeps a `/fix` commit clean even on a
+   worktree whose `_main` clone predates the exclude write. `CLAUDE.md` is intentionally *not*
+   pathspec-excluded here — it is handled by the git-ignore so it survives `git clean -fd`.)
 5. Returns `{"committed": bool, "commit_sha": str, "branch": str}`
 
 ### `sync_branch(wt, owner, repo, issue_num, base_branch, provider, cfg)`

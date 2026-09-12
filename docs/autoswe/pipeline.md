@@ -67,6 +67,8 @@ Each layer boundary is cached as a test seam — see `testing.md`.
 
 `poller.sh` (Linux, `flock`) and `poller.ps1` (Windows, `System.Threading.Mutex`) provide a process-level mutex so two cron firings can't overlap — a firing that finds a run in progress simply exits. Both fetch+reset the autoSWE repo to `origin/master`, then invoke `python autoswe.py poller --drain`.
 
+On Windows (`poller.ps1`, issue #251) the wrapper additionally hardens the PowerShell 5.1 boundary: it pins UTF-8-without-BOM across the console, the child Python (`PYTHONIOENCODING`/`PYTHONUTF8`), and the log file (written via `[System.IO.File]::AppendAllText`, not the UTF-16 `Add-Content` cmdlet); it temporarily lowers `$ErrorActionPreference` to `Continue` around the poller call so redirected native stderr is captured as data rather than aborting the script; and it captures `$LASTEXITCODE` and exits with it, so a failed `python autoswe.py poller` is visible to Task Scheduler / monitoring instead of being masked as exit 0. See [debugging.md](debugging.md) for the failure modes this addresses.
+
 ## Stage 3 — Sync: Read API + Decide (`orch.loop._single_poll`)
 
 For each repo in `repos.json` (or auto-discovered owned repos):
@@ -131,7 +133,7 @@ The `emit()` layer maps `DispatchResult.done_content` to status transitions:
 
 | Handler Return | `autoswe_status` | Mirrored Label | Comment Posted |
 |----------------|------------------|----------------|----------------|
-| `"PLAN_READY"` | `planned` | `autoswe:planned` | Plan comment (posted by handler) |
+| `"PLAN_READY"` | `planned` | `autoswe:planned` | Plan (patched into the sticky planning comment in place via MCP `post_plan`; new comment only on the text-parse fallback — issue #241) |
 | `"REVIEW_READY"` | `reviewed` | `autoswe:reviewed` | Review comment (posted by handler) |
 | `"WAITING: …"` | `waiting` | `autoswe:waiting` | Questions comment (posted by handler) |
 | `"DONE*"` (from `/fix`) | `fixed` | `autoswe:fixed` | Completion comment with commit link |

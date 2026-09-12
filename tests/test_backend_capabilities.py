@@ -66,6 +66,13 @@ def test_claude_backend_structured_output_capability():
     assert "structured_output" not in CodexBackend.capabilities()
 
 
+def test_pi_backend_structured_output_capability():
+    """pi does not support structured_output (no --mode json schema output)."""
+    from autoswe.harness.backends.pi import PiBackend
+
+    assert "structured_output" not in PiBackend.capabilities()
+
+
 def test_mode_type_exported():
     """Mode type should be importable from backends and runner."""
     from autoswe.harness.backends import Mode
@@ -185,6 +192,159 @@ def test_legacy_path_without_mode():
 
     assert asyncio.iscoroutine(coro)
     coro.close()
+
+
+# ---------- pi backend capabilities ----------
+
+
+def test_pi_backend_capabilities_exact():
+    """PiBackend advertises exactly mode + resume + session_fork + progress_stream + mcp."""
+    from autoswe.harness.backends.pi import PiBackend
+
+    caps = PiBackend.capabilities()
+    assert caps == {"mode", "resume", "session_fork", "progress_stream", "mcp"}
+
+
+def test_pi_backend_has_mode_capability():
+    """PiBackend advertises 'mode' — it has real --tools read-only enforcement."""
+    from autoswe.harness.backends.pi import PiBackend
+
+    assert "mode" in PiBackend.capabilities()
+
+
+def test_pi_backend_has_session_fork_capability():
+    """PiBackend advertises 'session_fork' (it has the --fork primitive).
+
+    This is the capability Codex LACKS: pi can fork a checkpoint into a new
+    session on /retry, so the provenance gate accepts a pi checkpoint when the
+    fix harness is pi.
+    """
+    from autoswe.harness.backends.pi import PiBackend
+
+    assert "session_fork" in PiBackend.capabilities()
+
+
+def test_pi_backend_retries_on_error_and_killed():
+    """PiBackend retries on the CLI-subprocess failure surface, like Codex."""
+    import asyncio
+
+    from autoswe.harness.backends.pi import PiBackend
+
+    assert PiBackend.retryable_subtypes() == {"error", "killed"}
+    assert asyncio.TimeoutError in PiBackend.retryable_exceptions()
+    assert OSError in PiBackend.retryable_exceptions()
+
+
+def test_pi_mode_tools_allowlist():
+    """pi translates mode into a real --tools allowlist via _tools_for_spec."""
+    from autoswe.harness.backends.base import RunSpec
+    from autoswe.harness.backends.pi import _MODE_TOOLS, _tools_for_spec
+
+    # plan/read_only → the read-only recipe (no write/bash).
+    assert _tools_for_spec(RunSpec(prompt="p", cwd="/tmp", mode="plan")) == \
+        list(_MODE_TOOLS["plan"])
+    assert "bash" not in _tools_for_spec(RunSpec(prompt="p", cwd="/tmp", mode="plan"))
+    assert "edit" not in _tools_for_spec(RunSpec(prompt="p", cwd="/tmp", mode="plan"))
+    assert "write" not in _tools_for_spec(RunSpec(prompt="p", cwd="/tmp", mode="plan"))
+    # read_write → the full working set.
+    rw = _tools_for_spec(RunSpec(prompt="p", cwd="/tmp", mode="read_write"))
+    assert "bash" in rw and "edit" in rw and "write" in rw
+    # unset mode falls back to read_write.
+    assert _tools_for_spec(RunSpec(prompt="p", cwd="/tmp")) == \
+        _tools_for_spec(RunSpec(prompt="p", cwd="/tmp", mode="read_write"))
+    # extra_tools append to the allowlist.
+    assert "CustomTool" in _tools_for_spec(
+        RunSpec(prompt="p", cwd="/tmp", mode="plan", extra_tools=["CustomTool"])
+    )
+
+
+def test_pi_backend_wires_fork_session_flag_on_retry_spec():
+    """A fork spec (resume + fork_session) reaches the pi CLI as
+    ``--fork <resume> --session-id <new>`` — a NEW session id, not the source."""
+    import asyncio
+
+    from autoswe.harness.backends.base import RunSpec
+    from autoswe.harness.backends.pi import PiBackend
+    from tests.fakes.pi_fake import PiFake
+
+    spec = RunSpec(
+        prompt="retry",
+        cwd="/tmp",
+        model="claude-sonnet-4-5",
+        resume="last-good-pi",
+        fork_session=True,
+        mode="read_write",
+    )
+
+    with PiFake() as fake:
+        fake.script_fix("done")
+        asyncio.run(PiBackend().run(spec))
+
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["is_fork"] is True
+    assert call["fork"] == "last-good-pi", "--fork must carry the source session"
+    assert call["session_id"] is not None
+    assert call["session_id"] != "last-good-pi", "a fork must mint a new session id"
+
+
+def test_pi_backend_plain_resume_no_fork_flag():
+    """A plain resume (fork_session unset) reaches pi as ``--session`` only."""
+    import asyncio
+
+    from autoswe.harness.backends.base import RunSpec
+    from autoswe.harness.backends.pi import PiBackend
+    from tests.fakes.pi_fake import PiFake
+
+    spec = RunSpec(
+        prompt="resume",
+        cwd="/tmp",
+        model="claude-sonnet-4-5",
+        resume="prior-pi",
+        mode="read_write",
+    )
+
+    with PiFake() as fake:
+        fake.script_fix("done")
+        asyncio.run(PiBackend().run(spec))
+
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["is_resume"] is True
+    assert call["is_fork"] is False
+    assert call["resume"] == "prior-pi"
+    assert "fork" not in call
+
+
+def test_pi_backend_fresh_run_mints_session_id():
+    """A fresh (no resume) run pins a new --session-id; the parser echoes it back."""
+    import asyncio
+
+    from autoswe.harness.backends.base import RunSpec
+    from autoswe.harness.backends.pi import PiBackend
+    from tests.fakes.pi_fake import PiFake
+
+    spec = RunSpec(
+        prompt="plan",
+        cwd="/tmp",
+        model="claude-sonnet-4-5",
+        mode="plan",
+    )
+
+    with PiFake() as fake:
+        fake.script_plan("a plan")
+        result = asyncio.run(PiBackend().run(spec))
+
+    call = fake.calls[0]
+    assert call["is_fresh"] is True
+    assert call["session_id"] is not None
+    # A fresh run pins a real uuid4 as --session-id (the fake's session header
+    # then echoes back whatever scripted id it was fed; the parser's header
+    # wins over the pre-seeded pin, so RunResult carries a non-empty id).
+    import uuid
+
+    uuid.UUID(call["session_id"])
+    assert result.session_id
 
 
 # ---------- fork-on-retry (session_fork capability) ----------
@@ -348,6 +508,26 @@ def test_backend_has_capability_claude_code():
     assert backend_has_capability(harness, "progress_stream")
 
 
+def test_backend_has_capability_pi():
+    """backend_has_capability returns correct values for a pi profile.
+
+    pi advertises mode + resume + session_fork + progress_stream + mcp and
+    nothing else (no per-tool approval, no plan_file, no structured_output).
+    """
+    from autoswe.harness.runner import backend_has_capability
+
+    harness = {"backend": "pi", "model": "claude-sonnet-4-5"}
+    assert backend_has_capability(harness, "mode")
+    assert backend_has_capability(harness, "resume")
+    assert backend_has_capability(harness, "session_fork")
+    assert backend_has_capability(harness, "progress_stream")
+    assert backend_has_capability(harness, "mcp")
+    assert not backend_has_capability(harness, "can_use_tool")
+    assert not backend_has_capability(harness, "plan_permission")
+    assert not backend_has_capability(harness, "plan_file")
+    assert not backend_has_capability(harness, "structured_output")
+
+
 def test_backend_has_capability_default():
     """backend_has_capability with None harness_cfg should default to Claude."""
     from autoswe.harness.runner import backend_has_capability
@@ -383,6 +563,20 @@ def test_has_read_only_enforcement_codex_is_false():
     from autoswe.harness.runner import has_read_only_enforcement
 
     assert has_read_only_enforcement({"backend": "codex", "model": "gpt-5.6-terra"}) is False
+
+
+def test_has_read_only_enforcement_pi_is_true():
+    """pi enforces read-only via the --tools allowlist (advertises 'mode').
+
+    This is the pi ≠ codex distinction: a plan/review phase on a pi profile
+    keeps its read-only guarantee at the CLI level and must NOT loudly degrade
+    (no ``ensure_worktree_unchanged``-reliant path), unlike Codex.
+    """
+    from autoswe.harness.runner import has_read_only_enforcement
+
+    assert has_read_only_enforcement(
+        {"backend": "pi", "model": "claude-sonnet-4-5"}
+    ) is True
 
 
 def test_has_read_only_enforcement_default_is_claude():
@@ -713,6 +907,14 @@ def test_plan_file_capability_codex():
     from autoswe.harness.backends.codex import CodexBackend
 
     assert "plan_file" not in CodexBackend.capabilities()
+
+
+def test_plan_file_capability_pi():
+    """PiBackend must NOT advertise the 'plan_file' capability (plan capture
+    is text-pattern driven via <AUTOSWE_PLAN> tags, not a plan file)."""
+    from autoswe.harness.backends.pi import PiBackend
+
+    assert "plan_file" not in PiBackend.capabilities()
 
 
 def test_interpret_plan_result_codex_prose_skips_fs_scan(tmp_path):

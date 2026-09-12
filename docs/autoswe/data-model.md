@@ -65,7 +65,7 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `suppress_welcome` | `bool` | True once the welcome comment has been posted |
 | `welcome_comment_id` | `int \| None` | Comment ID of the welcome message (if posted) |
 | `progress_comment_id` | `int \| None` | Sticky progress comment ID for the in-flight dispatch. Cleared on any clean return (finalize), so it lingers **only** after a crash — a `/retry` from the `error` state re-uses this comment instead of posting a new one. See [handlers.md](handlers.md). |
-| `bot_comment_ids` | `list[int]` | Every comment ID autoSWE has posted on this issue |
+| `bot_comment_ids` | `list[int]` | Comment IDs autoSWE has recorded for this issue (every dispatch-lifecycle comment plus completion/`emit` effects; best-effort fallback posts rely on the marker/content fallback instead — see below) |
 | `pr_number` | `int \| None` | Cached PR number. Persisted at ship time (both the explicit `/pr` path and the `AUTO_CREATE_PR` path) so consumers can reference the PR without re-querying the provider |
 | `pr_url` | `str \| None` | Cached PR web URL, persisted alongside `pr_number` at ship time |
 | `fix_summary` | `str \| None` | Extracted from `DONE_SUMMARY` on fix/retry completion; persisted in the queue so PR creation can include it in the body |
@@ -240,11 +240,14 @@ class RunResult:
     cost_usd: float | None = None
     duration_seconds: float = 0.0
     plan_file_path: str | None = None
-    plan_posted: bool = False        # MCP post_plan fired (Claude Code only)
-    question_posted: bool = False    # MCP post_question fired (Claude Code only)
+    plan_posted: bool = False        # MCP post_plan fired (Claude Code / pi)
+    question_posted: bool = False    # MCP post_question fired (Claude Code / pi)
+    plan_posted_body: str | None = None  # the post_plan `body` arg (issue #241)
 ```
 
 What a `CodingBackend.run(spec)` returns — the unparsed result of one agent run. Supports tuple unpacking (`text, session_id, subtype = result`) for legacy callers. `plan_posted` / `question_posted` are only meaningful when the backend advertises the `"mcp"` capability; handlers gate on `runner.backend_has_capability(harness, "mcp")` before trusting them and fall back to text parsing otherwise.
+
+**Question>plan precedence.** The planner checks `question_posted` *before* `plan_posted` (so a run that posted both lands on `waiting`, not `planned`). The pi backend enforces this at the source: once `post_question` is observed in a run, any later `post_plan` is ignored and `plan_posted` stays `False` (a "question-terminal" run), so `question_posted` remains authoritative even if the model continues past its own question (issue #230).
 
 ### `HandlerResult` — interpreted handler output
 
@@ -304,7 +307,11 @@ class NormalizedComment:
     is_bot: bool = False             # set by adapter from bot_comment_ids membership
 ```
 
-The `id` field is the **primary watermark** for the state machine. The `is_bot` flag is set by the adapter from `bot_comment_ids` membership (with body marker fallback for pre-existing bot comments). Orchestrator code uses `is_bot` exclusively — no content pattern matching in the decision layer.
+The `id` field is the **primary watermark** for the state machine. The `is_bot` flag is set by the adapter from `bot_comment_ids` membership (with body marker fallback for pre-existing bot comments).
+
+**Bot-comment IDs are recorded on every dispatch-lifecycle posting path.** Every comment autoSWE posts is tagged with the `BOT_MARKER`, and the dispatch-lifecycle comments record their ID to `bot_comment_ids` at the moment of the successful POST (via `record_bot_comment_id`, `autoswe/tracking/comments.py`): the sticky progress comment (`_dispatch_task`), the dispatch-error comment (`_handle_dispatch_error`), the orphaned-worktree recovery comment (`_recover_orphaned_worktrees`), the welcome comment (`_post_pending_welcomes`), and the completion / `emit` effects + PR-deferred comment (`providers/adapter.py`). The decision layer's reply/restart filters (`_has_user_reply_after`, `_has_new_user_comment_after`) therefore use the layered `_is_autoswe_bot_comment` check — `is_bot` flag **then** `BOT_MARKER` **then** content patterns — rather than the raw flag alone. This is the defense for the case where a comment's ID never reaches `bot_comment_ids` (e.g. a progress comment posted just before a dispatch crash, on a provider such as Azure DevOps that strips HTML markers from bodies): the content-pattern fallback still classifies it as a bot comment, so it is never mistaken for a user reply that resumes the task (issue #236).
+
+A few best-effort fallback posting sites (the planner raw-text fallback, the standalone `AskUserQuestion` comment, and the ship PR-opened/PR-exists comments in `autoswe/vcs/ship.py`) are `BOT_MARKER`-tagged but do not record their ID — they are covered by the marker/content-pattern fallback instead, which is why the content patterns include `Pull request opened:` / `Pull request already exists:` / `PR deferred —`. If a new bot body is introduced, add it to `_BOT_CONTENT_PATTERNS` so the fallback keeps it classified as a bot comment.
 
 ### `PRResult`
 

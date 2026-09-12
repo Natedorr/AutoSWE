@@ -98,16 +98,45 @@ def _is_autoswe_bot_comment(comment: CommentLike) -> bool:
 
 # Content patterns that uniquely identify autoSWE bot comments.
 # Used as a fallback when BOT_MARKER is stripped (e.g. Azure DevOps).
+#
+# Each pattern is a *literal substring* of a body autoSWE actually posts (issue
+# #236: the "Dispatching `/..." pattern had a stray slash that no posted body
+# ever contained, so on Azure — where the marker is stripped — a progress
+# comment was misread as a user reply and drove a bogus resume).
 _BOT_CONTENT_PATTERNS = (
+    "autoSWE picked up this issue",  # welcome comment (orch/loop._build_welcome_comment)
     "## Questions",             # planner WAITING output
     "## Plan\n",                # planner PLAN_READY output (## Plan followed by newline)
     "## Claude's response",     # planner WAITING:see comment fallback
+    "## Dispatch Error",        # dispatch-error comment (core/error_utils.format_error_comment)
     "Completed with command",   # dispatch completion comment
     "Post `/retry`",            # dispatch failure comment (partial — enough to be unique)
     "Task aborted.",            # dispatch abort comment
-    "Dispatching `/",           # initial sticky body (e.g. "Dispatching `/plan`…")
+    "autoSWE recovery",         # orphaned-worktree recovery comment (orch/loop)
+    "Dispatching `",            # initial sticky body (e.g. "Dispatching `plan`…")
     "Resuming `",               # initial sticky body for resume (e.g. "Resuming `plan` session…")
+    "Retrying `",               # adopted sticky body on /retry after a crash (e.g. "Retrying `plan`…")
+    "Pull request opened: ",    # ship PR-opened comment (vcs/ship.open_pr)
+    "Pull request already exists: ",  # ship PR-exists comment (vcs/ship.open_pr)
+    "PR deferred — ",           # /pr preflight-deferred comment (providers/adapter.apply_effect)
 )
+
+
+def record_bot_comment_id(entry: dict, comment_id: int | None) -> None:
+    """Append a posted comment's ID to the queue entry's ``bot_comment_ids``.
+
+    Centralised so every posting path records IDs the same way — the dispatch
+    lifecycle comments posted on the live queue entry (progress, dispatch
+    error, orphaned-worktree recovery in ``orch/loop.py``) and the
+    completion/``emit`` effect bookkeeping in ``providers/adapter.py`` all
+    funnel through here (issue #236 review: the inline setdefault/append was
+    repeated with slightly inconsistent dedup).
+    """
+    if comment_id is None:
+        return
+    ids = entry.setdefault("bot_comment_ids", [])
+    if comment_id not in ids:
+        ids.append(comment_id)
 
 
 def _find_last_completion_id(comments: list[CommentLike]) -> int | None:
@@ -148,8 +177,38 @@ def _find_last_bot_comment_id(comments: list[CommentLike]) -> int | None:
     return _find_last_bot_comment_ts(comments)
 
 
-_PLAN_RE = re.compile(r"<AUTOSWE_PLAN>(.*?)</AUTOSWE_PLAN>", re.DOTALL)
-_QUESTIONS_RE = re.compile(r"<AUTOSWE_QUESTIONS>(.*?)</AUTOSWE_QUESTIONS>", re.DOTALL)
+# Tolerate optional whitespace inside the brackets: some backends (observed on
+# qwen3.8:27b via pi, 2026-09-07 E2E) emit "< AUTOSWE_PLAN>" with a space after
+# the opening bracket. These are the *fallback* tags for backends without the
+# MCP comment server, so any small model quirk should still be detected.
+_PLAN_RE = re.compile(r"<\s*AUTOSWE_PLAN>(.*?)</\s*AUTOSWE_PLAN>", re.DOTALL)
+_QUESTIONS_RE = re.compile(r"<\s*AUTOSWE_QUESTIONS>(.*?)</\s*AUTOSWE_QUESTIONS>", re.DOTALL)
+
+# Leading "## Plan" header, tolerating trailing whitespace on the line and a
+# header that ends the body outright (no trailing newline).  Used by
+# normalize_plan_comment() to strip an already-present header before
+# re-prepending, so the normalization is idempotent.
+_PLAN_HEADER_RE = re.compile(r"^\s*##\s+Plan\s*(?:\n|\Z)")
+
+
+def normalize_plan_comment(body: str) -> str:
+    """Idempotently ensure *body* starts with a ``## Plan`` header.
+
+    Downstream plan extraction (``_find_plan_in_comments``) only recognises
+    plan comments whose body starts with ``## Plan`` — but the plan prompt
+    asks the agent to call ``post_plan`` "with the plan as markdown" and does
+    not require the header, so an agent-supplied body is not guaranteed to
+    carry it.  This normalizes the body once at the boundary (MCP server and
+    planner both call it) so the sticky planning comment is always
+    extractable by ``/fix`` and ``/review`` (issue #241).
+    """
+    stripped = body.strip()
+    stripped = _PLAN_HEADER_RE.sub("", stripped, count=1).lstrip()
+    if not stripped:
+        # Header-only (or empty-after-strip) body: leave the header as-is
+        # rather than collapsing to the empty string.
+        return "## Plan"
+    return f"## Plan\n\n{stripped}"
 
 
 # ---------------------------------------------------------------------------

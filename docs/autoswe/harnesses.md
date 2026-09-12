@@ -4,15 +4,16 @@
 
 Loaded by `core/config.py:load_harnesses_config()`. Keys starting with `_` are skipped.
 
-A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its model and any auth/runtime settings. Phases (`plan`, `fix`, `review`) reference a profile by name via `plan_harness`, `fix_harness`, or `review_harness` in `repos.json` (or `PLAN_HARNESS`, `FIX_HARNESS`, `REVIEW_HARNESS` in `autoswe.env`).
+A **harness profile** bundles a coding backend (`claude_code`, `codex`, `pi`) with its model and any auth/runtime settings. Phases (`plan`, `fix`, `review`) reference a profile by name via `plan_harness`, `fix_harness`, or `review_harness` in `repos.json` (or `PLAN_HARNESS`, `FIX_HARNESS`, `REVIEW_HARNESS` in `autoswe.env`).
 
 ### Profile Schema
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-----------|
-| `backend` | **Yes** | — | Backend implementation: `"claude_code"` or `"codex"` |
-| `model` | No for `claude_code`, **required** for `codex` | `""` | Model ID (e.g. `"claude-opus-5"`, `"gpt-5.6-terra"`). No default for `codex` — resolution fails if missing |
+| `backend` | **Yes** | — | Backend implementation: `"claude_code"`, `"codex"`, or `"pi"` |
+| `model` | No for `claude_code`, **required** for `codex` and `pi` | `""` | Model ID (e.g. `"claude-opus-5"`, `"gpt-5.6-terra"`, `"claude-sonnet-4-5"`). No default for `codex` or `pi` — resolution fails if missing (pi would otherwise silently pick a settings default, unacceptable for reproducibility) |
 | `timeout` | No | (from env) | Backend-specific timeout in seconds |
+| `max_turns` | No | `200` (review: `80`) | Turn cap for the agent run (issue #222). Validated as a positive integer on load. **Only honored by backends that expose a turn cap** — `claude_code` today; `codex` and `pi` treat it as a documented no-op (their anti-runaway guard is the wall-clock `timeout`). When set it beats the per-repo `agent_max_turns` and the global `MAX_TURNS`/`REVIEW_MAX_TURNS`. See [Turn cap (`max_turns`)](#turn-cap-max_turns) |
 | `cli_path` | No | (from env) | Path to the CLI binary (e.g. `claude` or `codex`) |
 | `codex_api_key` | No | — | API key for Codex backend (sets `CODEX_API_KEY` env var) |
 | `openai_api_key` | No | — | Alternative API key for Codex backend (sets `OPENAI_API_KEY` env var) |
@@ -20,10 +21,59 @@ A **harness profile** bundles a coding backend (`claude_code`, `codex`) with its
 | `anthropic_base_url` | No | (from env) | Custom API endpoint (Claude Code only) |
 | `anthropic_auth_token` | No | (from env) | Auth token (Claude Code only) |
 | `anthropic_api_key` | No | (from env) | API key (Claude Code only) |
+| `provider` | No | — | Model provider (pi only): e.g. `"anthropic"`, `"openai"`, `"ollama"`. Emits `--provider` (pi resolves a settings default when unset) |
+| `api_key` | No | — | API key (pi only): emitted via `--api-key`, which overrides environment variables per the pi docs. The key is *not* also injected as an env var |
+| `thinking` | No | — | Reasoning effort level (pi only): emitted via `--thinking` |
+| `agent_dir` | No | — | pi config directory (pi only): maps to the `PI_CODING_AGENT_DIR` env var (pi's config-directory override; default `~/.pi/agent`). Sits below profile `env` in precedence |
+| `session_dir` | No | — | pi session storage directory (pi only): emitted via `--session-dir` (overrides `PI_CODING_AGENT_SESSION_DIR`) |
+| `approve_project` | No | `true` (pi only) | Trust the project. Non-interactive pi modes ignore project-local resources unless `--approve` is passed (the dedicated-machine posture is to trust). Set `false` on a shared host to drop the flag |
+| `system_prompt` | No | — | Replaces pi's system prompt entirely (pi only, `--system-prompt`); context files and skills are still appended |
+| `append_system_prompt` | No | — | Appended to pi's system prompt (pi only, `--append-system-prompt`) |
 | `env` | No | — | Extra environment variables (a `{key: value}` map) merged into the backend's child process. Values override backend defaults; ``${VAR}``/``${VAR:-default}`` supported. See [Per-profile `env`](#per-profile-env) |
 
 String values support ``${VAR}`` and ``${VAR:-default}`` environment variable
 interpolation (expanded at load time from the current process environment).
+
+### Turn cap (`max_turns`, issue #222)
+
+The agent's tool-use turn budget is configurable rather than a single
+hard-coded 200. It resolves per run in this precedence order (highest wins):
+
+1. **Harness profile** `max_turns` — the profile this phase resolves to
+   (`harnesses.json`). Validated as a positive integer on load; a non-integer
+   or a value `< 1` fails startup with a `ValueError` (fail fast — a silent
+   "no cap" from a typo would defeat the anti-runaway guard).
+2. **Per-repo** `agent_max_turns` — a `repos.json` entry field (same pattern
+   as `agent_timeout`).
+3. **Global** — `MAX_TURNS` (coding phases, default `200`) or `REVIEW_MAX_TURNS`
+   (the read-only review phase, default `80`). The review phase keeps its
+   separate lower cap because a read-only pass needs far fewer round trips than
+   a coding phase.
+
+Code path: `config.resolve_max_turns(phase, repo_cfg, cfg, harness_cfg)`.
+
+**Only backends that expose a turn cap honor it.** `claude_code` passes the
+resolved value to the Agent SDK. `codex` and `pi` have **no turn cap** (Codex
+`exec` dropped the `agent.max_turns` config key; pi has no cap) — they treat
+`max_turns` as a documented no-op, so the wall-clock `timeout` is their
+anti-runaway guard. The value is still resolved and passed on `RunSpec.max_turns`
+for contract parity.
+
+**Graceful commit-on-cap (fix phase).** A run can consume its whole turn budget
+*after* the coding work is done but before the commit step runs (the
+Natedorr/AutoSWE#216 failure: diff complete, only the commit left, ~$96
+burned). When a **fix** run ends `error_max_turns`, before emitting `failed`
+the handler checks whether the worktree holds committable work **and** the
+post-fix test gate is green in that tree:
+
+- **Both true** → the partial run is committed + pushed through the normal
+  finalize path and the task still reaches `autoswe:fixed`
+  (`[FIX] … max_turns rescue: gate green, committing partial run`).
+- **Either false** (no work, or a red gate) → the run fails exactly as before
+  (FAILED + `/retry` hint); a red suite is never committed as `fixed`.
+
+Only the fix phase rescues — plan and review are read-only and hold no
+committable work to save.
 
 ### Resolution Order
 
@@ -105,15 +155,19 @@ a self-hosted OpenAI-compatible endpoint via `OPENAI_API_BASE`).
 - **Claude Code** — merged into the SDK `env` option, so the variables reach the
   spawned CLI only (never the poller's own process environment).
 - **Codex** — merged into the `codex exec` subprocess environment.
+- **pi** — merged into the `pi --mode json` subprocess environment. The named
+  `agent_dir` field (`PI_CODING_AGENT_DIR`) sits *below* `env`, so `env` can
+  still redirect pi's config directory. The API key is *not* injected as an env
+  var — the `api_key` field is carried on the `--api-key` flag instead.
 
 **Precedence** (highest wins):
 
-| Claude Code | Codex |
-|-------------|-------|
-| 1. `spec.env_overrides` (internal) | 1. `spec.env_overrides` (internal) |
-| 2. profile `env` | 2. profile `env` |
-| 3. backend defaults (e.g. `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, Anthropic creds) | 3. api-key fields (`OPENAI_API_KEY` / `CODEX_API_KEY`) |
-| 4. inherited `os.environ` | 4. inherited `os.environ` |
+| Claude Code | Codex | pi |
+|-------------|-------|----|
+| 1. `spec.env_overrides` (internal) | 1. `spec.env_overrides` (internal) | 1. `spec.env_overrides` (internal) |
+| 2. profile `env` | 2. profile `env` | 2. profile `env` |
+| 3. backend defaults (e.g. `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, Anthropic creds) | 3. api-key fields (`OPENAI_API_KEY` / `CODEX_API_KEY`) | 3. named fields (`agent_dir` → `PI_CODING_AGENT_DIR`) |
+| 4. inherited `os.environ` | 4. inherited `os.environ` | 4. inherited `os.environ` |
 
 So a profile `env` value overrides a backend default but loses to the internal
 `env_overrides` seam. `${VAR}` / `${VAR:-default}` expansion is applied to `env`
@@ -281,21 +335,209 @@ Access is instead controlled by a single explicit switch, `bypass_approvals` (pr
 - ``cost_usd`` is an **estimate** from a maintained price table (`codex_pricing.py`). Returns ``None`` for unknown models — never guesses.
 - ``plan_file_path`` is always ``None`` — Codex doesn't write a native plan file (Claude Code's `~/.claude/plans/` is reached via `claude_code.plan_file_dir()`; Codex has no equivalent).
 - ``plan_posted`` / ``question_posted`` are always ``False`` — no MCP comment posting yet.
+- **Large JSONL line handling (issue #251).** The subprocess is spawned with a StreamReader ``limit=_MAX_STREAM_BYTES + 1`` (16 MiB + 1) so that either pipe can hold a legitimately large single JSONL line — the asyncio default is only 64 KiB. If a line still exceeds that limit, ``readline()`` raises ``ValueError``; the backend catches it, flags the turn failed, and drains the rest of stdout, so the run surfaces as ``subtype="error"`` instead of the uncaught exception propagating out of the runner and crashing the poller.
+- Duration is tracked via ``time.monotonic()`` locally.
+
+#### `pi`
+
+Shells out to `pi --mode json` (the pi CLI subprocess — the official SDK is
+TypeScript-only, so the CLI is the transport, the same shape as Codex). Maps
+`RunSpec` to pi flags (`--model`, `--provider`, `--thinking`, a mode-derived
+`--tools` allowlist, `--exclude-tools`, `--approve`, `--api-key`, and the
+session flags below) and parses the JSON event stream (one JSON object per line
+on stdout) into a `RunResult`. `RunResult.text` is sourced from the last
+assistant `message_end`'s text blocks (falling back to the accumulated
+`text_delta` chunks — keyed by `contentIndex` — when a run is killed before
+`message_end`).
+
+**Requirements:** `pi` CLI on PATH (`npm i -g @earendil-works/pi-coding-agent`).
+The provider/model/API key come from the `provider`, `model`, and `api_key`
+profile fields (the key is passed via `--api-key`, which overrides environment
+variables; for local providers such as Ollama, configure the model via
+`~/.pi/agent/models.json` and no key is needed).
+
+**Profile fields:**
+- `backend`: `"pi"` (required)
+- `model`: **required** model id or `provider/model` pattern (e.g. `"claude-sonnet-4-5"`, `"anthropic/claude-opus-4-8"`, `"gpt-5.6-sol"`, `"qwen3.6:27b"` for Ollama). There is no built-in default — a missing `model` fails resolution with a `ValueError` (pi would otherwise silently pick a settings default, unacceptable for reproducibility)
+- `provider`: Model provider (e.g. `"anthropic"`, `"openai"`, `"ollama"`) — emits `--provider`
+- `api_key`: API key, emitted via `--api-key` (overrides environment variables). Not injected as an env var
+- `thinking`: Reasoning effort level — emits `--thinking`
+- `agent_dir`: pi config directory (maps to the `PI_CODING_AGENT_DIR` env var; default `~/.pi/agent`). Sits below profile `env` in precedence
+- `session_dir`: pi session storage directory — emits `--session-dir` (overrides `PI_CODING_AGENT_SESSION_DIR`)
+- `approve_project`: Trust the project (boolean, **default `true`**). Non-interactive pi modes ignore project-local resources unless `--approve` is passed; the dedicated-machine posture is to trust. Set it to `false` on a shared host to drop the flag
+- `system_prompt` / `append_system_prompt`: replace / append to pi's system prompt (`--system-prompt` / `--append-system-prompt`) — a knob Codex lacks
+- `timeout`: Override the default timeout (optional)
+- `cli_path`: Path to the pi binary (optional; otherwise resolved via `shutil.which("pi")`, with a Windows `.cmd`/`.bat` shim invoked through `cmd /c`)
+- `env`: Extra environment variables (a `{key: value}` map) merged into the `pi --mode json` subprocess (optional). User values win over the named fields (e.g. `PI_CODING_AGENT_DIR` from `agent_dir`); see [Per-profile `env`](#per-profile-env)
+
+**Capabilities:** `mode`, `mcp`, `resume`, `session_fork`, `progress_stream`.
+
+**MCP comment posting via the pi-mcp-adapter.** When a run's `spec.mcp_servers`
+names the `autoswe_comment` server, pi reaches it through the third-party
+`pi-mcp-adapter` (the pi-native MCP extension; see
+[spike-pi-mcp.md](spike-pi-mcp.md) for the live-run record this section rests
+on). The mechanism:
+
+- **Agent-dir `mcp.json`, not a worktree `.mcp.json`.** `PiBackend` writes the
+  `autoswe_comment` server into `<agent dir>/mcp.json` (the `agent_dir` profile
+  field; `autoswe/harness/mcp_config.py:build_pi_mcp_json()` builds the dict,
+  `pi.py:_write_pi_mcp_json` merges it in). A `.mcp.json` in the target
+  worktree would pollute the repo under test and trip project trust. The merge
+  is entry-scoped: autoSWE owns only its `autoswe_comment` server entry and its
+  own top-level `settings` (`freezeDirectTools`, `sampling: false`,
+  `elicitation: false`) — other servers/settings an operator left in a shared
+  agent dir are preserved.
+- **The `--tools` allowlist gains the three direct names for every mode.**
+  With `toolPrefix: "mcp"` the adapter surfaces the direct tools as
+  `mcp__autoswe_comment_post_plan` / `_post_question` / `_update_progress`.
+  pi's `--tools` is a *hard* allowlist — an MCP tool not listed is not in the
+  model's tool set at all — so `_tools_for_spec` appends all three names to the
+  mode-derived allowlist (a `plan`/`read_only` run still needs them even
+  though its base set is read-only).
+- **Stream parsing.** `tool_execution_start` events are classified by
+  `pi.py:_classify_mcp_comment_call` into the same three tools across the
+  shapes the adapter can emit: the **direct** name (`toolName` is
+  `mcp__autoswe_comment_<tool>`, `args` carries `body`), the **generic `mcp`
+  proxy** (`toolName: "mcp"`, `args: {tool, args: {body}}`), and the
+  **`mcp__autoswe_comment` namespace proxy** (bare namespace `toolName`, same
+  `{tool, args}` shape). `post_plan` → `RunResult.plan_posted` (and the
+  `body` argument → `RunResult.plan_posted_body`, so the planner can re-push
+  the normalized plan to the sticky comment after the run — issue #241),
+  `post_question` → `question_posted`, `update_progress` → progress callback.
+  Parsing the two proxy shapes is a deliberate fallback: on a *cold* MCP cache
+  (no `autoswe_comment` entry in `<agent dir>/mcp-cache.json`) the adapter
+  serves the proxy shapes instead of the direct tools, so plan/question
+  detection keeps working instead of silently reverting to `<AUTOSWE_PLAN>`
+  tag-scraping. Because the `mcp` capability is advertised,
+  `planner.py`'s `has_mcp` branch (`autoswe/harness/planner.py:104`) turns on
+  for pi.
+
+**The env-vs-config-hash rule (spells out what goes where — it silently
+regresses otherwise).** The agent-dir `mcp.json` is matched/hashed by the
+adapter, and its `command`/`args`/`cwd`/`env` values are stable for the whole
+host (the resolved Python path, the autoSWE checkout root as `cwd`) — the file
+only ever carries values that do **not** change between issues, so rewriting
+it is idempotent and it is written once per host. The *per-task* values the
+server needs (the comment id, owner/repo, issue number, PAT, provider — the
+server's `env` block built by `mcp_config.build_mcp_comment_server`) must
+**not** go into that file: they would change the file every issue (and a
+changed config re-triggers the adapter's hash/match cycle). Instead
+`PiBackend` merges that `env` block into the **`pi --mode json` subprocess env**
+(`pi.py:_run_async`), and the adapter's `resolveEnv` seeds the MCP server
+child from pi's process env — so the per-task vars reach the server without
+the config file ever changing. If this ever regresses (per-task values baked
+into `mcp.json`, or the env block not merged into the subprocess env), the
+server starts with empty/`None` identity vars and comment posting fails or
+posts to the wrong thread, with no error in the pi stream — check
+`_write_pi_mcp_json` / `build_pi_mcp_json` (stable values only) and the
+`server_env` merge in `_run_async` when touching this path.
+
+**Cold-start warm-up.** A brand-new agent dir has no `mcp-cache.json` entry, so
+the first real run uses the proxy shapes. `pi.py:warm_up_mcp_cache` (driven by
+`pi_warmup_targets` over the harnesses.json profiles that pair `backend: pi`
+with an `agent_dir`) stages the `mcp.json` and runs pi once against a trivial
+prompt with the comment server named — the adapter connects at startup and
+writes the cache entry. `PiBackend` also logs a loud
+`[WARN][PI] cold MCP cache` preflight when the cache lacks a usable
+`autoswe_comment` entry, naming the run that will fall back.
+
+**Real read-only enforcement (the big difference from Codex).** pi *does*
+advertise the `mode` capability: a tool **allowlist** (`--tools`) over the
+built-in tools is derived from `RunSpec.mode`, so a plan/review phase is
+restricted at the CLI level. Because `mode` is advertised,
+`has_read_only_enforcement` is `True` — plan/review keep their read-only
+guarantees instead of loudly degrading and relying on the post-run
+`ensure_worktree_unchanged` rollback backstop Codex needs (see [No
+`mode`](#codex-phase-4)). `ask_question` is always excluded from every run
+(appended to `--exclude-tools` unconditionally) because there is no per-tool
+approval callback in `--mode json` — a non-interactive run could otherwise block
+on it indefinitely.
+
+**Mode → tools mapping:**
+
+| `RunSpec.mode` | `--tools` allowlist |
+|---|---|
+| `plan` / `read_only` | `read,grep,find,ls` (the documented read-only recipe) |
+| `read_write` | `read,bash,edit,write,grep,find,ls` (+ `powershell` on a Windows host) |
+| *(unset)* | the `read_write` set (a `/fix` run is a full-work phase) |
+
+`spec.extra_tools` appends to the allowlist; `spec.disallowed_tools_override`
+adds to the `--exclude-tools` denylist.
+
+**Capabilities (not yet supported):** `can_use_tool` (no per-tool runtime
+callback), `plan_permission` (no dedicated plan mode), `plan_file` (no native
+plan file — the planner's `~/.claude/plans` filesystem-scan fallback stays
+skipped), `structured_output` (pi has no JSON-Schema-validated output, so
+`RunSpec.output_format` is ignored and the planner/reviewer fall back to their
+text-pattern paths). The same gap disables the WAITING flow: AskUserQuestion
+interception lives entirely in the `can_use_tool` callback, so a pi plan session
+can never ask the user a question. Handlers degrade gracefully when these are
+unavailable.
+
+**Retry semantics (fork — unlike Codex's resume-in-place).** pi *does* have a
+fork primitive: `--fork <id> --session-id <new>`. So a pi `/retry` can *branch*
+from the last known-good session into a **new** session, leaving the original
+intact for rollback — the same fork-on-retry behavior as Claude Code (see
+[harnesses.md#retry-semantics](#retry-semantics)), and unlike Codex, which
+only resumes in place or starts fresh (it does not advertise
+`"session_fork"`). The backend advertises `"session_fork"`, so when
+`_run_retry`'s capability gate + checkpoint provenance gate pass
+(`last_good_session_backend` matches `pi`), `RunSpec.fork_session` is set and
+pi forks from the checkpoint; the forked run's new session id becomes the new
+`session_id` while the original checkpoint stays resumable. Because pi forks
+from an *exact* session id (not an earlier message), the "branch from a
+known-good message" follow-up is not applicable here.
+
+**Command mapping:**
+- Fresh run: `pi --mode json [--model <model>] [--provider <p>] [--thinking <lvl>] --tools <derived> [--exclude-tools ask_question,...] [--approve] [--api-key <k>] [--system-prompt <t>] [--append-system-prompt <t>] [--session-dir <d>] --session-id <uuid4> -- <prompt>` (subprocess `cwd` set to the worktree — pi has no `-C`)
+- Resume: same, with `--session <spec.resume>` in place of `--session-id`
+- Fork: same, with `--fork <spec.resume> --session-id <new uuid4>` (only when `spec.fork_session` and `spec.resume` are both set)
+
+**Session identity.** pi is pinned to an exact session id (`--session-id` for
+fresh/fork, `--session` for resume). The accumulator is **pre-seeded** with the
+id the backend passes, so even if the process dies before emitting the `session`
+header, `RunResult.session_id` is the id requested — strictly better than
+Codex's parse-only path, which returns `None` in that case. If the header does
+arrive with a *different* id, the header wins (it reflects the session pi
+really used) and the mismatch is logged.
+
+**Retryable subtypes:** `{"error", "killed"}` — pi failure is return-value-driven
+(rc 0 with an in-stream error → `error`; negative rc / signal-killed → `killed`).
+The runner inspects `RunResult.subtype` and retries when `AGENT_RETRY_ON_FAILURE > 0`.
+Override with `AGENT_RETRY_ON_SUBTYPE`. **Retryable exceptions:**
+`retryable_exceptions()` returns `(asyncio.TimeoutError, OSError)` —
+transport-level failures that surface as exceptions rather than a `subtype`
+(pi has no SDK; its failure surface is the subprocess boundary, same as Codex).
+
+**Cost is reported, not estimated.** `cost_usd` is sourced from the stream's
+`usage.cost.total` (USD, provider-reported) — the latest value carried on any
+event with a usage block, finalized by the last `message_end` / `agent_end`.
+There is no price table analogous to `codex_pricing.py`.
+
+**Known limitations:**
+- `RunSpec.max_turns` is **not honored** — pi has no turn cap (the guard is the wall-clock timeout, `timeout` profile field / `AGENT_TIMEOUT`).
+- **An `isError` tool result does NOT flip the run to `error`.** A tool-result event with `isError: true` is a *non-terminal* signal: pi catches the tool failure, reports it to the LLM, and continues (`docs/pi/extensions.md` — "the thrown error is caught, reported to the LLM with `isError: true`, and execution continues"). The agent normally recovers, so a clean rc-0 run that emitted a valid final `message_end` is `"success"` even if a mid-run tool had a nonzero exit — a transient `grep`-matched-nothing or a `pytest` the agent then fixed does not discard the run's real, verified work. The failure is logged for the operator but does not set the run's error flag. Whether the fix actually landed is decided downstream (the `committed` flag from `commit_and_push` + the post-fix test gate), not by a mid-run tool exit code. Genuine process-level failures — `extension_error` events, `error` events, and stream overflow — still set the flag and sink the run to `error`. (Revised: the earlier "any isError flips to error" behavior mislabeled recovered runs as failed, surfacing as a live E2E where a completed docstring fix with a passing test suite was reported `subtype=error` and never committed.)
+- **No AskUserQuestion / structured output** (see the "Capabilities (not yet supported)" bullet above) — plan/review keep their read-only guarantee via the tool allowlist, but structured verdicts fall back to the text-pattern paths.
+- ``plan_file_path`` is always ``None`` — pi doesn't write a native plan file (the planner's `~/.claude/plans/` scan stays skipped; the `plan_file` capability is not advertised).
+- ``plan_posted`` / ``question_posted`` are set from the `autoswe_comment` MCP `tool_execution_start` events when a run names that server (direct or proxy shapes — see the "MCP comment posting via the pi-mcp-adapter" section above); they stay ``False`` otherwise.
+- **Question-terminal precedence (issue #230):** once `post_question` is observed in a run, any later `post_plan` in the *same* run is ignored (``plan_posted`` stays ``False``), keeping `question_posted` authoritative. This mirrors the planner's question>plan check so a plan model that continues past its own question and self-posts a plan cannot flip the run back to "posted a plan."
+- **Large JSON line handling (issue #251).** The subprocess (and the MCP warm-up) is spawned with a StreamReader ``limit=_MAX_STREAM_BYTES + 1`` (16 MiB + 1) so that either pipe can hold a legitimately large single JSON line — the asyncio default is only 64 KiB. If a line still exceeds that limit, ``readline()`` raises ``ValueError``; the backend catches it, sets the run's error flag, and drains the rest of stdout, so the run surfaces as ``subtype="error"`` instead of the uncaught exception propagating out of the runner and crashing the poller.
 - Duration is tracked via ``time.monotonic()`` locally.
 
 ### Shared RunSpec → RunResult contract (backends/base.py)
 
-Both backends implement the `CodingBackend` protocol and share two cross-cutting
+All backends implement the `CodingBackend` protocol and share two cross-cutting
 behaviors, exercised identically in the runner's retry loop:
 
 - **`retryable_subtypes()`** — the set of return-value `subtype` strings that
-  trigger a retry (empty for `claude_code`; `{"error", "killed"}` for `codex`).
+  trigger a retry (empty for `claude_code`; `{"error", "killed"}` for `codex`
+  and `pi`).
 - **`retryable_exceptions()`** — the tuple of exception types that trigger a
   retry (S6 / issue #169 F-09). The runner uses the *resolved backend's* tuple,
   so each backend retries on its own failure modes: `claude_code` on its SDK
-  exceptions, `codex` on `asyncio.TimeoutError`/`OSError`. A backend missing the
-  method gets an empty tuple (no exception-based retry) — `runner.run()` never
-  hard-codes Claude's set.
+  exceptions, `codex` and `pi` on `asyncio.TimeoutError`/`OSError`. A backend
+  missing the method gets an empty tuple (no exception-based retry) —
+  `runner.run()` never hard-codes Claude's set.
 
 `RunResult` carries a **normalized `ok: bool`** (S6 / issue #169 F-10) so
 handlers gate success on a backend-neutral flag instead of comparing
@@ -305,7 +547,7 @@ an explicit `ok=` wins.
 
 Backend instances are created by `autoswe/harness/backends/factory.py:get_backend(harness_cfg)`. Dispatch on `harness_cfg["backend"]` field. Mirrors the provider factory pattern (`providers/factory.py`).
 
-Unknown backend names raise `ValueError`. A `codex` profile without `model` also raises `ValueError` (no default model). Case-insensitive matching.
+Unknown backend names raise `ValueError`. A `codex` or `pi` profile without `model` also raises `ValueError` (neither CLI has a default model). Case-insensitive matching.
 
 ### Backward Compatibility
 

@@ -5,6 +5,10 @@
 
 ---
 
+## Deep-dive guides
+
+- [Issue ↔ Branch ↔ PR Linking & CI Results](issue-pr-linking-and-ci.md) — how build/CI results are read (Actions runs, jobs, artifacts, check runs, commit statuses), how issues tie to branches and PRs (closing keywords, cross-referencing, branch naming conventions), how a merge auto-closes issues, and the recommended full-linkage recipe for tooling.
+
 ## Rate Limits
 
 ### Primary Rate Limits
