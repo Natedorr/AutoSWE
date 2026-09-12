@@ -11,5 +11,5 @@ claude-agent-sdk>=0.2.152
 # mcp_servers/autoswe_inline_comment_server.py (unconditional v1 imports).
 # The mcp>=2.0 branch in mcp_servers/autoswe_comment_server.py is a
 # forward-compat shim for when this pin is raised.
-mcp>=1.23.0,<2
+mcp>=2.2.0,<3
 portalocker
