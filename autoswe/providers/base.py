@@ -20,7 +20,24 @@ Design notes (issue #168, S5 "provider seam"):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
+
+# ---------------------------------------------------------------------------
+# Capabilities — a declared-absence model for the two edges that are not
+# symmetric across platforms (issue #245 plan §0). A missing capability is a
+# queryable fact a consumer gates on, never a silent no-op that behaves like
+# success.
+# ---------------------------------------------------------------------------
+
+class Capability(StrEnum):
+    BRANCH_LINK = "branch_link"                  # issue/WI -> branch, platform-managed
+    PR_ISSUE_LINK = "pr_issue_link"              # PR -> issue/WI, machine-readable
+    AUTO_CLOSE_ON_MERGE = "auto_close_on_merge"  # merge closes the issue, no extra call
+    CI_PER_COMMIT = "ci_per_commit"              # CI verdict addressable by SHA
+    CI_LOGS = "ci_logs"                          # failure text retrievable via API
+    MERGE_STATUS = "merge_status"                # mergeability readable
+
 
 # ---------------------------------------------------------------------------
 # Normalized dataclasses — backends produce these; orchestrator consumes them
@@ -55,6 +72,7 @@ class NormalizedIssue:
     is_pull_request: bool = False
     last_updated: str | None = None   # ISO 8601; GitHub updated_at / Azure System.ChangedDate
     creator_login: str = ""           # issue creator login for auto-assign
+    work_item_type: str = ""          # Azure System.WorkItemType; unused on GitHub
 
     def __post_init__(self):
         if self.labels is None:
@@ -103,6 +121,27 @@ class CIStatus:
     neutral: int = 0
     pending_count: int = 0
     summary: str = ""
+
+
+@dataclass
+class LinkageState:
+    """Normalized answer to "how linked is this task?" (issue #245 plan §1.2).
+
+    Produced by ``VCSProvider.get_linkage`` and consumed by
+    ``autoswe.vcs.linkage.ensure_links``. ``missing`` lists edge names
+    (``"branch"``, ``"pr_link"``, ``"closes"``) that are either unsupported by
+    the platform (a declared-absent capability) or failed to establish — the
+    operator-facing checklist renders both without distinguishing them.
+    """
+
+    branch_linked: bool = False
+    pr_linked: bool = False
+    closes_on_merge: bool = False
+    merged: bool = False
+    pr_number: int | None = None
+    head_sha: str | None = None
+    merge_state: Literal["clean", "conflicts", "pending", "unknown"] = "unknown"
+    missing: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +215,26 @@ class IssueTracker(Protocol):
 
     def pid_prefix(self) -> str:
         """Return the PID-file stem prefix for this provider (``gh_`` / ``ado_``)."""
+
+    def capabilities(self) -> frozenset[Capability]:
+        """Return the set of edges this tracker manages without extra calls.
+
+        GitHub declares ``AUTO_CLOSE_ON_MERGE`` (the closing keyword closes the
+        issue on merge with no further action). Azure declares nothing — a
+        merge never transitions the work item's state, so ``close_issue`` is a
+        real write the caller must issue (edge E5).
+        """
+
+    def close_issue(self, issue_number: int, reason: str = "completed") -> None:
+        """Close the issue/work item.
+
+        *reason* takes GitHub's vocabulary (``"completed"`` / ``"not_planned"``)
+        on every provider — Azure's implementation maps it onto the
+        config-resolved ``done_state`` (or the ``Removed``-category state for
+        ``"not_planned"``) so no caller needs platform-specific reason codes.
+        Used as the E5 safety net: on GitHub only when the closing keyword
+        failed to register; on Azure, always (no platform-managed mechanic).
+        """
 
 
 @runtime_checkable
@@ -254,3 +313,39 @@ class VCSProvider(Protocol):
 
     def pid_prefix(self) -> str:
         """Return the PID-file stem prefix for this provider (``gh_`` / ``ado_``)."""
+
+    def capabilities(self) -> frozenset[Capability]:
+        """Return the set of linkage/CI edges this VCS backend supports.
+
+        A missing capability is a declared absence, not a silent no-op: a
+        consumer (``autoswe.vcs.linkage.ensure_links``) checks membership
+        before writing and records the edge as missing rather than either
+        skipping quietly or fabricating success.
+        """
+
+    def link_pr_to_issue(self, issue_number: int, pr_number: int) -> None:
+        """Create the machine-readable PR<->issue/WI link (edge E3), if needed.
+
+        A no-op when the platform's link is implicit in something already
+        written (GitHub's closing keyword in the PR body) — declared via the
+        absence of ``Capability.PR_ISSUE_LINK`` gating the caller, not by this
+        method silently doing nothing while still claiming success.
+        """
+
+    def get_linkage(
+        self, issue_number: int, branch: str, pr_number: int | None,
+    ) -> LinkageState:
+        """Read the current linkage state for a task, provider-agnostic.
+
+        Used by ``ensure_links`` to decide which edges are already
+        established (skip) vs. missing (write). ``pr_number`` may be ``None``
+        when no PR has been opened yet.
+        """
+
+    def commit_trailer(self, issue_number: int) -> str:
+        """Return the commit-message trailer that links a commit to the issue.
+
+        The convention differs per platform (GitHub: ``"Refs #12"``; Azure:
+        ``"#12"``), so this is a provider method rather than a shared format —
+        the worktree layer must not know which platform it is talking to.
+        """

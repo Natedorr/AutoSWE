@@ -521,6 +521,8 @@ These layers test infrastructure concerns that don't fit the decide/run/emit mod
 | `tests/test_concurrency.py` | PID collision (crashed process leaves .pid without .done), repo lock contention, MAX_CONCURRENT gate, comment ID backfill race, RUNNING states protection (comments arriving mid-run), welcome post interleaving |
 | `tests/test_drift_detection.py` | Queue/API divergence scenarios: orphan RUNNING tasks, deleted plan comments, gh_closed reopen, bot_comment_ids backfill, deleted comment watermarks, closed PR tracking, label/queue status drift, author allowlist, auto-dispatch |
 | `tests/test_fake_parity.py` | Verifies fakes implement the full IssueTracker and VCSProvider protocol; covers all GET/PUT/POST routes for both GitHub and Azure fakes; comment ID uniqueness; provider parity for shared operations |
+| `tests/test_capabilities.py` | `Capability` declarations for both providers' tracker/VCS classes; `factory.get_tracker`/`get_vcs` structural Protocol conformance assert (issue #245) |
+| `tests/test_linkage.py` | `autoswe.vcs.linkage.ensure_links` decision logic — steady-state no-op, self-heal, capability-gated writes, E5 close-on-merge idempotency, declared-absence reporting, checklist rendering |
 
 **Key patterns:**
 

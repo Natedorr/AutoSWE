@@ -371,6 +371,42 @@ def test_apply_effect_create_pr_missing_identity_is_noop(provider):
 
 
 # ---------------------------------------------------------------------------
+# apply_effect -- create_pr calls ensure_links (issue #245 §1.4, edge E3)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_new_calls_ensure_links(provider):
+    """A freshly-created PR triggers ensure_links(phase='pr_open')."""
+    tracker = MagicMock()
+    vcs = MagicMock()
+    vcs.find_existing_pr.return_value = None
+    vcs.open_pull_request.return_value = PRResult(number=7, url="https://x/pull/7")
+    slug = "gh__owner_repo_1"
+    queue = _queue_with_entry(provider, slug)
+    with patch("autoswe.providers.adapter.get_vcs", return_value=vcs), \
+         patch("autoswe.providers.adapter.ensure_links") as mock_ensure_links:
+        _run_apply(provider, tracker, _create_pr_effect(), queue, 1, slug)
+    mock_ensure_links.assert_called_once()
+    _, kwargs = mock_ensure_links.call_args
+    assert kwargs["phase"] == "pr_open"
+    assert kwargs["vcs"] is vcs
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_apply_effect_create_pr_existing_calls_ensure_links(provider):
+    """The idempotent existing-PR path also self-heals via ensure_links."""
+    tracker = MagicMock()
+    vcs = MagicMock()
+    vcs.find_existing_pr.return_value = PRResult(number=15, url="https://x/pull/15")
+    slug = "gh__owner_repo_1"
+    queue = _queue_with_entry(provider, slug)
+    with patch("autoswe.providers.adapter.get_vcs", return_value=vcs), \
+         patch("autoswe.providers.adapter.ensure_links") as mock_ensure_links:
+        _run_apply(provider, tracker, _create_pr_effect(), queue, 1, slug)
+    mock_ensure_links.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # apply_effect -- create_pr CI gate (no sync gate; already synced)
 # ---------------------------------------------------------------------------
 

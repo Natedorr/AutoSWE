@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import Capability, NormalizedComment, NormalizedIssue
 from autoswe.tracking import api as gh_api
 from autoswe.tracking.assignment import _auto_assign_issue, _get_authenticated_user
 from autoswe.tracking.comments import BOT_MARKER
@@ -203,6 +203,24 @@ class GitHubTracker:
 
     def pid_prefix(self) -> str:
         return "gh_"
+
+    def capabilities(self) -> frozenset[Capability]:
+        """GitHub closes the issue on merge via the PR body's closing keyword."""
+        return frozenset({Capability.AUTO_CLOSE_ON_MERGE})
+
+    def close_issue(self, issue_number: int, reason: str = "completed") -> None:
+        """Close a GitHub issue (edge E5 safety net).
+
+        Used only when ``AUTO_CLOSE_ON_MERGE`` handling determines the closing
+        keyword did not register — the normal path relies on GitHub's own
+        merge-triggered close.
+        """
+        state_reason = "completed" if reason == "completed" else "not_planned"
+        gh_api.gh_patch(
+            f"/repos/{self._owner}/{self._repo}/issues/{issue_number}",
+            self._token,
+            body={"state": "closed", "state_reason": state_reason},
+        )
 
     # ---- Internal helpers ----
 

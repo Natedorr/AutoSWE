@@ -19,6 +19,7 @@ from autoswe.orch.types import ApiState, Effect
 from autoswe.providers.base import IssueTracker, NormalizedComment
 from autoswe.providers.factory import get_vcs
 from autoswe.tracking.comments import BOT_MARKER, record_bot_comment_id
+from autoswe.vcs.linkage import ensure_links
 from autoswe.vcs.pr_gate import preflight_pr
 
 dbg = get_debug_logger()
@@ -201,6 +202,9 @@ def apply_effect(
                     task_entry["pr_number"] = pr.number
                 if pr.url:
                     task_entry["pr_url"] = pr.url
+            if task_entry is not None:
+                with contextlib.suppress(Exception):
+                    ensure_links(task_entry, repo_cfg, cfg, phase="pr_open", vcs=vcs)
         elif task_entry is not None:
             # Idempotent skip: the PR already exists but the queue entry lost
             # its cached identity (e.g. a crash between create and save).
@@ -209,3 +213,5 @@ def apply_effect(
                 task_entry["pr_number"] = existing.number
             if existing.url:
                 task_entry["pr_url"] = existing.url
+            with contextlib.suppress(Exception):
+                ensure_links(task_entry, repo_cfg, cfg, phase="pr_open", vcs=vcs)

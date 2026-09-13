@@ -251,6 +251,13 @@ def _run_sync(
                 )
             else:
                 summary = f"Already up to date with `origin/{sync_base}`."
+            # Issue #245 §1.4: surface the cross-linkage checklist (if any
+            # observation has been persisted) so an operator sees which edges
+            # exist without a separate `queue status` lookup.
+            from autoswe.vcs.linkage import render_linkage_checklist
+            checklist = render_linkage_checklist(task)
+            if checklist:
+                summary = f"{summary}\n\n{checklist}"
             return DispatchResult(
                 done_content=f"DONE_SUMMARY\t{summary}\t{commit_sha}",
             )

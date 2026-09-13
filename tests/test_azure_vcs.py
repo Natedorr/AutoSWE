@@ -5,6 +5,7 @@ import pytest
 
 from autoswe.providers.azure.api import _ado_api_version, ado_patch_json
 from autoswe.providers.azure.vcs import AzureVCS
+from autoswe.providers.base import Capability
 from tests.conftest import load_ado_fixture
 
 
@@ -507,3 +508,109 @@ def test_get_ci_status_source_version_missing_no_staleness_claim(
     assert ci.state == "success"
     assert ci.stale is False
     assert ci.head_sha is None
+
+
+# ---------------------------------------------------------------------------
+# E3 — workItemRefs on PR create/update (issue #245)
+# ---------------------------------------------------------------------------
+
+def test_open_pull_request_includes_work_item_refs(vcs, mock_ado_request, ado_route_table):
+    """PR creation attaches workItemRefs from the branch's issue number."""
+    fixture = load_ado_fixture("pullrequest_created.json")
+    ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = fixture
+
+    vcs.open_pull_request(
+        branch="autoswe/issue-101", base="main", title="Fix", body="body",
+    )
+
+    call = mock_ado_request.calls[0]
+    assert call["body"]["workItemRefs"] == [{"id": 101}]
+
+
+def test_open_pull_request_no_work_item_refs_for_non_issue_branch(vcs, mock_ado_request, ado_route_table):
+    """A branch that doesn't match the autoswe/issue-N convention gets no
+    workItemRefs — the write is best-effort, not assumed."""
+    fixture = load_ado_fixture("pullrequest_created.json")
+    ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = fixture
+
+    vcs.open_pull_request(branch="some/other-branch", base="main", title="Fix", body="body")
+
+    call = mock_ado_request.calls[0]
+    assert "workItemRefs" not in call["body"]
+
+
+def test_link_pr_to_issue_patches_work_item_refs(vcs, mock_ado_request, ado_route_table):
+    """link_pr_to_issue (self-heal path) PATCHes workItemRefs onto the PR."""
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests/43")] = {}
+
+    vcs.link_pr_to_issue(101, 43)
+
+    call = mock_ado_request.calls[0]
+    assert call["method"] == "PATCH"
+    assert call["body"] == {"workItemRefs": [{"id": 101}]}
+
+
+def test_commit_trailer_is_hash_issue_number(vcs):
+    """Azure's commit-message convention is bare #N (auto-link, no auto-close)."""
+    assert vcs.commit_trailer(101) == "#101"
+
+
+# ---------------------------------------------------------------------------
+# get_linkage (issue #245)
+# ---------------------------------------------------------------------------
+
+def test_get_linkage_no_pr_reports_pr_link_and_branch_missing(vcs):
+    state = vcs.get_linkage(101, "autoswe/issue-101", None)
+    assert "branch" in state.missing
+    assert "pr_link" in state.missing
+    assert state.pr_linked is False
+
+
+def test_get_linkage_linked_pr(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests/43")] = {
+        "pullRequestId": 43,
+        "status": "active",
+        "mergeStatus": "succeeded",
+        "workItemRefs": [{"id": "101"}],
+        "lastMergeSourceCommit": {"commitId": "cafebabe"},
+    }
+
+    state = vcs.get_linkage(101, "autoswe/issue-101", 43)
+
+    assert state.pr_linked is True
+    assert "pr_link" not in state.missing
+    assert state.merged is False
+    assert state.merge_state == "clean"
+    assert state.head_sha == "cafebabe"
+
+
+def test_get_linkage_unlinked_pr_reports_pr_link_missing(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests/43")] = {
+        "pullRequestId": 43, "status": "completed", "mergeStatus": "succeeded",
+        "workItemRefs": [],
+    }
+
+    state = vcs.get_linkage(101, "autoswe/issue-101", 43)
+
+    assert state.pr_linked is False
+    assert "pr_link" in state.missing
+    assert state.merged is True
+
+
+def test_get_linkage_read_failure_records_pr_link_missing(vcs, mock_ado_request, ado_route_table):
+    def _raise(method, path, pat, body):
+        raise RuntimeError("Azure API ... -> HTTP 503")
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests/43")] = _raise
+
+    state = vcs.get_linkage(101, "autoswe/issue-101", 43)
+
+    assert "pr_link" in state.missing
+
+
+# ---------------------------------------------------------------------------
+# E1 — ADO branch-link capability (unverified per plan §1.3)
+# ---------------------------------------------------------------------------
+
+def test_azure_declares_no_branch_link_capability(vcs):
+    assert Capability.BRANCH_LINK not in vcs.capabilities()

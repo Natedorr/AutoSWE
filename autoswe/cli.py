@@ -231,6 +231,12 @@ def _cmd_queue_status(args, cfg):
         pass
     task["label_status"] = label_status
     print(json.dumps(task, indent=2))
+    if task.get("linkage_state"):
+        from autoswe.vcs.linkage import render_linkage_checklist
+        checklist = render_linkage_checklist(task)
+        if checklist:
+            print()
+            print(checklist)
 
 
 def _cmd_queue_prune(args, cfg):

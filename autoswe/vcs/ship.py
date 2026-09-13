@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.base import PRResult
 from autoswe.providers.factory import get_tracker, get_vcs
+from autoswe.vcs.linkage import ensure_links
 from autoswe.vcs.pr_gate import preflight_pr
 
 if TYPE_CHECKING:
@@ -154,6 +155,8 @@ def open_pr(
             tracker.post_comment(issue_num,
                 f"Pull request already exists: {pr_display}{AUTOSWE_BOT_FOOTER}")
         _record_pr(task, pr_url, existing.number)
+        with contextlib.suppress(Exception):
+            ensure_links(task, rcfg, cfg, phase="pr_open", vcs=vcs)
         return f"DONE: PR {pr_display}"
 
     try:
@@ -172,6 +175,8 @@ def open_pr(
             tracker.post_comment(issue_num,
                "Pull request opened: " + pr_display + AUTOSWE_BOT_FOOTER)
         _record_pr(task, pr_url, pr_result.number)
+        with contextlib.suppress(Exception):
+            ensure_links(task, rcfg, cfg, phase="pr_open", vcs=vcs)
         return f"DONE: PR {pr_display}"
     except Exception as e:  # Poller resilience — any PR creation failure is caught and reported
         dbg.error("open_pr: failed: %s", e, exc_info=True)

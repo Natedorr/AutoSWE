@@ -7,7 +7,7 @@ from autoswe.core.config import AUTOSWE_DIR
 from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.factory import get_vcs
-from autoswe.providers.github.vcs import MissingScopeError
+from autoswe.vcs.linkage import ensure_links
 
 dbg = get_debug_logger()
 
@@ -567,24 +567,20 @@ def create_worktree(
         # Best-effort: link branch to issue in platform UI (Development sidebar).
         # Runs BEFORE the remote branch is pushed, so the GraphQL createLinkedBranch
         # mutation can create the ref. Reused branches (branch_exists=True) skip this.
+        # Routed through ensure_links (issue #245 E1) so the capability model and
+        # missing-edge bookkeeping apply uniformly across call sites; failures are
+        # swallowed inside ensure_links itself (best-effort, never blocks the push).
         if cfg.get("LINK_BRANCH_TO_ISSUE", True):
-            try:
-                full_sha_result = _run(
-                    ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],
-                    check=False,
+            full_sha_result = _run(
+                ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],
+                check=False,
+            )
+            full_base_sha = full_sha_result.stdout.strip()
+            if full_base_sha:
+                ensure_links(
+                    {"issue_number": issue_num}, repo_cfg, cfg,
+                    phase="branch", vcs=get_vcs(repo_cfg), base_sha=full_base_sha,
                 )
-                full_base_sha = full_sha_result.stdout.strip()
-                if full_base_sha:
-                    get_vcs(repo_cfg).link_branch_to_issue(
-                        issue_num, full_base_sha, branch,
-                    )
-            except MissingScopeError:
-                dbg.warning(
-                    "WORKTREE: link_branch_to_issue skipped — "
-                    "PAT missing permission to create linked branch"
-                )
-            except Exception as e:  # Best-effort; log and continue.
-                dbg.warning("WORKTREE: link_branch_to_issue failed: %s", e, exc_info=True)
 
     if new_branch and push_new:
         _run(["git", "-C", str(main), "push", "-u", "origin", branch])
@@ -594,8 +590,13 @@ def create_worktree(
     return wt
 
 
-def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, base_branch: str = "main", provider: str = "github", *, before_sha: str | None = None) -> dict:
+def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, base_branch: str = "main", provider: str = "github", *, before_sha: str | None = None, cfg: dict | None = None) -> dict:
     """Stage, commit (if changes), and push.
+
+    When ``LINK_COMMIT_TRAILER`` is enabled (default) *msg* gets the
+    provider's ``commit_trailer()`` appended (edge E2, issue #245) — e.g.
+    GitHub's ``"Refs #12"`` or Azure's ``"#12"`` — so the commit shows up in
+    the issue's Development/links timeline without closing it.
 
     Preserves Claude auto-commits as a commit trail rather than squashing:
     - If the coding agent auto-committed during the session, the last commit is
@@ -621,7 +622,12 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
       - branch: str      (branch name, e.g. "autoswe/issue-42")
     """
     repo_cfg = {"owner": owner, "repo": repo, "token": "", "provider": provider}
-    branch = get_vcs(repo_cfg).branch_name(issue_num)
+    vcs = get_vcs(repo_cfg)
+    branch = vcs.branch_name(issue_num)
+    if (cfg or {}).get("LINK_COMMIT_TRAILER", True):
+        trailer = vcs.commit_trailer(issue_num)
+        if trailer and trailer not in msg:
+            msg = f"{msg}\n\n{trailer}"
     dbg.debug("WORKTREE: commit_and_push msg=%s", msg)
 
     # Check for in-progress merge/rebase operations

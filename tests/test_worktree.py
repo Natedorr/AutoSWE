@@ -215,11 +215,14 @@ def _link_fake_run():
 
 
 def _mock_vcs(link_calls):
+    from autoswe.providers.base import Capability
+
     vcs = MagicMock()
     vcs.branch_name.side_effect = lambda n: f"autoswe/issue-{n}"
     vcs.worktree_path_parts.return_value = ("o", "r")
     # worktree path layout (issue #168 seam table): GitHub → (owner, repo).
     vcs.worktree_path_parts.return_value = ("o", "r")
+    vcs.capabilities.return_value = frozenset(Capability)
 
     def _record_link(issue_num, commit_sha, branch):
         link_calls.append((issue_num, commit_sha, branch))
@@ -498,7 +501,10 @@ def test_commit_and_push_amend_uses_correct_message(tmp_path, monkeypatch):
     amend_calls = [c for c in call_order if "--amend" in c]
     assert len(amend_calls) == 1
     assert "-m" in amend_calls[0]
-    assert expected_msg in amend_calls[0]
+    # The commit trailer (E2) is appended by default — assert the base
+    # message is a prefix of the amended one rather than an exact match.
+    idx = amend_calls[0].index("-m") + 1
+    assert amend_calls[0][idx].startswith(expected_msg)
 
 
 def test_commit_and_push_multi_fix_preserves_history(tmp_path, monkeypatch):

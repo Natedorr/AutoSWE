@@ -6,10 +6,12 @@ orchestrator code is backend-agnostic.
 """
 from __future__ import annotations
 
+import contextlib
 import html
 import re
 from html.parser import HTMLParser
 
+from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
 from autoswe.providers.azure.api import (
     _ado_api_version,
@@ -21,11 +23,17 @@ from autoswe.providers.azure.api import (
     ado_post,
     ado_post_patch,
 )
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import Capability, NormalizedComment, NormalizedIssue
 from autoswe.tracking.comments import _BOT_CONTENT_PATTERNS, BOT_MARKER
 from autoswe.tracking.labels import _validate_status
 
+dbg = get_debug_logger()
+
 _PREFIX = "autoswe:"
+
+# Default terminal-state set for reads (issue #245 plan §1.5) — the set
+# already hardcoded pre-#245, lifted into a per-repo-overridable constant.
+DEFAULT_DONE_STATES: tuple[str, ...] = ("Closed", "Done", "Removed")
 
 # ADO's batch work-item GET caps the number of ids per request (undocumented).
 # Keep well under that cap — docs/azure-devops-api/list-work-items.md,
@@ -117,6 +125,11 @@ class AzureTracker:
         self._org_enc = _encode_path_segment(self._org)
         self._project_enc = _encode_path_segment(self._project)
 
+        # Per (project, work item type) discovery cache (issue #245 §1.5):
+        # avoids re-querying workitemtypes/{type}/states on every close_issue.
+        self._completed_state_cache: dict[str, str] = {}
+        self._removed_state_cache: dict[str, str] = {}
+
     # ---- Repo ID resolution ----
 
     def resolve_repo_id(self) -> str | None:
@@ -135,14 +148,32 @@ class AzureTracker:
     def pid_prefix(self) -> str:
         return "ado_"
 
+    def capabilities(self) -> frozenset[Capability]:
+        """Azure declares no tracker capabilities: merge never transitions the
+        work item's state, so ``close_issue`` is always a real write (E5)."""
+        return frozenset()
+
     # ---- Protocol: IssueTracker ----
+
+    def _resolve_done_states(self) -> tuple[str, ...]:
+        """Return the terminal-state set for reads (issue #245 §1.5).
+
+        A per-repo ``done_states`` override (``repos.json``) beats the
+        default ``("Closed", "Done", "Removed")`` set — the same set already
+        hardcoded pre-#245, now overridable for a custom process.
+        """
+        override = self._repo_cfg.get("done_states")
+        if override:
+            return tuple(override)
+        return DEFAULT_DONE_STATES
 
     def list_open_issues(self) -> list[NormalizedIssue]:
         """Return all open work items via WIQL + batch expand."""
+        done_states_sql = ",".join(f"'{s}'" for s in self._resolve_done_states())
         wiql = {
             "query": (
                 "SELECT [System.Id] FROM WorkItems "
-                "WHERE [System.State] NOT IN ('Closed','Done','Removed') "
+                f"WHERE [System.State] NOT IN ({done_states_sql}) "
                 f"AND [System.TeamProject] = '{self._project}'"
             ),
         }
@@ -461,6 +492,116 @@ class AzureTracker:
             body=[{"op": "add", "path": "/fields/System.AssignedTo", "value": login}],
         )
 
+    def _discover_completed_state(self, work_item_type: str) -> str | None:
+        """Discover the ``Completed``-category state for *work_item_type*.
+
+        Queries ``workitemtypes/{type}/states`` and caches the result (plus
+        any ``Removed``-category state found alongside it) per work item type
+        for the life of this tracker instance — this needs only ``vso.work``
+        read scope, unlike the process-admin-gated process API, and is the
+        correct answer for a custom/inherited process (issue #245 §1.5).
+        """
+        if not work_item_type:
+            return None
+        if work_item_type in self._completed_state_cache:
+            return self._completed_state_cache[work_item_type]
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitemtypes/"
+            f"{_encode_path_segment(work_item_type)}/states"
+        )
+        try:
+            result = ado_get(path, self._pat)
+        except Exception as e:
+            dbg.warning(
+                "_discover_completed_state: states lookup failed for %r: %s: %s",
+                work_item_type, type(e).__name__, e,
+            )
+            return None
+        states = result.get("value", [])
+        completed = [s["name"] for s in states if s.get("category") == "Completed"]
+        removed = [s["name"] for s in states if s.get("category") == "Removed"]
+        if len(completed) > 1:
+            dbg.warning(
+                "_discover_completed_state: %d states with category=Completed for %r "
+                "(%s) — using %r; set 'done_state' explicitly to disambiguate",
+                len(completed), work_item_type, completed, completed[0],
+            )
+        if removed:
+            self._removed_state_cache[work_item_type] = removed[0]
+        if completed:
+            self._completed_state_cache[work_item_type] = completed[0]
+            return completed[0]
+        return None
+
+    def _resolve_done_state(self, repo_cfg: dict, work_item_type: str, reason: str) -> str:
+        """Resolve the state value to write for *reason* (issue #245 §1.5).
+
+        Resolution order: per-repo/global ``done_state`` override (already
+        merged onto *repo_cfg* by ``build_repo_cfg``) -> runtime discovery ->
+        fallback ``"Closed"``. ``reason="not_planned"`` prefers a discovered
+        ``Removed``-category state over the ``done_state`` override, since the
+        override is meant for the "completed" case; it falls back to the same
+        chain when no such state was found.
+        """
+        if reason != "completed":
+            self._discover_completed_state(work_item_type)  # populates removed cache
+            removed = self._removed_state_cache.get(work_item_type)
+            if removed:
+                return removed
+        override = repo_cfg.get("done_state")
+        if override:
+            return override
+        discovered = self._discover_completed_state(work_item_type)
+        if discovered:
+            return discovered
+        return "Closed"
+
+    def close_issue(self, issue_number: int, reason: str = "completed") -> None:
+        """Close a work item by transitioning ``System.State`` (edge E5).
+
+        Azure has no merge-triggered close, so this is always a real write.
+        Idempotent: a work item already in a terminal state (per
+        ``_resolve_done_states``) is left untouched. A 400 from the PATCH
+        (unresolvable state, missing ``System.Reason``, or a process that
+        forbids a direct jump) is reported loudly — once, via a posted
+        comment — rather than retried with a guessed state.
+        """
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
+            f"{issue_number}?fields=System.WorkItemType,System.State"
+        )
+        raw = ado_get(path, self._pat)
+        fields = raw.get("fields", {})
+        work_item_type = fields.get("System.WorkItemType", "")
+        current_state = fields.get("System.State", "")
+        if current_state in self._resolve_done_states():
+            return  # already terminal
+
+        target_state = self._resolve_done_state(self._repo_cfg, work_item_type, reason)
+        patch_path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
+        )
+        try:
+            ado_patch(
+                patch_path, self._pat,
+                body=[{"op": "add", "path": "/fields/System.State", "value": target_state}],
+            )
+        except RuntimeError as e:
+            if "HTTP 400" in str(e):
+                dbg.warning(
+                    "close_issue: state=%r rejected (HTTP 400) for work item %d "
+                    "(type=%r): %s", target_state, issue_number, work_item_type, e,
+                )
+                with contextlib.suppress(Exception):
+                    self.post_comment(
+                        issue_number,
+                        "autoSWE could not close this work item automatically "
+                        f"(state `{target_state}` was rejected). Set `done_state` "
+                        "in repos.json for this repo, or close it manually.",
+                    )
+                return
+            raise
+
     # ---- Internal helpers ----
 
     def _to_normalized(self, raw: dict) -> NormalizedIssue:
@@ -471,7 +612,7 @@ class AzureTracker:
         tags_raw = fields.get("System.Tags", "") or ""
         labels = [t.strip() for t in tags_raw.split(";") if t.strip()] if tags_raw else []
         raw_state = fields.get("System.State", "New")
-        state = "closed" if raw_state in ("Closed", "Done", "Removed") else "open"
+        state = "closed" if raw_state in self._resolve_done_states() else "open"
         return NormalizedIssue(
             number=raw["id"],
             title=title,
@@ -484,4 +625,5 @@ class AzureTracker:
             status=self._extract_status(labels),
             last_updated=fields.get("System.ChangedDate"),
             creator_login=fields.get("System.CreatedBy", {}).get("uniqueName", ""),
+            work_item_type=fields.get("System.WorkItemType", ""),
         )

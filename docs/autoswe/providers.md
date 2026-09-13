@@ -57,6 +57,8 @@ No method takes a `repo_cfg` argument: the provider instance is constructed from
 | `normalize_comment_body(comment)` | `tuple[str, bool]` | Provider-specific body cleanup; returns `(body, is_bot)` |
 | `slug_prefix()` | `str` | Queue-slug prefix for this provider (`gh` / `ado`) |
 | `pid_prefix()` | `str` | PID-file stem prefix for this provider (`gh_` / `ado_`) |
+| `capabilities()` | `frozenset[Capability]` | Edges this tracker manages without an extra call — see [Capability model](#capability-model-providersbase) |
+| `close_issue(issue_number, reason="completed")` | `None` | Close the issue/work item (edge E5). `reason` is GitHub's vocabulary (`"completed"` / `"not_planned"`) on every provider |
 
 ### `VCSProvider` (Protocol)
 
@@ -73,6 +75,25 @@ No method takes a `repo_cfg` argument: the provider instance is constructed from
 | `worktree_path_parts()` | `tuple[str, ...]` | Path parts for worktree/clone dirs — GitHub `(owner, repo)`, Azure `(org, project, repo)` |
 | `resolve_repo_id()` | `str \| None` | Platform-specific repo id for URLs (Azure: Git repo UUID; GitHub: no-op) |
 | `slug_prefix()` / `pid_prefix()` | `str` | Queue-slug / PID-file stem prefixes |
+| `capabilities()` | `frozenset[Capability]` | Linkage/CI edges this VCS backend supports — see [Capability model](#capability-model-providersbase) |
+| `link_pr_to_issue(issue_number, pr_number)` | `None` | Create the machine-readable PR<->issue link (edge E3); no-op where the link is implicit (GitHub's closing keyword) |
+| `get_linkage(issue_number, branch, pr_number)` | `LinkageState` | Read current linkage state, provider-agnostic |
+| `commit_trailer(issue_number)` | `str` | Commit-message trailer for edge E2 (GitHub: `"Refs #N"`; Azure: `"#N"`) |
+
+## Capability model (`providers/base.py`)
+
+The two platforms are not symmetric (issue #245). `Capability` is a `StrEnum` naming every edge that might be platform-managed on one provider and not the other: `BRANCH_LINK`, `PR_ISSUE_LINK`, `AUTO_CLOSE_ON_MERGE`, `CI_PER_COMMIT`, `CI_LOGS`, `MERGE_STATUS`. Both protocols expose `capabilities() -> frozenset[Capability]`; `factory.get_vcs` / `factory.get_tracker` assert structural Protocol conformance at construction, so a provider missing a method fails at wiring time, not deep inside a handler at dispatch.
+
+The rule for every consumer: **a missing capability produces a logged, queryable "missing" entry — never a silent skip, never a fabricated pass.** `autoswe/vcs/linkage.py:ensure_links` is the canonical consumer — see [pipeline.md](pipeline.md) and [data-model.md](data-model.md) (`linkage_state` / `linkage_missing`).
+
+| Capability | GitHub | Azure DevOps |
+|---|---|---|
+| `BRANCH_LINK` | ✅ `createLinkedBranch` GraphQL | ❌ unverified (plan §1.3) — declared absent until a live probe confirms otherwise |
+| `PR_ISSUE_LINK` | ✅ closing keyword in PR body (`link_pr_to_issue` is a no-op) | ✅ `workItemRefs` on PR create/update |
+| `AUTO_CLOSE_ON_MERGE` (tracker) | ✅ `Fixes #N` closes the issue on merge | ❌ no mechanic — `close_issue` is always a real write |
+| `CI_PER_COMMIT` / `CI_LOGS` / `MERGE_STATUS` | ✅ | ✅ |
+
+`LinkageState` (`providers/base.py`) is the normalized answer to "how linked is this task?": `branch_linked`, `pr_linked`, `closes_on_merge`, `merged`, `pr_number`, `head_sha`, `merge_state`, `missing: tuple[str, ...]`.
 
 `CIStatus` (`providers/base.py`) is a provider-agnostic dataclass: `state` (`"success" \| "pending" \| "failure" \| "none" \| "error"`), `head_sha`, `stale`, `url`, `total`, `failing: list[str]`, `neutral`, `pending_count`, `summary`.
 

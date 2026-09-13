@@ -358,7 +358,7 @@ class TestRecoverOrphanedWorktrees:
 
         commit_calls = []
 
-        def fake_cap(wt, owner, repo, issue_num, msg, base_branch, provider="github"):
+        def fake_cap(wt, owner, repo, issue_num, msg, base_branch, provider="github", cfg=None):
             commit_calls.append({
                 "owner": owner, "repo": repo,
                 "issue_num": issue_num, "msg": msg,

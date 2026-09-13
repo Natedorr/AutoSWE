@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.base import CIStatus, PRResult
+from autoswe.providers.base import Capability, CIStatus, LinkageState, PRResult
 from autoswe.tracking.api import gh_get, gh_post
 
 dbg = get_debug_logger()
@@ -15,6 +16,12 @@ dbg = get_debug_logger()
 # check-run/status conclusions that block a PR vs. that count as a pass
 _FAILURE_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required"}
 _SUCCESS_CONCLUSIONS = {"success", "neutral", "skipped"}
+
+# GitHub closing keywords (case-insensitive) that link a PR to an issue and
+# auto-close it on merge. Mirrors the subset GitHub itself recognizes.
+_CLOSING_KEYWORD_RE_TEMPLATE = (
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{issue}\b"
+)
 
 
 class MissingScopeError(RuntimeError):
@@ -422,4 +429,79 @@ class GitHubVCS:
 
     def pid_prefix(self) -> str:
         return "gh_"
+
+    def capabilities(self) -> frozenset[Capability]:
+        """GitHub is the fully-connected platform: every edge is supported."""
+        return frozenset(Capability)
+
+    def link_pr_to_issue(self, issue_number: int, pr_number: int) -> None:
+        """No-op: GitHub links the PR via the closing keyword in its body.
+
+        ``open_pull_request`` already writes ``Fixes #N`` — there is no
+        separate machine-readable link call on this platform.
+        """
+
+    def commit_trailer(self, issue_number: int) -> str:
+        """Return the GitHub commit-message trailer (issue #245 E2).
+
+        ``Refs #N`` associates the commit with the issue (visible in the
+        issue's Development timeline) without closing it — closing is left to
+        the PR body's ``Fixes #N`` keyword.
+        """
+        return f"Refs #{issue_number}"
+
+    def get_linkage(
+        self, issue_number: int, branch: str, pr_number: int | None,
+    ) -> LinkageState:
+        """Read the current linkage state for *issue_number* / *pr_number*.
+
+        Best-effort: any read failure reports the affected edge(s) as missing
+        rather than raising, so ``ensure_links`` can proceed with self-heal
+        writes instead of aborting.
+        """
+        missing: list[str] = ["branch"]  # verified only via the live probe path
+        if pr_number is None:
+            missing.append("pr_link")
+            return LinkageState(missing=tuple(missing))
+
+        try:
+            pr = gh_get(
+                f"/repos/{self._owner}/{self._repo}/pulls/{pr_number}",
+                self._token, max_retries=1,
+            )
+        except Exception as e:
+            dbg.warning("get_linkage: could not fetch PR %s: %s: %s",
+                        pr_number, type(e).__name__, e)
+            missing.append("pr_link")
+            return LinkageState(pr_number=pr_number, missing=tuple(missing))
+
+        body = pr.get("body", "") or ""
+        pattern = re.compile(
+            _CLOSING_KEYWORD_RE_TEMPLATE.format(issue=issue_number), re.IGNORECASE,
+        )
+        closes = bool(pattern.search(body))
+        merged = bool(pr.get("merged"))
+        head_sha = pr.get("head", {}).get("sha")
+        mergeable_state = pr.get("mergeable_state")
+        merge_state = {
+            "clean": "clean", "unstable": "clean", "has_hooks": "clean",
+            "dirty": "conflicts", "blocked": "conflicts",
+        }.get(mergeable_state, "pending" if mergeable_state == "unknown" else "unknown")
+
+        # GitHub's closing keyword IS the machine-readable link — declare
+        # pr_linked True whenever it is present.
+        pr_linked = closes
+        if not pr_linked:
+            missing.append("pr_link")
+
+        return LinkageState(
+            branch_linked=False,  # not verifiable without the live probe (§1.3)
+            pr_linked=pr_linked,
+            closes_on_merge=closes,
+            merged=merged,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            merge_state=merge_state,
+            missing=tuple(missing),
+        )
 

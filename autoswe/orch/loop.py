@@ -688,7 +688,7 @@ def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None
             token = os.environ.get("PAT", "") or repo_cfg.get("pat", "")
             ensure_clone(owner, repo, token, cfg, base_branch=base_branch, provider=provider)
             msg = f"autoswe: recovered orphaned changes from interrupted run (issue #{issue_num})"
-            commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider)
+            commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider, cfg=cfg)
             log(f"[RECOVER] {slug}: committed and pushed orphaned changes")
         except Exception as e:
             dbg.error("recover: commit_and_push failed for %s: %s", slug, e, exc_info=True)
@@ -736,7 +736,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
 
     Returns the number of tasks processed (actions that weren't noop).
     """
-    repos_cfg = load_repos_config()
+    repos_cfg = load_repos_config(cfg)
     repo_keys = [k for k in repos_cfg if not k.startswith("_")]
 
     if repo_filter:

@@ -612,7 +612,7 @@ def _finalize_fix(
     log(f"[FIX] {task['id']} committing subject={subject!r}")
     dbg.debug("FIX: committing with subject=%r", subject)
     try:
-        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider, before_sha=before_sha)
+        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider, before_sha=before_sha, cfg=cfg)
     except Exception as e:  # Commit/push boundary — any provider or git error surfaces to the task result.
         dbg.error("_finalize_fix: commit/push failed: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: commit/push error: {e}")

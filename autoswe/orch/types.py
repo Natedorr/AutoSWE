@@ -81,6 +81,9 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("fix_summary", "fix_summary", ""),
     TaskField("rereview_after_fix", "rereview_after_fix", False),
     TaskField("pr_url", "pr_url", None),
+    TaskField("linkage_state", "linkage_state", None),
+    TaskField("linkage_missing", "linkage_missing", (),
+              transform=lambda v: tuple(v) if isinstance(v, list) else v),
 )
 
 
@@ -191,6 +194,11 @@ class TaskState:
     # pr_number is the machine-facing cache (idempotency, result.json); pr_url
     # is the human-facing link for operators inspecting queue.json.
     pr_url: str | None = None
+    # Last observed LinkageState (as a dict) and its missing-edge names, set by
+    # autoswe.vcs.linkage.ensure_links at branch/PR-open/merge-observation call
+    # sites (issue #245 §1.4). Rendered as a checklist by `queue status` / `/sync`.
+    linkage_state: dict | None = None
+    linkage_missing: tuple[str, ...] = ()
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:

@@ -749,3 +749,40 @@ def test_open_pr_github_still_posts_url(mock_gh_post_comment):
     assert result == "DONE: PR https://github.com/o/r/pull/42"
     comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
     assert "https://github.com/o/r/pull/42" in comment_body
+
+
+# ---------------------------------------------------------------------------
+# open_pr calls ensure_links (issue #245 §1.4, edge E3)
+# ---------------------------------------------------------------------------
+
+def test_open_pr_new_pr_calls_ensure_links(mock_gh_post_comment):
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship.ensure_links") as mock_ensure_links:
+        mock_get_vcs.return_value = _mock_vcs(pr_url="https://github.com/o/r/pull/42", pr_num=42)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    mock_ensure_links.assert_called_once()
+    _, kwargs = mock_ensure_links.call_args
+    assert kwargs["phase"] == "pr_open"
+
+
+def test_open_pr_existing_pr_calls_ensure_links(mock_gh_post_comment):
+    task = make_task()
+    existing = PRResult(url="https://github.com/o/r/pull/15", number=15)
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship.ensure_links") as mock_ensure_links:
+        mock_get_vcs.return_value = _mock_vcs(existing_pr=existing)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    mock_ensure_links.assert_called_once()

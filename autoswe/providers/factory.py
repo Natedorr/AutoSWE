@@ -40,22 +40,41 @@ def provider_names() -> list[str]:
 def get_tracker(repo_cfg: dict) -> IssueTracker:
     """Return an IssueTracker for the given repo configuration.
 
-    The ``provider`` field in repo_cfg selects the backend.
+    The ``provider`` field in repo_cfg selects the backend. Asserts
+    structural ``IssueTracker`` conformance at construction (issue #245 plan
+    §0) — a provider missing a protocol method fails here, at wiring time,
+    rather than as an ``AttributeError`` deep inside a handler at dispatch.
     """
     provider = repo_cfg.get("provider", "github").lower()
     try:
-        return TRACKERS[provider](repo_cfg)
+        instance = TRACKERS[provider](repo_cfg)
     except KeyError:
         raise ValueError(f"Unknown provider: {provider}") from None
+    if not isinstance(instance, IssueTracker):
+        raise TypeError(
+            f"{type(instance).__name__} does not structurally conform to IssueTracker "
+            f"(provider={provider!r})"
+        )
+    return instance
 
 
 def get_vcs(repo_cfg: dict) -> VCSProvider:
-    """Return a VCSProvider for the repo configuration."""
+    """Return a VCSProvider for the repo configuration.
+
+    Asserts structural ``VCSProvider`` conformance at construction — see
+    ``get_tracker``.
+    """
     provider = repo_cfg.get("provider", "github").lower()
     try:
-        return VCSS[provider](repo_cfg)
+        instance = VCSS[provider](repo_cfg)
     except KeyError:
         raise ValueError(f"Unknown provider: {provider}") from None
+    if not isinstance(instance, VCSProvider):
+        raise TypeError(
+            f"{type(instance).__name__} does not structurally conform to VCSProvider "
+            f"(provider={provider!r})"
+        )
+    return instance
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +114,13 @@ def build_repo_cfg(owner: str, repo: str, cfg: dict, repos_cfg: dict | None = No
     # sync already set), trust it instead of the GitHub default.
     elif provider:
         rcfg["provider"] = provider
+
+    # Azure done-state: a repo-level override in repos.json wins; otherwise
+    # fall through to the global cfg value (issue #245 §1.5). Folded in here
+    # so every consumer of repo_cfg (the Azure tracker included) sees a single
+    # resolved value without re-reading global cfg itself.
+    if "done_state" not in rcfg and cfg.get("done_state"):
+        rcfg["done_state"] = cfg["done_state"]
 
     prov = rcfg.get("provider", "github").lower()
 
