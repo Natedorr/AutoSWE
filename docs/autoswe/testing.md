@@ -51,6 +51,8 @@ Key: comments must include `user` dicts with `login` (GitHub) or `createdBy.uniq
 
 Each scenario has `world.json` (API state, task state, config) and `expected_action.json` (the Action kind, branch, guidance, etc.). Tests load the JSON, construct `World`, call `decide(world)`, and assert the returned `Action` matches the expected one. Parametrized over all scenario directories.
 
+`test_decide_ignores_world_ci` (same file) re-runs every scenario with `World.ci` populated by a real `CIStatus` (any state) and asserts the output is byte-identical to the `ci=None` baseline — the P2 acceptance criterion that `decide()` stays a pure function of everything *except* CI until P3/P4 wire a branch for it. No new decide fixtures were needed for P2: `read_ci`'s eligibility/throttle/plumbing is covered directly in `tests/test_provider_adapter.py` instead, since nothing about it is a `World -> Action` decision.
+
 ## Layer 3 — Emit Fixtures (Layer C)
 
 **Location:** `tests/fixtures/emit/<scenario>/`

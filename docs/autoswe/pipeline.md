@@ -77,7 +77,7 @@ For each repo in `repos.json` (or auto-discovered owned repos):
 
 2. **For each open issue** (skipping PRs and closed issues):
    - Ensure queue entry exists (`_ensure_queue_entry`), upserting title/body/base_branch.
-   - Build `TaskState` + `World` from queue entry and API snapshot.
+   - Build `TaskState` + `World` from queue entry and API snapshot. `_build_poll_task` also calls `providers.adapter.read_ci(vcs, task_entry, cfg, repo_cfg)` to populate `World.ci` — report-only (issue #245 plan §2.2): eligible only when `autoswe_status` is one of `CI_WATCH_STATUSES` (`fixed`, `shipped`, `synced`, `ci_failed`) and a branch resolves, gated by `CI_WATCH` (default on), and throttled by `CI_POLL_INTERVAL_SEC` (default 120s) against the persisted `ci_last_checked` watermark on the queue entry. `World.ci=None` means "not consulted this cycle" — ineligible, disabled, or throttled — distinct from an actual `CIStatus`. A real read caches `ci_status`/`ci_last_checked` on the queue entry for `/sync` and `queue status` to render (`providers.adapter.render_ci_status`); `decide()` does not consume `World.ci` yet (that's P3/P4).
    - Call `decide(world)` — Layer A returns an `Action`.
    - If comments were fetched this poll, update `last_comment_sync` on the queue entry. If `decide` returned `noop`, also advance `last_updated` to the issue's current provider timestamp — this enables the skip optimization on the next poll.
 

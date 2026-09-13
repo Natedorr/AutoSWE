@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 # Re-export the existing RunResult so types.py is self-contained
 from autoswe.harness.runner import RunResult  # noqa: F401
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue
 
 # --------------------------------------------------------------------------
 # Declarative field registry — single source of truth for TaskState ↔ queue
@@ -84,6 +84,8 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("linkage_state", "linkage_state", None),
     TaskField("linkage_missing", "linkage_missing", (),
               transform=lambda v: tuple(v) if isinstance(v, list) else v),
+    TaskField("ci_last_checked", "ci_last_checked", None),
+    TaskField("ci_status", "ci_status", None),
 )
 
 
@@ -199,6 +201,12 @@ class TaskState:
     # sites (issue #245 §1.4). Rendered as a checklist by `queue status` / `/sync`.
     linkage_state: dict | None = None
     linkage_missing: tuple[str, ...] = ()
+    # Last-known CI observation, cached by autoswe.providers.adapter.read_ci
+    # (issue #245 plan §2.2) — the watermark timestamp and the serialized
+    # CIStatus. Rendered by ``/sync`` and ``queue status``; a value here
+    # persists across cycles that don't re-consult the API (throttled).
+    ci_last_checked: str | None = None
+    ci_status: dict | None = None
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:
@@ -249,6 +257,12 @@ class World:
     task: TaskState
     cfg: dict
     repo_cfg: dict
+    # This poll's CI observation, or None when not consulted this cycle
+    # (ineligible, CI_WATCH off, or throttled — issue #245 plan §2.2). A
+    # distinct, checkable state from an actual CIStatus, mirroring the
+    # ``comments_fetched`` idiom. decide() does not consume this yet (P2 is
+    # report-only); it is plumbed through for /sync + queue status.
+    ci: CIStatus | None = None
 
 
 @dataclass(frozen=True)

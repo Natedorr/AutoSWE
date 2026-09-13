@@ -258,6 +258,12 @@ def _run_sync(
             checklist = render_linkage_checklist(task)
             if checklist:
                 summary = f"{summary}\n\n{checklist}"
+            # Issue #245 §2.2: surface the last CI observation (report-only —
+            # no decision is taken here) alongside the linkage checklist.
+            from autoswe.providers.adapter import render_ci_status
+            ci_summary = render_ci_status(task)
+            if ci_summary:
+                summary = f"{summary}\n\n{ci_summary}"
             return DispatchResult(
                 done_content=f"DONE_SUMMARY\t{summary}\t{commit_sha}",
             )

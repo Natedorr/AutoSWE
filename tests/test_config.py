@@ -1329,6 +1329,32 @@ def test_auto_close_on_merge_env_override(isolated_autoswe_dir):
     assert load_config()["AUTO_CLOSE_ON_MERGE"] is False
 
 
+# ---------------------------------------------------------------------------
+# CI watch config keys (issue #245 §2.2)
+# ---------------------------------------------------------------------------
+
+def test_ci_watch_defaults_true(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["CI_WATCH"] is True
+
+
+def test_ci_watch_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("CI_WATCH=false\n", encoding="utf-8")
+    assert load_config()["CI_WATCH"] is False
+
+
+def test_ci_poll_interval_sec_defaults_120(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["CI_POLL_INTERVAL_SEC"] == 120
+
+
+def test_ci_poll_interval_sec_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("CI_POLL_INTERVAL_SEC=45\n", encoding="utf-8")
+    assert load_config()["CI_POLL_INTERVAL_SEC"] == 45
+
+
 def test_done_state_defaults_empty(isolated_autoswe_dir):
     from autoswe.core.config import load_config
     assert load_config()["done_state"] == ""

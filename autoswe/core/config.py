@@ -85,6 +85,20 @@ def _as_bool(value: str | None, default: str = "false") -> bool:
     return str(value or default).strip().lower() in ("true", "1", "yes", "on")
 
 
+def resolve_flag(name: str, cfg: dict, repo_cfg: dict, default: bool = True) -> bool:
+    """Resolve a boolean flag: a per-repo override (lowercase key) beats cfg.
+
+    Shared by any caller that needs the cfg/repo_cfg override pattern (e.g.
+    ``PR_REQUIRE_SYNC``/``PR_REQUIRE_CI`` in ``vcs.pr_gate``, ``CI_WATCH`` in
+    ``providers.adapter``) so it isn't reimplemented or imported from a
+    module-private helper in an unrelated module.
+    """
+    override = repo_cfg.get(name.lower())
+    if override is not None:
+        return bool(override)
+    return bool(cfg.get(name, default))
+
+
 def _load_json_config(filepath: Path) -> dict:
     """Read a JSON config file, returning ``{}`` on missing/corrupt file."""
     if filepath.exists():
@@ -155,6 +169,8 @@ def load_config() -> dict:
         "REVIEW_MAX_TURNS": int(os.environ.get("REVIEW_MAX_TURNS", 80)),
         "LINK_COMMIT_TRAILER": _as_bool(os.environ.get("LINK_COMMIT_TRAILER"), "true"),
         "AUTO_CLOSE_ON_MERGE": _as_bool(os.environ.get("AUTO_CLOSE_ON_MERGE"), "true"),
+        "CI_WATCH": _as_bool(os.environ.get("CI_WATCH"), "true"),
+        "CI_POLL_INTERVAL_SEC": int(os.environ.get("CI_POLL_INTERVAL_SEC", 120)),
         # Azure done-state resolution (issue #245 §1.5): "" means "discover,
         # else fall back to Closed" — see providers/azure/tracker.py. Read via
         # os.environ.get(...) directly (not the dict-literal key above) since
@@ -170,6 +186,7 @@ def load_config() -> dict:
                 "AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS",
                 "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES",
                 "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS",
+                "CI_POLL_INTERVAL_SEC",
             )
         }
         for line in CONFIG_FILE.read_text().splitlines():
@@ -181,7 +198,7 @@ def load_config() -> dict:
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
                     v = v[1:-1]
                 cfg[k.strip()] = v
-        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS"):
+        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS", "CI_POLL_INTERVAL_SEC"):
             raw = cfg.get(int_key)
             if raw is None:
                 continue
@@ -207,6 +224,7 @@ def load_config() -> dict:
         cfg["TEST_GATE"] = _as_bool(cfg.get("TEST_GATE"), "true")
         cfg["LINK_COMMIT_TRAILER"] = _as_bool(cfg.get("LINK_COMMIT_TRAILER"), "true")
         cfg["AUTO_CLOSE_ON_MERGE"] = _as_bool(cfg.get("AUTO_CLOSE_ON_MERGE"), "true")
+        cfg["CI_WATCH"] = _as_bool(cfg.get("CI_WATCH"), "true")
     # Parse ALLOWED_AUTHORS as a set for O(1) lookup
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()
     cfg["ALLOWED_AUTHORS"] = {a.strip() for a in _raw.split(",") if a.strip()} if _raw else set()

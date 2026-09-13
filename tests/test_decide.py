@@ -8,6 +8,7 @@ Provider-agnostic: a decide test runs the same regardless of GH vs ADO origin.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from autoswe.orch.types import (
     TaskState,
     World,
 )
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "decide"
 
@@ -173,6 +174,44 @@ def test_decide(scenario: Path):
     assert actual.user_reply_text == expected.user_reply_text
     assert actual.limit_reason == expected.limit_reason, f"limit_reason: expected={expected.limit_reason!r} actual={actual.limit_reason!r}"
     assert actual.refused_command == expected.refused_command, f"refused_command: expected={expected.refused_command!r} actual={actual.refused_command!r}"
+
+
+# ---------------------------------------------------------------------------
+# World.ci is a P2 (report-only) read — decide() must not consume it yet.
+# issue #245 plan §2.2 acceptance: "decide() output unchanged for all
+# existing cases". Every fixture already builds World with ci=None (the
+# loader never sets it); this asserts BOTH that the default is None AND
+# that populating it with a real CIStatus (any state) changes nothing.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("scenario", _discover_fixtures(), ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "ci",
+    [
+        CIStatus(state="failure", summary="1 check(s) failing: build"),
+        CIStatus(state="success"),
+        CIStatus(state="error"),
+        CIStatus(state="pending"),
+    ],
+    ids=["failure", "success", "error", "pending"],
+)
+def test_decide_ignores_world_ci(scenario: Path, ci: CIStatus):
+    """Populating World.ci must not change decide()'s output (P2 is read-only)."""
+    world = _load_world(json.loads((scenario / "world.json").read_text()))
+    assert world.ci is None  # default when the loader doesn't set it
+
+    baseline = decide(world)
+    with_ci = decide(dataclasses.replace(world, ci=ci))
+
+    assert with_ci.kind == baseline.kind
+    assert with_ci.slug == baseline.slug
+    assert with_ci.plan_branch == baseline.plan_branch
+    assert with_ci.guidance == baseline.guidance
+    assert with_ci.attempt_count == baseline.attempt_count
+    assert with_ci.resume_session_id == baseline.resume_session_id
+    assert with_ci.user_reply_text == baseline.user_reply_text
+    assert with_ci.limit_reason == baseline.limit_reason
+    assert with_ci.refused_command == baseline.refused_command
 
 
 # ---------------------------------------------------------------------------

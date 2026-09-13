@@ -32,7 +32,7 @@ from autoswe.orch.decide import decide
 from autoswe.orch.emit import emit
 from autoswe.orch.run import DispatchResult, run
 from autoswe.orch.types import ApiState, TaskState, World
-from autoswe.providers.adapter import apply_effect, read_api
+from autoswe.providers.adapter import apply_effect, read_api, read_ci
 from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
 from autoswe.tracking.comments import record_bot_comment_id
 from autoswe.tracking.labels import (
@@ -119,8 +119,16 @@ def _build_poll_task(
     api: ApiState,
     cfg: dict,
     repo_cfg: dict,
+    *,
+    vcs=None,
 ) -> PollTask:
-    """Build TaskState + World from queue entry and API snapshot."""
+    """Build TaskState + World from queue entry and API snapshot.
+
+    When *vcs* is given, also reads this cycle's CI observation (issue #245
+    plan §2.2) — eligibility, throttling, and queue caching are handled by
+    ``providers.adapter.read_ci``; a task not due for a check yields
+    ``World.ci=None`` without any API call.
+    """
     t = queue[slug]
     raw_status = t.get("autoswe_status")
     status = normalize_legacy_status(raw_status, t.get("last_dispatched_command"))
@@ -129,8 +137,17 @@ def _build_poll_task(
         t["autoswe_status"] = status
     # Override the registry-read status with the normalised value
     t["autoswe_status"] = status
+    ci_status = None
+    if vcs is not None:
+        try:
+            ci_status = read_ci(vcs, t, cfg, repo_cfg)
+        except Exception as e:  # CI read is best-effort; never blocks the poll
+            dbg.warning("_build_poll_task: %s: read_ci failed: %s", slug, e)
+    # Snapshot TaskState after read_ci so a fresh CI observation made this
+    # cycle (read_ci mutates ci_status/ci_last_checked on `t` in place) is
+    # reflected in the same cycle's handler dict, not just the next one.
     ts = TaskState.from_queue(slug, t)
-    world = World(api=api, task=ts, cfg=cfg, repo_cfg=repo_cfg)
+    world = World(api=api, task=ts, cfg=cfg, repo_cfg=repo_cfg, ci=ci_status)
     return PollTask(slug=slug, task_state=ts, world=world)
 
 
@@ -781,12 +798,13 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             continue
 
         tracker = get_tracker(repo_cfg)
+        vcs = get_vcs(repo_cfg)
         provider = repo_cfg.get("provider", "github")
 
         # Resolve a platform-specific repo identifier (Azure: Git repo UUID —
         # web URLs require UUID, not display name; GitHub: no-op).
         try:
-            repo_id = get_vcs(repo_cfg).resolve_repo_id()
+            repo_id = vcs.resolve_repo_id()
             if repo_id:
                 repo_cfg["repo_id"] = repo_id
         except Exception as e:  # repo_id resolution is optional — fallback to repo name
@@ -816,7 +834,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             # Do NOT confuse with PID-file stems which use underscores
             # (``gh_``/``ado_``) via slug_to_filename() — that's what
             # _is_repo_locked() uses.
-            stem_prefix = f"{get_vcs(repo_cfg).slug_prefix()}:{owner}_{repo}_"
+            stem_prefix = f"{vcs.slug_prefix()}:{owner}_{repo}_"
 
             prev_updated: dict[int, str | None] = {}
             force_fetch: set[int] = set()
@@ -888,7 +906,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             )
 
             # Build TaskState + World
-            pt = _build_poll_task(queue, slug, api, cfg, repo_cfg)
+            pt = _build_poll_task(queue, slug, api, cfg, repo_cfg, vcs=vcs)
             action = decide(pt.world)
 
             # Bookkeeping: update last_comment_sync and last_updated

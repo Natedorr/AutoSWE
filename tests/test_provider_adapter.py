@@ -24,12 +24,13 @@ Coverage:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from autoswe.orch.types import Effect
-from autoswe.providers.adapter import apply_effect, read_api
+from autoswe.providers.adapter import apply_effect, read_api, read_ci, render_ci_status
 from autoswe.providers.azure.tracker import AzureTracker
 from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue, PRResult
 from autoswe.providers.github.tracker import GitHubTracker
@@ -492,3 +493,146 @@ def test_apply_effect_create_pr_no_gate_without_cfg(provider):
         _run_apply(provider, tracker, _create_pr_effect(), queue, 1, slug)
     vcs.get_ci_status.assert_not_called()
     vcs.open_pull_request.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# read_ci -- eligibility, throttle, queue plumbing (issue #245 plan §2.2)
+# ---------------------------------------------------------------------------
+
+def _task_entry(status: str = "fixed", **overrides) -> dict:
+    entry = {
+        "id": "o/r#1", "issue_number": 1, "autoswe_status": status,
+        "plan_branch": "autoswe/issue-1",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _now() -> datetime:
+    return datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def test_read_ci_eligible_and_due_calls_api_and_caches():
+    vcs = MagicMock()
+    vcs.get_ci_status.return_value = CIStatus(state="success", summary="ok")
+    task = _task_entry()
+    result = read_ci(vcs, task, {}, {}, now=_now())
+    assert result == CIStatus(state="success", summary="ok")
+    vcs.get_ci_status.assert_called_once_with("autoswe/issue-1")
+    assert task["ci_last_checked"] == "2026-01-01T00:00:00Z"
+    assert task["ci_status"] == {
+        "state": "success", "head_sha": None, "stale": False, "url": None,
+        "total": 0, "failing": [], "neutral": 0, "pending_count": 0, "summary": "ok",
+    }
+
+
+@pytest.mark.parametrize("status", ["pending", "planning", "fixing", "reviewed", "waiting"])
+def test_read_ci_ineligible_status_returns_none_no_call(status):
+    vcs = MagicMock()
+    task = _task_entry(status=status)
+    assert read_ci(vcs, task, {}, {}, now=_now()) is None
+    vcs.get_ci_status.assert_not_called()
+    assert "ci_last_checked" not in task
+
+
+def test_read_ci_no_branch_returns_none_no_call():
+    vcs = MagicMock()
+    vcs.branch_name.side_effect = RuntimeError("boom")
+    task = _task_entry(plan_branch=None)
+    assert read_ci(vcs, task, {}, {}, now=_now()) is None
+    vcs.get_ci_status.assert_not_called()
+
+
+def test_read_ci_falls_back_to_vcs_branch_name_when_no_plan_branch():
+    vcs = MagicMock()
+    vcs.branch_name.return_value = "autoswe/issue-1"
+    vcs.get_ci_status.return_value = CIStatus(state="none")
+    task = _task_entry(plan_branch=None)
+    read_ci(vcs, task, {}, {}, now=_now())
+    vcs.branch_name.assert_called_once_with(1)
+    vcs.get_ci_status.assert_called_once_with("autoswe/issue-1")
+
+
+def test_read_ci_disabled_by_cfg_returns_none():
+    vcs = MagicMock()
+    task = _task_entry()
+    assert read_ci(vcs, task, {"CI_WATCH": False}, {}, now=_now()) is None
+    vcs.get_ci_status.assert_not_called()
+
+
+def test_read_ci_disabled_by_repo_override():
+    vcs = MagicMock()
+    task = _task_entry()
+    assert read_ci(vcs, task, {"CI_WATCH": True}, {"ci_watch": False}, now=_now()) is None
+    vcs.get_ci_status.assert_not_called()
+
+
+def test_read_ci_throttled_within_interval_skips_api_call():
+    vcs = MagicMock()
+    task = _task_entry(ci_last_checked="2026-01-01T00:00:00Z")
+    later = _now() + timedelta(seconds=60)
+    result = read_ci(vcs, task, {"CI_POLL_INTERVAL_SEC": 120}, {}, now=later)
+    assert result is None
+    vcs.get_ci_status.assert_not_called()
+    # Consecutive polls within the interval must not call the API repeatedly.
+    result2 = read_ci(vcs, task, {"CI_POLL_INTERVAL_SEC": 120}, {}, now=later + timedelta(seconds=30))
+    assert result2 is None
+    vcs.get_ci_status.assert_not_called()
+
+
+def test_read_ci_calls_again_once_interval_elapsed():
+    vcs = MagicMock()
+    vcs.get_ci_status.return_value = CIStatus(state="failure", summary="boom")
+    task = _task_entry(ci_last_checked="2026-01-01T00:00:00Z")
+    later = _now() + timedelta(seconds=121)
+    result = read_ci(vcs, task, {"CI_POLL_INTERVAL_SEC": 120}, {}, now=later)
+    assert result == CIStatus(state="failure", summary="boom")
+    vcs.get_ci_status.assert_called_once()
+
+
+def test_read_ci_repo_override_interval_beats_cfg():
+    vcs = MagicMock()
+    task = _task_entry(ci_last_checked="2026-01-01T00:00:00Z")
+    later = _now() + timedelta(seconds=90)
+    # cfg says 60s (would be due); repo override says 300s (not due yet).
+    result = read_ci(vcs, task, {"CI_POLL_INTERVAL_SEC": 60}, {"ci_poll_interval_sec": 300}, now=later)
+    assert result is None
+    vcs.get_ci_status.assert_not_called()
+
+
+def test_read_ci_malformed_watermark_treated_as_due():
+    vcs = MagicMock()
+    vcs.get_ci_status.return_value = CIStatus(state="none")
+    task = _task_entry(ci_last_checked="not-a-timestamp")
+    assert read_ci(vcs, task, {}, {}, now=_now()) is not None
+    vcs.get_ci_status.assert_called_once()
+
+
+def test_read_ci_get_ci_status_exception_returns_none_no_crash():
+    vcs = MagicMock()
+    vcs.get_ci_status.side_effect = RuntimeError("network down")
+    task = _task_entry()
+    assert read_ci(vcs, task, {}, {}, now=_now()) is None
+    assert "ci_last_checked" not in task
+
+
+def test_render_ci_status_empty_when_never_checked():
+    assert render_ci_status({}) == ""
+
+
+def test_render_ci_status_renders_cached_observation():
+    task = {
+        "ci_status": {"state": "failure", "summary": "1 check(s) failing: build",
+                       "url": "https://x/run/1", "stale": False},
+        "ci_last_checked": "2026-01-01T00:00:00Z",
+    }
+    rendered = render_ci_status(task)
+    assert "CI watch: failure" in rendered
+    assert "1 check(s) failing: build" in rendered
+    assert "https://x/run/1" in rendered
+    assert "2026-01-01T00:00:00Z" in rendered
+
+
+def test_render_ci_status_flags_stale():
+    task = {"ci_status": {"state": "pending", "stale": True}}
+    assert "CI watch: pending (stale)" in render_ci_status(task)

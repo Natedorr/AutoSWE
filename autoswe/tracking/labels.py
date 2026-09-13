@@ -57,6 +57,12 @@ REVIEW_BLOCKING_STATUSES = frozenset({"review_failed", "review_blocked"})
 # MAX_ATTEMPTS budget (the prior phase finished, the gate is a new signal).
 SHIPPING_BLOCKING_STATUSES = REVIEW_BLOCKING_STATUSES | frozenset({"test_failed"})
 
+# Statuses eligible for the read-only CI watch (issue #245 plan §2.2): a
+# branch has been pushed and the task is resting, so a build may be running
+# or have already finished for it. "ci_failed" is P3's status (not yet in
+# VALID_STATUSES) — included now so P3 needs no change here.
+CI_WATCH_STATUSES = frozenset({"fixed", "shipped", "synced", "ci_failed"})
+
 # Action kind → status mappings (module-level to avoid per-call allocation)
 _KIND_TO_RUNNING = {
     "plan": "planning",

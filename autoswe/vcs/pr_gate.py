@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from autoswe.core.config import resolve_flag as _flag
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.factory import get_vcs
 from autoswe.vcs import worktree as worktree_mod
@@ -25,14 +26,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 dbg = get_debug_logger()
-
-
-def _flag(name: str, cfg: dict, repo_cfg: dict, default: bool = True) -> bool:
-    """Resolve a boolean flag: a per-repo override (lowercase key) beats cfg."""
-    override = repo_cfg.get(name.lower())
-    if override is not None:
-        return bool(override)
-    return bool(cfg.get(name, default))
 
 
 def _policy(

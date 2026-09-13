@@ -239,6 +239,12 @@ def _cmd_queue_status(args, cfg):
         if checklist:
             print()
             print(checklist)
+    if task.get("ci_status"):
+        from autoswe.providers.adapter import render_ci_status
+        ci_summary = render_ci_status(task)
+        if ci_summary:
+            print()
+            print(ci_summary)
 
 
 def _cmd_queue_prune(args, cfg):
