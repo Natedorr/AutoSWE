@@ -90,8 +90,10 @@ def _cmd_sync(args, cfg):
 
     if target_repo:
         log(f"[SYNC] Syncing single repo: {target_repo}")
-        # Verify the repo exists in repos.json
-        repos_cfg = load_repos_config()
+        # Verify the repo exists in repos.json. Pass cfg so a misconfigured
+        # Azure done_state raises here (issue #245 §1.5) instead of only
+        # surfacing later from the poller's own load_repos_config(cfg) call.
+        repos_cfg = load_repos_config(cfg)
         if target_repo not in repos_cfg:
             log(f"[ERROR] Repo '{target_repo}' not found in repos.json")
             sys.exit(1)
@@ -163,7 +165,7 @@ def _cmd_queue_list(args, cfg):
     if not queue:
         print("Queue is empty.")
         return
-    repos_cfg = load_repos_config()
+    repos_cfg = load_repos_config(cfg)
     rows = sorted(queue.values(), key=lambda t: t.get("created_at", ""))
     if getattr(args, "status", None):
         filtered = []
@@ -219,7 +221,7 @@ def _cmd_queue_status(args, cfg):
     task = queue[slug]
     label_status = "-"
     try:
-        repos_cfg = load_repos_config()
+        repos_cfg = load_repos_config(cfg)
         repo_cfg = build_repo_cfg(owner, repo, cfg, repos_cfg)
         repo_cfg["provider"] = provider
         if repo_cfg.get("pat"):

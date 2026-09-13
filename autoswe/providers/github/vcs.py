@@ -9,7 +9,7 @@ from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
 from autoswe.providers.base import Capability, CIStatus, LinkageState, PRResult
-from autoswe.tracking.api import gh_get, gh_post
+from autoswe.tracking.api import gh_get, gh_patch, gh_post
 
 dbg = get_debug_logger()
 
@@ -435,11 +435,39 @@ class GitHubVCS:
         return frozenset(Capability)
 
     def link_pr_to_issue(self, issue_number: int, pr_number: int) -> None:
-        """No-op: GitHub links the PR via the closing keyword in its body.
+        """Self-heal the closing-keyword link if it is missing (edge E3).
 
-        ``open_pull_request`` already writes ``Fixes #N`` — there is no
-        separate machine-readable link call on this platform.
+        ``open_pull_request`` writes ``Fixes #N`` at creation time, but that
+        is the *only* place the keyword gets written — a hand-edited PR body
+        (or a PR opened outside autoSWE) can lose it. This is only called by
+        ``ensure_links`` when ``get_linkage`` has already determined the
+        keyword is absent, so it must actually add it: a no-op here would let
+        the caller mark the edge linked without anything having been written
+        (issue #245 review — "never fabricate a pass").
         """
+        try:
+            pr = gh_get(
+                f"/repos/{self._owner}/{self._repo}/pulls/{pr_number}",
+                self._token, max_retries=1,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"link_pr_to_issue: could not fetch PR {pr_number}: {e}"
+            ) from e
+
+        body = pr.get("body", "") or ""
+        pattern = re.compile(
+            _CLOSING_KEYWORD_RE_TEMPLATE.format(issue=issue_number), re.IGNORECASE,
+        )
+        if pattern.search(body):
+            return  # another writer already restored it — nothing to do
+
+        new_body = f"{body.rstrip()}\n\nFixes #{issue_number}".strip()
+        gh_patch(
+            f"/repos/{self._owner}/{self._repo}/pulls/{pr_number}",
+            self._token,
+            body={"body": redact_outbound(new_body)},
+        )
 
     def commit_trailer(self, issue_number: int) -> str:
         """Return the GitHub commit-message trailer (issue #245 E2).
@@ -450,6 +478,49 @@ class GitHubVCS:
         """
         return f"Refs #{issue_number}"
 
+    def _linked_branch_names(self, issue_number: int) -> list[str] | None:
+        """Return the issue's linked-branch names via GraphQL, or ``None`` on failure.
+
+        Backs ``get_linkage``'s E1 read: ``createLinkedBranch`` (write side,
+        ``link_branch_to_issue``) has a query-side counterpart —
+        ``issue.linkedBranches`` — so the checklist can report a real verdict
+        instead of assuming failure just because the write happened in an
+        earlier phase / cycle (issue #245 review: a permanently-``✗`` E1 on a
+        GitHub task that actually linked cleanly is a checklist bug, not a
+        capability limit).
+        """
+        query = (
+            "query($owner: String!, $repo: String!, $number: Int!) {"
+            "  repository(owner: $owner, name: $repo) {"
+            "    issue(number: $number) {"
+            "      linkedBranches(first: 25) { nodes { ref { name } } }"
+            "    }"
+            "  }"
+            "}"
+        )
+        variables = {"owner": self._owner, "repo": self._repo, "number": issue_number}
+        try:
+            result = gh_post(
+                "/graphql", self._token,
+                {"query": query, "variables": variables},
+                max_retries=1, timeout=10,
+            )
+        except Exception as e:
+            dbg.warning("get_linkage: linkedBranches query failed for issue %d: %s: %s",
+                        issue_number, type(e).__name__, e)
+            return None
+        if result.get("errors"):
+            dbg.warning("get_linkage: linkedBranches GraphQL error for issue %d: %s",
+                        issue_number, result["errors"])
+            return None
+        nodes = (
+            (result.get("data") or {}).get("repository") or {}
+        ).get("issue", {}) or {}
+        nodes = (nodes.get("linkedBranches") or {}).get("nodes") or []
+        return [
+            (n.get("ref") or {}).get("name") for n in nodes if (n.get("ref") or {}).get("name")
+        ]
+
     def get_linkage(
         self, issue_number: int, branch: str, pr_number: int | None,
     ) -> LinkageState:
@@ -457,12 +528,19 @@ class GitHubVCS:
 
         Best-effort: any read failure reports the affected edge(s) as missing
         rather than raising, so ``ensure_links`` can proceed with self-heal
-        writes instead of aborting.
+        writes instead of aborting. A query failure for the branch-link check
+        (rather than a confirmed absence) reports it as missing too — a
+        conservative read never claims a link exists that wasn't verified.
         """
-        missing: list[str] = ["branch"]  # verified only via the live probe path
+        missing: list[str] = []
+        linked_branches = self._linked_branch_names(issue_number)
+        branch_linked = bool(linked_branches) and branch in linked_branches
+        if not branch_linked:
+            missing.append("branch")
+
         if pr_number is None:
             missing.append("pr_link")
-            return LinkageState(missing=tuple(missing))
+            return LinkageState(branch_linked=branch_linked, missing=tuple(missing))
 
         try:
             pr = gh_get(
@@ -473,7 +551,8 @@ class GitHubVCS:
             dbg.warning("get_linkage: could not fetch PR %s: %s: %s",
                         pr_number, type(e).__name__, e)
             missing.append("pr_link")
-            return LinkageState(pr_number=pr_number, missing=tuple(missing))
+            return LinkageState(branch_linked=branch_linked, pr_number=pr_number,
+                                 missing=tuple(missing))
 
         body = pr.get("body", "") or ""
         pattern = re.compile(
@@ -483,10 +562,15 @@ class GitHubVCS:
         merged = bool(pr.get("merged"))
         head_sha = pr.get("head", {}).get("sha")
         mergeable_state = pr.get("mergeable_state")
+        # "blocked" means a required review/check is outstanding, not a git
+        # conflict — map it alongside "unknown" to "pending" rather than
+        # "conflicts" so the checklist doesn't tell an operator to resolve a
+        # merge conflict that doesn't exist.
         merge_state = {
             "clean": "clean", "unstable": "clean", "has_hooks": "clean",
-            "dirty": "conflicts", "blocked": "conflicts",
-        }.get(mergeable_state, "pending" if mergeable_state == "unknown" else "unknown")
+            "dirty": "conflicts",
+            "blocked": "pending", "unknown": "pending",
+        }.get(mergeable_state, "unknown")
 
         # GitHub's closing keyword IS the machine-readable link — declare
         # pr_linked True whenever it is present.
@@ -495,7 +579,7 @@ class GitHubVCS:
             missing.append("pr_link")
 
         return LinkageState(
-            branch_linked=False,  # not verifiable without the live probe (§1.3)
+            branch_linked=branch_linked,
             pr_linked=pr_linked,
             closes_on_merge=closes,
             merged=merged,
