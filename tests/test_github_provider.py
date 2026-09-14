@@ -740,6 +740,121 @@ class TestGitHubVCS:
         )
 
     # -----------------------------------------------------------------------
+    # get_ci_failures (issue #245 plan §2.1/§4, P4 — CI auto-fix feedback text)
+    # -----------------------------------------------------------------------
+
+    def test_get_ci_failures_reads_check_run_annotations(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/cafebabe/check-runs")] = {
+            "check_runs": [
+                {"id": 1, "name": "build", "status": "completed", "conclusion": "failure",
+                 "html_url": "https://github.com/natedorr/autoswe/runs/1"},
+                {"id": 2, "name": "lint", "status": "completed", "conclusion": "success"},
+            ],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/check-runs/1/annotations")] = [
+            {"title": "SyntaxError", "message": "unexpected indent on line 12"},
+        ]
+
+        failures = vcs.get_ci_failures("autoswe/issue-42", ref_sha="cafebabe")
+
+        assert len(failures) == 1
+        assert failures[0].check == "build"
+        assert failures[0].url == "https://github.com/natedorr/autoswe/runs/1"
+        assert "unexpected indent on line 12" in failures[0].excerpt
+
+    def test_get_ci_failures_respects_limit(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/cafebabe/check-runs")] = {
+            "check_runs": [
+                {"id": i, "name": f"job{i}", "status": "completed", "conclusion": "failure"}
+                for i in range(1, 6)
+            ],
+        }
+        for i in range(1, 6):
+            gh_route_table[("GET", f"/repos/natedorr/autoswe/check-runs/{i}/annotations")] = []
+
+        failures = vcs.get_ci_failures("autoswe/issue-42", ref_sha="cafebabe", limit=2)
+
+        assert len(failures) == 2
+
+    def test_get_ci_failures_truncates_excerpt_to_max_chars(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/cafebabe/check-runs")] = {
+            "check_runs": [
+                {"id": 1, "name": "build", "status": "completed", "conclusion": "failure"},
+            ],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/check-runs/1/annotations")] = [
+            {"title": "err", "message": "x" * 500},
+        ]
+
+        failures = vcs.get_ci_failures("autoswe/issue-42", ref_sha="cafebabe", max_chars=50)
+
+        assert len(failures[0].excerpt) == 50
+
+    def test_get_ci_failures_falls_back_to_job_steps_on_403(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        """The classic-PAT 403 case: check-runs unavailable, so fall back to
+        actions/runs -> jobs, reporting failed step names (no log download)."""
+        def raise_403(method, path, token, body):
+            raise RuntimeError("GitHub API ... -> HTTP 403: forbidden")
+
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/cafebabe/check-runs")] = raise_403
+        # More specific route registered first: mock_gh_request matches by
+        # prefix in insertion order, and "/actions/runs/99/jobs" also
+        # startswith "/actions/runs".
+        gh_route_table[("GET", "/repos/natedorr/autoswe/actions/runs/99/jobs")] = {
+            "jobs": [
+                {"name": "test", "conclusion": "failure",
+                 "html_url": "https://github.com/natedorr/autoswe/actions/runs/99/jobs/1",
+                 "steps": [
+                     {"name": "Run tests", "conclusion": "failure"},
+                     {"name": "Checkout", "conclusion": "success"},
+                 ]},
+            ],
+        }
+        gh_route_table[("GET", "/repos/natedorr/autoswe/actions/runs")] = {
+            "workflow_runs": [
+                {"id": 99, "name": "CI", "conclusion": "failure",
+                 "html_url": "https://github.com/natedorr/autoswe/actions/runs/99"},
+            ],
+        }
+
+        failures = vcs.get_ci_failures("autoswe/issue-42", ref_sha="cafebabe")
+
+        assert len(failures) == 1
+        assert failures[0].check == "test"
+        assert "Run tests" in failures[0].excerpt
+
+    def test_get_ci_failures_no_failures_returns_empty(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/cafebabe/check-runs")] = {
+            "check_runs": [{"id": 1, "name": "build", "status": "completed", "conclusion": "success"}],
+        }
+
+        failures = vcs.get_ci_failures("autoswe/issue-42", ref_sha="cafebabe")
+
+        assert failures == []
+
+    def test_get_ci_failures_unresolvable_sha_returns_empty(
+        self, vcs, fake_token, mock_gh_request, gh_route_table,
+    ):
+        def raise_error(method, path, token, body):
+            raise RuntimeError("HTTP 500")
+
+        gh_route_table[("GET", "/repos/natedorr/autoswe/commits/autoswe/issue-42")] = raise_error
+
+        failures = vcs.get_ci_failures("autoswe/issue-42")
+
+        assert failures == []
+
+    # -----------------------------------------------------------------------
     # get_linkage / link_pr_to_issue (issue #245 review — E1/E3 checklist
     # correctness). Before this, GitHubVCS.get_linkage always hardcoded
     # branch_linked=False and link_pr_to_issue was an unconditional no-op that

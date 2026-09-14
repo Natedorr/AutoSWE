@@ -171,6 +171,9 @@ def load_config() -> dict:
         "AUTO_CLOSE_ON_MERGE": _as_bool(os.environ.get("AUTO_CLOSE_ON_MERGE"), "true"),
         "CI_WATCH": _as_bool(os.environ.get("CI_WATCH"), "true"),
         "CI_POLL_INTERVAL_SEC": int(os.environ.get("CI_POLL_INTERVAL_SEC", 120)),
+        "CI_AUTO_FIX": _as_bool(os.environ.get("CI_AUTO_FIX"), "true"),
+        "CI_MAX_FIX_ATTEMPTS": int(os.environ.get("CI_MAX_FIX_ATTEMPTS", 2)),
+        "CI_LOG_MAX_CHARS": int(os.environ.get("CI_LOG_MAX_CHARS", 4000)),
         # Azure done-state resolution (issue #245 §1.5): "" means "discover,
         # else fall back to Closed" — see providers/azure/tracker.py. Read via
         # os.environ.get(...) directly (not the dict-literal key above) since
@@ -186,7 +189,7 @@ def load_config() -> dict:
                 "AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS",
                 "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES",
                 "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS",
-                "CI_POLL_INTERVAL_SEC",
+                "CI_POLL_INTERVAL_SEC", "CI_MAX_FIX_ATTEMPTS", "CI_LOG_MAX_CHARS",
             )
         }
         for line in CONFIG_FILE.read_text().splitlines():
@@ -198,7 +201,7 @@ def load_config() -> dict:
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
                     v = v[1:-1]
                 cfg[k.strip()] = v
-        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS", "CI_POLL_INTERVAL_SEC"):
+        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS", "CI_POLL_INTERVAL_SEC", "CI_MAX_FIX_ATTEMPTS", "CI_LOG_MAX_CHARS"):
             raw = cfg.get(int_key)
             if raw is None:
                 continue
@@ -225,6 +228,7 @@ def load_config() -> dict:
         cfg["LINK_COMMIT_TRAILER"] = _as_bool(cfg.get("LINK_COMMIT_TRAILER"), "true")
         cfg["AUTO_CLOSE_ON_MERGE"] = _as_bool(cfg.get("AUTO_CLOSE_ON_MERGE"), "true")
         cfg["CI_WATCH"] = _as_bool(cfg.get("CI_WATCH"), "true")
+        cfg["CI_AUTO_FIX"] = _as_bool(cfg.get("CI_AUTO_FIX"), "true")
     # Parse ALLOWED_AUTHORS as a set for O(1) lookup
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()
     cfg["ALLOWED_AUTHORS"] = {a.strip() for a in _raw.split(",") if a.strip()} if _raw else set()

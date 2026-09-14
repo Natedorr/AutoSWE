@@ -102,6 +102,9 @@ def _load_world(data: dict) -> World:
         ci_failed_from_status=task_data.get("ci_failed_from_status"),
         ci_last_notified_sha=task_data.get("ci_last_notified_sha"),
         ci_error_notified=task_data.get("ci_error_notified", False),
+        ci_error_notified_sha=task_data.get("ci_error_notified_sha"),
+        ci_attempt_count=task_data.get("ci_attempt_count", 0),
+        ci_last_fixed_sha=task_data.get("ci_last_fixed_sha"),
     )
 
     cfg = _default_cfg()
@@ -135,6 +138,7 @@ def _load_action(data: dict) -> Action:
         user_reply_text=data.get("user_reply_text"),
         limit_reason=data.get("limit_reason"),
         refused_command=data.get("refused_command"),
+        trigger=data.get("trigger"),
     )
 
 
@@ -183,6 +187,7 @@ def test_decide(scenario: Path):
     assert actual.user_reply_text == expected.user_reply_text
     assert actual.limit_reason == expected.limit_reason, f"limit_reason: expected={expected.limit_reason!r} actual={actual.limit_reason!r}"
     assert actual.refused_command == expected.refused_command, f"refused_command: expected={expected.refused_command!r} actual={actual.refused_command!r}"
+    assert actual.trigger == expected.trigger, f"trigger: expected={expected.trigger!r} actual={actual.trigger!r}"
 
 
 # ---------------------------------------------------------------------------

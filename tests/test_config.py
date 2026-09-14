@@ -1355,6 +1355,39 @@ def test_ci_poll_interval_sec_env_override(isolated_autoswe_dir):
     assert load_config()["CI_POLL_INTERVAL_SEC"] == 45
 
 
+def test_ci_auto_fix_defaults_true(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["CI_AUTO_FIX"] is True
+
+
+def test_ci_auto_fix_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("CI_AUTO_FIX=false\n", encoding="utf-8")
+    assert load_config()["CI_AUTO_FIX"] is False
+
+
+def test_ci_max_fix_attempts_defaults_2(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["CI_MAX_FIX_ATTEMPTS"] == 2
+
+
+def test_ci_max_fix_attempts_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("CI_MAX_FIX_ATTEMPTS=5\n", encoding="utf-8")
+    assert load_config()["CI_MAX_FIX_ATTEMPTS"] == 5
+
+
+def test_ci_log_max_chars_defaults_4000(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["CI_LOG_MAX_CHARS"] == 4000
+
+
+def test_ci_log_max_chars_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("CI_LOG_MAX_CHARS=1000\n", encoding="utf-8")
+    assert load_config()["CI_LOG_MAX_CHARS"] == 1000
+
+
 def test_done_state_defaults_empty(isolated_autoswe_dir):
     from autoswe.core.config import load_config
     assert load_config()["done_state"] == ""

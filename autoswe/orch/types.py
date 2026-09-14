@@ -90,6 +90,8 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("ci_last_notified_sha", "ci_last_notified_sha", None),
     TaskField("ci_error_notified", "ci_error_notified", False),
     TaskField("ci_error_notified_sha", "ci_error_notified_sha", None),
+    TaskField("ci_attempt_count", "ci_attempt_count", 0),
+    TaskField("ci_last_fixed_sha", "ci_last_fixed_sha", None),
 )
 
 
@@ -224,6 +226,16 @@ class TaskState:
     ci_last_notified_sha: str | None = None
     ci_error_notified: bool = False
     ci_error_notified_sha: str | None = None
+    # CI-triggered auto-fix bookkeeping (issue #245 plan §2.4, P4). A *separate*
+    # counter from attempt_count so a CI loop can never consume the budget a
+    # human /fix depends on (brake 1). Resets to 0 only on a green build
+    # (ci_recovered) or a human-dispatched Claude action (emit()'s common
+    # patch); never on a push the agent itself made. ci_last_fixed_sha is the
+    # SHA watermark (brake 2): an auto-fix is dispatched at most once per head
+    # commit, checked before the counter so a lost/reset counter still can't
+    # loop on an unchanged commit.
+    ci_attempt_count: int = 0
+    ci_last_fixed_sha: str | None = None
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:
@@ -308,11 +320,17 @@ class Action:
     attempt_count: int = 0
     triggering_comment_id: int | None = None
     user_reply_text: str | None = None
-    limit_reason: Literal["attempts", "time"] | None = None
+    limit_reason: Literal["attempts", "time", "ci"] | None = None
     # For kind="refused": the slash command that was refused
     # (e.g. "/pr" on a failed task, "/fix" on a guard-blocked task).
     # emit() uses it to pick the refusal message.
     refused_command: str | None = None
+    # Set to "ci" for a kind="fix" auto-dispatched by the CI watch (issue #245
+    # plan §2.3/§2.4, P4) — distinguishes it from a human-triggered "fix" so
+    # emit() bumps the separate ci_attempt_count / ci_last_fixed_sha watermark
+    # instead of the phase attempt_count, and run() knows to fetch and append
+    # get_ci_failures() text to the guidance. None for every human dispatch.
+    trigger: Literal["ci"] | None = None
 
 
 @dataclass(frozen=True)

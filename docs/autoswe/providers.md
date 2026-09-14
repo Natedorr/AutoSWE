@@ -70,6 +70,7 @@ No method takes a `repo_cfg` argument: the provider instance is constructed from
 | `open_pull_request(branch, base, title, body)` | `PRResult` | Open PR; raises on failure |
 | `link_branch_to_issue(issue_number, commit_sha, branch)` | `None` | Link branch to issue in platform UI (no-op default for Azure) |
 | `get_ci_status(branch, ref_sha=None)` | `CIStatus` | Combined CI status for the branch head — used by `vcs/pr_gate.py` to gate `/pr` |
+| `get_ci_failures(branch, ref_sha=None, *, limit=3, max_chars=4000)` | `list[CIFailure]` | Feedback text for up to `limit` failing checks (issue #245 §2.1/§4, P4) — fetched lazily in `orch/run.py` only when a CI-triggered fix is actually dispatched. Best-effort: a read failure yields `[]` rather than raising. |
 | `commit_url(commit_sha)` | `str \| None` | Clickable URL for a commit, or None |
 | `branch_url(branch)` | `str \| None` | Clickable URL for a branch, or None |
 | `worktree_path_parts()` | `tuple[str, ...]` | Path parts for worktree/clone dirs — GitHub `(owner, repo)`, Azure `(org, project, repo)` |
@@ -101,6 +102,8 @@ The rule for every consumer: **a missing capability produces a logged, queryable
 - `"error"` means the CI API could **not** be consulted (network failure, bad PAT, unresolvable branch head). It is never treated as a pass and never triggers an auto-fix; `pr_gate` blocks on it unless the repo opts into `PR_CI_ERROR_POLICY=open` (default `block`).
 - `stale=True` marks a verdict that belongs to a different commit than the one requested (Azure's `sourceVersion` predates the branch head). Stale verdicts are reported as `state="pending"` so the gate waits for a fresh build rather than trusting an out-of-date result.
 - `neutral` counts checks that ran but verified nothing (`neutral`/`skipped` conclusions on GitHub) — reported separately instead of being collapsed into `"none"`.
+
+`CIFailure` (`providers/base.py`) is the provider-agnostic shape one failing check's feedback text takes: `check` (job/task/definition name), `url`, `excerpt` (pre-truncated by the provider to `max_chars`). GitHub's `get_ci_failures` reads check-run `output.annotations` (JSON, no log download) for each failing check-run, falling back to `actions/runs/{id}/jobs` failed-step names when the check-runs source itself is unavailable (the classic-PAT 403 case). Azure's reads each failed build-timeline record's structured `issues` array — also JSON, no log download. Both are best-effort: any read failure yields `[]`, leaving the `CIStatus` summary already in the fix guidance as the fallback text.
 
 
 ## Registry (`providers/factory.py`)

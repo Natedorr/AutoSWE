@@ -478,6 +478,120 @@ def test_get_ci_status_fresh_source_version_is_not_stale(
     assert ci.head_sha == "newsha"
 
 
+# -- get_ci_failures (issue #245 plan §2.1/§4, P4 — CI auto-fix feedback text) --
+
+_TIMELINE_PREFIX = "https://dev.azure.com/my-org/my-project/_apis/build/builds/7/timeline"
+
+
+def test_get_ci_failures_reads_failed_record_issues(vcs, mock_ado_request, ado_route_table):
+    # More specific route registered first: mock_ado_request matches by
+    # prefix in insertion order, and the timeline path also startswith
+    # _BUILDS_PREFIX.
+    ado_route_table[("GET", _TIMELINE_PREFIX)] = {
+        "records": [
+            {"id": "r1", "name": "Build", "type": "Task", "result": "failed",
+             "issues": [{"type": "error", "message": "compile error on line 10"}]},
+            {"id": "r2", "name": "Checkout", "type": "Task", "result": "succeeded", "issues": []},
+        ],
+    }
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "failed",
+                   "sourceVersion": "abc1234", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="abc1234")
+
+    assert len(failures) == 1
+    assert failures[0].check == "Build"
+    assert "compile error on line 10" in failures[0].excerpt
+
+
+def test_get_ci_failures_respects_limit(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _TIMELINE_PREFIX)] = {
+        "records": [
+            {"id": f"r{i}", "name": f"task{i}", "type": "Task", "result": "failed", "issues": []}
+            for i in range(5)
+        ],
+    }
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "failed",
+                   "sourceVersion": "abc1234", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="abc1234", limit=2)
+
+    assert len(failures) == 2
+
+
+def test_get_ci_failures_truncates_excerpt(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _TIMELINE_PREFIX)] = {
+        "records": [
+            {"id": "r1", "name": "Build", "type": "Task", "result": "failed",
+             "issues": [{"type": "error", "message": "x" * 500}]},
+        ],
+    }
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "failed",
+                   "sourceVersion": "abc1234", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="abc1234", max_chars=50)
+
+    assert len(failures[0].excerpt) == 50
+
+
+def test_get_ci_failures_no_failed_records_returns_empty(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _TIMELINE_PREFIX)] = {
+        "records": [
+            {"id": "r1", "name": "Build", "type": "Task", "result": "succeeded", "issues": []},
+        ],
+    }
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "abc1234", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="abc1234")
+
+    assert failures == []
+
+
+def test_get_ci_failures_no_builds_returns_empty(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {"count": 0, "value": []}
+
+    failures = vcs.get_ci_failures("autoswe/issue-100")
+
+    assert failures == []
+
+
+def test_get_ci_failures_stale_build_returns_empty(vcs, mock_ado_request, ado_route_table):
+    """A build for an older commit than ref_sha carries no relevant failure text."""
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "failed",
+                   "sourceVersion": "oldsha", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="newsha")
+
+    assert failures == []
+
+
+def test_get_ci_failures_request_error_returns_empty(vcs, mock_ado_request, ado_route_table):
+    failures = vcs.get_ci_failures("autoswe/issue-100")
+
+    assert failures == []
+
+
 def test_get_ci_status_no_ref_sha_no_staleness_claim(vcs, mock_ado_request, ado_route_table):
     """Without ref_sha the provider can't claim staleness — fresh verdicts."""
     ado_route_table[("GET", _BUILDS_PREFIX)] = {

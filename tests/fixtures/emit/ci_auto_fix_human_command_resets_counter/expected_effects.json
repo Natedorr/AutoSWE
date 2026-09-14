@@ -1,0 +1,20 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": ["Fixed the login bug"]
+  },
+  {
+    "kind": "set_status",
+    "status": "fixed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "fixed",
+      "last_dispatched_command_id": 99,
+      "last_consumed_reply_id": 99,
+      "attempt_count": 2,
+      "ci_attempt_count": 0
+    }
+  }
+]

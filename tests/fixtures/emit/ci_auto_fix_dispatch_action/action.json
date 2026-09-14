@@ -1,0 +1,8 @@
+{
+  "kind": "fix",
+  "slug": "gh__o_r_5",
+  "plan_branch": "issue-5",
+  "guidance": "CI failed on the pushed branch.\n\nFailing checks:\n- build",
+  "attempt_count": 1,
+  "trigger": "ci"
+}

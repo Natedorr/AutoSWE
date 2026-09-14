@@ -8,7 +8,7 @@ import subprocess
 from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.base import Capability, CIStatus, LinkageState, PRResult
+from autoswe.providers.base import Capability, CIFailure, CIStatus, LinkageState, PRResult
 from autoswe.tracking.api import gh_get, gh_patch, gh_post
 
 dbg = get_debug_logger()
@@ -404,6 +404,128 @@ class GitHubVCS:
             state="none", head_sha=sha, url=self.commit_url(sha),
             total=total, neutral=neutral, summary="no checks found",
         )
+
+    def get_ci_failures(
+        self, branch: str, ref_sha: str | None = None, *, limit: int = 3, max_chars: int = 4000,
+    ) -> list[CIFailure]:
+        """Feedback text for up to *limit* failing checks (issue #245 §2.1).
+
+        Primary source: check-run ``output.annotations`` (JSON, no log
+        download) for each failing check-run on the resolved sha. When the
+        check-runs source is unavailable (e.g. the classic-PAT 403 case),
+        falls back to the ``actions/runs`` workflow list, reporting each
+        failed job's failing step names via ``actions/runs/{id}/jobs``.
+        Best-effort throughout: any read failure is swallowed and simply
+        yields fewer (possibly zero) failures rather than raising.
+        """
+        sha = ref_sha
+        if not sha:
+            try:
+                commit = gh_get(
+                    f"/repos/{self._owner}/{self._repo}/commits/{branch}",
+                    self._token, max_retries=1,
+                )
+                sha = commit.get("sha")
+            except Exception:
+                return []
+        if not sha:
+            return []
+
+        failures: list[CIFailure] = []
+
+        check_runs_ok = False
+        try:
+            check_runs = gh_get(
+                f"/repos/{self._owner}/{self._repo}/commits/{sha}/check-runs",
+                self._token, max_retries=1,
+            )
+            check_runs_ok = True
+            for run in check_runs.get("check_runs", []):
+                if len(failures) >= limit:
+                    break
+                if run.get("status") != "completed" or run.get("conclusion") not in _FAILURE_CONCLUSIONS:
+                    continue
+                failures.append(CIFailure(
+                    check=run.get("name", "check"),
+                    url=run.get("html_url"),
+                    excerpt=self._check_run_excerpt(run.get("id"), max_chars),
+                ))
+        except Exception as exc:
+            check_runs_ok = "HTTP 403" not in str(exc)
+
+        if not check_runs_ok and len(failures) < limit:
+            try:
+                runs = gh_get(
+                    f"/repos/{self._owner}/{self._repo}/actions/runs"
+                    f"?head_sha={sha}&per_page=20",
+                    self._token, max_retries=1,
+                )
+                for run in runs.get("workflow_runs", []):
+                    if len(failures) >= limit:
+                        break
+                    if run.get("conclusion") not in _FAILURE_CONCLUSIONS:
+                        continue
+                    failures.extend(self._workflow_run_job_failures(
+                        run.get("id"), limit - len(failures), max_chars,
+                    ))
+            except Exception:
+                pass
+
+        return failures[:limit]
+
+    def _check_run_excerpt(self, check_run_id, max_chars: int) -> str:
+        """Return a truncated excerpt from a check-run's annotations, if any."""
+        if not check_run_id:
+            return ""
+        try:
+            annotations = gh_get(
+                f"/repos/{self._owner}/{self._repo}/check-runs/{check_run_id}/annotations",
+                self._token, max_retries=1,
+            )
+        except Exception:
+            return ""
+        lines = []
+        for a in annotations if isinstance(annotations, list) else []:
+            title = a.get("title") or ""
+            message = a.get("message") or ""
+            text = f"{title}: {message}" if title else message
+            if text:
+                lines.append(text)
+        return "\n".join(lines)[:max_chars]
+
+    def _workflow_run_job_failures(
+        self, run_id, limit: int, max_chars: int,
+    ) -> list[CIFailure]:
+        """Return CIFailures for each failed job in a workflow run (403-fallback path)."""
+        if not run_id or limit <= 0:
+            return []
+        try:
+            jobs = gh_get(
+                f"/repos/{self._owner}/{self._repo}/actions/runs/{run_id}/jobs",
+                self._token, max_retries=1,
+            )
+        except Exception:
+            return []
+        out: list[CIFailure] = []
+        for job in jobs.get("jobs", []):
+            if len(out) >= limit:
+                break
+            if job.get("conclusion") not in _FAILURE_CONCLUSIONS:
+                continue
+            failed_steps = [
+                s.get("name", "step") for s in job.get("steps", [])
+                if s.get("conclusion") in _FAILURE_CONCLUSIONS
+            ]
+            excerpt = (
+                f"Failed step(s): {', '.join(failed_steps)}" if failed_steps
+                else "job failed (no per-step detail available)"
+            )
+            out.append(CIFailure(
+                check=job.get("name", "job"),
+                url=job.get("html_url"),
+                excerpt=excerpt[:max_chars],
+            ))
+        return out
 
     def commit_url(self, commit_sha: str) -> str | None:
         """Clickable GitHub commit URL, or None when owner/repo are unset."""

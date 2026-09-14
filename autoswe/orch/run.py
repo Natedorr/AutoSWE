@@ -135,6 +135,14 @@ def run(
         return _to_dispatch(hr, task)
 
     if kind == "fix":
+        if action.trigger == "ci":
+            # Failure text is fetched lazily here — only once a CI-triggered
+            # fix is actually dispatched (issue #245 plan §2.2) — so a red
+            # build that's still being throttled/parked never costs a log
+            # download. Best-effort: get_ci_failures() degrades to an empty
+            # list on any read failure, leaving the CIStatus summary already
+            # in `guidance` (built in decide()) as the fallback text.
+            guidance = _append_ci_failures(guidance, world, cfg, rc)
         if action.user_reply_text is not None:
             hr = coder.resume_fix(
                 task, action.user_reply_text, rc, cfg,
@@ -185,6 +193,40 @@ def run(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _append_ci_failures(guidance: str, world: World, cfg: dict, repo_cfg: dict) -> str:
+    """Append real CI failure text to a CI-triggered fix's guidance.
+
+    Calls ``VCSProvider.get_ci_failures`` (issue #245 plan §2.1/§2.2) — the
+    one I/O call the CI auto-fix path makes outside the read cycle, deferred
+    to here so it only happens for a fix that is actually being dispatched.
+    Best-effort: any failure (including a backend without the capability)
+    leaves *guidance* unchanged; the CIStatus summary already in it is a
+    usable, if less detailed, fallback.
+    """
+    ci = world.ci
+    if ci is None or not ci.head_sha:
+        return guidance
+    try:
+        from autoswe.providers.factory import get_vcs
+        vcs = get_vcs(repo_cfg)
+        branch = world.task.plan_branch or vcs.branch_name(world.task.issue_number)
+        max_chars = cfg.get("CI_LOG_MAX_CHARS", 4000)
+        failures = vcs.get_ci_failures(branch, ci.head_sha, max_chars=max_chars)
+    except Exception as e:
+        get_debug_logger().warning(
+            "CI auto-fix: get_ci_failures failed for %s: %s: %s",
+            world.task.slug, type(e).__name__, e,
+        )
+        return guidance
+    if not failures:
+        return guidance
+    lines = [guidance, "", "Failure details:"]
+    for f in failures:
+        lines.append(f"\n**{f.check}**" + (f" ([run]({f.url}))" if f.url else ""))
+        if f.excerpt:
+            lines.append(f"```\n{f.excerpt}\n```")
+    return "\n".join(lines)
 
 def _to_dispatch(
     hr: HandlerResult,

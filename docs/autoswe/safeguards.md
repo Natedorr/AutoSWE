@@ -69,6 +69,19 @@ Restarting a `failed`/`error` task: a `/fix` or `/plan` re-dispatches the comman
 - **Terminal status completion** (`orch/emit.py`): after any COMPLETED status (`fixed`/`synced`/`shipped`/`reviewed`), `failed`, `error`, `skipped`, or `aborted` — each new dispatch cycle gets a fresh timer. The `patch_queue` Effect sets `first_dispatched_at: None`.
 - **Phase transition** (`orch/decide.py`): when restarting from `planned` or a RUNNING status — each pipeline phase (plan → fix → pr) gets its own timer so the time limit measures the current phase, not the cumulative time of completed phases (fixes #119).
 
+## CI Auto-Fix Budget — Four Independent Brakes (issue #245 plan §2.4, P4)
+
+`CI_AUTO_FIX` (default on) lets `decide()` respond to a red build by auto-dispatching a `/fix` (`Action(kind="fix", trigger="ci")`) instead of only parking the task at `ci_failed`. An auto-fix loop that keeps pushing and re-failing would burn agent runs on a flaky or agent-unfixable pipeline, so the design leans on defence in depth — four brakes, each independently sufficient to stop the loop:
+
+1. **`CI_MAX_FIX_ATTEMPTS` (default 2) — a separate counter.** `ci_attempt_count` is tracked apart from the phase `attempt_count`, so a CI loop can never spend the budget a human `/fix` depends on (and vice versa: a human retry loop never exhausts the CI budget). Checked in `decide()`'s `_decide_ci`; once `ci_attempt_count >= CI_MAX_FIX_ATTEMPTS`, the next red build produces `Action(kind="mark_failed_limit", limit_reason="ci")` instead of another auto-dispatch — `emit()` parks the task at `ci_failed` with a comment asking for a human `/fix` (not `/retry`, which would just re-arm the same loop; `_guard_blocked` stays `False` so `/fix` isn't refused).
+2. **SHA watermark — the structural brake.** `ci_last_fixed_sha` records the head commit an auto-fix has already been dispatched for. `decide()` checks `ci.head_sha == task.ci_last_fixed_sha` **before** the counter, so even a lost or corrupted counter can't cause a second auto-dispatch for the exact same commit.
+3. **Reset rule.** `ci_attempt_count` resets to 0 only on a green build (the `ci_recovered` action) or any human-dispatched Claude action (`emit()`'s common queue patch resets it whenever `action.trigger != "ci"`) — never on a new commit the agent's own auto-fix pushed. This is what lets a genuinely different regression get a fresh budget while a stuck loop on the same underlying failure still exhausts it.
+4. **`CI_AUTO_FIX` config gate.** Per-repo overridable (lowercase `ci_auto_fix` in `repos.json`) escape hatch: `false` downgrades the watch to the old detect-and-park behaviour (comment + `ci_failed`, recovery via a human `/fix`) for a repo whose pipeline is flaky or permanently red. Not a rollout stage — a durable per-repo setting.
+
+Also: `_decide_ci` never treats `state="error"` or `stale=True` as a failure — an unconsultable or out-of-date CI verdict never triggers an auto-fix, mirroring the PR gate's `PR_CI_ERROR_POLICY` fail-safe stance.
+
+Failure text for the fix prompt comes from `VCSProvider.get_ci_failures()`, fetched lazily in Layer B (`orch/run.py`) — only when a CI-triggered fix is actually dispatched, so a red build that's merely being throttled or already parked never costs a log/annotation download. The excerpt is truncated provider-side to `CI_LOG_MAX_CHARS` (default 4000).
+
 ## `AGENT_TIMEOUT` Per Agent Session
 
 `asyncio.wait_for(backend.run(spec), timeout=AGENT_TIMEOUT)` in `harness/runner.py`. Default 7200 s (2 h); per-repo override via `repos.json` → `agent_timeout`. On timeout the handler returns `"FAILED: timeout during …"`.

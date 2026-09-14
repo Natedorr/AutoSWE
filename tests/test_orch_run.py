@@ -23,6 +23,7 @@ from autoswe.orch.types import (
     TaskState,
     World,
 )
+from autoswe.providers.base import CIStatus
 
 
 def _make_world(
@@ -34,6 +35,7 @@ def _make_world(
     base_branch="main",
     provider="github",
     plan_file_path=None,
+    ci=None,
 ):
     """Build a minimal World for testing."""
     return World(
@@ -76,6 +78,7 @@ def _make_world(
         ),
         cfg={"ANTHROPIC_API_KEY": "sk-fake"},
         repo_cfg={"pat": "ghp_fake", "provider": provider},
+        ci=ci,
     )
 
 
@@ -212,6 +215,115 @@ def test_run_fix_resume_on_user_reply():
     assert isinstance(result, DispatchResult)
     assert "def456" in result.done_content
     mock_resume.assert_called_once()
+
+
+# ------ CI-triggered fix (issue #245 plan §2.2/§2.4, P4) ------
+# get_ci_failures() is fetched lazily here — only once a CI-triggered fix is
+# actually dispatched — so these tests verify the guidance-text plumbing
+# rather than duplicate the provider-level get_ci_failures tests.
+
+
+def test_run_fix_ci_trigger_appends_ci_failures():
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha="abc123", failing=["build"]),
+    )
+    action = Action(
+        kind="fix", slug=world.task.slug, trigger="ci",
+        guidance="CI failed on the pushed branch.",
+    )
+
+    fake_vcs = MagicMock()
+    fake_vcs.get_ci_failures.return_value = [
+        MagicMock(check="build", url="https://x/run/1", excerpt="AssertionError: boom"),
+    ]
+
+    with patch("autoswe.providers.factory.get_vcs", return_value=fake_vcs), \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    fake_vcs.get_ci_failures.assert_called_once_with(
+        "autoswe/issue-42", "abc123", max_chars=4000,
+    )
+    guidance_arg = mock_fix.call_args[0][1]
+    assert "AssertionError: boom" in guidance_arg
+    assert "build" in guidance_arg
+    assert "CI failed on the pushed branch." in guidance_arg
+
+
+def test_run_fix_ci_trigger_no_failures_leaves_guidance_unchanged():
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha="abc123", failing=["build"]),
+    )
+    action = Action(
+        kind="fix", slug=world.task.slug, trigger="ci",
+        guidance="CI failed on the pushed branch.",
+    )
+
+    fake_vcs = MagicMock()
+    fake_vcs.get_ci_failures.return_value = []
+
+    with patch("autoswe.providers.factory.get_vcs", return_value=fake_vcs), \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    guidance_arg = mock_fix.call_args[0][1]
+    assert guidance_arg == "CI failed on the pushed branch."
+
+
+def test_run_fix_ci_trigger_no_head_sha_skips_fetch():
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha=None),
+    )
+    action = Action(kind="fix", slug=world.task.slug, trigger="ci", guidance="g")
+
+    with patch("autoswe.providers.factory.get_vcs") as mock_get_vcs, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    mock_get_vcs.assert_not_called()
+    assert mock_fix.call_args[0][1] == "g"
+
+
+def test_run_fix_ci_trigger_get_ci_failures_exception_swallowed():
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha="abc123"),
+    )
+    action = Action(kind="fix", slug=world.task.slug, trigger="ci", guidance="g")
+
+    fake_vcs = MagicMock()
+    fake_vcs.get_ci_failures.side_effect = RuntimeError("boom")
+
+    with patch("autoswe.providers.factory.get_vcs", return_value=fake_vcs), \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    assert mock_fix.call_args[0][1] == "g"
+
+
+def test_run_fix_human_trigger_never_fetches_ci_failures():
+    """trigger=None (a plain human /fix) must not call get_ci_failures at all —
+    even when World.ci happens to carry a failure from an unrelated watch."""
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha="abc123"),
+    )
+    action = Action(kind="fix", slug=world.task.slug, guidance="please fix it")
+
+    with patch("autoswe.providers.factory.get_vcs") as mock_get_vcs, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    mock_get_vcs.assert_not_called()
+    assert mock_fix.call_args[0][1] == "please fix it"
 
 
 # ------ Ship PR action ------

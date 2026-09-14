@@ -2347,9 +2347,12 @@ TRANSITIONS: list[dict[str, Any]] = [
     {
         "name": "ci_watch_red_build_marks_ci_failed",
         "description": (
-            "Fixed task, no slash command this poll; the branch build is red "
-            "-> the CI watch parks the task at ci_failed with the failure text "
-            "(non-terminal: /fix, /retry, /skip, /abort still work)."
+            "Fixed task, no slash command this poll, CI_AUTO_FIX off for this "
+            "repo (brake 4 — the config gate); the branch build is red -> the "
+            "CI watch parks the task at ci_failed with the failure text "
+            "(non-terminal: /fix, /retry, /skip, /abort still work). With "
+            "CI_AUTO_FIX at its default (on), the same red build instead "
+            "auto-dispatches a fix — see ci_watch_red_build_auto_fix_dispatches_fix."
         ),
         "start": {
             "issue": {"body": "Fix login."},
@@ -2376,10 +2379,99 @@ TRANSITIONS: list[dict[str, Any]] = [
                 "provider": "github",
             },
         },
+        "repos": {"ci_auto_fix": False},
         "expect": {
             "label_after": "autoswe:ci_failed",
             "autoswe_status": "ci_failed",
             "comment_contains": ["CI failed"],
+            "no_claude_calls": True,
+            "no_git_calls": True,
+        },
+    },
+    {
+        "name": "ci_watch_red_build_auto_fix_dispatches_fix",
+        "description": (
+            "Fixed task, no slash command this poll, CI_AUTO_FIX at its "
+            "default (on); the branch build is red -> the CI watch "
+            "auto-dispatches a /fix with the CI failure text as guidance "
+            "(issue #245 plan §2.3/§2.4, P4). Budget/watermark untouched "
+            "(brakes 1-2 are exercised separately below)."
+        ),
+        "start": {
+            "issue": {"body": "Fix login."},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "failure",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix login.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tAddressed CI failure\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "claude_permission": "bypassPermissions",
+        },
+    },
+    {
+        "name": "ci_watch_red_build_budget_exhausted_marks_ci_failed",
+        "description": (
+            "Fixed task whose CI auto-fix budget is already spent "
+            "(ci_attempt_count == CI_MAX_FIX_ATTEMPTS default 2) -> decide() "
+            "refuses a third auto-dispatch and parks the task at ci_failed "
+            "with a comment asking for a human /fix (brake 1 — the separate "
+            "counter never lets the loop run unbounded)."
+        ),
+        "start": {
+            "issue": {"body": "Fix login."},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "failure",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix login.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+                "ci_attempt_count": 2,
+                "ci_last_fixed_sha": "some-older-sha",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:ci_failed",
+            "autoswe_status": "ci_failed",
+            "comment_contains": ["budget", "/fix"],
             "no_claude_calls": True,
             "no_git_calls": True,
         },

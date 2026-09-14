@@ -124,6 +124,20 @@ class CIStatus:
 
 
 @dataclass
+class CIFailure:
+    """One failing check's feedback text, provider-agnostic (issue #245 §2.1/§4).
+
+    Produced by ``VCSProvider.get_ci_failures`` and folded into a CI-triggered
+    fix's guidance. ``excerpt`` is pre-truncated by the provider (``max_chars``)
+    so the orchestrator receives a shape that is already budgeted for a prompt.
+    """
+
+    check: str
+    url: str | None
+    excerpt: str
+
+
+@dataclass
 class LinkageState:
     """Normalized answer to "how linked is this task?" (issue #245 plan §1.2).
 
@@ -287,6 +301,21 @@ class VCSProvider(Protocol):
         unresolvable branch head), providers return
         ``CIStatus(state="error")`` — a distinct, fail-safe state the gate
         blocks on by default. Never fabricate "none" from a failed read.
+        """
+
+    def get_ci_failures(
+        self, branch: str, ref_sha: str | None = None, *, limit: int = 3, max_chars: int = 4000,
+    ) -> list[CIFailure]:
+        """Return feedback text for up to *limit* failing checks on a branch head.
+
+        Symmetric across providers: GitHub reads check-run annotations (and
+        failing-step names from ``actions/runs/{id}/jobs`` when the check-runs
+        source is unavailable); Azure reads failed timeline records' ``issues``.
+        Each ``CIFailure.excerpt`` is truncated to *max_chars* provider-side, so
+        the orchestrator receives one shape already budgeted for a fix prompt.
+        Best-effort: a read failure yields an empty list rather than raising —
+        the caller (a dispatched CI-triggered fix) still has ``CIStatus`` to
+        fall back on.
         """
 
     def commit_url(self, commit_sha: str) -> str | None:

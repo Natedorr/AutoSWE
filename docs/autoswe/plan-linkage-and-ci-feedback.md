@@ -211,9 +211,14 @@ implementation maps `completed` → the resolved `done_state` and `not_planned` 
 
 > **Status (P0, #244):** the `CIStatus` hardening below — the `error`/`head_sha`/`stale`/`url`/
 > `neutral` fields, the GH `actions/runs` 403 fallback, ADO `sourceVersion` staleness,
-> `PR_CI_ERROR_POLICY`, and the two flipped fail-open tests — **is landed**. The `CIFailure` /
-> `get_ci_failures()` feedback-text method (§2.1's last block) is **deliberately deferred** — it has
-> no P0 consumer and would be dead code until the auto-fix loop lands.
+> `PR_CI_ERROR_POLICY`, and the two flipped fail-open tests — **is landed**.
+>
+> **Status (P4):** `CIFailure` / `get_ci_failures()` (§2.1's last block) **is landed** —
+> GitHub reads check-run annotations (falling back to failed-step names via
+> `actions/runs/{id}/jobs` on a check-runs 403); Azure reads failed build-timeline
+> records' `issues`. Both are JSON-only (no log/zip download) and provider-side
+> truncated to `max_chars`. Consumed by the CI auto-fix path (§2.3/§2.4) — fetched
+> lazily in Layer B (`orch/run.py`), never in the read cycle.
 
 An auto-fix loop built on a fail-open signal is worse than no loop: an API 403 currently reads as
 "no CI" → "pass". Fix `CIStatus` before anything consumes it more widely.
@@ -359,7 +364,7 @@ Each phase is independently shippable, green-bar, and useful on its own.
 | **P1** | `Capability` enum + `capabilities()` + factory conformance assert; `LinkageState`; `linkage.py`; ADO `workItemRefs`; commit trailer (E2); `close_issue` + `done_state`; ADO branch-link live probe | Low — additive; each write is idempotent and best-effort |
 | **P2** | `read_ci` + `World.ci` + throttle + `ci_last_checked`; **no decisions taken** — `/sync` and `queue status` merely report CI | Very low — read-only |
 | **P3** | `ci_failed` status + label + `SHIPPING_BLOCKING_STATUSES`; comments; human `/fix` recovery | Medium — new status touches decide / emit / labels / queue |
-| **P4** | `CI_AUTO_FIX`: auto-dispatch, budget, SHA watermark, `get_ci_failures` → prompt | Medium-high — spends agent runs. Ships **on**; the brakes in §2.4 are what make that safe, so P4 does not land until all four are tested (including the transition rows for budget-exhausted and same-SHA) |
+| **P4** ✅ | `CI_AUTO_FIX`: auto-dispatch, budget, SHA watermark, `get_ci_failures` → prompt | Medium-high — spends agent runs. Ships **on**; the brakes in §2.4 are what make that safe — all four are tested (decide fixtures for budget-exhausted, same-SHA, and both the global and per-repo `CI_AUTO_FIX`/`CI_MAX_FIX_ATTEMPTS` overrides; transition rows for auto-fix-dispatches and budget-exhausted) |
 | **P5** | Gate unification (§2.5); `pr_deferred` auto-resume (§2.6) | Low |
 
 ---

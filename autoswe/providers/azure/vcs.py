@@ -17,7 +17,7 @@ from autoswe.providers.azure.api import (
     ado_patch_json,
     ado_post,
 )
-from autoswe.providers.base import Capability, CIStatus, LinkageState, PRResult
+from autoswe.providers.base import Capability, CIFailure, CIStatus, LinkageState, PRResult
 
 dbg = get_debug_logger()
 
@@ -328,6 +328,68 @@ class AzureVCS:
             state="none", head_sha=source_version, url=build_url,
             total=1, summary="no build result",
         )
+
+    def get_ci_failures(
+        self, branch: str, ref_sha: str | None = None, *, limit: int = 3, max_chars: int = 4000,
+    ) -> list[CIFailure]:
+        """Feedback text for up to *limit* failed timeline records (issue #245 §2.1).
+
+        Reads the build's timeline and reports each failed record's
+        ``issues`` (structured warning/error entries Azure Pipelines already
+        attaches — no log download required). Best-effort: any read failure
+        yields an empty list.
+        """
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/build/builds"
+            f"?branchName=refs/heads/{branch}&statusFilter=all&$top=1"
+            f"&queryOrder=queueTimeDescending"
+        )
+        try:
+            result = ado_get(path, self._pat)
+        except Exception:
+            return []
+        builds = result.get("value", [])
+        if not builds:
+            return []
+        latest = builds[0]
+        source_version = latest.get("sourceVersion") or None
+        if ref_sha and source_version and source_version.lower() != str(ref_sha).lower():
+            return []  # stale build — not the commit we were asked about
+        build_id = latest.get("id")
+        if not build_id:
+            return []
+        build_url = (
+            f"https://dev.azure.com/{self._org}/{self._project}"
+            f"/_build/results?buildId={build_id}"
+        )
+
+        timeline_path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/build/builds/"
+            f"{build_id}/timeline"
+        )
+        try:
+            timeline = ado_get(timeline_path, self._pat)
+        except Exception:
+            return []
+
+        failures: list[CIFailure] = []
+        for record in timeline.get("records", []):
+            if len(failures) >= limit:
+                break
+            if record.get("result") not in _FAILURE_RESULTS:
+                continue
+            issues = record.get("issues") or []
+            excerpt = "\n".join(
+                str(i.get("message", "")) for i in issues if i.get("message")
+            )
+            if not excerpt:
+                excerpt = f"{record.get('type', 'record')} failed (no issue detail available)"
+            failures.append(CIFailure(
+                check=record.get("name", "build"),
+                url=f"{build_url}&view=logs&j={record.get('id')}" if record.get("id") else build_url,
+                excerpt=excerpt[:max_chars],
+            ))
+        return failures
 
     def capabilities(self) -> frozenset[Capability]:
         """ADO declares PR/CI/merge edges but not branch-link or auto-close.

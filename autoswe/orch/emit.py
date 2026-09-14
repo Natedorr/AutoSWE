@@ -314,6 +314,33 @@ def emit(
         )
 
     if kind == "mark_failed_limit":
+        if action.limit_reason == "ci":
+            # CI auto-fix budget exhausted (issue #245 plan §2.3/§2.4, brake 1)
+            # — park at ci_failed rather than failed: this is the remote
+            # twin of test_failed, non-terminal and recovered by a human
+            # /fix (not /retry, which would just re-arm the same auto-fix
+            # loop). guard_blocked stays False so /fix isn't refused.
+            max_attempts = cfg.get("CI_MAX_FIX_ATTEMPTS", 2)
+            ci = world.ci
+            pre_status = task.ci_failed_from_status if task.status == "ci_failed" else task.status
+            msg = (
+                f"CI auto-fix budget ({max_attempts} attempt(s)) exhausted for this commit. "
+                f"Post `/fix` to continue manually.{BOT_MARKER}"
+            )
+            return (
+                Effect(kind="post_comment", body=msg),
+                Effect(kind="set_status", status="ci_failed"),
+                Effect(
+                    kind="patch_queue",
+                    queue_patch={
+                        "autoswe_status": "ci_failed",
+                        "ci_failed_from_status": pre_status,
+                        "ci_last_notified_sha": ci.head_sha if ci else None,
+                        "first_dispatched_at": None,
+                        "pending_command": None,
+                    },
+                ),
+            )
         if action.limit_reason == "time":
             max_hours = cfg.get("MAX_TOTAL_HOURS", 2)
             msg = f"Time limit ({max_hours}h) reached. Post `/retry` to continue.{BOT_MARKER}"
@@ -451,6 +478,11 @@ def emit(
                     "ci_last_notified_sha": None,
                     "ci_error_notified": False,
                     "ci_error_notified_sha": None,
+                    # Green build — reset rule 3: the CI auto-fix budget and
+                    # SHA watermark both clear so the next red build (a fresh
+                    # regression, not the one just fixed) gets a full budget.
+                    "ci_attempt_count": 0,
+                    "ci_last_fixed_sha": None,
                 },
             ),
         )
@@ -514,11 +546,20 @@ def emit(
     replayed_phase = _COMMAND_TO_PHASE.get(replayed_command) if replayed_command else None
 
     log(f"[EMIT] {task.slug} status {old_status}->{new_status} attempt={action.attempt_count}")
+    # A CI-triggered fix has no triggering comment (decide()'s auto-fix branch
+    # never scanned comments), so it must NOT touch the dispatch/reply
+    # watermarks — action.triggering_comment_id is None here, and writing that
+    # through would regress last_dispatched_command_id / last_consumed_reply_id
+    # to 0, letting an already-handled slash command re-match as "new" on the
+    # next poll (issue #245 plan §2.4).
+    ci_triggered = kind == "fix" and action.trigger == "ci"
+    dispatch_command_id = task.last_dispatched_command_id if ci_triggered else action.triggering_comment_id
+    consumed_reply_id = task.last_consumed_reply_id if ci_triggered else action.triggering_comment_id
     queue_patch = {
         "autoswe_status": new_status,
         "last_dispatched_command": pending_command,
-        "last_dispatched_command_id": action.triggering_comment_id,
-        "last_consumed_reply_id": action.triggering_comment_id,
+        "last_dispatched_command_id": dispatch_command_id,
+        "last_consumed_reply_id": consumed_reply_id,
         "attempt_count": action.attempt_count,
         "pending_command": None,
         "pending_guidance": None,
@@ -529,6 +570,16 @@ def emit(
     # Persist plan_branch from --branch so subsequent commands (/pr, /sync) use it
     if action.plan_branch:
         queue_patch["plan_branch"] = action.plan_branch
+
+    # CI auto-fix bookkeeping (issue #245 plan §2.4, brakes 1-3). A CI-triggered
+    # fix bumps its own counter and the SHA watermark; every human-dispatched
+    # Claude action resets the counter (reset rule 3 — never on a push the
+    # agent itself made, only on a green build or a human command).
+    if kind == "fix" and action.trigger == "ci":
+        queue_patch["ci_attempt_count"] = task.ci_attempt_count + 1
+        queue_patch["ci_last_fixed_sha"] = world.ci.head_sha if world.ci else None
+    else:
+        queue_patch["ci_attempt_count"] = 0
 
     # Update session_id if Claude returned one (skip for review — review
     # uses a throwaway session and should not overwrite the persistent fix session)

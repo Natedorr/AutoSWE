@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from autoswe.commands.parser import parse_slash_command
+from autoswe.core.config import resolve_flag
 from autoswe.core.logging_utils import log
 from autoswe.orch.types import Action, World
 from autoswe.providers.base import NormalizedComment
@@ -593,8 +594,20 @@ def _check_restart_or_guard(
 
 
 # ---------------------------------------------------------------------------
-# CI watch (issue #245 plan §2.3, P3 — status + comment only, no auto-fix)
+# CI watch (issue #245 plan §2.3/§2.4, P4 — auto-fix with four brakes)
 # ---------------------------------------------------------------------------
+
+
+def _ci_max_fix_attempts(cfg: dict, repo_cfg: dict) -> int:
+    """Resolve CI_MAX_FIX_ATTEMPTS: a per-repo override beats cfg (default 2)."""
+    for source in (repo_cfg.get("ci_max_fix_attempts"), cfg.get("CI_MAX_FIX_ATTEMPTS")):
+        if source is None:
+            continue
+        try:
+            return int(source)
+        except (TypeError, ValueError):
+            continue
+    return 2
 
 
 def _decide_ci(world: World) -> Action | None:
@@ -604,14 +617,23 @@ def _decide_ci(world: World) -> Action | None:
     user command always takes precedence; CI is re-consulted next cycle).
     Comments only on a state *change*, per the table in the plan:
 
-    * ``failure``, new head_sha -> park at ``ci_failed`` with the failure text.
-    * ``failure``, same head_sha as last time -> noop (no comment churn).
+    * ``failure``, CI_AUTO_FIX on, budget left, new head_sha -> auto-dispatch
+      a ``/fix`` (``Action(kind="fix", trigger="ci")``) with the CI failure
+      text as guidance (fetched lazily in Layer B — see ``run.py``).
+    * ``failure``, budget exhausted -> ``mark_failed_limit`` (``ci``) parks the
+      task at ``ci_failed`` and asks for a human ``/fix``.
+    * ``failure``, CI_AUTO_FIX off -> the old P3 behaviour: park directly at
+      ``ci_failed`` with the failure text, human ``/fix`` recovers.
+    * ``failure``, already at ``ci_failed`` with the same head_sha -> noop (no
+      comment churn — this is the case decide()'s SHA watermark alone can't
+      cover, since the task no longer eligible for auto-fix once parked).
     * ``pending`` / ``stale`` / ``none`` -> noop.
-    * ``error`` -> one-time warning comment, status untouched.
+    * ``error`` -> one-time warning comment, status untouched. Never treated
+      as a failure — no auto-fix, ever, on an unconsultable signal.
     * ``success`` while at ``ci_failed`` -> clear back to the prior status.
 
-    Never auto-dispatches a fix — that is P4 (CI_AUTO_FIX). Returns None for
-    "nothing to do", the same contract as every other decide() helper.
+    Returns None for "nothing to do", the same contract as every other
+    decide() helper.
     """
     task = world.task
     ci = world.ci
@@ -619,10 +641,56 @@ def _decide_ci(world: World) -> Action | None:
         return None
     if ci.stale or ci.state in ("pending", "none"):
         return None
+
     if ci.state == "failure":
-        if task.status == "ci_failed" and ci.head_sha == task.ci_last_notified_sha:
-            return None  # repeated identical failure — no comment churn
-        return Action(kind="ci_failed", slug=task.slug)
+        if task.status == "ci_failed":
+            # Already parked (auto-fix off, or budget was exhausted). Only a
+            # human command (via the terminal-restart machinery elsewhere)
+            # moves it forward; re-notify only if the sha genuinely changed
+            # without autoSWE's own dispatch having done so (e.g. a manual
+            # force-push while blocked).
+            if ci.head_sha == task.ci_last_notified_sha:
+                return None
+            return Action(kind="ci_failed", slug=task.slug)
+
+        if not resolve_flag("CI_AUTO_FIX", world.cfg, world.repo_cfg, default=True):
+            return Action(kind="ci_failed", slug=task.slug)
+
+        # Brake 2 (SHA watermark): never dispatch twice for the same commit.
+        if ci.head_sha is not None and ci.head_sha == task.ci_last_fixed_sha:
+            return None
+
+        # Brake 1 (separate counter): a CI loop never spends the human /fix
+        # budget (task.attempt_count), only its own ci_attempt_count.
+        max_attempts = _ci_max_fix_attempts(world.cfg, world.repo_cfg)
+        if task.ci_attempt_count >= max_attempts:
+            log(f"[LIMIT] {task.slug} CI auto-fix budget exhausted: "
+                f"ci_attempt_count={task.ci_attempt_count} >= CI_MAX_FIX_ATTEMPTS={max_attempts}")
+            return Action(kind="mark_failed_limit", slug=task.slug, limit_reason="ci")
+
+        # Guidance text is built here from the pure CIStatus already fetched
+        # this cycle (decide() stays I/O-free); get_ci_failures() is fetched
+        # lazily in Layer B only when this fix is actually dispatched.
+        lines = ["CI failed on the pushed branch."]
+        if ci.failing:
+            lines.append("")
+            lines.append("Failing checks:")
+            lines.extend(f"- {name}" for name in ci.failing)
+        if ci.summary:
+            lines.append("")
+            lines.append(ci.summary)
+        guidance = "\n".join(lines)
+        log(f"[DECIDE] {task.slug} CI auto-fix: head_sha={ci.head_sha} "
+            f"ci_attempt={task.ci_attempt_count + 1}/{max_attempts}")
+        return Action(
+            kind="fix",
+            slug=task.slug,
+            plan_branch=task.plan_branch,
+            guidance=guidance,
+            attempt_count=task.attempt_count,
+            trigger="ci",
+        )
+
     if ci.state == "error":
         if task.ci_error_notified and ci.head_sha == task.ci_error_notified_sha:
             return None  # already warned once for this exact commit
