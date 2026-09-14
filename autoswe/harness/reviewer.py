@@ -229,8 +229,10 @@ def run_review(
             output_format=review_output_format,
         )
     except asyncio.TimeoutError:
+        log(f"[REVIEW] {task['id']} timed out during review phase")
         return HandlerResult("FAILED: timeout during review phase")
     except Exception as e:  # State-machine boundary -- any handler failure becomes a FAILED result for emit().
+        log(f"[REVIEW] {task['id']} review error: {e}")
         return HandlerResult(f"FAILED: review error: {e}")
 
     # Backstop: roll back any worktree edits the review session made (issue #166).

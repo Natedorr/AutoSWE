@@ -629,8 +629,13 @@ class CodexBackend:
         # is a no-op for this backend; the anti-runaway guard is the wall-clock
         # timeout applied below (spec.timeout).
 
-        # Append the prompt behind `--` so prompts starting with `-` are safe
-        cmd.extend(["--", spec.prompt])
+        # The prompt is delivered over stdin, not the command line: `codex
+        # exec -` reads the prompt from stdin (docs/codex/non-interactive-mode.md).
+        # Review prompts alone can exceed 37k characters, well past Windows'
+        # ~32k CreateProcess command-line limit — passing spec.prompt as a
+        # trailing argv element made codex fail to launch for any nontrivial
+        # prompt. `_write_stdin` below writes it once the process is spawned.
+        cmd.append("-")
 
         # Build environment
         env = dict(os.environ)
@@ -659,7 +664,10 @@ class CodexBackend:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.DEVNULL,  # Codex waits for stdin EOF before running
+                # The prompt is delivered over stdin (see the `cmd.append("-")`
+                # above), not the command line, so it never hits the OS argv
+                # length limit.
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
@@ -681,6 +689,28 @@ class CodexBackend:
 
         # Accumulator for in-place mutation by _parse_jsonl_line
         acc = _CodexAccumulator()
+
+        async def _write_stdin() -> None:
+            """Write the prompt to codex's stdin and close it.
+
+            Runs CONCURRENTLY with the stdout/stderr readers (in the gather
+            below) — not before them. If the prompt exceeds the stdin pipe
+            buffer, ``drain()`` blocks until codex consumes it; codex may emit
+            startup output on stdout while still reading stdin, so the readers
+            must be running at the same time to avoid a pipe-buffer deadlock.
+            If codex dies before reading, the write raises BrokenPipeError —
+            harmless, since the run is already failing (nonzero exit) and the
+            error path below surfaces codex's stderr, so we swallow it.
+            """
+            stdin = getattr(process, "stdin", None)
+            if stdin is None:
+                return
+            try:
+                stdin.write(spec.prompt.encode("utf-8"))
+                await stdin.drain()
+                stdin.close()
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                log(f"[CODEX] could not write prompt to stdin: {e} — continuing (the run will report the exit code)")
 
         async def read_stderr() -> bytes:
             """Collect stderr output in chunks, bounded by _MAX_STREAM_BYTES.
@@ -775,6 +805,7 @@ class CodexBackend:
                 asyncio.gather(
                     read_stdout_jsonl(),
                     read_stderr(),
+                    _write_stdin(),
                     return_exceptions=False,
                 ),
                 timeout=spec.timeout,

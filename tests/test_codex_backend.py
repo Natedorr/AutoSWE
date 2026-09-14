@@ -140,12 +140,40 @@ class _MockStderrReader:
         return result
 
 
+class _MockStdin:
+    """Fake stdin sink recording the bytes CodexBackend writes to it.
+
+    The backend now delivers the prompt over stdin (not the command line) so
+    a large prompt never hits the OS argv length limit. ``record`` is a
+    callback handed the decoded prompt text once ``drain()`` "flushes" it.
+    """
+
+    def __init__(self, record=None):
+        self._record = record
+        self._buf = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self._buf.extend(data)
+
+    async def drain(self) -> None:
+        if self._record is not None and self._buf:
+            self._record(self._buf.decode("utf-8"))
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _MockProcess:
     """Fake asyncio subprocess process with controllable stdout/stderr.
 
     ``limit`` is the StreamReader limit to hand the stdout reader, mirroring
     the ``limit=`` kwarg the backend passes to ``create_subprocess_exec``.
     ``None`` (default) keeps the reader unbounded (pre-fix mock behaviour).
+
+    ``record_prompt`` is an optional callback wired to the fake stdin sink so
+    tests can assert what the backend wrote there (the prompt is delivered
+    over stdin, not argv — see ``cmd.append("-")`` in codex.py).
     """
 
     def __init__(
@@ -154,10 +182,12 @@ class _MockProcess:
         stderr: str = "",
         returncode: int = 0,
         limit: int | None = None,
+        record_prompt=None,
     ):
         self.returncode = returncode
         self.stdout = _MockStdoutReader(stdout.encode() if stdout else b"", limit=limit)
         self.stderr = _MockStderrReader(stderr.encode() if stderr else b"")
+        self.stdin = _MockStdin(record=record_prompt)
 
     async def wait(self) -> int:
         return self.returncode
@@ -172,8 +202,9 @@ def _mock_create_process(
     stdout: str = "",
     stderr: str = "",
     returncode: int = 0,
+    record_prompt=None,
 ) -> _MockProcess:
-    return _MockProcess(stdout=stdout, stderr=stderr, returncode=returncode)
+    return _MockProcess(stdout=stdout, stderr=stderr, returncode=returncode, record_prompt=record_prompt)
 
 
 def _get_cmd(mock_exec: AsyncMock) -> tuple:
@@ -798,10 +829,10 @@ def test_codex_ignore_user_config_with_api_key():
     assert "gpt-5" in cmd
     assert "-C" in cmd
     assert "/tmp/repo" in cmd
-    # Prompt should be after -- separator
-    assert "--" in cmd
-    dash_idx = cmd.index("--")
-    assert cmd[dash_idx + 1] == "Fix bug"
+    # Prompt is delivered over stdin now, not argv — the trailing arg is the
+    # `-` marker telling codex to read the prompt from stdin.
+    assert cmd[-1] == "-"
+    assert "Fix bug" not in cmd
 
 
 def test_codex_read_only_mode_no_sandbox(monkeypatch):
@@ -930,7 +961,8 @@ def test_codex_resume_no_sandbox_or_cd(monkeypatch):
 
 
 def test_codex_prompt_starts_with_dash():
-    """Prompt starting with - must be protected by -- separator."""
+    """A prompt starting with - is safe because it never touches argv at all
+    (delivered over stdin) — only the literal `-` stdin marker is appended."""
     backend = CodexBackend()
     spec = RunSpec(model="gpt-5.6-terra",
 
@@ -940,10 +972,37 @@ def test_codex_prompt_starts_with_dash():
     )
 
     cmd = _get_cmd(asyncio.run(_async_cmd_test(backend, spec)()))
-    dash_idx = cmd.index("--")
-    assert cmd[dash_idx + 1] == "-Fix the bug"
-    # The prompt must be the last element
-    assert cmd[-1] == "-Fix the bug"
+    # The prompt marker must be the last element; the prompt text itself is
+    # never on the command line.
+    assert cmd[-1] == "-"
+    assert "-Fix the bug" not in cmd
+
+
+def test_codex_prompt_delivered_over_stdin_not_argv():
+    """A large prompt (well over Windows' ~32k CreateProcess argv limit) is
+    written to stdin, never appended to argv (issue: review prompts >37k
+    chars made `codex exec` fail to launch when the prompt was on argv)."""
+    backend = CodexBackend()
+    big_prompt = "A" * 45_000
+    spec = RunSpec(model="gpt-5.6-terra", prompt=big_prompt, cwd="/tmp/repo", mode="read_write")
+
+    written = {}
+
+    def _record(text):
+        written["prompt"] = text
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=_mock_create_process(
+            stdout=_make_success_jsonl(), record_prompt=_record,
+        ))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await _run_backend(backend, spec)
+        return mock_exec
+
+    cmd = _get_cmd(asyncio.run(_run()))
+    assert cmd[-1] == "-"
+    assert all(big_prompt not in str(arg) for arg in cmd)
+    assert written.get("prompt") == big_prompt
 
 
 def test_codex_error_returncode():
@@ -1003,6 +1062,10 @@ def test_codex_timeout():
     mock_process.stdout.readline = blocking_read
     mock_process.stderr = Mock()
     mock_process.stderr.read = AsyncMock(return_value=b"")
+    mock_process.stdin = Mock()
+    mock_process.stdin.write = Mock()
+    mock_process.stdin.drain = AsyncMock(return_value=None)
+    mock_process.stdin.close = Mock()
 
     async def _run():
         mock_exec = AsyncMock(return_value=mock_process)
@@ -1648,7 +1711,7 @@ def test_codex_last_message_fallback_when_file_empty(tmp_path):
 
 
 def test_codex_output_last_message_flag_fresh():
-    """Fresh exec emits --output-last-message <path> before the -- separator."""
+    """Fresh exec emits --output-last-message <path> before the `-` stdin marker."""
     backend = CodexBackend()
     spec = RunSpec(model="gpt-5.6-terra", prompt="Fix", cwd="/tmp", mode="read_write")
 
@@ -1663,8 +1726,8 @@ def test_codex_output_last_message_flag_fresh():
     assert "--output-last-message" in cmd
     idx = cmd.index("--output-last-message")
     assert cmd[idx + 1] == "/tmp/codex-lastmsg-xyz.txt"
-    # Flag must come before the `--` prompt separator (a global CLI flag).
-    assert idx < cmd.index("--")
+    # Flag must come before the trailing `-` stdin marker (a global CLI flag).
+    assert idx < cmd.index("-")
 
 
 def test_codex_output_last_message_flag_resume():

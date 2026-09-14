@@ -694,6 +694,23 @@ def emit(
     #   * Blocked          -> "review_blocked"  (non-terminal, /pr blocked)
     # Keep not clearing plan_file_path/session_id so a later /fix still has the plan.
     if kind == "review":
+        if new_status == "failed":
+            # The review handler raised/timed out (e.g. reviewer.py's
+            # asyncio.TimeoutError / Exception branches) — done_content is
+            # "FAILED: ..." rather than "REVIEW_READY\t...". Render this the
+            # same way every other handler's FAILED result is rendered
+            # (lines below, `elif new_status == "failed":`) instead of
+            # falling into the REVIEW_READY formatting, which would produce
+            # a near-blank "## Review" comment with no failure reason.
+            reason = done[7:].strip() if done.startswith("FAILED:") else done
+            fail_msg = f"Failed: {reason}\n\nPost `/retry` to continue.{BOT_MARKER}"
+            queue_patch["session_id"] = None
+            queue_patch["rereview_after_fix"] = False
+            return (
+                Effect(kind="post_comment", body=fail_msg),
+                Effect(kind="set_status", status="failed"),
+                Effect(kind="patch_queue", queue_patch=queue_patch),
+            )
         review_text = done[len("REVIEW_READY\t"):] if done.startswith("REVIEW_READY\t") else ""
         if new_status == "review_blocked":
             gate_note = (

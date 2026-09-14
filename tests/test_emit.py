@@ -649,6 +649,49 @@ def test_review_success_does_not_set_last_good_session_id():
     assert patch.get("session_id") is None
 
 
+def test_review_failed_renders_explicit_failure_not_blank_review():
+    """A FAILED review result (reviewer.py raised/timed out) must render as an
+    explicit failure comment, not a near-blank '## Review' section.
+
+    Before the fix, the `kind == "review"` branch in emit() ran unconditionally
+    and only knew how to format REVIEW_READY text — a `FAILED: ...` done_content
+    fell through to an empty review_text/gate_note, producing a content-less
+    '## Review' comment that hid the actual error from the user."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "plan_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="review",
+        slug=world.task.slug,
+        plan_branch=world.task.plan_branch,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="FAILED: review error: codex executable not found on PATH",
+        cost_usd=None,
+        duration_seconds=5.0,
+        session_id=None,
+    )
+
+    effects = emit(action, result, world)
+
+    comments = [e for e in effects if e.kind == "post_comment"]
+    assert comments, "a failed review must post a comment"
+    body = comments[0].body
+    assert "## Review" not in body
+    assert "Failed:" in body
+    assert "codex executable not found on PATH" in body
+
+    statuses = [e for e in effects if e.kind == "set_status"]
+    assert statuses and statuses[0].status == "failed"
+
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "a failed review must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("session_id") is None
+
+
 def test_sync_branch_does_not_clobber_checkpoint_backend():
     """A non-failed sync run that carries a session_id must NOT touch the
     last-known-good checkpoint. Before the fix, sync_branch (phase unresolvable)
