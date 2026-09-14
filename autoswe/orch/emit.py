@@ -425,6 +425,12 @@ def emit(
                     "ci_failed_from_status": pre_status,
                     "ci_last_notified_sha": ci.head_sha if ci else None,
                     "ci_error_notified": False,
+                    "ci_error_notified_sha": None,
+                    # Mirrors _field_lifecycle_patch's clearing for every other
+                    # entry into SHIPPING_BLOCKING_STATUSES (test_failed etc.):
+                    # the next /fix should get a fresh MAX_TOTAL_HOURS clock,
+                    # not one still counting from a stale earlier dispatch.
+                    "first_dispatched_at": None,
                 },
             ),
         )
@@ -444,6 +450,7 @@ def emit(
                     "ci_failed_from_status": None,
                     "ci_last_notified_sha": None,
                     "ci_error_notified": False,
+                    "ci_error_notified_sha": None,
                 },
             ),
         )
@@ -468,7 +475,11 @@ def emit(
             Effect(kind="set_status", status=task.status),
             Effect(
                 kind="patch_queue",
-                queue_patch={"autoswe_status": task.status, "ci_error_notified": True},
+                queue_patch={
+                    "autoswe_status": task.status,
+                    "ci_error_notified": True,
+                    "ci_error_notified_sha": ci.head_sha if ci else None,
+                },
             ),
         )
 

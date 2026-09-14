@@ -312,6 +312,7 @@ def _dispatch_task(
         running = running_status_for(
             action.kind,
             task_entry.get("resume_phase") or task_entry.get("last_phase"),
+            task_entry.get("autoswe_status"),
         )
         try:
             tracker.set_status(issue_num, f"autoswe:{running}")

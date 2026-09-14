@@ -93,14 +93,21 @@ _CMD_TO_KIND = {
 }
 
 
-def running_status_for(kind: str, last_phase: str | None = None) -> str:
+def running_status_for(
+    kind: str, last_phase: str | None = None, current_status: str | None = None
+) -> str:
     """Return the RUNNING status for an action kind.
 
     For ``retry`` the status depends on ``last_phase`` (plan→planning, fix→fixing).
+    Pure bookkeeping kinds (skip/abort/ci_failed/ci_recovered/ci_error_warn/etc.)
+    have no dedicated RUNNING verb and no backend call to gate on — they fall
+    back to ``current_status`` (the task isn't visibly changing state) instead
+    of the misleading hardcoded "fixing", so a failed corrective effect leaves
+    the label at the task's real status rather than stuck mid-transition.
     """
     if kind == "retry" and last_phase == "plan":
         return "planning"
-    return _KIND_TO_RUNNING.get(kind, "fixing")
+    return _KIND_TO_RUNNING.get(kind, current_status or "fixing")
 
 
 def completed_status_for(kind: str) -> str:

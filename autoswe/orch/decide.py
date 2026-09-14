@@ -620,12 +620,12 @@ def _decide_ci(world: World) -> Action | None:
     if ci.stale or ci.state in ("pending", "none"):
         return None
     if ci.state == "failure":
-        if ci.head_sha and ci.head_sha == task.ci_last_notified_sha:
+        if task.status == "ci_failed" and ci.head_sha == task.ci_last_notified_sha:
             return None  # repeated identical failure — no comment churn
         return Action(kind="ci_failed", slug=task.slug)
     if ci.state == "error":
-        if task.ci_error_notified:
-            return None  # already warned once for this error streak
+        if task.ci_error_notified and ci.head_sha == task.ci_error_notified_sha:
+            return None  # already warned once for this exact commit
         return Action(kind="ci_error_warn", slug=task.slug)
     if ci.state == "success" and task.status == "ci_failed":
         return Action(kind="ci_recovered", slug=task.slug)

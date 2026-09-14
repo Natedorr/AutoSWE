@@ -89,6 +89,7 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("ci_failed_from_status", "ci_failed_from_status", None),
     TaskField("ci_last_notified_sha", "ci_last_notified_sha", None),
     TaskField("ci_error_notified", "ci_error_notified", False),
+    TaskField("ci_error_notified_sha", "ci_error_notified_sha", None),
 )
 
 
@@ -216,10 +217,13 @@ class TaskState:
     # recovery. ci_last_notified_sha is the head_sha of the last failure
     # already surfaced as a comment, so an unchanged red build doesn't churn
     # a comment every poll. ci_error_notified is a one-time flag for the
-    # "CI could not be consulted" warning, so an error streak comments once.
+    # "CI could not be consulted" warning, so an error streak comments once;
+    # ci_error_notified_sha is the head_sha (possibly None) that flag was
+    # raised for, so a new push during a persistent error streak still warns.
     ci_failed_from_status: str | None = None
     ci_last_notified_sha: str | None = None
     ci_error_notified: bool = False
+    ci_error_notified_sha: str | None = None
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:
