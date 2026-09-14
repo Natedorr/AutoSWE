@@ -21,7 +21,9 @@
       "autoswe_status": "ci_failed",
       "ci_failed_from_status": "fixed",
       "ci_last_notified_sha": "abc1234",
-      "ci_error_notified": false
+      "ci_error_notified": false,
+      "ci_error_notified_sha": null,
+      "first_dispatched_at": null
     }
   }
 ]

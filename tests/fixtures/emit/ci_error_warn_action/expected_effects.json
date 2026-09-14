@@ -16,7 +16,8 @@
     "kind": "patch_queue",
     "patch_contains": {
       "autoswe_status": "fixed",
-      "ci_error_notified": true
+      "ci_error_notified": true,
+      "ci_error_notified_sha": "abc1234"
     }
   }
 ]

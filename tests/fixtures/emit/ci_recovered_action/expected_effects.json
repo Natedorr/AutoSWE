@@ -17,7 +17,8 @@
       "autoswe_status": "fixed",
       "ci_failed_from_status": null,
       "ci_last_notified_sha": null,
-      "ci_error_notified": false
+      "ci_error_notified": false,
+      "ci_error_notified_sha": null
     }
   }
 ]

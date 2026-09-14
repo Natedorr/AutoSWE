@@ -11,6 +11,7 @@ from autoswe.tracking.labels import (
     _set_autoswe_status,
     _validate_status,
     completed_status_for,
+    running_status_for,
 )
 from tests.conftest import load_fixture
 
@@ -235,3 +236,29 @@ def test_set_autoswe_status_accepts_ci_failed(
 
     new_labels = put_calls[0]["labels"]
     assert new_labels == ["autoswe:ci_failed"]
+
+
+# ---------------------------------------------------------------------------
+# running_status_for fallback for pure bookkeeping kinds (issue #245 plan §2.3)
+# ---------------------------------------------------------------------------
+
+
+def test_running_status_for_falls_back_to_current_status():
+    """A kind with no RUNNING verb (skip/abort/ci_failed/etc.) should use the
+    task's current status as the transient label, not a hardcoded 'fixing' —
+    so a failed corrective set_status effect leaves the label truthful
+    instead of stuck mid-transition."""
+    assert running_status_for("ci_failed", current_status="fixed") == "fixed"
+    assert running_status_for("ci_error_warn", current_status="ci_failed") == "ci_failed"
+    assert running_status_for("skip", current_status="planned") == "planned"
+
+
+def test_running_status_for_defaults_to_fixing_without_current_status():
+    """Backward-compatible default when no current_status is supplied."""
+    assert running_status_for("ci_failed") == "fixing"
+
+
+def test_running_status_for_known_kinds_ignore_current_status():
+    """Kinds with a dedicated RUNNING verb use it regardless of current_status."""
+    assert running_status_for("fix", current_status="planned") == "fixing"
+    assert running_status_for("plan", current_status="fixed") == "planning"
