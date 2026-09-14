@@ -35,8 +35,8 @@
     "last_consumed_reply_id": 1,
     "welcome_comment_id": null,
     "bot_comment_ids": [1],
-    "ci_attempt_count": 1,
-    "ci_last_fixed_sha": "some-older-sha"
+    "gate_attempt_count": 1,
+    "gate_last_fixed_sha": "some-older-sha"
   },
   "ci": {
     "state": "failure",
@@ -45,6 +45,6 @@
     "url": "https://github.com/owner/repo/actions/runs/1",
     "summary": "1 check(s) failing: build"
   },
-  "cfg": {"CI_MAX_FIX_ATTEMPTS": 5},
-  "repo_cfg": {"ci_max_fix_attempts": 1}
+  "cfg": {"GATE_MAX_FIX_ATTEMPTS": 5},
+  "repo_cfg": {"gate_max_fix_attempts": 1}
 }

@@ -1,6 +1,6 @@
 # Unified Plan — Complete Cross-Linkage + CI Feedback Loop
 
-**Status:** proposal / implementation plan. **Date:** 2026-09-09. **Branch:** `pi`.
+**Status:** implemented (P0-P5 all landed; P5 closes the workstream). **Date:** 2026-09-09. **Branch:** `pi`.
 **Inputs:** [review-github-provider.md](review-github-provider.md),
 [review-azure-provider.md](review-azure-provider.md),
 [../github-api/issue-pr-linking-and-ci.md](../github-api/issue-pr-linking-and-ci.md),
@@ -365,7 +365,7 @@ Each phase is independently shippable, green-bar, and useful on its own.
 | **P2** | `read_ci` + `World.ci` + throttle + `ci_last_checked`; **no decisions taken** — `/sync` and `queue status` merely report CI | Very low — read-only |
 | **P3** | `ci_failed` status + label + `SHIPPING_BLOCKING_STATUSES`; comments; human `/fix` recovery | Medium — new status touches decide / emit / labels / queue |
 | **P4** ✅ | `CI_AUTO_FIX`: auto-dispatch, budget, SHA watermark, `get_ci_failures` → prompt | Medium-high — spends agent runs. Ships **on**; the brakes in §2.4 are what make that safe — all four are tested (decide fixtures for budget-exhausted, same-SHA, and both the global and per-repo `CI_AUTO_FIX`/`CI_MAX_FIX_ATTEMPTS` overrides; transition rows for auto-fix-dispatches and budget-exhausted) |
-| **P5** | Gate unification (§2.5); `pr_deferred` auto-resume (§2.6) | Low |
+| **P5** ✅ | Gate unification (§2.5); `pr_deferred` auto-resume (§2.6) | Low |
 
 ---
 

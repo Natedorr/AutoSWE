@@ -1355,26 +1355,26 @@ def test_ci_poll_interval_sec_env_override(isolated_autoswe_dir):
     assert load_config()["CI_POLL_INTERVAL_SEC"] == 45
 
 
-def test_ci_auto_fix_defaults_true(isolated_autoswe_dir):
+def test_auto_fix_on_gate_failure_defaults_true(isolated_autoswe_dir):
     from autoswe.core.config import load_config
-    assert load_config()["CI_AUTO_FIX"] is True
+    assert load_config()["AUTO_FIX_ON_GATE_FAILURE"] is True
 
 
-def test_ci_auto_fix_env_override(isolated_autoswe_dir):
+def test_auto_fix_on_gate_failure_env_override(isolated_autoswe_dir):
     from autoswe.core.config import CONFIG_FILE, load_config
-    CONFIG_FILE.write_text("CI_AUTO_FIX=false\n", encoding="utf-8")
-    assert load_config()["CI_AUTO_FIX"] is False
+    CONFIG_FILE.write_text("AUTO_FIX_ON_GATE_FAILURE=false\n", encoding="utf-8")
+    assert load_config()["AUTO_FIX_ON_GATE_FAILURE"] is False
 
 
-def test_ci_max_fix_attempts_defaults_2(isolated_autoswe_dir):
+def test_gate_max_fix_attempts_defaults_2(isolated_autoswe_dir):
     from autoswe.core.config import load_config
-    assert load_config()["CI_MAX_FIX_ATTEMPTS"] == 2
+    assert load_config()["GATE_MAX_FIX_ATTEMPTS"] == 2
 
 
-def test_ci_max_fix_attempts_env_override(isolated_autoswe_dir):
+def test_gate_max_fix_attempts_env_override(isolated_autoswe_dir):
     from autoswe.core.config import CONFIG_FILE, load_config
-    CONFIG_FILE.write_text("CI_MAX_FIX_ATTEMPTS=5\n", encoding="utf-8")
-    assert load_config()["CI_MAX_FIX_ATTEMPTS"] == 5
+    CONFIG_FILE.write_text("GATE_MAX_FIX_ATTEMPTS=5\n", encoding="utf-8")
+    assert load_config()["GATE_MAX_FIX_ATTEMPTS"] == 5
 
 
 def test_ci_log_max_chars_defaults_4000(isolated_autoswe_dir):

@@ -315,12 +315,13 @@ def emit(
 
     if kind == "mark_failed_limit":
         if action.limit_reason == "ci":
-            # CI auto-fix budget exhausted (issue #245 plan §2.3/§2.4, brake 1)
+            # CI auto-fix budget exhausted (issue #245 plan §2.3-§2.5, brake 1)
             # — park at ci_failed rather than failed: this is the remote
             # twin of test_failed, non-terminal and recovered by a human
             # /fix (not /retry, which would just re-arm the same auto-fix
             # loop). guard_blocked stays False so /fix isn't refused.
-            max_attempts = cfg.get("CI_MAX_FIX_ATTEMPTS", 2)
+            from autoswe.orch.gate_policy import gate_max_fix_attempts
+            max_attempts = gate_max_fix_attempts(cfg, world.repo_cfg)
             ci = world.ci
             pre_status = task.ci_failed_from_status if task.status == "ci_failed" else task.status
             msg = (
@@ -336,6 +337,31 @@ def emit(
                         "autoswe_status": "ci_failed",
                         "ci_failed_from_status": pre_status,
                         "ci_last_notified_sha": ci.head_sha if ci else None,
+                        "first_dispatched_at": None,
+                        "pending_command": None,
+                    },
+                ),
+            )
+        if action.limit_reason == "gate":
+            # Local test-gate auto-fix budget exhausted (issue #245 §2.5) —
+            # the task is already parked at test_failed; post a one-time
+            # notice (test_gate_limit_notified) so it doesn't repeat every
+            # poll, and leave recovery to a human /fix (not /retry, which
+            # would just re-arm the same auto-fix loop).
+            from autoswe.orch.gate_policy import gate_max_fix_attempts
+            max_attempts = gate_max_fix_attempts(cfg, world.repo_cfg)
+            msg = (
+                f"Test gate auto-fix budget ({max_attempts} attempt(s)) exhausted for this commit. "
+                f"Post `/fix` to continue manually.{BOT_MARKER}"
+            )
+            return (
+                Effect(kind="post_comment", body=msg),
+                Effect(kind="set_status", status="test_failed"),
+                Effect(
+                    kind="patch_queue",
+                    queue_patch={
+                        "autoswe_status": "test_failed",
+                        "test_gate_limit_notified": True,
                         "first_dispatched_at": None,
                         "pending_command": None,
                     },
@@ -478,12 +504,45 @@ def emit(
                     "ci_last_notified_sha": None,
                     "ci_error_notified": False,
                     "ci_error_notified_sha": None,
-                    # Green build — reset rule 3: the CI auto-fix budget and
-                    # SHA watermark both clear so the next red build (a fresh
-                    # regression, not the one just fixed) gets a full budget.
-                    "ci_attempt_count": 0,
-                    "ci_last_fixed_sha": None,
+                    # Green build — reset rule 3: the shared gate-recovery
+                    # counter and per-commit watermark both clear so the next
+                    # red build (a fresh regression, not the one just fixed)
+                    # gets a full budget.
+                    "gate_attempt_count": 0,
+                    "gate_last_fixed_sha": None,
                 },
+            ),
+        )
+
+    if kind == "retry_deferred_pr":
+        # Green CI observed while a create_pr effect was deferred (issue #245
+        # §2.6) — re-emit create_pr; the existing idempotency guard
+        # (find_existing_pr) makes the re-emit safe even if a human already
+        # posted /pr in the meantime. pr_head/pr_base are recomputed exactly
+        # as the original auto-create-PR-after-fix path did.
+        pr_head = _resolve_branch(task.owner, task.repo, task.issue_number, None, task.provider)
+        pr_base = task.base_branch
+        body_parts = [f"Fixes #{task.issue_number}"]
+        issue_body = task.body or ""
+        fix_summary = task.fix_summary or ""
+        if issue_body:
+            body_parts.append(f"**Issue:**\n\n{issue_body}")
+        if fix_summary:
+            body_parts.append(f"**Fix Summary:**\n\n{fix_summary}")
+        body_parts.append("\nOpened by autoSWE.")
+        pr_body = "\n\n".join(body_parts)
+        return (
+            # Clear the flag before re-attempting: if the create_pr effect
+            # below defers again (a flapping build going pending/red between
+            # the observation above and the actual API call), its own
+            # deferred path re-sets pr_deferred — this order lets that stick.
+            Effect(kind="patch_queue", queue_patch={"pr_deferred": False}),
+            Effect(
+                kind="create_pr",
+                pr_title=f"Fixes #{task.issue_number}: {task.title}",
+                pr_body=pr_body,
+                pr_head=pr_head,
+                pr_base=pr_base,
             ),
         )
 
@@ -546,15 +605,16 @@ def emit(
     replayed_phase = _COMMAND_TO_PHASE.get(replayed_command) if replayed_command else None
 
     log(f"[EMIT] {task.slug} status {old_status}->{new_status} attempt={action.attempt_count}")
-    # A CI-triggered fix has no triggering comment (decide()'s auto-fix branch
-    # never scanned comments), so it must NOT touch the dispatch/reply
-    # watermarks — action.triggering_comment_id is None here, and writing that
-    # through would regress last_dispatched_command_id / last_consumed_reply_id
-    # to 0, letting an already-handled slash command re-match as "new" on the
-    # next poll (issue #245 plan §2.4).
-    ci_triggered = kind == "fix" and action.trigger == "ci"
-    dispatch_command_id = task.last_dispatched_command_id if ci_triggered else action.triggering_comment_id
-    consumed_reply_id = task.last_consumed_reply_id if ci_triggered else action.triggering_comment_id
+    # A gate-triggered fix (CI or the local test gate) has no triggering
+    # comment (decide()'s auto-fix branches never scanned comments), so it
+    # must NOT touch the dispatch/reply watermarks — action.triggering_comment_id
+    # is None here, and writing that through would regress
+    # last_dispatched_command_id / last_consumed_reply_id to 0, letting an
+    # already-handled slash command re-match as "new" on the next poll
+    # (issue #245 plan §2.4/§2.5).
+    gate_triggered = kind == "fix" and action.trigger in ("ci", "gate")
+    dispatch_command_id = task.last_dispatched_command_id if gate_triggered else action.triggering_comment_id
+    consumed_reply_id = task.last_consumed_reply_id if gate_triggered else action.triggering_comment_id
     queue_patch = {
         "autoswe_status": new_status,
         "last_dispatched_command": pending_command,
@@ -571,15 +631,21 @@ def emit(
     if action.plan_branch:
         queue_patch["plan_branch"] = action.plan_branch
 
-    # CI auto-fix bookkeeping (issue #245 plan §2.4, brakes 1-3). A CI-triggered
-    # fix bumps its own counter and the SHA watermark; every human-dispatched
-    # Claude action resets the counter (reset rule 3 — never on a push the
-    # agent itself made, only on a green build or a human command).
-    if kind == "fix" and action.trigger == "ci":
-        queue_patch["ci_attempt_count"] = task.ci_attempt_count + 1
-        queue_patch["ci_last_fixed_sha"] = world.ci.head_sha if world.ci else None
+    # Shared recoverable-gate bookkeeping (issue #245 §2.5, brakes 1-3). A
+    # gate-triggered fix (CI or the local test gate) bumps the shared counter
+    # and per-commit watermark; every human-dispatched Claude action resets
+    # the counter (reset rule 3 — never on a push the agent itself made, only
+    # on a green signal or a human command) and clears the test-gate
+    # exhaustion notice so a fresh cycle can notify again if it recurs.
+    if kind == "fix" and action.trigger in ("ci", "gate"):
+        queue_patch["gate_attempt_count"] = task.gate_attempt_count + 1
+        if action.trigger == "ci":
+            queue_patch["gate_last_fixed_sha"] = world.ci.head_sha if world.ci else None
+        else:
+            queue_patch["gate_last_fixed_sha"] = task.test_failed_sha
     else:
-        queue_patch["ci_attempt_count"] = 0
+        queue_patch["gate_attempt_count"] = 0
+        queue_patch["test_gate_limit_notified"] = False
 
     # Update session_id if Claude returned one (skip for review — review
     # uses a throwaway session and should not overwrite the persistent fix session)
@@ -791,6 +857,11 @@ def emit(
         effects.append(Effect(kind="set_status", status="test_failed"))
         # No pending re-review — the gate, not the reviewer, produced this state.
         queue_patch["rereview_after_fix"] = False
+        # Shared gate policy bookkeeping (issue #245 §2.5): persist the
+        # failing commit + failure text so _decide_test_gate can auto-fix on
+        # the next poll without re-running anything.
+        queue_patch["test_failed_sha"] = commit_sha
+        queue_patch["test_failure_detail"] = detail
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 
     elif new_status == "aborted":

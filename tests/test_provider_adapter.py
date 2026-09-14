@@ -416,7 +416,7 @@ def _queue_with_entry(provider: str, slug: str) -> dict:
 
 
 def _run_create_pr_ci(provider: str, ci_state, cfg):
-    """Drive a create_pr through the CI gate; returns (vcs, tracker)."""
+    """Drive a create_pr through the CI gate; returns (vcs, tracker, queue, slug)."""
     tracker = MagicMock()
     vcs = MagicMock()
     vcs.find_existing_pr.return_value = None
@@ -425,24 +425,28 @@ def _run_create_pr_ci(provider: str, ci_state, cfg):
     queue = _queue_with_entry(provider, slug)
     with patch("autoswe.providers.adapter.get_vcs", return_value=vcs):
         _run_apply(provider, tracker, _create_pr_effect(), queue, 1, slug, cfg)
-    return vcs, tracker
+    return vcs, tracker, queue, slug
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_apply_effect_create_pr_deferred_when_ci_pending(provider):
     """CI pending -> PR creation deferred, deferral comment posted instead."""
-    vcs, tracker = _run_create_pr_ci(provider, "pending", {"PR_REQUIRE_CI": True})
+    vcs, tracker, queue, slug = _run_create_pr_ci(provider, "pending", {"PR_REQUIRE_CI": True})
     vcs.open_pull_request.assert_not_called()
     tracker.post_comment.assert_called_once()
     assert "deferred" in tracker.post_comment.call_args[0][1].lower()
+    # issue #245 §2.6: pr_deferred is recorded instead of asking for /pr again.
+    assert queue[slug]["pr_deferred"] is True
+    assert "Post `/pr` when ready" not in tracker.post_comment.call_args[0][1]
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_apply_effect_create_pr_deferred_when_ci_failing(provider):
     """CI failing -> PR creation deferred."""
-    vcs, tracker = _run_create_pr_ci(provider, "failure", {"PR_REQUIRE_CI": True})
+    vcs, tracker, queue, slug = _run_create_pr_ci(provider, "failure", {"PR_REQUIRE_CI": True})
     vcs.open_pull_request.assert_not_called()
     tracker.post_comment.assert_called_once()
+    assert queue[slug]["pr_deferred"] is True
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
@@ -452,31 +456,33 @@ def test_apply_effect_create_pr_deferred_when_ci_error(provider):
     Fail-safe: the default PR_CI_ERROR_POLICY=block refuses to open a PR when
     the CI status could not be read.
     """
-    vcs, tracker = _run_create_pr_ci(provider, "error", {"PR_REQUIRE_CI": True})
+    vcs, tracker, queue, slug = _run_create_pr_ci(provider, "error", {"PR_REQUIRE_CI": True})
     vcs.open_pull_request.assert_not_called()
     tracker.post_comment.assert_called_once()
     assert "PR_CI_ERROR_POLICY=block" in tracker.post_comment.call_args[0][1]
+    assert queue[slug]["pr_deferred"] is True
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_apply_effect_create_pr_proceeds_when_ci_success(provider):
     """CI success -> PR created as normal."""
-    vcs, tracker = _run_create_pr_ci(provider, "success", {"PR_REQUIRE_CI": True})
+    vcs, tracker, queue, slug = _run_create_pr_ci(provider, "success", {"PR_REQUIRE_CI": True})
     vcs.open_pull_request.assert_called_once()
     tracker.post_comment.assert_not_called()
+    assert "pr_deferred" not in queue[slug]
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_apply_effect_create_pr_proceeds_when_no_ci_configured(provider):
     """CI state 'none' (no checks configured) -> treated as pass, PR created."""
-    vcs, tracker = _run_create_pr_ci(provider, "none", {"PR_REQUIRE_CI": True})
+    vcs, tracker, queue, slug = _run_create_pr_ci(provider, "none", {"PR_REQUIRE_CI": True})
     vcs.open_pull_request.assert_called_once()
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_apply_effect_create_pr_ci_gate_disabled_ignores_failure(provider):
     """PR_REQUIRE_CI=False -> CI failure does not block PR creation."""
-    vcs, tracker = _run_create_pr_ci(provider, "failure", {"PR_REQUIRE_CI": False})
+    vcs, tracker, queue, slug = _run_create_pr_ci(provider, "failure", {"PR_REQUIRE_CI": False})
     vcs.open_pull_request.assert_called_once()
 
 

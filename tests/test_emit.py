@@ -111,8 +111,12 @@ def _load_world(data: dict) -> World:
         ci_last_notified_sha=task_data.get("ci_last_notified_sha"),
         ci_error_notified=task_data.get("ci_error_notified", False),
         ci_error_notified_sha=task_data.get("ci_error_notified_sha"),
-        ci_attempt_count=task_data.get("ci_attempt_count", 0),
-        ci_last_fixed_sha=task_data.get("ci_last_fixed_sha"),
+        gate_attempt_count=task_data.get("gate_attempt_count", task_data.get("ci_attempt_count", 0)),
+        gate_last_fixed_sha=task_data.get("gate_last_fixed_sha", task_data.get("ci_last_fixed_sha")),
+        test_failed_sha=task_data.get("test_failed_sha"),
+        test_failure_detail=task_data.get("test_failure_detail"),
+        test_gate_limit_notified=task_data.get("test_gate_limit_notified", False),
+        pr_deferred=task_data.get("pr_deferred", False),
     )
 
     cfg = _default_cfg()

@@ -35,8 +35,8 @@
     "last_consumed_reply_id": 1,
     "welcome_comment_id": null,
     "bot_comment_ids": [1],
-    "ci_attempt_count": 1,
-    "ci_last_fixed_sha": "abc1234"
+    "gate_attempt_count": 1,
+    "gate_last_fixed_sha": "abc1234"
   },
   "ci": {
     "state": "failure",

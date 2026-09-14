@@ -1,0 +1,14 @@
+[
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "pr_deferred": false
+    }
+  },
+  {
+    "kind": "create_pr",
+    "pr_title": "Fixes #5: PR deferred issue",
+    "pr_head": "autoswe/issue-5",
+    "pr_base": "main"
+  }
+]

@@ -11,8 +11,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from autoswe.commands.parser import parse_slash_command
-from autoswe.core.config import resolve_flag
 from autoswe.core.logging_utils import log
+from autoswe.orch.gate_policy import (
+    auto_fix_on_gate_failure,
+    build_gate_guidance,
+    gate_max_fix_attempts,
+)
 from autoswe.orch.types import Action, World
 from autoswe.providers.base import NormalizedComment
 from autoswe.tracking.comments import (
@@ -594,20 +598,8 @@ def _check_restart_or_guard(
 
 
 # ---------------------------------------------------------------------------
-# CI watch (issue #245 plan §2.3/§2.4, P4 — auto-fix with four brakes)
+# CI watch (issue #245 plan §2.3-§2.5 — auto-fix on the shared gate policy)
 # ---------------------------------------------------------------------------
-
-
-def _ci_max_fix_attempts(cfg: dict, repo_cfg: dict) -> int:
-    """Resolve CI_MAX_FIX_ATTEMPTS: a per-repo override beats cfg (default 2)."""
-    for source in (repo_cfg.get("ci_max_fix_attempts"), cfg.get("CI_MAX_FIX_ATTEMPTS")):
-        if source is None:
-            continue
-        try:
-            return int(source)
-        except (TypeError, ValueError):
-            continue
-    return 2
 
 
 def _decide_ci(world: World) -> Action | None:
@@ -617,13 +609,13 @@ def _decide_ci(world: World) -> Action | None:
     user command always takes precedence; CI is re-consulted next cycle).
     Comments only on a state *change*, per the table in the plan:
 
-    * ``failure``, CI_AUTO_FIX on, budget left, new head_sha -> auto-dispatch
-      a ``/fix`` (``Action(kind="fix", trigger="ci")``) with the CI failure
-      text as guidance (fetched lazily in Layer B — see ``run.py``).
+    * ``failure``, AUTO_FIX_ON_GATE_FAILURE on, budget left, new head_sha ->
+      auto-dispatch a ``/fix`` (``Action(kind="fix", trigger="ci")``) with the
+      CI failure text as guidance (fetched lazily in Layer B — see ``run.py``).
     * ``failure``, budget exhausted -> ``mark_failed_limit`` (``ci``) parks the
       task at ``ci_failed`` and asks for a human ``/fix``.
-    * ``failure``, CI_AUTO_FIX off -> the old P3 behaviour: park directly at
-      ``ci_failed`` with the failure text, human ``/fix`` recovers.
+    * ``failure``, AUTO_FIX_ON_GATE_FAILURE off -> the old P3 behaviour: park
+      directly at ``ci_failed`` with the failure text, human ``/fix`` recovers.
     * ``failure``, already at ``ci_failed`` with the same head_sha -> noop (no
       comment churn — this is the case decide()'s SHA watermark alone can't
       cover, since the task no longer eligible for auto-fix once parked).
@@ -631,6 +623,8 @@ def _decide_ci(world: World) -> Action | None:
     * ``error`` -> one-time warning comment, status untouched. Never treated
       as a failure — no auto-fix, ever, on an unconsultable signal.
     * ``success`` while at ``ci_failed`` -> clear back to the prior status.
+    * ``success`` while ``task.pr_deferred`` -> re-emit the deferred
+      ``create_pr`` effect (issue #245 §2.6).
 
     Returns None for "nothing to do", the same contract as every other
     decide() helper.
@@ -653,35 +647,29 @@ def _decide_ci(world: World) -> Action | None:
                 return None
             return Action(kind="ci_failed", slug=task.slug)
 
-        if not resolve_flag("CI_AUTO_FIX", world.cfg, world.repo_cfg, default=True):
+        if not auto_fix_on_gate_failure(world.cfg, world.repo_cfg):
             return Action(kind="ci_failed", slug=task.slug)
 
-        # Brake 2 (SHA watermark): never dispatch twice for the same commit.
-        if ci.head_sha is not None and ci.head_sha == task.ci_last_fixed_sha:
+        # Brake 2 (per-commit watermark): never dispatch twice for the same commit.
+        if ci.head_sha is not None and ci.head_sha == task.gate_last_fixed_sha:
             return None
 
-        # Brake 1 (separate counter): a CI loop never spends the human /fix
-        # budget (task.attempt_count), only its own ci_attempt_count.
-        max_attempts = _ci_max_fix_attempts(world.cfg, world.repo_cfg)
-        if task.ci_attempt_count >= max_attempts:
+        # Brake 1 (shared counter): a gate-triggered loop never spends the
+        # human /fix budget (task.attempt_count), only gate_attempt_count.
+        max_attempts = gate_max_fix_attempts(world.cfg, world.repo_cfg)
+        if task.gate_attempt_count >= max_attempts:
             log(f"[LIMIT] {task.slug} CI auto-fix budget exhausted: "
-                f"ci_attempt_count={task.ci_attempt_count} >= CI_MAX_FIX_ATTEMPTS={max_attempts}")
+                f"gate_attempt_count={task.gate_attempt_count} >= GATE_MAX_FIX_ATTEMPTS={max_attempts}")
             return Action(kind="mark_failed_limit", slug=task.slug, limit_reason="ci")
 
         # Guidance text is built here from the pure CIStatus already fetched
         # this cycle (decide() stays I/O-free); get_ci_failures() is fetched
         # lazily in Layer B only when this fix is actually dispatched.
-        lines = ["CI failed on the pushed branch."]
-        if ci.failing:
-            lines.append("")
-            lines.append("Failing checks:")
-            lines.extend(f"- {name}" for name in ci.failing)
-        if ci.summary:
-            lines.append("")
-            lines.append(ci.summary)
-        guidance = "\n".join(lines)
+        guidance = build_gate_guidance(
+            "CI failed on the pushed branch.", failing=list(ci.failing), summary=ci.summary,
+        )
         log(f"[DECIDE] {task.slug} CI auto-fix: head_sha={ci.head_sha} "
-            f"ci_attempt={task.ci_attempt_count + 1}/{max_attempts}")
+            f"gate_attempt={task.gate_attempt_count + 1}/{max_attempts}")
         return Action(
             kind="fix",
             slug=task.slug,
@@ -695,9 +683,67 @@ def _decide_ci(world: World) -> Action | None:
         if task.ci_error_notified and ci.head_sha == task.ci_error_notified_sha:
             return None  # already warned once for this exact commit
         return Action(kind="ci_error_warn", slug=task.slug)
-    if ci.state == "success" and task.status == "ci_failed":
-        return Action(kind="ci_recovered", slug=task.slug)
+    if ci.state == "success":
+        if task.status == "ci_failed":
+            return Action(kind="ci_recovered", slug=task.slug)
+        if task.pr_deferred:
+            return Action(kind="retry_deferred_pr", slug=task.slug)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Local test gate (issue #245 plan §2.5 — the local half of the shared policy)
+# ---------------------------------------------------------------------------
+
+
+def _decide_test_gate(world: World) -> Action | None:
+    """React to a resting task parked at ``test_failed``.
+
+    Unlike CI (a polled remote signal), the local post-fix test gate's
+    outcome is already known and stored on the task the moment it lands in
+    ``test_failed`` (``emit()``'s ``test_failed`` branch persists
+    ``test_failed_sha`` / ``test_failure_detail``) — no read step is needed,
+    so this fires on the very next poll with no slash command, mirroring
+    ``_decide_ci`` but keyed off stored fields instead of ``World.ci``.
+
+    Shares ``gate_attempt_count`` / ``gate_last_fixed_sha`` and
+    ``AUTO_FIX_ON_GATE_FAILURE`` with the CI signal (issue #245 §2.5): a
+    human /fix from ``test_failed`` resets the counter via emit()'s common
+    reset rule exactly like a human /fix from ``ci_failed`` does.
+    """
+    task = world.task
+    if task.status != "test_failed":
+        return None
+    if not auto_fix_on_gate_failure(world.cfg, world.repo_cfg):
+        return None
+
+    sha = task.test_failed_sha
+    # Brake 2 (per-commit watermark): never dispatch twice for the same commit.
+    if sha is not None and sha == task.gate_last_fixed_sha:
+        return None
+
+    # Brake 1 (shared counter).
+    max_attempts = gate_max_fix_attempts(world.cfg, world.repo_cfg)
+    if task.gate_attempt_count >= max_attempts:
+        if task.test_gate_limit_notified:
+            return None  # already told the user once for this exhausted budget
+        log(f"[LIMIT] {task.slug} test-gate auto-fix budget exhausted: "
+            f"gate_attempt_count={task.gate_attempt_count} >= GATE_MAX_FIX_ATTEMPTS={max_attempts}")
+        return Action(kind="mark_failed_limit", slug=task.slug, limit_reason="gate")
+
+    guidance = build_gate_guidance(
+        "🧪 Test gate failed on the pushed branch.", excerpt=task.test_failure_detail or "",
+    )
+    log(f"[DECIDE] {task.slug} test-gate auto-fix: sha={sha} "
+        f"gate_attempt={task.gate_attempt_count + 1}/{max_attempts}")
+    return Action(
+        kind="fix",
+        slug=task.slug,
+        plan_branch=task.plan_branch,
+        guidance=guidance,
+        attempt_count=task.attempt_count,
+        trigger="gate",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +825,13 @@ def decide(world: World) -> Action:
             action = _reply_transition(world, status, dispatch_slash=True)
             if action is not None:
                 return action
+
+        # Shared recoverable-gate policy (issue #245 §2.5): cheap local gate
+        # first, remote gate second. Neither status can co-occur, so order
+        # only matters as documentation of intent.
+        gate_action = _decide_test_gate(world)
+        if gate_action is not None:
+            return gate_action
 
         # CI watch: no slash command this poll, so a fresh CI observation
         # (fixed/shipped/synced/ci_failed only — see CI_WATCH_STATUSES) may

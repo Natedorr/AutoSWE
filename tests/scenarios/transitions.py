@@ -2347,11 +2347,11 @@ TRANSITIONS: list[dict[str, Any]] = [
     {
         "name": "ci_watch_red_build_marks_ci_failed",
         "description": (
-            "Fixed task, no slash command this poll, CI_AUTO_FIX off for this "
+            "Fixed task, no slash command this poll, AUTO_FIX_ON_GATE_FAILURE off for this "
             "repo (brake 4 — the config gate); the branch build is red -> the "
             "CI watch parks the task at ci_failed with the failure text "
             "(non-terminal: /fix, /retry, /skip, /abort still work). With "
-            "CI_AUTO_FIX at its default (on), the same red build instead "
+            "AUTO_FIX_ON_GATE_FAILURE at its default (on), the same red build instead "
             "auto-dispatches a fix — see ci_watch_red_build_auto_fix_dispatches_fix."
         ),
         "start": {
@@ -2379,7 +2379,7 @@ TRANSITIONS: list[dict[str, Any]] = [
                 "provider": "github",
             },
         },
-        "repos": {"ci_auto_fix": False},
+        "repos": {"auto_fix_on_gate_failure": False},
         "expect": {
             "label_after": "autoswe:ci_failed",
             "autoswe_status": "ci_failed",
@@ -2391,7 +2391,7 @@ TRANSITIONS: list[dict[str, Any]] = [
     {
         "name": "ci_watch_red_build_auto_fix_dispatches_fix",
         "description": (
-            "Fixed task, no slash command this poll, CI_AUTO_FIX at its "
+            "Fixed task, no slash command this poll, AUTO_FIX_ON_GATE_FAILURE at its "
             "default (on); the branch build is red -> the CI watch "
             "auto-dispatches a /fix with the CI failure text as guidance "
             "(issue #245 plan §2.3/§2.4, P4). Budget/watermark untouched "
@@ -2436,7 +2436,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "name": "ci_watch_red_build_budget_exhausted_marks_ci_failed",
         "description": (
             "Fixed task whose CI auto-fix budget is already spent "
-            "(ci_attempt_count == CI_MAX_FIX_ATTEMPTS default 2) -> decide() "
+            "(gate_attempt_count == GATE_MAX_FIX_ATTEMPTS default 2) -> decide() "
             "refuses a third auto-dispatch and parks the task at ci_failed "
             "with a comment asking for a human /fix (brake 1 — the separate "
             "counter never lets the loop run unbounded)."
@@ -2464,8 +2464,8 @@ TRANSITIONS: list[dict[str, Any]] = [
                 "session_id": "s-fix-prev",
                 "pr_number": None,
                 "provider": "github",
-                "ci_attempt_count": 2,
-                "ci_last_fixed_sha": "some-older-sha",
+                "gate_attempt_count": 2,
+                "gate_last_fixed_sha": "some-older-sha",
             },
         },
         "expect": {
@@ -2642,6 +2642,141 @@ TRANSITIONS: list[dict[str, Any]] = [
             "label_after": "autoswe:ci_failed",
             "autoswe_status": "ci_failed",
             "no_claude_calls": True,
+        },
+    },
+    {
+        "name": "test_gate_auto_fix_dispatches_fix",
+        "description": (
+            "Task at test_failed, no slash command this poll, "
+            "AUTO_FIX_ON_GATE_FAILURE at its default (on) -> the shared "
+            "recoverable-gate policy auto-dispatches a /fix with the stored "
+            "test-gate failure text as guidance, mirroring the CI watch's "
+            "auto-fix path but keyed off the already-known local signal "
+            "instead of a poll (issue #245 plan §2.5)."
+        ),
+        "start": {
+            "issue": {"body": "Implement half()."},
+            "labels": ["autoswe:test_failed"],
+            "comments": [
+                {
+                    "body": "🧪 **Test gate failed** — the branch suite is red, so `/fix` is **not** marked done.\n\n**Failure:**\n\n```\nsuite failing (exit 1)\n```\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Implement half().",
+                "autoswe_status": "test_failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+                "test_failed_sha": "deadbeef",
+                "test_failure_detail": "suite failing (exit 1)",
+            },
+        },
+        "claude_responses": [
+            {"text": "DONE_SUMMARY\tAddressed test gate failure\tabc1234", "session_id": "s-fix-42", "subtype": "success"},
+        ],
+        "git_calls": ["commit_and_push"],
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "claude_permission": "bypassPermissions",
+        },
+    },
+    {
+        "name": "test_gate_auto_fix_budget_exhausted_stays_parked",
+        "description": (
+            "Task at test_failed whose gate auto-fix budget is already spent "
+            "(gate_attempt_count == GATE_MAX_FIX_ATTEMPTS default 2, same sha) "
+            "-> decide() refuses a third auto-dispatch and posts a one-time "
+            "budget-exhausted comment instead, staying parked at test_failed "
+            "for a human /fix (brake 1, shared with the CI signal)."
+        ),
+        "start": {
+            "issue": {"body": "Implement half()."},
+            "labels": ["autoswe:test_failed"],
+            "comments": [
+                {
+                    "body": "🧪 **Test gate failed** — the branch suite is red, so `/fix` is **not** marked done.\n\n**Failure:**\n\n```\nsuite failing (exit 1)\n```\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Implement half().",
+                "autoswe_status": "test_failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+                "test_failed_sha": "deadbeef",
+                "test_failure_detail": "suite failing (exit 1)",
+                "gate_attempt_count": 2,
+                "gate_last_fixed_sha": "some-older-sha",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:test_failed",
+            "autoswe_status": "test_failed",
+            "comment_contains": ["budget", "/fix"],
+            "no_claude_calls": True,
+            "no_git_calls": True,
+        },
+    },
+    {
+        "name": "pr_deferred_retries_on_green_ci",
+        "description": (
+            "A create_pr effect was deferred by pending CI (pr_deferred=True); "
+            "the next poll observes a green build -> decide() re-emits "
+            "create_pr instead of leaving the human to re-post /pr (issue #245 "
+            "plan §2.6). find_existing_pr's idempotency guard makes the re-emit "
+            "safe even if a PR already exists."
+        ),
+        "start": {
+            "issue": {"body": "Fix login."},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "success",
+            "comments": [
+                {
+                    "body": "PR deferred — CI still running (1 pending) — retry /pr when green. Will retry automatically once CI is green.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix login.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+                "pr_deferred": True,
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "no_claude_calls": True,
+            # issue #245 §2.6: the deferred create_pr effect re-fires on green
+            # CI and actually creates the PR (the fake assigns PR number 1).
+            "pr_number": 1,
         },
     },
 ]

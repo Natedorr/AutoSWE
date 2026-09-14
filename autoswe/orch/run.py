@@ -103,6 +103,7 @@ def run(
         "noop", "skip", "abort", "post_welcome",
         "advance_watermark", "mark_failed_limit", "refused",
         "ci_failed", "ci_recovered", "ci_error_warn",
+        "retry_deferred_pr",
     ):
         return None
 

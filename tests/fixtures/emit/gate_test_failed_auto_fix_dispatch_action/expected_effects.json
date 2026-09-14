@@ -1,7 +1,7 @@
 [
   {
     "kind": "post_comment",
-    "contains": ["Addressed CI failure"]
+    "contains": ["Addressed test gate failure"]
   },
   {
     "kind": "set_status",
@@ -16,7 +16,7 @@
       "last_consumed_reply_id": 42,
       "attempt_count": 1,
       "gate_attempt_count": 1,
-      "gate_last_fixed_sha": "def5678"
+      "gate_last_fixed_sha": "deadbeef"
     }
   }
 ]

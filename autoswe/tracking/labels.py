@@ -51,14 +51,21 @@ TERMINAL_STATUSES = COMPLETED_STATUSES | frozenset({"failed", "skipped", "aborte
 # task is NOT done: /pr is blocked until the user posts /fix (which re-reviews).
 REVIEW_BLOCKING_STATUSES = frozenset({"review_failed", "review_blocked"})
 
+# Blocking, auto-fixable gate statuses (issue #245 plan §2.5): one policy,
+# two signals. test_failed is the local post-fix test gate
+# (harness/test_gate.py — the fix committed and pushed, but the branch suite
+# is red); ci_failed is its remote twin (the pushed branch's CI build is
+# red). Both share the same attempt counter (task.gate_attempt_count), reset
+# rule, AUTO_FIX_ON_GATE_FAILURE switch, and prompt-assembly helper — see
+# orch/gate_policy.py.
+RECOVERABLE_GATE_STATUSES = frozenset({"test_failed", "ci_failed"})
+
 # Non-terminal resting states where shipping is blocked: the review verdicts
-# (review_failed/review_blocked) plus the post-fix test gate (test_failed —
-# the fix committed and pushed, but the branch suite is red) plus the CI
-# watch (ci_failed — the pushed branch's remote build is red, issue #245
-# plan P3). /pr is refused until a /fix re-runs the blocking check green;
-# restarts start a fresh MAX_ATTEMPTS budget (the prior phase finished, the
-# gate is a new signal).
-SHIPPING_BLOCKING_STATUSES = REVIEW_BLOCKING_STATUSES | frozenset({"test_failed", "ci_failed"})
+# (review_failed/review_blocked) plus the recoverable gate statuses above.
+# /pr is refused until a /fix re-runs the blocking check green; restarts
+# start a fresh MAX_ATTEMPTS budget (the prior phase finished, the gate is a
+# new signal).
+SHIPPING_BLOCKING_STATUSES = REVIEW_BLOCKING_STATUSES | RECOVERABLE_GATE_STATUSES
 
 # Statuses eligible for the read-only CI watch (issue #245 plan §2.2): a
 # branch has been pushed and the task is resting, so a build may be running

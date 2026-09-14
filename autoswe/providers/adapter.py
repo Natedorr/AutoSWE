@@ -265,10 +265,16 @@ def apply_effect(
         if cfg is not None and task_entry is not None:
             ok, reason = preflight_pr(task_entry, cfg, repo_cfg, do_sync=False, vcs=vcs)
             if not ok:
+                # pr_deferred (issue #245 §2.6): record it on the task instead
+                # of asking the human to re-post /pr — the next green CI
+                # observation re-emits this create_pr effect (decide()'s
+                # retry_deferred_pr row), and find_existing_pr below already
+                # makes that re-emit idempotent.
+                task_entry["pr_deferred"] = True
                 with contextlib.suppress(Exception):
                     comment_id = tracker.post_comment(
                         issue_num,
-                        f"PR deferred — {reason}. Post `/pr` when ready.{BOT_MARKER}",
+                        f"PR deferred — {reason}. Will retry automatically once CI is green.{BOT_MARKER}",
                     )
                     record_bot_comment_id(task_entry, comment_id)
                 return

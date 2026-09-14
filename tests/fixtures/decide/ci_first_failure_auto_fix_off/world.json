@@ -43,6 +43,6 @@
     "url": "https://github.com/owner/repo/actions/runs/1",
     "summary": "1 check(s) failing: build"
   },
-  "cfg": {"CI_AUTO_FIX": false},
+  "cfg": {"AUTO_FIX_ON_GATE_FAILURE": false},
   "repo_cfg": {}
 }

@@ -1,8 +1,8 @@
 {
   "api": {
     "issue": {
-      "number": 11,
-      "title": "CI watch issue",
+      "number": 12,
+      "title": "Test gate issue",
       "body": "Description.",
       "owner": "owner",
       "repo": "repo",
@@ -10,7 +10,7 @@
     },
     "comments": [
       {
-        "body": "Completed with command `/fix`.\n\n<!-- autoswe-bot -->",
+        "body": "🧪 **Test gate failed** — the branch suite is red.\n\n<!-- autoswe-bot -->",
         "created_at": "2026-01-01T10:00:00Z",
         "author_login": "BOT",
         "id": 1,
@@ -19,13 +19,13 @@
     ]
   },
   "task": {
-    "slug": "gh:owner_repo_11",
+    "slug": "gh:owner_repo_12",
     "owner": "owner",
     "repo": "repo",
-    "issue_number": 11,
-    "title": "CI watch issue",
-    "status": "fixed",
-    "plan_branch": "issue-11",
+    "issue_number": 12,
+    "title": "Test gate issue",
+    "status": "test_failed",
+    "plan_branch": "issue-12",
     "base_branch": "main",
     "attempt_count": 1,
     "last_dispatched_command": "/fix",
@@ -34,15 +34,12 @@
     "last_dispatched_command_id": 1,
     "last_consumed_reply_id": 1,
     "welcome_comment_id": null,
-    "bot_comment_ids": [1]
+    "bot_comment_ids": [1],
+    "test_failed_sha": "deadbeef",
+    "test_failure_detail": "suite failing (exit 1)",
+    "gate_attempt_count": 2,
+    "gate_last_fixed_sha": "some-older-sha"
   },
-  "ci": {
-    "state": "failure",
-    "head_sha": "abc1234",
-    "failing": ["build"],
-    "url": "https://github.com/owner/repo/actions/runs/1",
-    "summary": "1 check(s) failing: build"
-  },
-  "cfg": {"AUTO_FIX_ON_GATE_FAILURE": true},
-  "repo_cfg": {"auto_fix_on_gate_failure": false}
+  "cfg": {},
+  "repo_cfg": {}
 }

@@ -1,0 +1,24 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "budget",
+      "2",
+      "/fix",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "test_failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "test_failed",
+      "test_gate_limit_notified": true,
+      "first_dispatched_at": null,
+      "pending_command": null
+    }
+  }
+]

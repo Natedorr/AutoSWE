@@ -1,0 +1,8 @@
+{
+  "kind": "fix",
+  "slug": "gh:owner_repo_12",
+  "plan_branch": "issue-12",
+  "guidance": "🧪 Test gate failed on the pushed branch.\n\n```\nsuite failing (exit 1)\ntest_half_ten_contract: assert 5.0 == 6.0\n```",
+  "attempt_count": 1,
+  "trigger": "gate"
+}

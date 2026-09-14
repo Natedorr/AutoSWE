@@ -14,7 +14,7 @@
       "last_dispatched_command_id": 99,
       "last_consumed_reply_id": 99,
       "attempt_count": 2,
-      "ci_attempt_count": 0
+      "gate_attempt_count": 0
     }
   }
 ]
