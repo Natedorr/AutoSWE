@@ -29,7 +29,7 @@ from autoswe.orch.types import (
     TaskState,
     World,
 )
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "emit"
 
@@ -107,16 +107,23 @@ def _load_world(data: dict) -> World:
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
         fix_summary=task_data.get("fix_summary", ""),
+        ci_failed_from_status=task_data.get("ci_failed_from_status"),
+        ci_last_notified_sha=task_data.get("ci_last_notified_sha"),
+        ci_error_notified=task_data.get("ci_error_notified", False),
     )
 
     cfg = _default_cfg()
     cfg.update(data.get("cfg", {}))
+
+    ci_data = data.get("ci")
+    ci = CIStatus(**ci_data) if ci_data is not None else None
 
     return World(
         api=api,
         task=task,
         cfg=cfg,
         repo_cfg=data.get("repo_cfg", {}),
+        ci=ci,
     )
 
 
@@ -235,10 +242,10 @@ def _discover_fixtures() -> list[Path]:
 @pytest.mark.parametrize("scenario", _discover_fixtures(), ids=lambda p: p.name)
 def test_emit(scenario: Path):
     """Parametrized emit test: world + action + result -> expected effects."""
-    world = _load_world(json.loads((scenario / "world.json").read_text()))
-    action = _load_action(json.loads((scenario / "action.json").read_text()))
+    world = _load_world(json.loads((scenario / "world.json").read_text(encoding="utf-8")))
+    action = _load_action(json.loads((scenario / "action.json").read_text(encoding="utf-8")))
     result = _load_result(scenario / "result.json")
-    expected_list = json.loads((scenario / "expected_effects.json").read_text())
+    expected_list = json.loads((scenario / "expected_effects.json").read_text(encoding="utf-8"))
 
     effects = emit(action, result, world)
     expected = [dict(e) for e in expected_list]

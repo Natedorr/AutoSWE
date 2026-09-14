@@ -24,6 +24,7 @@ AUTOSWE_LABELS = {
     "autoswe:review_failed":  {"color": "fbca04", "description": "Review found issues — needs /fix"},
     "autoswe:review_blocked": {"color": "d73a4a", "description": "Review blocked — critical findings, needs /fix"},
     "autoswe:test_failed":    {"color": "d73a4a", "description": "Fix pushed but test suite failing — needs /fix"},
+    "autoswe:ci_failed":  {"color": "d73a4a", "description": "CI red on pushed branch"},
     "autoswe:waiting":    {"color": "fbca04", "description": "Agent asked a question"},
     "autoswe:failed":     {"color": "d73a4a", "description": "Agent errored"},
     "autoswe:skipped":    {"color": "ffffff", "description": "Skipped by user"},
@@ -38,7 +39,7 @@ _PREFIX = "autoswe:"
 VALID_STATUSES = frozenset(
     {"pending", "planning", "fixing", "syncing", "reviewing", "shipping",
      "planned", "fixed", "synced", "shipped", "reviewed",
-     "review_failed", "review_blocked", "test_failed",
+     "review_failed", "review_blocked", "test_failed", "ci_failed",
      "waiting", "failed", "skipped", "aborted", "error"}
 )
 
@@ -52,15 +53,16 @@ REVIEW_BLOCKING_STATUSES = frozenset({"review_failed", "review_blocked"})
 
 # Non-terminal resting states where shipping is blocked: the review verdicts
 # (review_failed/review_blocked) plus the post-fix test gate (test_failed —
-# the fix committed and pushed, but the branch suite is red). /pr is refused
-# until a /fix re-runs the blocking check green; restarts start a fresh
-# MAX_ATTEMPTS budget (the prior phase finished, the gate is a new signal).
-SHIPPING_BLOCKING_STATUSES = REVIEW_BLOCKING_STATUSES | frozenset({"test_failed"})
+# the fix committed and pushed, but the branch suite is red) plus the CI
+# watch (ci_failed — the pushed branch's remote build is red, issue #245
+# plan P3). /pr is refused until a /fix re-runs the blocking check green;
+# restarts start a fresh MAX_ATTEMPTS budget (the prior phase finished, the
+# gate is a new signal).
+SHIPPING_BLOCKING_STATUSES = REVIEW_BLOCKING_STATUSES | frozenset({"test_failed", "ci_failed"})
 
 # Statuses eligible for the read-only CI watch (issue #245 plan §2.2): a
 # branch has been pushed and the task is resting, so a build may be running
-# or have already finished for it. "ci_failed" is P3's status (not yet in
-# VALID_STATUSES) — included now so P3 needs no change here.
+# or have already finished for it.
 CI_WATCH_STATUSES = frozenset({"fixed", "shipped", "synced", "ci_failed"})
 
 # Action kind → status mappings (module-level to avoid per-call allocation)

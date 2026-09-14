@@ -1,0 +1,27 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "CI failed",
+      "build",
+      "1 check(s) failing: build",
+      "https://github.com/o/r/actions/runs/1",
+      "/fix",
+      "/pr",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "ci_failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "ci_failed",
+      "ci_failed_from_status": "fixed",
+      "ci_last_notified_sha": "abc1234",
+      "ci_error_notified": false
+    }
+  }
+]

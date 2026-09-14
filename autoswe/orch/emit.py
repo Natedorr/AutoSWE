@@ -391,6 +391,87 @@ def emit(
             ),
         )
 
+    if kind == "ci_failed":
+        # First red build (or a new failing head_sha) on a watched task —
+        # park it at ci_failed with the failure text (issue #245 plan §2.3).
+        # Non-terminal: /fix, /retry, /skip, /abort and new-comment restarts
+        # all keep working via SHIPPING_BLOCKING_STATUSES + _check_restart_or_guard.
+        ci = world.ci
+        pre_status = task.ci_failed_from_status if task.status == "ci_failed" else task.status
+        lines = ["🔴 **CI failed** on the pushed branch."]
+        if ci and ci.failing:
+            lines.append("")
+            lines.append("Failing checks:")
+            lines.extend(f"- {name}" for name in ci.failing)
+        if ci and ci.summary:
+            lines.append("")
+            lines.append(ci.summary)
+        if ci and ci.url:
+            lines.append("")
+            lines.append(f"[View run]({ci.url})")
+        lines.append("")
+        lines.append(
+            "This is non-terminal — post `/fix` to address it (or `/retry`). "
+            "`/pr` is blocked while CI is red."
+        )
+        body = "\n".join(lines) + BOT_MARKER
+        return (
+            Effect(kind="post_comment", body=body),
+            Effect(kind="set_status", status="ci_failed"),
+            Effect(
+                kind="patch_queue",
+                queue_patch={
+                    "autoswe_status": "ci_failed",
+                    "ci_failed_from_status": pre_status,
+                    "ci_last_notified_sha": ci.head_sha if ci else None,
+                    "ci_error_notified": False,
+                },
+            ),
+        )
+
+    if kind == "ci_recovered":
+        # Green build observed while resting at ci_failed — clear back to
+        # the status the task was in before CI turned red.
+        restore_status = task.ci_failed_from_status or "fixed"
+        body = f"✅ **CI green** — cleared back to `{restore_status}`.{BOT_MARKER}"
+        return (
+            Effect(kind="post_comment", body=body),
+            Effect(kind="set_status", status=restore_status),
+            Effect(
+                kind="patch_queue",
+                queue_patch={
+                    "autoswe_status": restore_status,
+                    "ci_failed_from_status": None,
+                    "ci_last_notified_sha": None,
+                    "ci_error_notified": False,
+                },
+            ),
+        )
+
+    if kind == "ci_error_warn":
+        # CI could not be consulted (API error) — a one-time notice, never a
+        # status change: an error is never treated as a pass or a fail.
+        # _dispatch_task flips the label to a transient "running" status
+        # before this runs (there is no Claude call to gate it on), so the
+        # set_status effect below is required to restore it — not optional
+        # bookkeeping — and the queue_patch must restore autoswe_status too,
+        # since the same transient flip already landed directly on the live
+        # queue entry.
+        ci = world.ci
+        summary = (ci.summary if ci else "") or "the CI API could not be consulted"
+        body = (
+            f"⚠️ **CI status unknown** — {summary}. This is a one-time notice; "
+            f"the task status is unchanged.{BOT_MARKER}"
+        )
+        return (
+            Effect(kind="post_comment", body=body),
+            Effect(kind="set_status", status=task.status),
+            Effect(
+                kind="patch_queue",
+                queue_patch={"autoswe_status": task.status, "ci_error_notified": True},
+            ),
+        )
+
     # --- Claude actions (result should be DispatchResult) ---
 
     if result is None:

@@ -2343,6 +2343,215 @@ TRANSITIONS: list[dict[str, Any]] = [
             "claude_permission": "plan",
         },
     },
+    # ---- CI watch (issue #245 plan §2.3, P3 — status + comment, no auto-fix) ----
+    {
+        "name": "ci_watch_red_build_marks_ci_failed",
+        "description": (
+            "Fixed task, no slash command this poll; the branch build is red "
+            "-> the CI watch parks the task at ci_failed with the failure text "
+            "(non-terminal: /fix, /retry, /skip, /abort still work)."
+        ),
+        "start": {
+            "issue": {"body": "Fix login."},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "failure",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix login.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:ci_failed",
+            "autoswe_status": "ci_failed",
+            "comment_contains": ["CI failed"],
+            "no_claude_calls": True,
+            "no_git_calls": True,
+        },
+    },
+    {
+        "name": "ci_watch_green_after_red_clears",
+        "description": (
+            "Task parked at ci_failed; the branch build turns green -> the "
+            "watch clears it back to the status it was in before CI went red."
+        ),
+        "start": {
+            "issue": {"body": "Fix login."},
+            "labels": ["autoswe:ci_failed"],
+            "ci_status": "success",
+            "comments": [
+                {
+                    "body": "CI failed on the pushed branch.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix login.",
+                "autoswe_status": "ci_failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+                "ci_failed_from_status": "fixed",
+                "ci_last_notified_sha": "some-old-sha",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["CI green"],
+            "no_claude_calls": True,
+            "no_git_calls": True,
+        },
+    },
+    {
+        "name": "ci_watch_error_status_unchanged",
+        "description": (
+            "Fixed task; the CI API cannot be consulted (error) -> a one-time "
+            "warning comment is posted and the status/label are left exactly "
+            "as they were (an error is never treated as a pass or a fail)."
+        ),
+        "start": {
+            "issue": {"body": "Fix login."},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "error",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix login.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["CI status unknown"],
+            "no_claude_calls": True,
+            "no_git_calls": True,
+        },
+    },
+    {
+        "name": "ci_watch_pending_build_no_action",
+        "description": (
+            "Fixed task; the branch build is still running -> no comment, no "
+            "status change (pending/no-verdict-yet reads the same as a stale "
+            "verdict at the decide() level — see tests/fixtures/decide/"
+            "ci_pending_noop and ci_stale_noop, which exercise the pending and "
+            "stale short-circuits directly: read_ci never passes ref_sha, so a "
+            "genuinely stale CIStatus is not reachable through the CI watch's "
+            "own poll path, only through the /pr gate)."
+        ),
+        "start": {
+            "issue": {"body": "Fix login."},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "pending",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix login.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "no_claude_calls": True,
+            "no_git_calls": True,
+        },
+    },
+    {
+        "name": "ci_pr_refused_while_ci_failed",
+        "description": (
+            "Task at ci_failed (CI watch red): /pr is refused exactly like "
+            "test_failed — red code must not ship. No dispatch, no label change."
+        ),
+        "start": {
+            "issue": {"body": "/plan"},
+            "labels": ["autoswe:ci_failed"],
+            "comments": [
+                {
+                    "body": "CI failed on the pushed branch.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "/plan",
+                "autoswe_status": "ci_failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/fix",
+                "last_dispatched_command_id": 1,
+                "last_consumed_reply_id": 1,
+                "provider": "github",
+                "ci_failed_from_status": "fixed",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:ci_failed",
+            "autoswe_status": "ci_failed",
+            "no_claude_calls": True,
+        },
+    },
 ]
 
 

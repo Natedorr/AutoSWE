@@ -22,6 +22,7 @@ from autoswe.orch.types import (
     World,
 )
 from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue
+from autoswe.tracking.labels import CI_WATCH_STATUSES
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "decide"
 
@@ -97,6 +98,10 @@ def _load_world(data: dict) -> World:
         created_at=task_data.get("created_at", ""),
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
+        rereview_after_fix=task_data.get("rereview_after_fix", False),
+        ci_failed_from_status=task_data.get("ci_failed_from_status"),
+        ci_last_notified_sha=task_data.get("ci_last_notified_sha"),
+        ci_error_notified=task_data.get("ci_error_notified", False),
     )
 
     cfg = _default_cfg()
@@ -105,11 +110,15 @@ def _load_world(data: dict) -> World:
     if isinstance(cfg.get("ALLOWED_AUTHORS"), str):
         cfg["ALLOWED_AUTHORS"] = {a.strip() for a in cfg["ALLOWED_AUTHORS"].split(",") if a.strip()}
 
+    ci_data = data.get("ci")
+    ci = CIStatus(**ci_data) if ci_data is not None else None
+
     return World(
         api=api,
         task=task,
         cfg=cfg,
         repo_cfg=data.get("repo_cfg", {}),
+        ci=ci,
     )
 
 
@@ -160,8 +169,8 @@ def _discover_fixtures() -> list[Path]:
 @pytest.mark.parametrize("scenario", _discover_fixtures(), ids=lambda p: p.name)
 def test_decide(scenario: Path):
     """Parametrized decide test: world.json -> expected_action.json."""
-    world = _load_world(json.loads((scenario / "world.json").read_text()))
-    expected = _load_action(json.loads((scenario / "expected_action.json").read_text()))
+    world = _load_world(json.loads((scenario / "world.json").read_text(encoding="utf-8")))
+    expected = _load_action(json.loads((scenario / "expected_action.json").read_text(encoding="utf-8")))
     actual = decide(world)
 
     # Compare the key fields that matter for the state machine
@@ -177,14 +186,26 @@ def test_decide(scenario: Path):
 
 
 # ---------------------------------------------------------------------------
-# World.ci is a P2 (report-only) read — decide() must not consume it yet.
-# issue #245 plan §2.2 acceptance: "decide() output unchanged for all
-# existing cases". Every fixture already builds World with ci=None (the
-# loader never sets it); this asserts BOTH that the default is None AND
-# that populating it with a real CIStatus (any state) changes nothing.
+# World.ci is only consumed by decide() for tasks resting in a CI-watched
+# status (fixed/shipped/synced/ci_failed — see CI_WATCH_STATUSES and
+# _decide_ci; issue #245 plan §2.3, P3). For every other status/scenario in
+# this fixture set it must remain inert, exactly as it was under P2 (report
+# -only). This asserts BOTH that the default is None AND that populating it
+# with a real CIStatus (any state) changes nothing for a non-watched task.
+# The CI-watched statuses now legitimately change decide()'s output — those
+# branches are covered by the dedicated ci_* fixtures instead.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("scenario", _discover_fixtures(), ids=lambda p: p.name)
+def _non_ci_watched_fixtures() -> list[Path]:
+    fixtures = []
+    for scenario in _discover_fixtures():
+        task = json.loads((scenario / "world.json").read_text(encoding="utf-8"))["task"]
+        if task.get("status") not in CI_WATCH_STATUSES:
+            fixtures.append(scenario)
+    return fixtures
+
+
+@pytest.mark.parametrize("scenario", _non_ci_watched_fixtures(), ids=lambda p: p.name)
 @pytest.mark.parametrize(
     "ci",
     [
@@ -195,9 +216,11 @@ def test_decide(scenario: Path):
     ],
     ids=["failure", "success", "error", "pending"],
 )
-def test_decide_ignores_world_ci(scenario: Path, ci: CIStatus):
-    """Populating World.ci must not change decide()'s output (P2 is read-only)."""
-    world = _load_world(json.loads((scenario / "world.json").read_text()))
+def test_decide_ignores_world_ci_outside_watch_statuses(scenario: Path, ci: CIStatus):
+    """Populating World.ci must not change decide()'s output for a task whose
+    status isn't in CI_WATCH_STATUSES — read_ci never populates world.ci for
+    those in production, and _decide_ci short-circuits on the status check."""
+    world = _load_world(json.loads((scenario / "world.json").read_text(encoding="utf-8")))
     assert world.ci is None  # default when the loader doesn't set it
 
     baseline = decide(world)

@@ -25,6 +25,7 @@ This file is **the source of truth for what autoSWE runs**. The poll loop writes
 | `shipped` | PR created | No |
 | `reviewed` | Review completed | No |
 | `test_failed` | Fix committed/pushed, but the post-fix test gate found the branch suite red — needs `/fix` | No |
+| `ci_failed` | Remote CI watch observed a red build on the pushed branch — needs `/fix`/`/retry`, or clears automatically on green | No |
 | `waiting` | Claude asked a question; waiting for a reply | No |
 | `failed` | Handler errored, or a limit guard tripped | No |
 | `error` | Infrastructure error (dispatch crash, OOM, unhandled exception) | No |
@@ -71,7 +72,10 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `linkage_state` | `dict \| None` | Last observed `LinkageState` (as a dict), written by `autoswe.vcs.linkage.ensure_links` at branch-create / PR-open / merge-observation call sites (issue #245). Rendered as a checklist by `queue status` and the `/sync` completion comment. |
 | `linkage_missing` | `list[str]` | Edge names (`branch`, `pr_link`, `closes`) that are either unsupported by the platform (declared-absent capability) or failed to establish on the last observation |
 | `ci_last_checked` | `str \| None` | ISO 8601 watermark of the last time `providers.adapter.read_ci` actually consulted the CI API for this task (issue #245 plan §2.2). Compared against `CI_POLL_INTERVAL_SEC` to throttle a `--drain` loop to one call per watched task per interval. |
-| `ci_status` | `dict \| None` | Last observed `CIStatus` (as a dict), cached by `read_ci` alongside `ci_last_checked`. Persists across cycles that don't re-consult the API (throttled or ineligible). Rendered by `queue status` and the `/sync` completion comment via `providers.adapter.render_ci_status`. Report-only in P2 — `decide()` does not read this field; it reads the *current cycle's* observation from `World.ci` instead (`None` when not consulted this cycle). |
+| `ci_status` | `dict \| None` | Last observed `CIStatus` (as a dict), cached by `read_ci` alongside `ci_last_checked`. Persists across cycles that don't re-consult the API (throttled or ineligible). Rendered by `queue status` and the `/sync` completion comment via `providers.adapter.render_ci_status`. `decide()` does not read this field; it reads the *current cycle's* observation from `World.ci` instead (`None` when not consulted this cycle). |
+| `ci_failed_from_status` | `str \| None` | The status the task was resting in before the CI watch parked it at `ci_failed` (issue #245 plan §2.3). Set by `emit()` on the `ci_failed` action; a green build's `ci_recovered` action restores `autoswe_status` to this value and clears it. |
+| `ci_last_notified_sha` | `str \| None` | Head SHA of the last CI failure already surfaced as a comment. `decide()`'s `_decide_ci` compares this against the current `World.ci.head_sha` so a red build that hasn't changed doesn't re-comment every poll. Cleared on recovery. |
+| `ci_error_notified` | `bool` | One-time flag: `CIStatus.state == "error"` (API unreachable) posts a warning comment once per error streak instead of every poll. Cleared on the next failure or recovery observation. |
 | `fix_summary` | `str \| None` | Extracted from `DONE_SUMMARY` on fix/retry completion; persisted in the queue so PR creation can include it in the body |
 | `rereview_after_fix` | `bool` | Set by `emit()` when a `/fix` dispatched from `review_failed`/`review_blocked` completes. `decide()` then auto-dispatches `/review` on the next poll (and `emit()` clears it when the review runs) so the gating verdict is re-checked before `/pr`. It is also cleared by any other completion that lands in a terminal status — a `/sync`→`synced` or `/pr`→`shipped` that follows a flagged fix — so a shipped/synced task never carries a live re-review (issue #195). |
 | `gh_closed` | `bool` | True once the issue is observed closed; cleared if it's reopened; task is never auto-purged |

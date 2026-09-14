@@ -20,6 +20,7 @@ from autoswe.tracking.comments import (
     _is_autoswe_bot_comment,
 )
 from autoswe.tracking.labels import (
+    CI_WATCH_STATUSES,
     COMPLETED_STATUSES,
     RUNNING_STATUSES,
     SHIPPING_BLOCKING_STATUSES,
@@ -592,6 +593,46 @@ def _check_restart_or_guard(
 
 
 # ---------------------------------------------------------------------------
+# CI watch (issue #245 plan §2.3, P3 — status + comment only, no auto-fix)
+# ---------------------------------------------------------------------------
+
+
+def _decide_ci(world: World) -> Action | None:
+    """React to a fresh CI observation on a resting, CI-watched task.
+
+    Only consulted when there is no slash command this poll (an explicit
+    user command always takes precedence; CI is re-consulted next cycle).
+    Comments only on a state *change*, per the table in the plan:
+
+    * ``failure``, new head_sha -> park at ``ci_failed`` with the failure text.
+    * ``failure``, same head_sha as last time -> noop (no comment churn).
+    * ``pending`` / ``stale`` / ``none`` -> noop.
+    * ``error`` -> one-time warning comment, status untouched.
+    * ``success`` while at ``ci_failed`` -> clear back to the prior status.
+
+    Never auto-dispatches a fix — that is P4 (CI_AUTO_FIX). Returns None for
+    "nothing to do", the same contract as every other decide() helper.
+    """
+    task = world.task
+    ci = world.ci
+    if ci is None or task.status not in CI_WATCH_STATUSES:
+        return None
+    if ci.stale or ci.state in ("pending", "none"):
+        return None
+    if ci.state == "failure":
+        if ci.head_sha and ci.head_sha == task.ci_last_notified_sha:
+            return None  # repeated identical failure — no comment churn
+        return Action(kind="ci_failed", slug=task.slug)
+    if ci.state == "error":
+        if task.ci_error_notified:
+            return None  # already warned once for this error streak
+        return Action(kind="ci_error_warn", slug=task.slug)
+    if ci.state == "success" and task.status == "ci_failed":
+        return Action(kind="ci_recovered", slug=task.slug)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Main state machine
 # ---------------------------------------------------------------------------
 
@@ -670,6 +711,13 @@ def decide(world: World) -> Action:
             action = _reply_transition(world, status, dispatch_slash=True)
             if action is not None:
                 return action
+
+        # CI watch: no slash command this poll, so a fresh CI observation
+        # (fixed/shipped/synced/ci_failed only — see CI_WATCH_STATUSES) may
+        # park the task at ci_failed, warn once on error, or clear it back.
+        ci_action = _decide_ci(world)
+        if ci_action is not None:
+            return ci_action
 
         return Action(kind="noop", slug=task.slug)
 

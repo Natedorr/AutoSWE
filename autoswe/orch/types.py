@@ -86,6 +86,9 @@ TASK_FIELDS: tuple[TaskField, ...] = (
               transform=lambda v: tuple(v) if isinstance(v, list) else v),
     TaskField("ci_last_checked", "ci_last_checked", None),
     TaskField("ci_status", "ci_status", None),
+    TaskField("ci_failed_from_status", "ci_failed_from_status", None),
+    TaskField("ci_last_notified_sha", "ci_last_notified_sha", None),
+    TaskField("ci_error_notified", "ci_error_notified", False),
 )
 
 
@@ -207,6 +210,16 @@ class TaskState:
     # persists across cycles that don't re-consult the API (throttled).
     ci_last_checked: str | None = None
     ci_status: dict | None = None
+    # CI-watch bookkeeping for the ci_failed status (issue #245 plan §2.3, P3).
+    # ci_failed_from_status is the status to restore on a green build — set
+    # when decide()/emit() first parks the task at ci_failed, cleared on
+    # recovery. ci_last_notified_sha is the head_sha of the last failure
+    # already surfaced as a comment, so an unchanged red build doesn't churn
+    # a comment every poll. ci_error_notified is a one-time flag for the
+    # "CI could not be consulted" warning, so an error streak comments once.
+    ci_failed_from_status: str | None = None
+    ci_last_notified_sha: str | None = None
+    ci_error_notified: bool = False
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:
@@ -280,6 +293,9 @@ class Action:
         "mark_failed_limit",
         "refused",
         "review",
+        "ci_failed",
+        "ci_recovered",
+        "ci_error_warn",
     ]
     slug: str
     plan_branch: str | None = None
