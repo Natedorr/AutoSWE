@@ -985,28 +985,40 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             if task_entry["issue_number"] not in open_issue_numbers:
                 if not task_entry.get("gh_closed", False):
                     task_entry["gh_closed"] = True
-                    last_cmd = task_entry.get("last_dispatched_command")
-                    if last_cmd is None:
-                        # Issue closed before anything was ever dispatched
-                        # (issue #258): a COMPLETED status would be a
-                        # fabricated terminal state on a task that did no
-                        # work — drivers watching the queue or the label
-                        # would skip it entirely. Mark gh_closed only,
-                        # leave autoswe_status neutral, and write no
-                        # terminal label. `queue prune` still cleans up
-                        # the entry via the gh_closed flag.
+                    # A real handler run is evidenced by attempt_count —
+                    # written by emit()'s common Claude-action patch and
+                    # the FAILED patch, and by NO refused/skip/abort patch.
+                    # last_dispatched_command alone is NOT evidence: the
+                    # REFUSED emit path records the command (and the
+                    # watermarks) without any agent run, so a task whose
+                    # only recorded command was a refusal (e.g. /review on
+                    # a failed task) would still get a fabricated terminal
+                    # status + label (issue #258 follow-up).
+                    if int(task_entry.get("attempt_count") or 0) == 0:
+                        # No real dispatch ever happened (issue #258):
+                        # a COMPLETED status would be a fabricated
+                        # terminal state on a task that did no work —
+                        # drivers watching the queue or the label would
+                        # skip it entirely. Mark gh_closed only, leave
+                        # autoswe_status UNCHANGED (never neutralize — a
+                        # legacy entry whose real but uncounted dispatch
+                        # already set a terminal status keeps it), and
+                        # write no terminal label. `queue prune` still
+                        # cleans up the entry via the gh_closed flag.
                         log(
                             f"[CLOSED] {slug} — issue closed on platform "
-                            "before any dispatch; status stays neutral"
+                            "without a real dispatch; status unchanged"
                         )
                     else:
-                        # A real dispatch happened. last_dispatched_command
-                        # is a slash command ("/sync", "/pr", ...), not an
-                        # action kind. completed_status_for is keyed by
-                        # kind ("sync_branch", "ship_pr", ...), so use
+                        # A real dispatch happened (attempt_count > 0).
+                        # last_dispatched_command is a slash command
+                        # ("/sync", "/pr", ...), not an action kind.
+                        # completed_status_for is keyed by kind
+                        # ("sync_branch", "ship_pr", ...), so use
                         # _kind_from_command to convert — otherwise /sync
                         # and /pr both fall through to the "fixed"
                         # default.
+                        last_cmd = task_entry.get("last_dispatched_command") or "/fix"
                         closed_status = completed_status_for(
                             _kind_from_command(last_cmd)
                         )
@@ -1034,6 +1046,11 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             # first_dispatched_at are written only by the dispatch path, and
             # a bot completion comment is posted on every real dispatch —
             # so any of those set is positive evidence a dispatch happened.
+            # fix_summary, pr_number, and plan_file_path are likewise written
+            # only by completed handler runs (emit.py), so they count too:
+            # a legacy completed entry whose bot comments were lost (queue
+            # wipe + rebuilt bot_comment_ids, or a deleted completion
+            # comment) still carries one of them and must not be demoted.
             # The welcome comment is is_bot=True and gets backfilled into
             # bot_comment_ids by Phase 1, so it is excluded from the
             # evidence set: a #258-poisoned entry (zero dispatches, welcome
@@ -1048,6 +1065,9 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                 int(task_entry.get("attempt_count") or 0) > 0
                 or task_entry.get("first_dispatched_at") is not None
                 or bool(non_welcome_bot)
+                or bool(task_entry.get("fix_summary"))
+                or task_entry.get("pr_number") is not None
+                or bool(task_entry.get("plan_file_path"))
             )
             if (
                 not has_dispatch_evidence

@@ -599,7 +599,8 @@ def test_single_poll_gh_closed_fresh_entry_stays_neutral(isolated_autoswe_dir, m
 
 def test_single_poll_gh_closed_dispatched_entry_maps_completed(isolated_autoswe_dir, monkeypatch, tmp_path):
     """Entry with a real dispatch whose issue closes → phase's COMPLETED
-    status + label (existing behavior must be preserved)."""
+    status + label (existing behavior must be preserved). A real handler run
+    always writes attempt_count (emit.py), so the entry carries it."""
     import json
 
     repos_path = isolated_autoswe_dir / "config" / "repos.json"
@@ -608,7 +609,7 @@ def test_single_poll_gh_closed_dispatched_entry_maps_completed(isolated_autoswe_
     )
     _seed_queue(
         isolated_autoswe_dir, "gh:owner_repo_1",
-        autoswe_status="fixing", last_dispatched_command="/fix",
+        autoswe_status="fixing", last_dispatched_command="/fix", attempt_count=1,
     )
 
     set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
@@ -617,6 +618,38 @@ def test_single_poll_gh_closed_dispatched_entry_maps_completed(isolated_autoswe_
     assert entry["gh_closed"] is True
     assert entry["autoswe_status"] == "fixed"
     assert set_status_calls == [(1, "autoswe:fixed")]
+
+
+def test_single_poll_gh_closed_refused_only_entry_status_unchanged(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """A task whose only recorded command was a REFUSAL (no agent run) →
+    closing the issue must NOT fabricate a terminal: the REFUSED emit path
+    writes last_dispatched_command (and the watermarks) without any run and
+    without attempt_count, so the gate treats the entry as never-dispatched
+    and leaves the existing status untouched (issue #258 follow-up)."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="failed", last_dispatched_command="/review",
+        attempt_count=0,
+    )
+
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
+
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["gh_closed"] is True
+    assert entry["autoswe_status"] == "failed", (
+        f"refused-only entry must keep its status (no fabricated terminal), "
+        f"got {entry['autoswe_status']!r}"
+    )
+    assert set_status_calls == [], (
+        f"no terminal label may be written on a refused-only entry, "
+        f"got {set_status_calls}"
+    )
 
 
 def test_single_poll_heals_never_dispatched_entry_with_completed_status(isolated_autoswe_dir, monkeypatch, tmp_path):
@@ -751,5 +784,33 @@ def test_single_poll_heal_still_fires_with_welcome_only_bot_comment(isolated_aut
     )
     assert set_status_calls == [], (
         f"healed entry must not trigger any label write, got {set_status_calls}"
+    )
+
+
+def test_single_poll_heal_skips_legacy_completed_entry_with_pr_number(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """A legacy completed entry with no attempt_count, no
+    first_dispatched_at, and no bot comments that records a real ship
+    (pr_number set — written only by a completed handler run in emit.py)
+    must NOT be demoted by the heal."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixed", last_dispatched_command=None, pr_number=42,
+    )
+
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["autoswe_status"] == "fixed", (
+        f"legacy completed entry with pr_number must not be demoted, "
+        f"got {entry['autoswe_status']!r}"
+    )
+    assert set_status_calls == [(1, "autoswe:fixed")], (
+        f"only the Phase-3 mirror of autoswe:fixed may be written, "
+        f"got {set_status_calls}"
     )
 
