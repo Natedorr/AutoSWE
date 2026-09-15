@@ -1027,8 +1027,20 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             # "fixed") were fabricated by the old gh_closed path; reset
             # to neutral so decide() takes the fresh-discovery path and
             # Phase 3 stops re-mirroring the false terminal label.
+            # Legacy exception: a queue.json written by an older version can
+            # hold a genuinely-completed entry with no
+            # last_dispatched_command (normalize_legacy_status maps "done"
+            # → "fixed" when the command is absent). attempt_count and
+            # first_dispatched_at are written only by the dispatch path,
+            # so either one set is positive evidence a dispatch happened —
+            # skip the heal for such entries.
+            has_dispatch_evidence = (
+                int(task_entry.get("attempt_count") or 0) > 0
+                or task_entry.get("first_dispatched_at") is not None
+            )
             if (
-                task_entry.get("last_dispatched_command") is None
+                not has_dispatch_evidence
+                and task_entry.get("last_dispatched_command") is None
                 and task_entry.get("autoswe_status") in COMPLETED_STATUSES
             ):
                 log(

@@ -510,7 +510,7 @@ def _read_queue(isolated_autoswe_dir, task_id):
 
 
 def _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues):
-    """Run one sync-mode poll; return (FakeTracker, captured set_status calls)."""
+    """Run one sync-mode poll; return the captured set_status calls."""
     import autoswe.orch.loop as loop_mod
     import autoswe.providers.factory as factory_mod
     from autoswe.orch.types import ApiState
@@ -649,4 +649,49 @@ def test_single_poll_heals_never_dispatched_entry_with_completed_status(isolated
     assert entry["gh_closed"] is False
     assert entry["autoswe_status"] is None
     assert set_status_calls == []
+
+
+def test_single_poll_heal_skips_entry_with_dispatch_evidence(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """A queue entry with positive dispatch evidence (attempt_count > 0 or
+    first_dispatched_at set) but no last_dispatched_command — e.g. a
+    genuinely-completed "done" entry from an older queue version that
+    normalize_legacy_status mapped to "fixed" — must NOT be demoted by the
+    heal; only #258-fabricated poison (neither field set) is reset."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+
+    # Case 1: attempt_count > 0 (written only by the dispatch path).
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixed", last_dispatched_command=None, attempt_count=1,
+    )
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["autoswe_status"] == "fixed", (
+        f"legacy completed entry with dispatch evidence must not be demoted, "
+        f"got {entry['autoswe_status']!r}"
+    )
+    assert all(label is not None for _, label in set_status_calls), (
+        f"no neutral/demotion label may be written, got {set_status_calls}"
+    )
+
+    # Case 2: only first_dispatched_at set (the second disjunct).
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixed", last_dispatched_command=None,
+        first_dispatched_at="2026-01-02T00:00:00Z",
+    )
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["autoswe_status"] == "fixed", (
+        f"entry with first_dispatched_at must not be demoted, "
+        f"got {entry['autoswe_status']!r}"
+    )
+    assert all(label is not None for _, label in set_status_calls), (
+        f"no neutral/demotion label may be written, got {set_status_calls}"
+    )
 
