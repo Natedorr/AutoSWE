@@ -455,3 +455,198 @@ def test_sync_before_dispatch_rebase_conflict_returns_failed_handler_result(tmp_
     assert isinstance(err, HandlerResult)
     assert "FAILED" in (err.done_content or "")
     assert "rebase conflict" in (err.done_content or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# gh_closed detection — no fabricated terminal on never-dispatched tasks
+# ---------------------------------------------------------------------------
+#
+# Regression for issue #258: a queue entry whose issue dropped out of the
+# open-issues list used to be marked gh_closed=True AND autoswe_status =
+# completed_status_for(_kind_from_command(last_dispatched_command or "/fix"))
+# unconditionally — a fresh, never-dispatched entry (last_dispatched_command
+# is None) landed on "fixed" in the queue and as the autoswe:fixed GitHub
+# label, a false terminal state that drivers skip.
+# ---------------------------------------------------------------------------
+
+
+def _seed_queue(isolated_autoswe_dir, task_id, **overrides):
+    """Seed a queue entry for owner/repo#1 with the given overrides."""
+    from autoswe.core.queue_store import LockedQueue
+
+    entry = {
+        "id": task_id,
+        "owner": "owner",
+        "repo": "repo",
+        "issue_number": 1,
+        "title": "Test",
+        "body": "Body",
+        "autoswe_status": None,
+        "last_updated": "2026-01-01T00:00:00Z",
+        "last_comment_sync": None,
+        "base_branch": "main",
+        "provider": "github",
+        "suppress_welcome": True,
+        "pr_number": None,
+        "welcome_comment_id": None,
+        "bot_comment_ids": [],
+        "last_dispatched_command": None,
+        "last_dispatched_command_id": None,
+        "last_consumed_reply_id": None,
+        "last_synced": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "gh_closed": False,
+    }
+    entry.update(overrides)
+    with LockedQueue() as lq:
+        lq.queue[task_id] = entry
+
+
+def _read_queue(isolated_autoswe_dir, task_id):
+    from autoswe.core.queue_store import LockedQueue
+
+    with LockedQueue() as lq:
+        return dict(lq.queue[task_id])
+
+
+def _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues):
+    """Run one sync-mode poll; return (FakeTracker, captured set_status calls)."""
+    import autoswe.orch.loop as loop_mod
+    import autoswe.providers.factory as factory_mod
+    from autoswe.orch.types import ApiState
+    from autoswe.providers.base import NormalizedIssue
+
+    set_status_calls = []
+
+    class FakeTracker:
+        def set_status(self, issue_num, label):
+            set_status_calls.append((issue_num, label))
+
+        def post_comment(self, issue_num, body):
+            pass
+
+        def fetch_comments(self, *a, **kw):
+            return []
+
+        def slug_prefix(self):
+            return "gh"
+
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
+        result = {}
+        for num in open_issues:
+            result[num] = ApiState(
+                issue=NormalizedIssue(
+                    number=num, title="Test", body="Body",
+                    owner="owner", repo="repo", state="open",
+                    is_pull_request=False, labels=[],
+                    last_updated="2026-01-01T00:00:00Z",
+                ),
+                comments=(),
+            )
+        return result
+
+    monkeypatch.setattr(loop_mod, "get_tracker", lambda r: FakeTracker())
+    monkeypatch.setattr(factory_mod, "get_tracker", lambda r: FakeTracker())
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
+
+    loop_mod.poll(
+        {
+            "MAX_CONCURRENT": 1,
+            "SILENT_REPORTING": True,
+            "WORKTREE_DIR": str(tmp_path / "worktrees"),
+        },
+        mode="sync",
+        repo_filter="owner/repo",
+    )
+    return set_status_calls
+
+
+def test_single_poll_gh_closed_fresh_entry_stays_neutral(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """Never-dispatched entry whose issue closes → gh_closed set, status stays
+    None, and NO terminal label is written (acceptance #4 for #258)."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+
+    # Poll where the issue is absent from the open-issues listing.
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
+
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["gh_closed"] is True
+    assert entry["autoswe_status"] is None, (
+        f"never-dispatched entry must stay neutral, got {entry['autoswe_status']!r}"
+    )
+    assert set_status_calls == [], (
+        f"no terminal label may be written on a never-dispatched entry, "
+        f"got {set_status_calls}"
+    )
+
+    # Poll where the issue is back in the open set (reopen): still neutral,
+    # still no label — Phase 3 must not re-mirror a fabricated terminal.
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["gh_closed"] is False
+    assert entry["autoswe_status"] is None
+    assert set_status_calls == []
+
+
+def test_single_poll_gh_closed_dispatched_entry_maps_completed(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """Entry with a real dispatch whose issue closes → phase's COMPLETED
+    status + label (existing behavior must be preserved)."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixing", last_dispatched_command="/fix",
+    )
+
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
+
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["gh_closed"] is True
+    assert entry["autoswe_status"] == "fixed"
+    assert set_status_calls == [(1, "autoswe:fixed")]
+
+
+def test_single_poll_heals_never_dispatched_entry_with_completed_status(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """Pre-#258 poison: open issue, never dispatched, but queue says 'fixed'
+    (the fabricated terminal) → every poll heals it back to None."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixed", last_dispatched_command=None,
+    )
+
+    # Issue is open: the invariant heal must reset the fabricated terminal.
+    _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["autoswe_status"] is None, (
+        f"fabricated terminal must be healed to neutral, got {entry['autoswe_status']!r}"
+    )
+
+    # Re-opened after a close: gh_closed clears AND a still-poisoned status
+    # is healed in the same poll.
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixed", last_dispatched_command=None, gh_closed=True,
+    )
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["gh_closed"] is False
+    assert entry["autoswe_status"] is None
+    assert set_status_calls == []
+

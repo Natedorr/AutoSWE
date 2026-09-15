@@ -36,6 +36,7 @@ from autoswe.providers.adapter import apply_effect, read_api
 from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
 from autoswe.tracking.comments import record_bot_comment_id
 from autoswe.tracking.labels import (
+    COMPLETED_STATUSES,
     RUNNING_STATUSES,
     SHIPPING_BLOCKING_STATUSES,
     TERMINAL_STATUSES,
@@ -979,24 +980,56 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             if task_entry["issue_number"] not in open_issue_numbers:
                 if not task_entry.get("gh_closed", False):
                     task_entry["gh_closed"] = True
-                    # last_dispatched_command is a slash command ("/sync",
-                    # "/pr", ...), not an action kind. completed_status_for
-                    # is keyed by kind ("sync_branch", "ship_pr", ...), so
-                    # use _kind_from_command to convert — otherwise /sync
-                    # and /pr both fall through to the "fixed" default.
-                    closed_status = completed_status_for(
-                        _kind_from_command(
-                            task_entry.get("last_dispatched_command", "/fix")
+                    last_cmd = task_entry.get("last_dispatched_command")
+                    if last_cmd is None:
+                        # Issue closed before anything was ever dispatched
+                        # (issue #258): a COMPLETED status would be a
+                        # fabricated terminal state on a task that did no
+                        # work — drivers watching the queue or the label
+                        # would skip it entirely. Mark gh_closed only,
+                        # leave autoswe_status neutral, and write no
+                        # terminal label. `queue prune` still cleans up
+                        # the entry via the gh_closed flag.
+                        log(
+                            f"[CLOSED] {slug} — issue closed on platform "
+                            "before any dispatch; status stays neutral"
                         )
-                    )
-                    task_entry["autoswe_status"] = closed_status
-                    with contextlib.suppress(RuntimeError):
-                        tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
-                    log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
+                    else:
+                        # A real dispatch happened. last_dispatched_command
+                        # is a slash command ("/sync", "/pr", ...), not an
+                        # action kind. completed_status_for is keyed by
+                        # kind ("sync_branch", "ship_pr", ...), so use
+                        # _kind_from_command to convert — otherwise /sync
+                        # and /pr both fall through to the "fixed"
+                        # default.
+                        closed_status = completed_status_for(
+                            _kind_from_command(last_cmd)
+                        )
+                        task_entry["autoswe_status"] = closed_status
+                        with contextlib.suppress(RuntimeError):
+                            tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
+                        log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
                 continue
             if task_entry.get("gh_closed", False):
                 task_entry["gh_closed"] = False
                 log(f"[REOPENED] {slug} — issue reopened on platform")
+            # Self-heal pre-#258 poison, on every poll: a never-dispatched
+            # entry (last_dispatched_command is None) can legitimately hold
+            # no COMPLETED status — emit() always records the dispatch
+            # command it maps from. Entries still carrying one (e.g.
+            # "fixed") were fabricated by the old gh_closed path; reset
+            # to neutral so decide() takes the fresh-discovery path and
+            # Phase 3 stops re-mirroring the false terminal label.
+            if (
+                task_entry.get("last_dispatched_command") is None
+                and task_entry.get("autoswe_status") in COMPLETED_STATUSES
+            ):
+                log(
+                    f"[HEAL] {slug} — never-dispatched entry carries "
+                    f"{task_entry['autoswe_status']!r}; resetting to "
+                    f"neutral (issue #258)"
+                )
+                task_entry["autoswe_status"] = None
 
         # --- Phase 3: Label mirror for terminal tasks ---
         # Only call set_status when the issue's current status (from labels/tags

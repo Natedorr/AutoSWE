@@ -81,18 +81,14 @@ Additionally, `last_dispatched_command_id` and `last_consumed_reply_id` are ID-b
 
 ## Staleness Refresh Before Running
 
-The queue is a snapshot from the last poll. Before `_dispatch_task` actually runs a task, the poll loop **re-fetches the issue** (state + comments) via `read_api()` and reconciles:
-
-- `issue.state == "closed"` → don't run the agent; set `autoswe_status = "fixed"` and `gh_closed = True`, then move on. (The COMPLETED status here means *autoSWE is done with it* — the issue being "closed" is a separate lifecycle on the tracker side, not something autoSWE owns.)
-- comments changed since last poll → `decide()` re-evaluates from the fresh API data; if the command is now stale (comment ID ≤ `last_dispatched_command_id`), returns `noop`.
-
-This is the safety net for the gap between "poll built the map" and "dispatch acts on it."
+The queue is a snapshot from the last poll. There is **no** separate re-fetch inside `_dispatch_task` — the closed-issue check happens once per poll cycle in the `gh_closed` detection phase (below), and `decide()` re-evaluates from the fresh API data each poll: if a command is now stale (comment ID ≤ `last_dispatched_command_id`), it returns `noop`.
 
 ## RUNNING States Are Protected
 
 `decide()` only re-opens a task from a COMPLETED status (`fixed`/`synced`/`shipped`/`reviewed`)/`failed`/`error`/`skipped`/`planned`/`waiting` — never from a RUNNING status (`planning`/`fixing`/`syncing`/`reviewing`/`shipping`). So a comment posted while an agent run is in flight can't pull the task out from under it; it'll be picked up on the *next* poll after the run finishes. (The `autoswe:*` label mirror inherits this; the protection is in `autoswe_status`, not the label.)
 
-## Closed-Issue Handling (two paths)
+## Closed-Issue Handling
 
-1. **At sync time:** an issue that has dropped out of `list_open_issues()` → `gh_closed = True` in the queue. The task is never purged; if the issue is reopened, `gh_closed` is set back to `False`.
-2. **At dispatch time (refresh):** see "Staleness Refresh" above — a task that was `pending` at sync but whose issue is now closed is not run; it's marked as a COMPLETED status + `gh_closed`.
+1. **At sync time:** an issue that has dropped out of `list_open_issues()` → `gh_closed = True` in the queue. If a real dispatch happened, `autoswe_status` is set to that phase's COMPLETED status and the matching `autoswe:*` label is written. If the task was **never** dispatched, the status stays neutral (`None`) and no terminal label is written — the old unconditional `"fixed"` default fabricated a false terminal on fresh issues that drivers then skipped (issue #258). The task is never purged by the poller; if the issue is reopened, `gh_closed` is set back to `False`, and a per-poll heal resets any never-dispatched entry carrying a COMPLETED status (left behind by pre-#258 code) back to `None`.
+
+2. **Cleanup:** `queue prune` (manual, `autoswe.py queue prune`) removes entries with `gh_closed = True` or a terminal status older than the `--older-than-days` threshold (default 30).
