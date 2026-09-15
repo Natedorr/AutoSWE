@@ -73,6 +73,9 @@ def _make_tracker(provider: str, comments: list[NormalizedComment]) -> MagicMock
     mock = MagicMock(wraps=tracker)
     mock.list_open_issues = MagicMock(return_value=[_make_issue(42)])
     mock.fetch_comments = MagicMock(return_value=comments)
+    # Class attributes are not proxied by wraps; copy the real capability so
+    # read_api's comment-fetch policy is exercised per-provider.
+    mock.comments_bump_updated = tracker.comments_bump_updated
     return mock
 
 
@@ -142,12 +145,42 @@ def _single_issue_tracker(provider: str, last_updated: str | None,
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_read_api_skip_unchanged_issue(provider):
-    """When prev_updated matches, comments should be skipped."""
+    """When prev_updated matches, comments are skipped — but ONLY on providers
+    where a comment bumps the updated timestamp (GitHub)."""
     t = _single_issue_tracker(provider, "2026-01-01T00:00:00Z")
     api_states = _run_read(t, prev_updated={42: "2026-01-01T00:00:00Z"})
-    assert api_states[42].comments_fetched is False
-    assert api_states[42].comments == ()
-    t.fetch_comments.assert_not_called()
+    if provider == "github":
+        assert api_states[42].comments_fetched is False
+        assert api_states[42].comments == ()
+        t.fetch_comments.assert_not_called()
+    else:
+        # Azure: a comment does not bump System.ChangedDate, so an unchanged
+        # timestamp must NOT suppress the fetch or a new slash command is lost.
+        assert api_states[42].comments_fetched is True
+        t.fetch_comments.assert_called_once()
+
+
+def test_read_api_azure_comment_after_tag_write_still_fetched():
+    """Regression: on Azure the poller stalls if a comment-only change is
+    treated as "unchanged".
+
+    Sequence that reproduced the live bug (issues 188/189/190): autoSWE writes
+    a status tag -> ADO advances System.ChangedDate -> the poller stores it as
+    last_updated -> the user posts a new `/fix` -> ADO does NOT advance
+    ChangedDate again -> read_api sees last_updated == stored and skips the
+    comment fetch -> the command is never seen and the task never moves.
+
+    With comments_bump_updated=False the fetch must happen even though the
+    timestamp is unchanged, so the new comment (and its slash command) is read.
+    """
+    t = _single_issue_tracker(
+        "azure", "2026-09-11T16:53:09.207Z",
+        comments=[_make_comment("/fix", author_login="OWNER")],
+    )
+    api_states = _run_read(t, prev_updated={42: "2026-09-11T16:53:09.207Z"})
+    assert api_states[42].comments_fetched is True
+    t.fetch_comments.assert_called_once()
+    assert api_states[42].comments[0].body == "/fix"
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)

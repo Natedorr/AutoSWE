@@ -9,7 +9,7 @@ from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool, post_question_fallback
 from autoswe.harness.mcp_config import build_mcp_comment_server
-from autoswe.harness.prompts import BOT_MARKER, build_plan_prompt
+from autoswe.harness.prompts import BOT_MARKER, _output_format_note, build_plan_prompt
 from autoswe.harness.runner import HandlerResult
 from autoswe.harness.schemas import PLAN_SCHEMA, output_format_for
 from autoswe.providers.factory import get_tracker
@@ -468,10 +468,19 @@ def run_plan(task: dict, repo_cfg: dict, cfg: dict, guidance: str | None = None,
     # render to the tools this backend's adapter actually exposes.
     tool_names = runner.comment_tool_names(harness)
 
+    # Gate the JSON-schema output note on the backend's structured_output
+    # capability — pi/codex never receive an output_format, so the note is
+    # dropped for them (issue #235 follow-up). The harness is already resolved
+    # above, so the note can be computed here.
+    output_format_note = _output_format_note(
+        runner.backend_has_capability(harness, "structured_output"), "plan",
+    )
+
     return _plan_session(
         task, repo_cfg, cfg or {},
         prompt_factory=lambda wt: build_plan_prompt(
-            task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance, tool_names=tool_names,
+            task, repo_root=str(wt), repo_cfg=repo_cfg, guidance=guidance,
+            tool_names=tool_names, output_format_note=output_format_note,
         ),
         resume_session_id=None,
         label=label,

@@ -803,7 +803,7 @@ class TestModeTranslationParity:
         assert not hasattr(codex_mod, "_MODE_SANDBOX")
         assert not hasattr(codex_mod, "_mode_to_sandbox")
 
-    def test_pi_mode_tools_coverage(self):
+    def test_pi_mode_tools_coverage(self, monkeypatch):
         """PiBackend _MODE_TOOLS covers all three modes with real enforcement.
 
         Unlike Codex, pi translates mode into a real ``--tools`` allowlist:
@@ -812,6 +812,12 @@ class TestModeTranslationParity:
         (a non-interactive run would block on it — there is no per-tool
         approval in --mode json).
         """
+        # Pin the platform so the spec→allowlist assertions below match the
+        # base _MODE_TOOLS table exactly. On a Windows host _tools_for_spec
+        # additionally appends `powershell` for read_write (covered by
+        # test_tools_windows_read_write_adds_powershell); without the pin the
+        # equality to the static table fails on native-Windows runners.
+        monkeypatch.setattr("autoswe.harness.backends.pi.os.name", "posix")
         from autoswe.harness.backends.pi import _MODE_TOOLS, _tools_for_spec
 
         for mode in ("plan", "read_only", "read_write"):

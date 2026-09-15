@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from autoswe.providers.base import PRResult
-from autoswe.vcs.ship import _pr_ref
+from autoswe.vcs.ship import _pr_display, _pr_ref
 
 
 @pytest.fixture(autouse=True)
@@ -655,3 +655,97 @@ class TestOpenPrPreflightGate:
         assert captured["cfg"] == {"GITHUB_TOKEN": "tok"}
         assert captured["repo_cfg"]["owner"] == "o"
         assert captured["progress_callback"] is progress
+
+
+# ---------------------------------------------------------------------------
+# _pr_display — provider-aware PR reference (Azure !N vs GitHub URL)
+# ---------------------------------------------------------------------------
+
+def test_pr_display_azure_uses_exclamation():
+    """Azure posts the short !N reference instead of the long web URL."""
+    url = "https://dev.azure.com/org/proj/_git/repo/pullrequest/42"
+    assert _pr_display(url, 42, "azure") == "!42"
+
+
+def test_pr_display_azure_falls_back_to_url_when_no_number():
+    """Azure with unknown number still parses the URL; no number at all → URL."""
+    url = "https://dev.azure.com/org/proj/_git/repo/pullrequest/42"
+    assert _pr_display(url, None, "azure") == "!42"
+    # No parseable number and no explicit number → keep the URL.
+    assert _pr_display("", None, "azure") == ""
+
+
+def test_pr_display_github_keeps_url():
+    """Non-Azure providers keep the full clickable URL (no !N convention)."""
+    url = "https://github.com/o/r/pull/42"
+    assert _pr_display(url, 42, "github") == url
+
+
+def test_open_pr_azure_posts_exclamation_not_url(mock_gh_post_comment):
+    """On Azure, /pr posts !N in the 'opened' comment and DONE ref, not the URL."""
+    task = make_task()
+    task["provider"] = "azure"
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(
+            pr_url="https://dev.azure.com/org/proj/_git/repo/pullrequest/17",
+            existing_pr=None,
+        )
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"AZURE_PAT": "tok"})
+
+    assert result == "DONE: PR !17"
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
+    assert "Pull request opened: !17" in comment_body
+    # The long URL must not be posted.
+    assert "dev.azure.com" not in comment_body
+    # The queue cache still records the full URL (machine-readable).
+    assert task["pr_url"] == "https://dev.azure.com/org/proj/_git/repo/pullrequest/17"
+    assert task["pr_number"] == 17
+
+
+def test_open_pr_azure_existing_posts_exclamation(mock_gh_post_comment):
+    """Azure idempotent /pr path also posts !N, not the URL."""
+    task = make_task()
+    task["provider"] = "azure"
+    existing = PRResult(
+        url="https://dev.azure.com/org/proj/_git/repo/pullrequest/15",
+        number=15,
+    )
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(existing_pr=existing)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"AZURE_PAT": "tok"})
+
+    assert result == "DONE: PR !15"
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
+    assert "Pull request already exists: !15" in comment_body
+    assert "dev.azure.com" not in comment_body
+
+
+def test_open_pr_github_still_posts_url(mock_gh_post_comment):
+    """Regression: GitHub /pr still posts the full URL, unchanged."""
+    task = make_task()
+    task["provider"] = "github"
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_get_vcs.return_value = _mock_vcs(
+            pr_url="https://github.com/o/r/pull/42",
+            existing_pr=None,
+        )
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result == "DONE: PR https://github.com/o/r/pull/42"
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
+    assert "https://github.com/o/r/pull/42" in comment_body

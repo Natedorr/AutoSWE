@@ -18,6 +18,58 @@ CONFLICT_RESOLUTION_PROMPT_FILE = AUTOSWE_DIR / "config" / "prompts" / "conflict
 
 BOT_MARKER = "\n<!-- autoswe-bot -->"
 
+# Prompt note injected at ``{{OUTPUT_FORMAT_NOTE}}`` when the resolved backend
+# supports schema-validated structured output (Claude Code only). pi and codex
+# have no ``structured_output`` capability and never receive an
+# ``output_format``, so the note is dropped for them — otherwise the prompt
+# still tells the model to emit a JSON blob the backend will never parse, and
+# that blob becomes the posted report. See issue #235 follow-up.
+_REVIEW_OUTPUT_FORMAT_NOTE = (
+    "Your final answer is also validated against a JSON schema: put the full "
+    "report in `report_markdown` and a short verdict in `verdict`."
+)
+_PLAN_OUTPUT_FORMAT_NOTE = (
+    "Your final answer is also validated against a JSON schema. Mirror whatever "
+    "you already produced into its fields, whichever channel you used (the "
+    "`post_plan` / `post_question` tools, `AskUserQuestion`, or the text blocks "
+    "below): when your plan is ready, finish with `is_plan_ready: true` and the "
+    "full plan in `plan_markdown`; when you are still waiting on "
+    "clarification, finish with `is_plan_ready: false` and the same questions "
+    "in `question_markdown`."
+)
+
+
+def _output_format_note(has_structured_output: bool, kind: str) -> str:
+    """Return the ``{{OUTPUT_FORMAT_NOTE}}`` text for a builder.
+
+    ``kind`` is ``"review"`` or ``"plan"``. The note is only emitted when the
+    resolved backend actually supports schema-validated structured output; for
+    any other backend it returns an empty string so the placeholder is erased.
+    """
+    if not has_structured_output:
+        return ""
+    return _REVIEW_OUTPUT_FORMAT_NOTE if kind == "review" else _PLAN_OUTPUT_FORMAT_NOTE
+
+
+def _comment_tool_name(names: dict | None, role: str) -> str:
+    """Resolve one MCP tool name from the backend's tool-names dict.
+
+    PLAN-pi-mcp.md Phase 3: prompts name the tools the way the resolved
+    backend's adapter exposes them (``{{POST_PLAN_TOOL}}`` etc.). The dict comes
+    from ``CodingBackend.comment_tool_names()`` (via
+    ``runner.comment_tool_names``); when it is missing a role — or the whole
+    dict is None for a caller that predates the parameter — fall back to the
+    Claude Code spelling so a prompt always renders to a concrete tool name and
+    existing custom prompt files that hardcode the Claude names keep working.
+    """
+    if names:
+        value = names.get(role)
+        if value:
+            return value
+    from autoswe.harness.backends.base import CLAUDE_COMMENT_TOOL_NAMES
+
+    return CLAUDE_COMMENT_TOOL_NAMES[role]
+
 
 def _comment_tool_name(names: dict | None, role: str) -> str:
     """Resolve one MCP tool name from the backend's tool-names dict.
@@ -150,6 +202,7 @@ def build_plan_prompt(
     task: dict, repo_root: str | None = None, comments: list[NormalizedComment] | None = None,
     repo_cfg: dict | None = None, guidance: str | None = None,
     tool_names: dict | None = None,
+    output_format_note: str = "",
 ) -> str:
     """Build the plan prompt from template + task data.
 
@@ -158,6 +211,10 @@ def build_plan_prompt(
     ``{{POST_QUESTION_TOOL}}`` / ``{{UPDATE_PROGRESS_TOOL}}`` placeholders so
     the agent is told to call the tools the way this backend's adapter exposes
     them. When omitted, the Claude Code names are used (the default).
+
+    *output_format_note* fills ``{{OUTPUT_FORMAT_NOTE}}``: the JSON-schema
+    instruction is included only when the resolved backend supports structured
+    output (see :func:`_output_format_note`).
     """
     # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
     from autoswe.providers.factory import get_tracker
@@ -193,6 +250,7 @@ def build_plan_prompt(
         "{{POST_PLAN_TOOL}}": _comment_tool_name(tool_names, "post_plan"),
         "{{POST_QUESTION_TOOL}}": _comment_tool_name(tool_names, "post_question"),
         "{{UPDATE_PROGRESS_TOOL}}": _comment_tool_name(tool_names, "update_progress"),
+        "{{OUTPUT_FORMAT_NOTE}}": output_format_note,
     }
     prompt = template
     for k, v in replacements.items():
@@ -417,8 +475,15 @@ def build_review_prompt(
     diff_stat: str | None = None,
     diff_text: str | None = None,
     guidance: str | None = None,
+    output_format_note: str = "",
 ) -> str:
-    """Build the review prompt from template + task data."""
+    """Build the review prompt from template + task data.
+
+    *output_format_note* fills ``{{OUTPUT_FORMAT_NOTE}}``: the JSON-schema
+    instruction is included only when the resolved backend supports structured
+    output (see :func:`_output_format_note`). Callers pass the resolved
+    backend's note, or ``""`` to erase the placeholder (the pre-gate default).
+    """
     # Deferred import: avoids circular dependency (prompts <- factory <-> providers).
     from autoswe.providers.factory import get_vcs
 
@@ -449,6 +514,7 @@ def build_review_prompt(
         "{{GUIDANCE_BLOCK}}": guidance_block,
         "{{BASE_BRANCH}}": base_branch,
         "{{BRANCH}}": branch,
+        "{{OUTPUT_FORMAT_NOTE}}": output_format_note,
     }
     prompt = template
     for k, v in replacements.items():

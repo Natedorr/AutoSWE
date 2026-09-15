@@ -4,8 +4,14 @@ Shells out to the pi CLI subprocess, maps a harness-agnostic ``RunSpec`` to
 CLI flags, and parses the JSON event stream (one JSON object per line on
 stdout) into a ``RunResult``.  This is the Python-side integration for pi:
 the official SDK is TypeScript-only, so the CLI is the transport (the same
-shape as the Codex backend).  ``pi --mode json "<prompt>"`` emits the stream
-and exits on completion (``docs/pi/json.md``).
+shape as the Codex backend).  ``pi --mode json`` emits the stream and exits on
+completion (``docs/pi/json.md``); the prompt is **not** passed as a positional
+argument — it is written to the subprocess's **stdin** (pi merges piped stdin
+into the initial message, ``docs/pi/usage.md``).  Passing it inline would put a
+10-20 KB ``/fix`` prompt on the command line, which Windows' ``cmd /c`` (used
+to launch the ``pi.cmd`` shim) caps at ~8191 chars, so an inline prompt makes pi
+die at spawn with "The command line is too long."  Stdin has no such limit and
+also avoids pi's ``@file`` ``<file name=...>`` wrapper.
 
 **Capabilities (Phase 2):** ``mode``, ``resume``, ``session_fork``,
 ``progress_stream``, ``mcp``.  The ``mcp`` capability is gated on the
@@ -372,11 +378,18 @@ async def warm_up_mcp_cache(harness_cfg: dict, *, timeout: float = 60.0) -> bool
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
-            stdin=asyncio.subprocess.DEVNULL,
+            # The (trivial) warm-up prompt is delivered over stdin, like a real
+            # run — _build_argv no longer puts the prompt on the command line.
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=autoswe_repo_root(),
+            # Same StreamReader limit as a real run: the warm-up drains both
+            # pipes (chunked read() only, no readline), but keeping the
+            # "every pipe we read from has an oversized limit" invariant means
+            # a future readline on this path cannot hit the 64 KiB default.
+            limit=_MAX_STREAM_BYTES + 1,
         )
     except FileNotFoundError:
         log("[PI-WARMUP] pi executable not found on PATH. Install with: npm i -g @earendil-works/pi-coding-agent")
@@ -401,9 +414,26 @@ async def warm_up_mcp_cache(harness_cfg: dict, *, timeout: float = 60.0) -> bool
                     pass
                 break
 
+    async def _write_stdin() -> None:
+        """Write the warm-up prompt to pi's stdin (merged into the initial
+        message).  The prompt is trivial, so it will never exceed the pipe
+        buffer, but it is written alongside the readers anyway for symmetry
+        with the real-run path.  getattr keeps it a no-op for a fake
+        subprocess that has no stdin pipe."""
+        stdin = getattr(process, "stdin", None)
+        if stdin is None:
+            return
+        try:
+            stdin.write(spec.prompt.encode("utf-8"))
+            await stdin.drain()
+            stdin.close()
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            log(f"[PI-WARMUP] could not write prompt to stdin: {e}")
+
     try:
         async def _run_and_drain() -> None:
-            await asyncio.gather(_drain(process.stdout), _drain(process.stderr), process.wait())
+            await asyncio.gather(_drain(process.stdout), _drain(process.stderr),
+                                 _write_stdin(), process.wait())
 
         await asyncio.wait_for(_run_and_drain(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -584,8 +614,14 @@ def _build_argv(
     if session_dir:
         cmd.extend(["--session-dir", session_dir])
 
-    # Prompt always behind -- so prompts starting with '-' are safe.
-    cmd.extend(["--", spec.prompt])
+    # The prompt is NOT a positional argument: it is written to the subprocess's
+    # stdin by the caller (PiBackend._run_async / warm_up_mcp_cache).  pi merges
+    # piped stdin into the initial message (docs/pi/usage.md), and this keeps a
+    # 10-20 KB /fix prompt off the command line — Windows' `cmd /c` caps the
+    # command line at ~8191 chars, so an inline prompt would make pi die at
+    # spawn with "The command line is too long."  (The old inline form was also
+    # the `--` separator that made dash-leading prompts safe; stdin needs no
+    # such separator.)
     return cmd
 
 
@@ -850,16 +886,26 @@ def _parse_line(line: str, acc: _PiAccumulator, callback) -> None:
             if callback:
                 callback(f"Tool: {_tool_label(event)}")
         else:
-            # End: surface a failing tool so the operator sees it live.  Per
-            # the plan, a tool result carrying isError: true sets the run's
-            # error flag (mirrors how a tool failure is a signal something
-            # went wrong).  Tradeoff: a routine nonzero-exit tool (e.g. a
-            # grep that matches nothing) also flips the subtype to "error" —
-            # accepted per the explicit spec ("extension_error and isError set
-            # the error flag").
+            # End: surface a failing tool so the operator sees it live.
+            #
+            # A tool result with isError: true is NOT a run-level failure. pi's
+            # contract is that a tool error is "caught, reported to the LLM
+            # with isError: true, and execution continues" (docs/pi/extensions.md)
+            # — the model sees the failure and normally recovers (retries the
+            # command, works around it). Sinking the whole run's subtype to
+            # "error" on any isError therefore mislabels a run that completed
+            # cleanly (rc 0, agent_end reached, valid final message) as a
+            # failure: a single transient bash nonzero exit — e.g. a grep that
+            # matched nothing, or a pytest run the agent then fixed — would
+            # discard real, verified work and force a /retry. Whether the fix
+            # actually landed is decided downstream by whether it produced
+            # committable changes (commit_and_push's committed flag) and the
+            # post-fix test gate, not by a mid-run tool exit code. So we log
+            # the failure for the operator but do NOT set the run's error flag.
+            # (extension_error / error events and stream overflow DO set
+            # has_error — those are genuine process-level failures.)
             if event.get("isError"):
-                log(f"[PI] tool {event.get('toolName')} failed (isError)")
-                acc.has_error = True
+                log(f"[PI] tool {event.get('toolName')} failed (isError) — run continues")
             elif callback:
                 callback(f"Tool done: {_tool_label(event)}")
 
@@ -1064,11 +1110,23 @@ class PiBackend:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
+                # The prompt is delivered over stdin, not the command line
+                # (see _build_argv): pi merges piped stdin into the initial
+                # message, and this keeps a /fix-sized prompt off the command
+                # line so `cmd /c` never hits its ~8191-char limit.
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=spec.cwd,
+                # StreamReader limit threads to BOTH stdout and stderr pipes.
+                # Default is 64 KiB: a single JSON event larger than that makes
+                # readline() raise ValueError, which is not a retryable
+                # exception and would crash the poller.  Raise it past
+                # _MAX_STREAM_BYTES so any line the byte budget allows is
+                # readable; the residual case (line > limit) is caught in
+                # read_stdout_jsonl below.
+                limit=_MAX_STREAM_BYTES + 1,
             )
         except FileNotFoundError as e:
             raise RuntimeError(
@@ -1083,6 +1141,32 @@ class PiBackend:
         acc = _PiAccumulator()
         # Pre-seed the session id so a premature death still reports it.
         acc.session_id = pinned_id
+
+        async def _write_stdin() -> None:
+            """Write the prompt to pi's stdin and close it (pi merges piped
+            stdin into the initial message, docs/pi/usage.md).
+
+            This runs CONCURRENTLY with the stdout/stderr readers (in the
+            gather below) — not before them.  If the prompt exceeds the stdin
+            pipe buffer, ``drain()`` blocks until pi consumes it; while pi is
+            reading stdin it also emits startup output on stdout, so the
+            readers must be running at the same time to avoid a pipe-buffer
+            deadlock.  If pi dies before reading, the write raises
+            BrokenPipeError — that is harmless because the run is already
+            failing (nonzero exit) and the error path below surfaces pi's
+            stderr, so we swallow it and let the exit-code path report the run.
+            (A fake subprocess in tests may have no stdin pipe at all; getattr
+            keeps this a no-op for those.)
+            """
+            stdin = getattr(process, "stdin", None)
+            if stdin is None:
+                return
+            try:
+                stdin.write(spec.prompt.encode("utf-8"))
+                await stdin.drain()
+                stdin.close()
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                log(f"[PI] could not write prompt to stdin: {e} — continuing (the run will report the exit code)")
 
         async def read_stderr() -> bytes:
             """Collect stderr output in chunks, bounded by _MAX_STREAM_BYTES.
@@ -1115,11 +1199,37 @@ class PiBackend:
             Bounded by _MAX_STREAM_BYTES to prevent pipe-buffer deadlock and
             unbounded memory growth.  After the limit is hit, the pipe is
             drained (discarding data) so the child does not block.
+
+            Also guards the StreamReader limit: the process is spawned with
+            ``limit=_MAX_STREAM_BYTES + 1`` so any line the byte budget
+            allows is readable.  If a single line still exceeds the limit,
+            ``readline()`` raises ``ValueError``; we flag the run and drain
+            (discarding data) so the child does not block — the run surfaces
+            as a backend error (subtype='error'), never a poller crash.
+            ``readline()`` clears the reader's internal buffer on this
+            error, so the drain below sees a fresh stream to EOF.
             """
             if process.stdout:
                 total_bytes = 0
                 while True:
-                    raw = await process.stdout.readline()
+                    try:
+                        raw = await process.stdout.readline()
+                    except ValueError:
+                        # A single JSON event exceeded the StreamReader limit
+                        # (limit=_MAX_STREAM_BYTES + 1).  Fail the run, drain
+                        # the rest so the child does not block, and let the
+                        # returncode/has_error path turn this into an error
+                        # RunResult instead of letting the ValueError escape
+                        # the poller (it is not a retryable exception).
+                        log(f"[PI] single JSON line exceeded the StreamReader limit ({_MAX_STREAM_BYTES + 1} bytes) — truncating stream")
+                        acc.has_error = True
+                        # Use read() not readline() — if the child writes
+                        # non-newline data, readline() would block forever.
+                        while True:
+                            leftover = await process.stdout.read(64 * 1024)
+                            if not leftover:
+                                break
+                        break
                     if not raw:
                         break
                     total_bytes += len(raw)
@@ -1134,26 +1244,54 @@ class PiBackend:
                     text = raw.decode("utf-8", errors="replace")
                     _parse_line(text, acc=acc, callback=spec.progress_callback)
 
+        # gather runs the stdout reader, the stderr reader, and the stdin
+        # writer together (the prompt is delivered over stdin while the
+        # streams are read).  We keep the collected stderr (index 1) so a
+        # non-zero exit can surface *why* pi died (the JSON stream on stdout
+        # carries no diagnostic; the real error text is on stderr, and without
+        # logging it a crash looks like an opaque `stream did not reach
+        # agent_end`).
+        stderr_bytes = b""
         try:
-            await asyncio.wait_for(
+            _gather_results = await asyncio.wait_for(
                 asyncio.gather(
                     read_stdout_jsonl(),
                     read_stderr(),
+                    _write_stdin(),
                     return_exceptions=False,
                 ),
                 timeout=spec.timeout,
             )
+            # Index 1 is read_stderr()'s collected bytes (the other two
+            # coroutines both return None).
+            stderr_bytes = _gather_results[1] if len(_gather_results) > 1 else b""
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
             log(f"[PI] timeout after {spec.timeout}s — killed process")
             raise
 
-        returncode = process.returncode
+        # Reap the process so `returncode` is set. On the Windows proactor
+        # event loop, draining the pipes does not reliably mark the process
+        # exited, so reading `process.returncode` here can yield `None` and
+        # turn a successful run into `subtype: error`. `wait()` is a no-op
+        # once the process has already exited (e.g. after a timeout kill).
+        returncode = await process.wait()
         duration = time.monotonic() - t0
 
         if returncode != 0:
             log(f"[PI] exit={returncode}")
+            # Surface pi's stderr so a startup crash (invalid flag, bad model,
+            # MCP/adapter failure, session-store error) is diagnosable instead
+            # of the opaque `stream did not reach agent_end`. The JSON stream
+            # on stdout carries no diagnostic; the real error is here. Redact
+            # the api key (passed via --api-key) before logging.
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+            if stderr_text:
+                api_key = str(harness_cfg.get("api_key") or "")
+                if api_key:
+                    stderr_text = stderr_text.replace(api_key, "***")
+                log(f"[PI] stderr (exit={returncode}): {stderr_text[:2000]}")
 
         # Determine subtype from exit code and in-stream errors.
         # asyncio.subprocess uses negative values for signal-killed processes

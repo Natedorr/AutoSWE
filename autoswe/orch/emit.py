@@ -41,11 +41,21 @@ _KIND_TO_PHASE = {
     "retry": "fix",
 }
 
+# Slash command → phase name. Used for a /retry that REPLAYED a command: the
+# replayed command's phase, not the literal "retry" (fix) — so a replayed /plan
+# records last_phase="plan" and the running label reads planning, not fixing.
+_COMMAND_TO_PHASE = {
+    "/plan": "plan",
+    "/fix": "fix",
+    "/review": "review",
+}
+
 
 def _field_lifecycle_patch(
     kind: str,
     new_status: str,
     result: DispatchResult,
+    phase_override: str | None = None,
 ) -> dict:
     """Pure function: compute lifecycle field mutations for (kind, new_status, result).
 
@@ -56,11 +66,16 @@ def _field_lifecycle_patch(
     Computing this once up front (before the review early-return) eliminates
     the ordering fragility of inlined mutations that *must* happen before
     the early return.
+
+    phase_override: the phase to record for last_phase/resume_phase, overriding
+    the kind→phase map. For a /retry this is the phase of the command actually
+    replayed (a replayed /plan → "plan", so the running label reads planning,
+    not fixing). None falls back to the kind map (the non-retry default).
     """
     patch: dict = {}
 
     # last_phase + resume_phase
-    phase = _KIND_TO_PHASE.get(kind)
+    phase = phase_override or _KIND_TO_PHASE.get(kind)
     if phase:
         patch["last_phase"] = phase
         patch["resume_phase"] = phase
@@ -69,7 +84,10 @@ def _field_lifecycle_patch(
     #  * plan + planned  -> persist the path the planner wrote
     #  * plan + waiting  -> leave existing value alone (mid-conversation)
     #  * fix / retry / sync / ship_pr -> always clear (consumed or N/A)
-    if kind == "plan":
+    # A /retry that replayed a /plan must behave like a /plan here (persist the
+    # plan path on planned), otherwise replaying a failed plan loses it.
+    retry_replayed_plan = kind == "retry" and result.replayed_command == "/plan"
+    if kind == "plan" or retry_replayed_plan:
         if new_status == "planned" and result.plan_file_path:
             patch["plan_file_path"] = result.plan_file_path
         elif new_status != "waiting":
@@ -389,7 +407,19 @@ def emit(
     # --- Common queue patch for all Claude actions ---
     old_status = task.status
 
+    # last_dispatched_command stays the TRIGGERING command ("/retry" for a retry).
+    # That is what decide()'s re-dispatch dedup compares against the slash command
+    # (`last_dispatched_command == slash_cmd`); overwriting it with the replayed
+    # command ("/plan") broke the match and made the same /retry comment
+    # re-dispatch every poll. The command actually REPLAYED is tracked separately
+    # in last_replayed_command, which a subsequent /retry follows.
     pending_command = _KIND_TO_COMMAND.get(kind, "/fix")
+    # The command a /retry actually replayed (None for every non-retry kind — this
+    # also clears any stale value left by a prior /retry, so it never dangles).
+    replayed_command = result.replayed_command if kind == "retry" else None
+    # The replayed command's phase, so last_phase/resume_phase and the checkpoint
+    # backend reflect what actually ran (a replayed /plan → "plan").
+    replayed_phase = _COMMAND_TO_PHASE.get(replayed_command) if replayed_command else None
 
     log(f"[EMIT] {task.slug} status {old_status}->{new_status} attempt={action.attempt_count}")
     queue_patch = {
@@ -401,6 +431,7 @@ def emit(
         "pending_command": None,
         "pending_guidance": None,
         "pending_user_reply": None,
+        "last_replayed_command": replayed_command,
     }
 
     # Persist plan_branch from --branch so subsequent commands (/pr, /sync) use it
@@ -423,7 +454,10 @@ def emit(
         # and a failed retry leaves the checkpoint intact for the next /retry.
         # Review is excluded above: its throwaway session is not a checkpoint.
         if new_status != "failed" and _KIND_TO_PHASE.get(kind) is not None:
-            phase = _KIND_TO_PHASE.get(kind)
+            # A /retry records the phase of the command it replayed (a replayed
+            # /plan → "plan"), so the checkpoint backend tag reflects the backend
+            # that actually produced this session.
+            phase = replayed_phase or _KIND_TO_PHASE.get(kind)
             queue_patch["last_good_session_id"] = session_id
             # Tag which backend produced this checkpoint. A /retry later only
             # forks when the checkpoint's backend matches the phase's resolved
@@ -442,7 +476,7 @@ def emit(
     # Merge lifecycle field mutations (last_phase, resume_phase, plan_file_path,
     # review_file_path, first_dispatched_at, _guard_blocked). Computed once up
     # front so the review early-return below cannot skip them.
-    queue_patch.update(_field_lifecycle_patch(kind, new_status, result))
+    queue_patch.update(_field_lifecycle_patch(kind, new_status, result, replayed_phase))
 
     # Review verdict gates the next step. _map_done_to_status parsed the
     # verdict embedded in the review text:

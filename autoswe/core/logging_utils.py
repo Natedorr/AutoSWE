@@ -15,6 +15,7 @@ the operator regardless of log level.
 import logging
 import logging.handlers
 import re
+import sys
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -155,7 +156,20 @@ def log(msg: str) -> None:
     pass through SensitiveLogFilter before interpolation.
     """
     masked = mask_sensitive(msg)
-    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] {masked}", flush=True)
+    line = f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] {masked}"
+    # The console's stdout is often a legacy Windows codepage (e.g. cp1252);
+    # a character outside it (emoji, CJK, …) would otherwise raise
+    # UnicodeEncodeError from the print and — when called from a backend's
+    # stream reader — abort the whole run. Never let a log line kill a run:
+    # fall back to a lossy-but-printable encoding for anything the console
+    # can't render. Behavior is unchanged for cp1252-printable output.
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        safe = line.encode(sys.stdout.encoding or "utf-8", "replace").decode(
+            sys.stdout.encoding or "utf-8", "replace"
+        )
+        print(safe, flush=True)
     # Also emit to the debug logger so per-issue handlers capture it.
     # Uses a direct getLogger call — safe even if init_debug_logger not yet called.
     try:

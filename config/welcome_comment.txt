@@ -1,6 +1,8 @@
 autoSWE picked up this issue (`{{SLUG}}`).
 
-**Available Commands:**
+<details>
+<summary>Commands</summary>
+
 - `/plan` - Start a planning session (reads code, asks questions, posts a plan)
 - `/plan --branch <name>` - Plan on a specific branch (default: main)
 - `/fix` - Implement the fix (runs Claude with code-editing permissions; restarts a failed/error task)
@@ -14,5 +16,7 @@ autoSWE picked up this issue (`{{SLUG}}`).
 - `/abort` - Cancel the current task
 
 You can add guidance: `/fix with performance focus`
+
+</details>
 
 <!-- autoswe-bot -->

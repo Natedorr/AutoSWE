@@ -51,6 +51,15 @@ class DispatchResult:
     # persist them on the shipped queue entry. None for every other kind.
     pr_number: int | None = None
     pr_url: str | None = None
+    # For kind="retry": the slash command _run_retry actually REPLAYED, after its
+    # fallback rules (non-replayable -> /fix, /review on failed -> /fix). None for
+    # every other kind. emit() records this as last_replayed_command (NOT
+    # last_dispatched_command, which stays the literal "/retry" so decide()'s
+    # re-dispatch dedup can match it) and as the phase, so a subsequent /retry
+    # re-replays the same command instead of silently promoting a failed /plan
+    # to /fix (issue: "a failed plan is retried as a plan, not silently
+    # promoted to /fix").
+    replayed_command: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +185,12 @@ def run(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_dispatch(hr: HandlerResult, task: dict, review_file_path: str | None = None) -> DispatchResult:
+def _to_dispatch(
+    hr: HandlerResult,
+    task: dict,
+    review_file_path: str | None = None,
+    replayed_command: str | None = None,
+) -> DispatchResult:
     """Convert HandlerResult (from planner/coder) to DispatchResult."""
     return DispatchResult(
         done_content=hr.done_content,
@@ -186,6 +200,7 @@ def _to_dispatch(hr: HandlerResult, task: dict, review_file_path: str | None = N
         plan_file_path=hr.plan_file_path,
         review_file_path=review_file_path or hr.review_file_path,
         verdict=hr.verdict,
+        replayed_command=replayed_command,
     )
 
 
@@ -515,8 +530,13 @@ def _run_retry(
             )
         return _to_dispatch(hr, task)
 
-    # Look at what was last dispatched and replay it
-    last_cmd = world.task.last_dispatched_command
+    # Replay the last SUBSTANTIVE command that actually ran. last_replayed_command
+    # records what a prior /retry replayed (and is set ONLY on a retry — every
+    # other dispatch clears it), so it takes precedence over last_dispatched_command,
+    # which is now the literal "/retry" (the triggering command) and non-replayable.
+    # When the last dispatch was a plain /plan / /fix / /review (no intervening
+    # retry), last_replayed_command is None and we fall back to the dispatch watermark.
+    last_cmd = world.task.last_replayed_command or world.task.last_dispatched_command
     if last_cmd in _NON_REPLAYABLE_COMMANDS:
         last_cmd = "/fix"
     # A /review watermark on a failed/error task must replay as /fix, not a
@@ -558,4 +578,7 @@ def _run_retry(
                                 progress_callback=progress_callback,
                                 fork_session=fork_session_id is not None,
                                 fork_session_id=fork_session_id)
-    return _to_dispatch(hr, task)
+    # Record the command we actually ran (not the literal "/retry") so the
+    # dispatch watermark reflects the replayed work and the next /retry
+    # re-replays the same command.
+    return _to_dispatch(hr, task, replayed_command=last_cmd)

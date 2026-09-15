@@ -256,6 +256,16 @@ def _run_fix_session(
     harness = resolve_harness("fix", rc, cfg or {})
     fix_model = harness.get("model") or fix_model
 
+    # Capture the branch head BEFORE the session so commit_and_push can tell
+    # "the agent committed (and maybe pushed) this session's work" from "the
+    # agent did nothing." A weaker backend (pi) may commit AND push during the
+    # session; against the post-fetch origin/{branch} baseline that pushed work
+    # is invisible (issue #180 / pi E2E). Best-effort: a None baseline falls
+    # back to the legacy origin/{branch} check inside commit_and_push.
+    before_sha = _get_branch_head_sha(wt, get_vcs(
+        {"owner": owner, "repo": repo, "token": "", "provider": provider}
+    ).branch_name(issue_num))
+
     try:
         run_result = runner.run(
             prompt,
@@ -336,6 +346,7 @@ def _run_fix_session(
         base_branch, provider, token, rc, cfg or {},
         session_id=run_result.session_id,
         progress_callback=progress_callback,
+        before_sha=before_sha,
     )
 
 
@@ -559,6 +570,7 @@ def _finalize_fix(
     session_id: str | None = None,
     progress_callback=None,
     run_gate: bool = True,
+    before_sha: str | None = None,
 ) -> HandlerResult:
     """Commit, push, run the post-fix test gate, and return the final HandlerResult.
 
@@ -568,6 +580,12 @@ def _finalize_fix(
     gate before committing (the ``error_max_turns`` rescue path), pass
     ``run_gate=False`` so the suite is not executed twice. The commit/push
     flow itself is identical either way.
+
+    *before_sha*: the branch head captured BEFORE the coding session ran,
+    handed to ``commit_and_push`` so it can still detect work the agent
+    committed AND pushed during the session (a pushed commit would otherwise
+    be invisible against the post-fetch ``origin/{branch}`` baseline — issue
+    #180 / pi E2E). ``None`` when the caller has no pre-session baseline.
     """
     # Build the human-facing summary from the response WITHOUT the internal
     # <AUTOSWE_COMMIT> block, so the "Summary:" issue comment and the PR body
@@ -594,7 +612,7 @@ def _finalize_fix(
     log(f"[FIX] {task['id']} committing subject={subject!r}")
     dbg.debug("FIX: committing with subject=%r", subject)
     try:
-        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider)
+        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider, before_sha=before_sha)
     except Exception as e:  # Commit/push boundary — any provider or git error surfaces to the task result.
         dbg.error("_finalize_fix: commit/push failed: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: commit/push error: {e}")

@@ -412,6 +412,104 @@ def test_retry_clears_review_file_path():
     assert patch["review_file_path"] is None
 
 
+def test_retry_replay_plan_records_plan_command():
+    """A /retry that REPLAYED a /plan must record last_replayed_command=/plan
+    (and last_phase=plan), while last_dispatched_command stays the triggering
+    /retry.
+
+    Regression for the E2E-12 bug: the command a /retry actually ran must be
+    remembered so a subsequent /retry re-replays it instead of falling back to
+    /fix (the docs forbid silently promoting a failed /plan to a fix). It is
+    stored in last_replayed_command, NOT last_dispatched_command — that field
+    must stay "/retry" so decide()'s re-dispatch dedup can match the triggering
+    command (overwriting it with "/plan" made the same /retry re-dispatch every
+    poll).
+    """
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "retry_clears_guard" / "world.json").read_text()
+    ))
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "retry_clears_guard" / "action.json").read_text()
+    ))
+    # The replayed /plan timed out -> failed.
+    result = DispatchResult(
+        done_content="FAILED: timeout during plan phase",
+        session_id=None,
+        replayed_command="/plan",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "retry must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("last_replayed_command") == "/plan", (
+        "a /retry that replayed /plan must record last_replayed_command=/plan, "
+        f"(got {patch.get('last_replayed_command')!r})"
+    )
+    assert patch.get("last_dispatched_command") == "/retry", (
+        "last_dispatched_command must stay the triggering '/retry' so the "
+        "re-dispatch dedup matches (got "
+        f"{patch.get('last_dispatched_command')!r})"
+    )
+    assert patch.get("last_phase") == "plan", (
+        "a replayed /plan must record last_phase=plan so the running label "
+        f"reads planning, not fixing (got {patch.get('last_phase')!r})"
+    )
+    assert patch.get("resume_phase") == "plan"
+    assert patch.get("autoswe_status") == "failed"
+
+
+def test_retry_replay_fix_records_fix_command():
+    """A /retry that replayed a /fix records last_replayed_command=/fix and
+    last_phase=fix (last_dispatched_command stays the triggering /retry) — the
+    common case, pinned so the replayed-command recording does not regress."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "retry_clears_guard" / "world.json").read_text()
+    ))
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "retry_clears_guard" / "action.json").read_text()
+    ))
+    result = DispatchResult(
+        done_content="FAILED: timeout during fix phase",
+        session_id=None,
+        replayed_command="/fix",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "retry must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("last_replayed_command") == "/fix"
+    assert patch.get("last_dispatched_command") == "/retry"
+    assert patch.get("last_phase") == "fix"
+    assert patch.get("resume_phase") == "fix"
+
+
+def test_non_retry_dispatch_clears_last_replayed_command():
+    """A plain /fix dispatch must clear last_replayed_command so a replayed
+    command never dangles past the /retry that set it — the next /retry should
+    then fall back to last_dispatched_command (/fix), not a stale replayed value."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "action.json").read_text()
+    ))
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tfixed the bug\n",
+        session_id="sess-fix-1",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "fix must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("last_replayed_command") is None, (
+        "a non-retry dispatch must clear last_replayed_command (got "
+        f"{patch.get('last_replayed_command')!r})"
+    )
+
+
 def test_fix_success_sets_last_good_session_id():
     """A non-failed run that persists a session_id must record it as the
     last-known-good checkpoint so /retry can fork from it later."""

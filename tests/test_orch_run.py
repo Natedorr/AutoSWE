@@ -324,6 +324,10 @@ def test_run_retry_replays_plan():
     assert isinstance(result, DispatchResult)
     assert result.done_content == "PLAN_READY"
     mock_plan.assert_called_once()
+    # The replayed command is threaded so emit records it (not the literal
+    # "/retry") — a subsequent /retry then re-replays /plan instead of falling
+    # back to /fix (regression: "a failed plan is retried as a plan").
+    assert result.replayed_command == "/plan"
 
 
 def test_run_retry_after_pr_falls_back_to_fix():

@@ -510,6 +510,30 @@ def test_bot_content_patterns_detect_sticky_dispatching():
         assert _is_autoswe_bot_comment({"body": body}) is True, f"Must detect: {body!r}"
 
 
+def test_bot_content_patterns_detect_welcome_comment():
+    """The 'picked up this issue' welcome comment must be bot-detected by content.
+
+    Azure DevOps strips the ``<!-- autoswe-bot -->`` marker from rendered
+    bodies, and every Azure comment posts under the owner's single login — so
+    a welcome comment that is not also caught by a content pattern is misread
+    as a user reply and resumes the current phase (the resumed model then
+    'approves' the plan and the task drifts to ``waiting``). The marker-stripped
+    welcome must be bot-detected on content alone, like the other autoSWE
+    comments (issue #236 class).
+    """
+    from autoswe.tracking.comments import _is_autoswe_bot_comment
+
+    body = (
+        "autoSWE picked up this issue (`ado:org_proj_71`).\n\n"
+        "**Available Commands:**\n"
+        "- `/plan` - Start a planning session\n"
+        "- `/fix` - Implement the fix\n"
+        "- `/pr` - Open a pull request\n"
+    )
+    # No marker (ADO stripped it), no is_bot flag — content pattern must catch it.
+    assert _is_autoswe_bot_comment({"body": body, "is_bot": False}) is True
+
+
 def test_bot_content_patterns_ignore_user_text():
     from autoswe.tracking.comments import _is_autoswe_bot_comment
 

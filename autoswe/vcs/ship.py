@@ -38,6 +38,30 @@ def _record_pr(task: dict, pr_url: str, number: int | None) -> None:
     task["pr_url"] = pr_url
 
 
+def _pr_display(pr_url: str, number: int | None, provider: str) -> str:
+    """Return the PR reference to embed in a posted comment.
+
+    Azure DevOps short-links work-item and pull-request references in comments
+    the way GitLab does merge requests: ``#N`` resolves to work item *N* and
+    ``!N`` to pull request *N*. Posting a bare ``!N`` is far more readable than
+    the 200-char web URL, so on the Azure provider we emit that when we know
+    the PR number. Every other provider (GitHub) keeps the full clickable URL,
+    since there ``#N`` refers to an *issue*, not a PR, and the URL is the only
+    unambiguous reference.
+
+    ``number`` is preferred over parsing ``pr_url`` (which some backends leave
+    empty); we fall back to the URL when the number is unknown.
+    """
+    if provider == "azure":
+        if number is not None:
+            return f"!{number}"
+        parsed = _pr_number_from_url(pr_url)
+        if parsed is not None:
+            return f"!{parsed}"
+        return pr_url
+    return pr_url
+
+
 def _pr_ref(pr_url: str) -> str:
     """Extract a redacted PR reference from a URL for safe log output.
 
@@ -98,6 +122,7 @@ def open_pr(
     branch = get_vcs(rcfg).branch_name(issue_num)
     vcs = get_vcs(rcfg)
     tracker = get_tracker(rcfg)
+    provider = task.get("provider") or rcfg.get("provider", "github")
 
     dbg.debug("SHIP: branch=%s base=%s", branch, base_branch)
 
@@ -122,13 +147,14 @@ def open_pr(
     if existing is not None:
         pr_url = existing.url or f"#{existing.number}"
         pr_ref = _pr_ref(pr_url)
+        pr_display = _pr_display(pr_url, existing.number, provider)
         dbg.debug("SHIP: pr_url=%s", pr_url)
         log(f"[SHIP] PR already exists: {pr_ref} base={base_branch} head={branch}")
         with contextlib.suppress(Exception):
             tracker.post_comment(issue_num,
-                f"Pull request already exists: {pr_url}{AUTOSWE_BOT_FOOTER}")
+                f"Pull request already exists: {pr_display}{AUTOSWE_BOT_FOOTER}")
         _record_pr(task, pr_url, existing.number)
-        return f"DONE: PR {pr_url}"
+        return f"DONE: PR {pr_display}"
 
     try:
         pr_result: PRResult = vcs.open_pull_request(
@@ -139,13 +165,14 @@ def open_pr(
         )
         pr_url = pr_result.url
         pr_ref = _pr_ref(pr_url)
+        pr_display = _pr_display(pr_url, pr_result.number, provider)
         dbg.debug("SHIP: pr_url=%s", pr_url)
         log(f"[SHIP] PR created: {pr_ref} base={base_branch} head={branch}")
         with contextlib.suppress(Exception):
             tracker.post_comment(issue_num,
-               "Pull request opened: " + pr_url + AUTOSWE_BOT_FOOTER)
+               "Pull request opened: " + pr_display + AUTOSWE_BOT_FOOTER)
         _record_pr(task, pr_url, pr_result.number)
-        return f"DONE: PR {pr_url}"
+        return f"DONE: PR {pr_display}"
     except Exception as e:  # Poller resilience — any PR creation failure is caught and reported
         dbg.error("open_pr: failed: %s", e, exc_info=True)
         return f"FAILED: could not create PR: {e}"
