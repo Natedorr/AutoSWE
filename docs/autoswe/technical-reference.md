@@ -101,7 +101,7 @@ After a successful `/fix` (`autoswe_status → fixed`), if `AUTO_CREATE_PR=true`
 After all dispatches in a cycle:
 
 1. **Backfill `bot_comment_ids`** — Any comment with `is_bot=True` but ID not yet in the queue row gets backfilled. Makes the system self-healing on the first poll after a queue wipe.
-2. **`gh_closed` detection** — Issues that dropped out of the open-issues list get `gh_closed = True`. If a real dispatch happened, `autoswe_status` becomes that phase's COMPLETED status (e.g. `"fixed"` after a `/fix`); if the task was never dispatched, the status stays neutral (`None`) and no terminal label is written (issue #258). A per-poll heal resets never-dispatched entries carrying a COMPLETED status back to `None`. Reopened issues clear the flag.
+2. **`gh_closed` detection** — Issues that dropped out of the open-issues list get `gh_closed = True`. If a real dispatch happened, `autoswe_status` becomes that phase's COMPLETED status (e.g. `"fixed"` after a `/fix`); if the task was never dispatched, the status stays neutral (`None`) and no terminal label is written (issue #258). A per-poll heal resets never-dispatched entries carrying a COMPLETED status back to `None` (it runs only while the issue is open — a poisoned entry whose issue is still closed keeps `autoswe_status="fixed"` until the issue is reopened or `queue prune` removes it). Reopened issues clear the flag.
 3. **Label mirror** — Terminal statuses (`fixed`, `synced`, `shipped`, `reviewed`, `failed`, `skipped`, `aborted`, `planned`, `waiting`) have their `autoswe:*` label synced on the issue.
 4. **Welcome comments** — `_post_pending_welcomes()` posts the welcome message to newly discovered issues, capturing the returned comment ID in `welcome_comment_id` and `bot_comment_ids`.
 

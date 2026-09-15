@@ -219,6 +219,8 @@ def test_single_poll_label_mirror_idempotent(
             "pr_number": None,
             "welcome_comment_id": None,
             "bot_comment_ids": [],
+            "last_dispatched_command": "/fix",
+            "attempt_count": 1,
             "last_dispatched_command_id": None,
             "last_consumed_reply_id": None,
             "last_synced": "2026-01-01T00:00:00Z",
@@ -675,8 +677,9 @@ def test_single_poll_heal_skips_entry_with_dispatch_evidence(isolated_autoswe_di
         f"legacy completed entry with dispatch evidence must not be demoted, "
         f"got {entry['autoswe_status']!r}"
     )
-    assert all(label is not None for _, label in set_status_calls), (
-        f"no neutral/demotion label may be written, got {set_status_calls}"
+    assert set_status_calls == [(1, "autoswe:fixed")], (
+        f"only the Phase-3 mirror of autoswe:fixed may be written, "
+        f"got {set_status_calls}"
     )
 
     # Case 2: only first_dispatched_at set (the second disjunct).
@@ -691,8 +694,9 @@ def test_single_poll_heal_skips_entry_with_dispatch_evidence(isolated_autoswe_di
         f"entry with first_dispatched_at must not be demoted, "
         f"got {entry['autoswe_status']!r}"
     )
-    assert all(label is not None for _, label in set_status_calls), (
-        f"no neutral/demotion label may be written, got {set_status_calls}"
+    assert set_status_calls == [(1, "autoswe:fixed")], (
+        f"only the Phase-3 mirror of autoswe:fixed may be written, "
+        f"got {set_status_calls}"
     )
 
 
@@ -717,8 +721,9 @@ def test_single_poll_heal_skips_entry_with_bot_completion_comment(isolated_autos
         f"entry with a bot completion comment must not be demoted, "
         f"got {entry['autoswe_status']!r}"
     )
-    assert all(label is not None for _, label in set_status_calls), (
-        f"no neutral/demotion label may be written, got {set_status_calls}"
+    assert set_status_calls == [(1, "autoswe:fixed")], (
+        f"only the Phase-3 mirror of autoswe:fixed may be written, "
+        f"got {set_status_calls}"
     )
 
 
@@ -744,7 +749,7 @@ def test_single_poll_heal_still_fires_with_welcome_only_bot_comment(isolated_aut
         f"welcome-only bot comment is not dispatch evidence; "
         f"poison must be healed, got {entry['autoswe_status']!r}"
     )
-    assert all(label is not None for _, label in set_status_calls), (
-        f"no neutral/demotion label may be written, got {set_status_calls}"
+    assert set_status_calls == [], (
+        f"healed entry must not trigger any label write, got {set_status_calls}"
     )
 
