@@ -1031,12 +1031,23 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             # hold a genuinely-completed entry with no
             # last_dispatched_command (normalize_legacy_status maps "done"
             # → "fixed" when the command is absent). attempt_count and
-            # first_dispatched_at are written only by the dispatch path,
-            # so either one set is positive evidence a dispatch happened —
-            # skip the heal for such entries.
+            # first_dispatched_at are written only by the dispatch path, and
+            # a bot completion comment is posted on every real dispatch —
+            # so any of those set is positive evidence a dispatch happened.
+            # The welcome comment is is_bot=True and gets backfilled into
+            # bot_comment_ids by Phase 1, so it is excluded from the
+            # evidence set: a #258-poisoned entry (zero dispatches, welcome
+            # posted) carries bot_comment_ids=[welcome_id] and must still
+            # be healed. Skip the heal for entries with dispatch evidence.
+            welcome_id = task_entry.get("welcome_comment_id")
+            non_welcome_bot = (
+                set(task_entry.get("bot_comment_ids") or ())
+                - ({welcome_id} if welcome_id is not None else set())
+            )
             has_dispatch_evidence = (
                 int(task_entry.get("attempt_count") or 0) > 0
                 or task_entry.get("first_dispatched_at") is not None
+                or bool(non_welcome_bot)
             )
             if (
                 not has_dispatch_evidence

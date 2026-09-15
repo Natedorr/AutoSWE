@@ -695,3 +695,56 @@ def test_single_poll_heal_skips_entry_with_dispatch_evidence(isolated_autoswe_di
         f"no neutral/demotion label may be written, got {set_status_calls}"
     )
 
+
+def test_single_poll_heal_skips_entry_with_bot_completion_comment(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """A non-welcome bot comment id in bot_comment_ids is dispatch evidence:
+    every real Claude completion posts a bot comment that Phase 1 backfills,
+    so a legacy completed entry with such an id must NOT be demoted."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixed", last_dispatched_command=None, bot_comment_ids=[999],
+    )
+
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["autoswe_status"] == "fixed", (
+        f"entry with a bot completion comment must not be demoted, "
+        f"got {entry['autoswe_status']!r}"
+    )
+    assert all(label is not None for _, label in set_status_calls), (
+        f"no neutral/demotion label may be written, got {set_status_calls}"
+    )
+
+
+def test_single_poll_heal_still_fires_with_welcome_only_bot_comment(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """The welcome comment is is_bot=True and gets backfilled into
+    bot_comment_ids, so it is excluded from dispatch evidence: a #258-poisoned
+    entry whose only bot comment is the welcome must still be healed to None."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixed", last_dispatched_command=None,
+        bot_comment_ids=[42], welcome_comment_id=42,
+    )
+
+    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["autoswe_status"] is None, (
+        f"welcome-only bot comment is not dispatch evidence; "
+        f"poison must be healed, got {entry['autoswe_status']!r}"
+    )
+    assert all(label is not None for _, label in set_status_calls), (
+        f"no neutral/demotion label may be written, got {set_status_calls}"
+    )
+
