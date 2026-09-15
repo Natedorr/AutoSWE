@@ -400,6 +400,46 @@ class AzureTracker:
                 last_error = e
         raise last_error
 
+    def clear_status(self, issue_number: int) -> None:
+        """Remove the autoswe status tag (read-modify-write).
+
+        Mirrors :meth:`set_status` minus the new tag: GETs the current
+        work item, strips autoswe:* tags, and PATCHes a single
+        ``replace`` on ``/fields/System.Tags`` (VS403691 forces the
+        same single-op shape as ``set_status``). No-op when no autoswe:*
+        tag is present. Retries once with a fresh GET on a PATCH failure
+        (same GET/PATCH race as ``set_status``).
+        """
+        last_error: RuntimeError | None = None
+        for _attempt in range(2):
+            try:
+                self._clear_status_once(issue_number)
+                return
+            except RuntimeError as e:
+                last_error = e
+        raise last_error
+
+    def _clear_status_once(self, issue_number: int) -> None:
+        get_path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
+            f"{issue_number}?fields=System.Tags"
+        )
+        raw = ado_get(get_path, self._pat)
+        tags_raw = raw.get("fields", {}).get("System.Tags", "") or ""
+        tags = [t.strip() for t in tags_raw.split(";") if t.strip()] if tags_raw else []
+        non_status = [t for t in tags if not t.startswith(_PREFIX)]
+        if len(non_status) == len(tags):
+            return
+        patch_path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
+        )
+        ado_patch(
+            patch_path, self._pat,
+            body=[
+                {"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(non_status)},
+            ],
+        )
+
     def _set_status_once(self, issue_number: int, status: str) -> None:
         # Read current tags
         get_path = _ado_api_version(

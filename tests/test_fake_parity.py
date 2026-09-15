@@ -404,6 +404,42 @@ class TestProviderParity:
         tags = az.work_items[1]["fields"]["System.Tags"]
         assert "autoswe:done" in tags
 
+    def test_both_clear_status(self):
+        """Both providers must support clearing the status label/tag while
+        preserving non-autoswe labels/tags (issue #258 heal path)."""
+        gh = GitHubFake()
+        gh.load({
+            "owner": "o", "repo": "r",
+            "issue": {"number": 1, "title": "T", "body": "B", "state": "open",
+                      "user": {"login": "owner", "id": 1, "type": "User"},
+                      "labels": ["autoswe:fixed", "bug"], "assignees": [],
+                      "created_at": "", "updated_at": ""},
+            "labels": ["autoswe:fixed", "bug"], "comments": [],
+            "repo_labels": [{"name": "autoswe:fixed", "color": "ededed"},
+                           {"name": "bug", "color": "ededed"}],
+        })
+        assert "autoswe:fixed" in gh.labels.get(1, [])
+        gh.handle_request("PUT", "/repos/o/r/issues/1/labels", "token",
+                         body={"labels": [{"name": "bug"}]})
+        assert gh.labels.get(1, []) == ["bug"]
+
+        az = AzureFake()
+        az.load({
+            "org": "org", "project": "proj", "repo": "repo",
+            "work_item": {"id": 1, "fields": {"System.Id": 1, "System.State": "Active",
+                                               "System.Title": "T"}},
+            "tags": ["autoswe:fixed", "bug"], "comments": [],
+        })
+        # Verify the fake preserved both tags through load()
+        assert "autoswe:fixed" in az.work_items[1]["fields"]["System.Tags"]
+        assert "bug" in az.work_items[1]["fields"]["System.Tags"]
+        az.handle_request("PATCH",
+            "https://dev.azure.com/org/proj/_apis/wit/workitems/1", "pat",
+            body=[{"op": "replace", "path": "/fields/System.Tags", "value": "bug"}])
+        tags = az.work_items[1]["fields"]["System.Tags"]
+        assert "autoswe:fixed" not in tags
+        assert "bug" in tags
+
     def test_both_post_comment(self):
         """Both providers must support post_comment with ID return."""
         gh = GitHubFake()
@@ -512,3 +548,119 @@ class TestProviderParity:
             "https://dev.azure.com/org/proj/_apis/wit/workitems/1/comments/999?api-version=7.1",
             "pat", body={"text": "Updated"})
         assert az_resp.get("text") == "Updated"
+
+
+# ---------------------------------------------------------------------------
+# Tracker-level clear_status tests (real implementation, not fakes)
+# ---------------------------------------------------------------------------
+
+class TestClearStatusImplementation:
+    """Direct coverage for GitHubTracker.clear_status and AzureTracker.clear_status —
+    the real read-modify-write that strips autoswe:* labels/tags and preserves
+    non-status ones, plus the no-op path (issue #258 heal path)."""
+
+    def test_github_clear_status_preserves_non_status_labels(self, monkeypatch):
+        """GitHubTracker.clear_status strips autoswe:* and preserves other labels."""
+        import autoswe.providers.github.tracker as gt_mod
+
+        put_calls: list[dict] = []
+
+        def fake_gh_get(path, token):
+            assert "/issues/42/labels" in path
+            return [
+                {"name": "autoswe:fixed", "id": 1, "color": "ededed"},
+                {"name": "bug", "id": 2, "color": "d73a4a"},
+                {"name": "P1", "id": 3, "color": "0075ca"},
+            ]
+
+        def fake_gh_put(path, token, body):
+            assert "/issues/42/labels" in path
+            put_calls.append(body)
+            return body
+
+        monkeypatch.setattr(gt_mod.gh_api, "gh_get", fake_gh_get)
+        monkeypatch.setattr(gt_mod.gh_api, "gh_put", fake_gh_put)
+
+        tracker = gt_mod.GitHubTracker({"owner": "o", "repo": "r", "token": "t"})
+        tracker.clear_status(42)
+
+        assert len(put_calls) == 1
+        names = put_calls[0]["labels"]
+        assert "autoswe:fixed" not in names
+        assert "bug" in names
+        assert "P1" in names
+
+    def test_github_clear_status_noop_when_no_status_label(self, monkeypatch):
+        """GitHubTracker.clear_status is a no-op when no autoswe:* label exists."""
+        import autoswe.providers.github.tracker as gt_mod
+
+        put_calls: list[dict] = []
+
+        def fake_gh_get(path, token):
+            return [
+                {"name": "bug", "id": 2, "color": "d73a4a"},
+                {"name": "P1", "id": 3, "color": "0075ca"},
+            ]
+
+        def fake_gh_put(path, token, body):
+            put_calls.append(body)
+            return body
+
+        monkeypatch.setattr(gt_mod.gh_api, "gh_get", fake_gh_get)
+        monkeypatch.setattr(gt_mod.gh_api, "gh_put", fake_gh_put)
+
+        tracker = gt_mod.GitHubTracker({"owner": "o", "repo": "r", "token": "t"})
+        tracker.clear_status(42)
+
+        assert put_calls == [], "no PUT should be issued when no autoswe:* label is present"
+
+    def test_azure_clear_status_preserves_non_status_tags(self, monkeypatch):
+        """AzureTracker.clear_status strips autoswe:* and preserves other tags."""
+        import autoswe.providers.azure.tracker as at_mod
+
+        patch_calls: list[dict] = []
+
+        def fake_ado_get(path, pat):
+            assert "System.Tags" in path
+            return {"fields": {"System.Tags": "autoswe:fixed; bug; P1"}}
+
+        def fake_ado_patch(path, pat, body=None, **kw):
+            patch_calls.append(body)
+            return {}
+
+        monkeypatch.setattr(at_mod, "ado_get", fake_ado_get)
+        monkeypatch.setattr(at_mod, "ado_patch", fake_ado_patch)
+
+        tracker = at_mod.AzureTracker({"org": "o", "project": "p", "pat": "t", "provider": "azure"})
+        tracker.clear_status(42)
+
+        assert len(patch_calls) == 1
+        ops = patch_calls[0]
+        assert len(ops) == 1
+        assert ops[0]["op"] == "replace"
+        assert ops[0]["path"] == "/fields/System.Tags"
+        value = ops[0]["value"]
+        assert "autoswe:fixed" not in value
+        assert "bug" in value
+        assert "P1" in value
+
+    def test_azure_clear_status_noop_when_no_status_tag(self, monkeypatch):
+        """AzureTracker.clear_status is a no-op when no autoswe:* tag exists."""
+        import autoswe.providers.azure.tracker as at_mod
+
+        patch_calls: list[dict] = []
+
+        def fake_ado_get(path, pat):
+            return {"fields": {"System.Tags": "bug; P1"}}
+
+        def fake_ado_patch(path, pat, body=None, **kw):
+            patch_calls.append(body)
+            return {}
+
+        monkeypatch.setattr(at_mod, "ado_get", fake_ado_get)
+        monkeypatch.setattr(at_mod, "ado_patch", fake_ado_patch)
+
+        tracker = at_mod.AzureTracker({"org": "o", "project": "p", "pat": "t", "provider": "azure"})
+        tracker.clear_status(42)
+
+        assert patch_calls == [], "no PATCH should be issued when no autoswe:* tag is present"

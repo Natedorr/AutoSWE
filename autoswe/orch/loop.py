@@ -36,6 +36,7 @@ from autoswe.providers.adapter import apply_effect, read_api
 from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
 from autoswe.tracking.comments import record_bot_comment_id
 from autoswe.tracking.labels import (
+    COMPLETED_STATUSES,
     RUNNING_STATUSES,
     SHIPPING_BLOCKING_STATUSES,
     TERMINAL_STATUSES,
@@ -984,26 +985,139 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             if task_entry["issue_number"] not in open_issue_numbers:
                 if not task_entry.get("gh_closed", False):
                     task_entry["gh_closed"] = True
-                    # last_dispatched_command is a slash command ("/sync",
-                    # "/pr", ...), not an action kind. completed_status_for
-                    # is keyed by kind ("sync_branch", "ship_pr", ...), so
-                    # use _kind_from_command to convert — otherwise /sync
-                    # and /pr both fall through to the "fixed" default.
-                    closed_status = completed_status_for(
-                        _kind_from_command(
-                            task_entry.get("last_dispatched_command", "/fix")
+                    # A real handler run is evidenced by attempt_count —
+                    # written by emit()'s common Claude-action patch and
+                    # the FAILED patch, and by NO refused/skip/abort patch.
+                    # last_dispatched_command alone is NOT evidence: the
+                    # REFUSED emit path records the command (and the
+                    # watermarks) without any agent run, so a task whose
+                    # only recorded command was a refusal (e.g. /review on
+                    # a failed task) would still get a fabricated terminal
+                    # status + label (issue #258 follow-up).
+                    if int(task_entry.get("attempt_count") or 0) == 0:
+                        # No real dispatch ever happened (issue #258):
+                        # a COMPLETED status would be a fabricated
+                        # terminal state on a task that did no work —
+                        # drivers watching the queue or the label would
+                        # skip it entirely. Mark gh_closed only, leave
+                        # autoswe_status UNCHANGED (never neutralize — a
+                        # legacy entry whose real but uncounted dispatch
+                        # already set a terminal status keeps it), and
+                        # write no terminal label. `queue prune` still
+                        # cleans up the entry via the gh_closed flag.
+                        log(
+                            f"[CLOSED] {slug} — issue closed on platform "
+                            "without a real dispatch; status unchanged"
                         )
-                    )
-                    task_entry["autoswe_status"] = closed_status
-                    try:
-                        tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
-                    except RuntimeError as e:
-                        log(f"[WARN] {slug}: could not set closed-status tag {closed_status!r}: {e}")
-                    log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
+                    else:
+                        # A real dispatch happened (attempt_count > 0).
+                        # last_dispatched_command is a slash command
+                        # ("/sync", "/pr", ...), not an action kind.
+                        # completed_status_for is keyed by kind
+                        # ("sync_branch", "ship_pr", ...), so use
+                        # _kind_from_command to convert — otherwise /sync
+                        # and /pr both fall through to the "fixed"
+                        # default.
+                        # Only fabricate the phase's COMPLETED status when
+                        # the entry's current status shows real work: a
+                        # COMPLETED status (already terminal — confirm) or
+                        # a RUNNING status (dispatch in flight when the
+                        # issue closed).  Otherwise the last dispatch
+                        # produced no work (failed/error/waiting/skipped/
+                        # aborted/planned/review_failed/...) and writing a
+                        # terminal would be the same false-terminal class
+                        # as #258 — leave status unchanged, no label.
+                        current_status = task_entry.get("autoswe_status")
+                        if (
+                            current_status in COMPLETED_STATUSES
+                            or current_status in RUNNING_STATUSES
+                        ):
+                            last_cmd = task_entry.get("last_dispatched_command") or "/fix"
+                            closed_status = completed_status_for(
+                                _kind_from_command(last_cmd)
+                            )
+                            task_entry["autoswe_status"] = closed_status
+                            try:
+                                tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
+                            except RuntimeError as e:
+                                log(f"[WARN] {slug}: could not set closed-status tag {closed_status!r}: {e}")
+                            log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
+                        else:
+                            log(
+                                f"[CLOSED] {slug} — issue closed on platform, "
+                                f"status {current_status!r} unchanged (no completed work)"
+                            )
                 continue
             if task_entry.get("gh_closed", False):
                 task_entry["gh_closed"] = False
                 log(f"[REOPENED] {slug} — issue reopened on platform")
+            # Self-heal pre-#258 poison, on every poll: an entry with no
+            # real dispatch (attempt_count == 0) can legitimately hold no
+            # COMPLETED status. Entries still carrying one (e.g. "fixed")
+            # were fabricated by the old gh_closed path; reset to neutral
+            # so decide() takes the fresh-discovery path and Phase 3 stops
+            # re-mirroring the false terminal label.
+            # The gate is attempt_count == 0 (not last_dispatched_command is
+            # None) because the REFUSED emit path writes last_dispatched_command
+            # without writing attempt_count — a refused-only entry poisoned by
+            # pre-#258 gh_closed fabrication would be missed by a
+            # last_dispatched_command-is-None gate (issue #258 M-2).
+            # Legacy exception: a queue.json written by an older version can
+            # hold a genuinely-completed entry with no last_dispatched_command
+            # (normalize_legacy_status maps "done" → "fixed" when the command
+            # is absent). attempt_count and first_dispatched_at are written
+            # only by the dispatch path, and a bot completion comment is
+            # posted on every real dispatch — so any of those set is positive
+            # evidence a dispatch happened. fix_summary, pr_number, and
+            # plan_file_path are likewise written only by completed handler
+            # runs (emit.py), so they count too: a legacy completed entry
+            # whose bot comments were lost (queue wipe + rebuilt
+            # bot_comment_ids, or a deleted completion comment) still carries
+            # one of them and must not be demoted. The welcome comment is
+            # is_bot=True and gets backfilled into bot_comment_ids by
+            # Phase 1, so it is excluded from the evidence set: a
+            # #258-poisoned entry (zero dispatches, welcome posted) carries
+            # bot_comment_ids=[welcome_id] and must still be healed.
+            # Skip the heal for entries with dispatch evidence.
+            welcome_id = task_entry.get("welcome_comment_id")
+            non_welcome_bot = (
+                set(task_entry.get("bot_comment_ids") or ())
+                - ({welcome_id} if welcome_id is not None else set())
+            )
+            has_dispatch_evidence = (
+                int(task_entry.get("attempt_count") or 0) > 0
+                or task_entry.get("first_dispatched_at") is not None
+                or bool(non_welcome_bot)
+                or bool(task_entry.get("fix_summary"))
+                or task_entry.get("pr_number") is not None
+                or bool(task_entry.get("plan_file_path"))
+            )
+            if (
+                not has_dispatch_evidence
+                and int(task_entry.get("attempt_count") or 0) == 0
+                and task_entry.get("autoswe_status") in COMPLETED_STATUSES
+            ):
+                # Attempt the label clear FIRST; only reset the queue status
+                # when the clear succeeds (or is a no-op). If the API write
+                # fails, leave the COMPLETED status in place so the next
+                # poll retries the heal — clearing the status before the
+                # label would strand the stale terminal label forever
+                # (issue #258 M-1: acceptance #2 requires no false terminal
+                # visible to a label-watching driver).
+                try:
+                    tracker.clear_status(task_entry["issue_number"])
+                except RuntimeError as e:
+                    log(
+                        f"[WARN] {slug}: could not clear stale status label "
+                        f"(will retry next poll): {e}"
+                    )
+                    continue
+                log(
+                    f"[HEAL] {slug} — no-dispatch entry carries "
+                    f"{task_entry['autoswe_status']!r}; resetting to "
+                    f"neutral (issue #258)"
+                )
+                task_entry["autoswe_status"] = None
 
         # --- Phase 3: Label mirror for terminal tasks ---
         # Only call set_status when the issue's current status (from labels/tags

@@ -1879,6 +1879,7 @@ TRANSITIONS: list[dict[str, Any]] = [
                 "owner": "owner", "repo": "repo", "issue_number": 42,
                 "title": "Test issue", "body": "Bug.",
                 "autoswe_status": "fixed",
+                "last_dispatched_command": "/fix",
                 "base_branch": "main",
                 "attempt_count": 1,
                 "first_dispatched_at": None,

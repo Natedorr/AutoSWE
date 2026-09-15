@@ -135,6 +135,12 @@ class IssueTracker(Protocol):
         *GitHub* lazily ensures labels on first call per repo.
         """
 
+    def clear_status(self, issue_number: int) -> None:
+        """Remove any autoswe:* status label/tag from the issue.
+
+        No-op (no API write) when the issue carries no autoswe:* label.
+        """
+
     def get_status(self, issue: NormalizedIssue) -> str | None:
         """Return the current status string for an issue, or None if untracked."""
 
