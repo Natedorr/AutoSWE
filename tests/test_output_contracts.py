@@ -256,11 +256,13 @@ class TestAzureOutputContracts:
 
         Production writes tags with a lone ``replace`` on System.Tags: ADO
         rejects two ops on one field in a body (VS403691), and a lone ``add``
-        is additive, so ``replace`` is the true set (issue #235 follow-up).        """
+        is additive, so ``replace`` is the true set (issue #235 follow-up).
+        """
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
-            {"op": "replace", "path": "/fields/System.Tags",             "value": "tag1; autoswe:planned"},
+            {"op": "replace", "path": "/fields/System.Tags",
+             "value": "tag1; autoswe:planned"},
         ]
         azure_fake.handle_request(
             "PATCH",
@@ -281,7 +283,8 @@ class TestAzureOutputContracts:
         azure_fake.load(_AZ_PLAN_STATE)
 
         patch_body = [
-            {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:fixed"},        ]
+            {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:fixed"},
+        ]
         azure_fake.handle_request(
             "PATCH",
             "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/1?api-version=7.1",
@@ -297,7 +300,8 @@ class TestAzureOutputContracts:
 
         Mirrors production set_status: the client strips autoswe:* tags, then
         writes the complete set with one ``replace`` op (the fake models ADO's
-        exact-set ``replace``). Assert on the *stored* tag set, not the body.        """
+        exact-set ``replace``). Assert on the *stored* tag set, not the body.
+        """
         azure_fake.load({
             **_AZ_PLAN_STATE,
             "tags": ["autoswe:pending", "tag1"],
@@ -310,7 +314,8 @@ class TestAzureOutputContracts:
         new_tags.append("autoswe:fixed")
 
         patch_body = [
-            {"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},        ]
+            {"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
+        ]
         azure_fake.handle_request(
             "PATCH",
             "https://dev.azure.com/testorg/testproj/_apis/wit/workitems/1?api-version=7.1",

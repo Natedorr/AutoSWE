@@ -78,6 +78,7 @@ def test_pi_mcp_json_path():
     assert expanded.parent.name == "agent"
     assert expanded.parent.parent.name == ".pi"
 
+
 def test_autoswe_repo_root_points_at_mcp_servers():
     """autoswe_repo_root() is the checkout containing the mcp_servers package."""
     from autoswe.harness.mcp_config import autoswe_repo_root

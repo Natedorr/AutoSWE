@@ -27,6 +27,7 @@ Completely replace all tags on a work item by setting `System.Tags` to a new val
 > `op: "replace"` is the only op that sets the field exactly, and it works on
 > both a populated *and* an empty `System.Tags` (verified live). This is what
 > autoSWE does in `AzureTracker.set_status`.
+
 ### Parameters
 
 #### Headers
@@ -57,7 +58,8 @@ Completely replace all tags on a work item by setting `System.Tags` to a new val
 ```json
 [
   {
-    "op": "replace",    "path": "/fields/System.Tags",
+    "op": "replace",
+    "path": "/fields/System.Tags",
     "value": "bug; high-priority; security"
   }
 ]
@@ -74,7 +76,8 @@ curl -u ":$ADO_PAT" \
   "https://dev.azure.com/myorg/myproject/_apis/wit/workitems/123?api-version=7.1" \
   -d '[
     {
-      "op": "replace",      "path": "/fields/System.Tags",
+      "op": "replace",
+      "path": "/fields/System.Tags",
       "value": "bug; high-priority; security"
     }
   ]'
@@ -121,6 +124,7 @@ def replace_tags(org, project, work_item_id, new_tags, pat):
         {"op": "replace", "path": "/fields/System.Tags",
          "value": "; ".join(new_tags)},
     ]
+
     response = requests.patch(
         url, auth=("", pat),
         params={"api-version": "7.1"},
@@ -146,4 +150,5 @@ result = replace_tags("myorg", "myproject", 123, ["bug", "critical"], "YOUR_PAT"
 
 1. **This DESTROYS existing tags** — Unlike `add-tags-to-work-item`, this replaces everything. Use only when you want a clean slate.
 2. **One op on `System.Tags`, not two** — A single `replace`. Pairing a `remove` and an `add` on the same field in one body is rejected with HTTP 400 VS403691 and the whole write fails.
-3. **`replace` to clear** — To remove all tags, use `"op": "replace"` with `"value": ""`; `replace` on an empty value clears the field (verified live).4. **Tag format** — Semicolon-separated string: `"tag1; tag2; tag3"`. Whitespace after semicolons is cosmetic but recommended for consistency.
+3. **`replace` to clear** — To remove all tags, use `"op": "replace"` with `"value": ""`; `replace` on an empty value clears the field (verified live).
+4. **Tag format** — Semicolon-separated string: `"tag1; tag2; tag3"`. Whitespace after semicolons is cosmetic but recommended for consistency.

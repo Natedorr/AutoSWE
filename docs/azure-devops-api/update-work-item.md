@@ -85,6 +85,7 @@ replacing the field). To truly replace the tag set, use a single
 `op: "replace"` on the field. You cannot pair a `remove` with an `add` on the
 same field in one body — ADO rejects two ops on one field with HTTP 400
 VS403691 — see [Replace Tags on Work Item](replace-tags-on-work-item.md).
+
 ### Common Update Patterns
 
 #### Change State
@@ -107,6 +108,7 @@ curl -u ":$ADO_PAT" \
 
 `add` on `System.Tags` is additive, so use a single `replace` to set the whole
 tag set (issue #235 follow-up):
+
 ```bash
 curl -u ":$ADO_PAT" \
   -X PATCH \
@@ -119,7 +121,8 @@ curl -u ":$ADO_PAT" \
       "value": "Fix login bug — critical path"
     },
     {
-      "op": "replace",      "path": "/fields/System.Tags",
+      "op": "replace",
+      "path": "/fields/System.Tags",
       "value": "bug; security; critical"
     }
   ]'
@@ -323,14 +326,16 @@ result = update_work_item(
         # System.Tags: a single `replace` sets the whole tag set — a lone
         # `add` would merge onto existing tags, and pairing remove+add on the
         # same field is rejected (VS403691).
-        {"op": "replace", "path": "/fields/System.Tags", "value": "in-progress; frontend"},    ],
+        {"op": "replace", "path": "/fields/System.Tags", "value": "in-progress; frontend"},
+    ],
     "YOUR_PAT"
 )
 ```
 
 ### Common Pitfalls
 
-1. **`op` is "add" for setting values** — Even when changing an existing scalar field, use `"op": "add"`, not `"op": "replace"`. **Exception:** `System.Tags` — `add` merges into the existing tags, so to replace the tag set use a single `replace`. Never pair `remove` + `add` on `System.Tags` in one body: ADO rejects two ops on one field with HTTP 400 VS403691 (see [replace-tags-on-work-item.md](replace-tags-on-work-item.md)).2. **Content-Type header** — Must be `application/json-patch+json`.
+1. **`op` is "add" for setting values** — Even when changing an existing scalar field, use `"op": "add"`, not `"op": "replace"`. **Exception:** `System.Tags` — `add` merges into the existing tags, so to replace the tag set use a single `replace`. Never pair `remove` + `add` on `System.Tags` in one body: ADO rejects two ops on one field with HTTP 400 VS403691 (see [replace-tags-on-work-item.md](replace-tags-on-work-item.md)).
+2. **Content-Type header** — Must be `application/json-patch+json`.
 3. **State transitions** — You can't always transition directly from any state to any state. Process rules govern valid transitions (e.g., New → Active → Resolved → Closed).
 4. **Removing fields** — Use `"op": "remove"` with no `"value"` field.
 5. **Revision number** — Each update increments the revision. Track revisions for audit trails.

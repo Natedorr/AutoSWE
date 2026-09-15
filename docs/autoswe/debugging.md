@@ -143,6 +143,7 @@ Regression tests live in `tests/test_poller_windows.py`: static contract
 assertions that run everywhere (no PowerShell required), plus functional
 Unicode/stderr/exit-code tests that run when `pwsh`/`powershell` is on PATH and
 skip cleanly otherwise (the default Linux CI box has no PowerShell).
+
 ## Testing
 
 See [docs/autoswe/testing.md](testing.md) for the 11-layer test strategy, how to capture API fixtures, add transition-matrix rows, and write scenario tests. Quick ref:

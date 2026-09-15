@@ -224,6 +224,7 @@ class AzureFake:
                             "once in the same update."
                         )
                     seen_paths.add(op_path)
+
                 fields = self.work_items[wi_num].setdefault("fields", {})
                 for op in body:
                     op_type = op.get("op", "")

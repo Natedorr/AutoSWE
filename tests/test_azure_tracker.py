@@ -698,7 +698,8 @@ def test_set_status_no_existing_tags(tracker, mock_ado_request, ado_route_table)
     assert len(mock_ado_request.calls) == 2
     patch_call = mock_ado_request.calls[1]
     assert patch_call["body"] == [
-        {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:pending"},    ]
+        {"op": "replace", "path": "/fields/System.Tags", "value": "autoswe:pending"},
+    ]
 
 
 def test_set_status_with_full_label_no_double_prefix(tracker, mock_ado_request, ado_route_table):
@@ -717,7 +718,8 @@ def test_set_status_with_full_label_no_double_prefix(tracker, mock_ado_request, 
     tracker.set_status(100, "autoswe:pending")
 
     patch_call = mock_ado_request.calls[1]
-    tag_value = patch_call["body"][0]["value"]  # single replace op    assert tag_value == "autoswe:pending"
+    tag_value = patch_call["body"][0]["value"]  # single replace op
+    assert tag_value == "autoswe:pending"
     assert "autoswe:autoswe:pending" not in tag_value
 
 
@@ -732,7 +734,8 @@ def test_set_status_full_label_replaces_old_full_label(tracker, mock_ado_request
     tracker.set_status(100, "autoswe:fixing")
 
     patch_call = mock_ado_request.calls[1]
-    tag_value = patch_call["body"][0]["value"]  # single replace op    assert "autoswe:fixing" in tag_value
+    tag_value = patch_call["body"][0]["value"]  # single replace op
+    assert "autoswe:fixing" in tag_value
     assert "autoswe:pending" not in tag_value
     assert "feature" in tag_value
     assert "bug" in tag_value
@@ -786,6 +789,7 @@ def test_set_status_raises_after_retry_exhausted(tracker, mock_ado_request, ado_
     with pytest.raises(RuntimeError):
         tracker.set_status(100, "pending")
 
+
 def test_set_status_removes_old_status_tag_on_server(ado_repo_cfg, azure_fake, monkeypatch):
     """Regression (#235): a status transition must not leave the old autoswe:*
     tag on the work item.
@@ -793,7 +797,8 @@ def test_set_status_removes_old_status_tag_on_server(ado_repo_cfg, azure_fake, m
     Runs the REAL AzureTracker.set_status against the stateful AzureFake, which
     models ADO's exact-set ``replace`` on System.Tags. If set_status ever
     regressed to a single additive ``add`` op, the old tag would survive the
-    write and this assertion would fail.    """
+    write and this assertion would fail.
+    """
     import autoswe.providers.azure.api as ado_module
     from autoswe.providers.azure.tracker import AzureTracker
 
@@ -868,6 +873,7 @@ def test_azure_fake_rejects_duplicate_field_in_one_patch(azure_fake, monkeypatch
         )
     # The rejected write must not have mutated the tag set.
     assert azure_fake.work_items[42]["fields"]["System.Tags"] == "feature"
+
 
 # -- assign_to_user --
 

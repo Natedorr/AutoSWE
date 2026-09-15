@@ -141,7 +141,6 @@ def _mock_process(stdout: str = "", stderr: str = "", returncode: int = 0, limit
         def close(self) -> None:
             self.closed = True
 
-
     class _Process:
         def __init__(self):
             self.returncode = returncode
@@ -1365,7 +1364,8 @@ def test_run_iserror_tool_does_not_flip_success():
     pi reports the tool error to the LLM and continues; the agent typically
     recovers. A clean rc-0 run that emitted a valid final message_end is
     "success" even though a mid-run tool had a nonzero exit — the transient
-    failure no longer discards the run's real output.    """
+    failure no longer discards the run's real output.
+    """
     stream = _jsonl(
         {"type": "session", "id": "pi-tool", "version": 3},
         {"type": "tool_execution_end",
@@ -1451,6 +1451,7 @@ def test_run_returncode_read_via_wait_not_attribute():
     )
     assert result.ok is True
     assert result.text == "ok"
+
 
 # ---------- Timeout / kill ----------
 
@@ -1683,6 +1684,7 @@ def test_pi_readline_valueerror_degrades_to_error_and_drains():
     assert reader.read_calls >= 1
     assert reader.read_bytes_total == len(residual), "all residual data must be drained"
 
+
 # ---------- Failure surfaces ----------
 
 
@@ -1770,6 +1772,7 @@ def test_run_prompt_delivered_over_stdin_not_command_line():
     argv = _build_argv(spec, {}, "pi", [], "s")
     assert long_prompt not in argv
     assert "--" not in argv
+
 
 def test_run_env_agent_dir_maps_to_pi_coding_agent_dir(monkeypatch):
     """The agent_dir profile field maps to PI_CODING_AGENT_DIR."""

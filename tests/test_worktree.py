@@ -825,8 +825,6 @@ def test_run_survives_utf8_commit_message_under_cp1252_locale(tmp_path, monkeypa
     assert subprocess._text_encoding() == "cp1252"
 
 
-
-
 # ---------------------------------------------------------------------------
 # is_dirty / reset_clean
 # ---------------------------------------------------------------------------

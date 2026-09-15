@@ -71,26 +71,6 @@ def _comment_tool_name(names: dict | None, role: str) -> str:
     return CLAUDE_COMMENT_TOOL_NAMES[role]
 
 
-def _comment_tool_name(names: dict | None, role: str) -> str:
-    """Resolve one MCP tool name from the backend's tool-names dict.
-
-    PLAN-pi-mcp.md Phase 3: prompts name the tools the way the resolved
-    backend's adapter exposes them (``{{POST_PLAN_TOOL}}`` etc.). The dict comes
-    from ``CodingBackend.comment_tool_names()`` (via
-    ``runner.comment_tool_names``); when it is missing a role — or the whole
-    dict is None for a caller that predates the parameter — fall back to the
-    Claude Code spelling so a prompt always renders to a concrete tool name and
-    existing custom prompt files that hardcode the Claude names keep working.
-    """
-    if names:
-        value = names.get(role)
-        if value:
-            return value
-    from autoswe.harness.backends.base import CLAUDE_COMMENT_TOOL_NAMES
-
-    return CLAUDE_COMMENT_TOOL_NAMES[role]
-
-
 # Mapping of repos.json keys to the bundled prompt file constants
 _PROMPT_KEY_MAP = {
     "plan_prompt": PLAN_PROMPT_FILE,
