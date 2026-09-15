@@ -404,6 +404,40 @@ class TestProviderParity:
         tags = az.work_items[1]["fields"]["System.Tags"]
         assert "autoswe:done" in tags
 
+    def test_both_clear_status(self):
+        """Both providers must support clearing the status label/tag while
+        preserving non-autoswe labels/tags (issue #258 heal path)."""
+        gh = GitHubFake()
+        gh.load({
+            "owner": "o", "repo": "r",
+            "issue": {"number": 1, "title": "T", "body": "B", "state": "open",
+                      "user": {"login": "owner", "id": 1, "type": "User"},
+                      "labels": ["autoswe:fixed", "bug"], "assignees": [],
+                      "created_at": "", "updated_at": ""},
+            "labels": ["autoswe:fixed", "bug"], "comments": [],
+            "repo_labels": [{"name": "autoswe:fixed", "color": "ededed"},
+                           {"name": "bug", "color": "ededed"}],
+        })
+        assert "autoswe:fixed" in gh.labels.get(1, [])
+        gh.handle_request("PUT", "/repos/o/r/issues/1/labels", "token",
+                         body={"labels": [{"name": "bug"}]})
+        assert gh.labels.get(1, []) == ["bug"]
+
+        az = AzureFake()
+        az.load({
+            "org": "org", "project": "proj", "repo": "repo",
+            "work_item": {"id": 1, "fields": {"System.Id": 1, "System.State": "Active",
+                                               "System.Title": "T",
+                                               "System.Tags": "autoswe:fixed; bug"}},
+            "tags": [], "comments": [],
+        })
+        az.handle_request("PATCH",
+            "https://dev.azure.com/org/proj/_apis/wit/workitems/1", "pat",
+            body=[{"op": "replace", "path": "/fields/System.Tags", "value": "bug"}])
+        tags = az.work_items[1]["fields"]["System.Tags"]
+        assert "autoswe:fixed" not in tags
+        assert "bug" in tags
+
     def test_both_post_comment(self):
         """Both providers must support post_comment with ID return."""
         gh = GitHubFake()

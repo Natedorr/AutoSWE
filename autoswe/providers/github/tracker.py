@@ -177,6 +177,28 @@ class GitHubTracker:
         self._ensure_labels()
         _set_autoswe_status(self._owner, self._repo, issue_number, status, self._token)
 
+    def clear_status(self, issue_number: int) -> None:
+        """Remove any autoswe:* status label, preserving other labels.
+
+        No-op when the issue carries no autoswe:* label, so a heal on an
+        already-clean issue performs no API write and does not bump the
+        issue's updated timestamp (same rationale as the Phase-3 mirror
+        skip in the poll loop).
+        """
+        current = gh_api.gh_get(
+            f"/repos/{self._owner}/{self._repo}/issues/{issue_number}/labels",
+            self._token,
+        )
+        non_status = [lb["name"] for lb in current if not lb["name"].startswith(_PREFIX)]
+        if len(non_status) == len(current):
+            return
+        gh_api.gh_put(
+            f"/repos/{self._owner}/{self._repo}/issues/{issue_number}/labels",
+            self._token,
+            {"labels": non_status},
+        )
+        dbg.debug(f"[LABEL] cleared autoswe status label on {self._owner}/{self._repo}#{issue_number}")
+
     def get_status(self, issue: NormalizedIssue) -> str | None:
         """Return current status from labels, or None."""
         return _get_autoswe_status(issue.labels)

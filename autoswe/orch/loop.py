@@ -1080,6 +1080,15 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                     f"neutral (issue #258)"
                 )
                 task_entry["autoswe_status"] = None
+                # The pre-#258 code also wrote the matching autoswe:* label
+                # on the live issue; clear it now instead of waiting for the
+                # next real dispatch, so a label-watching driver sees the
+                # neutral state immediately (issue #258 acceptance #1/#2).
+                # No-op when the issue carries no autoswe:* label.
+                try:
+                    tracker.clear_status(task_entry["issue_number"])
+                except RuntimeError as e:
+                    log(f"[WARN] {slug}: could not clear stale status label: {e}")
 
         # --- Phase 3: Label mirror for terminal tasks ---
         # Only call set_status when the issue's current status (from labels/tags

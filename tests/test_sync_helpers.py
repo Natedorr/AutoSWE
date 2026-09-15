@@ -512,17 +512,21 @@ def _read_queue(isolated_autoswe_dir, task_id):
 
 
 def _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues):
-    """Run one sync-mode poll; return the captured set_status calls."""
+    """Run one sync-mode poll; return (set_status calls, clear_status calls)."""
     import autoswe.orch.loop as loop_mod
     import autoswe.providers.factory as factory_mod
     from autoswe.orch.types import ApiState
     from autoswe.providers.base import NormalizedIssue
 
     set_status_calls = []
+    clear_status_calls = []
 
     class FakeTracker:
         def set_status(self, issue_num, label):
             set_status_calls.append((issue_num, label))
+
+        def clear_status(self, issue_num):
+            clear_status_calls.append(issue_num)
 
         def post_comment(self, issue_num, body):
             pass
@@ -560,7 +564,7 @@ def _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues):
         mode="sync",
         repo_filter="owner/repo",
     )
-    return set_status_calls
+    return set_status_calls, clear_status_calls
 
 
 def test_single_poll_gh_closed_fresh_entry_stays_neutral(isolated_autoswe_dir, monkeypatch, tmp_path):
@@ -575,7 +579,7 @@ def test_single_poll_gh_closed_fresh_entry_stays_neutral(isolated_autoswe_dir, m
     _seed_queue(isolated_autoswe_dir, "gh:owner_repo_1")
 
     # Poll where the issue is absent from the open-issues listing.
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
 
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["gh_closed"] is True
@@ -586,15 +590,23 @@ def test_single_poll_gh_closed_fresh_entry_stays_neutral(isolated_autoswe_dir, m
         f"no terminal label may be written on a never-dispatched entry, "
         f"got {set_status_calls}"
     )
+    assert clear_status_calls == [], (
+        f"closed entries are skipped before the heal block; "
+        f"no label clear expected, got {clear_status_calls}"
+    )
 
     # Poll where the issue is back in the open set (reopen): still neutral,
     # still no label — Phase 3 must not re-mirror a fabricated terminal.
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
 
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["gh_closed"] is False
     assert entry["autoswe_status"] is None
     assert set_status_calls == []
+    assert clear_status_calls == [], (
+        f"a never-poisoned entry must not trigger a label clear, "
+        f"got {clear_status_calls}"
+    )
 
 
 def test_single_poll_gh_closed_dispatched_entry_maps_completed(isolated_autoswe_dir, monkeypatch, tmp_path):
@@ -612,12 +624,16 @@ def test_single_poll_gh_closed_dispatched_entry_maps_completed(isolated_autoswe_
         autoswe_status="fixing", last_dispatched_command="/fix", attempt_count=1,
     )
 
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
 
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["gh_closed"] is True
     assert entry["autoswe_status"] == "fixed"
     assert set_status_calls == [(1, "autoswe:fixed")]
+    assert clear_status_calls == [], (
+        f"the fabricated-completed path must not clear labels, "
+        f"got {clear_status_calls}"
+    )
 
 
 def test_single_poll_gh_closed_refused_only_entry_status_unchanged(isolated_autoswe_dir, monkeypatch, tmp_path):
@@ -638,7 +654,7 @@ def test_single_poll_gh_closed_refused_only_entry_status_unchanged(isolated_auto
         attempt_count=0,
     )
 
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
 
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["gh_closed"] is True
@@ -649,6 +665,10 @@ def test_single_poll_gh_closed_refused_only_entry_status_unchanged(isolated_auto
     assert set_status_calls == [], (
         f"no terminal label may be written on a refused-only entry, "
         f"got {set_status_calls}"
+    )
+    assert clear_status_calls == [], (
+        f"closed entries are skipped before the heal block; "
+        f"no label clear expected, got {clear_status_calls}"
     )
 
 
@@ -666,11 +686,19 @@ def test_single_poll_heals_never_dispatched_entry_with_completed_status(isolated
         autoswe_status="fixed", last_dispatched_command=None,
     )
 
-    # Issue is open: the invariant heal must reset the fabricated terminal.
-    _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    # Issue is open: the invariant heal must reset the fabricated terminal
+    # AND clear the stale autoswe:* label off the live issue.
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["autoswe_status"] is None, (
         f"fabricated terminal must be healed to neutral, got {entry['autoswe_status']!r}"
+    )
+    assert clear_status_calls == [1], (
+        f"heal must clear the stale terminal label on the live issue, "
+        f"got {clear_status_calls}"
+    )
+    assert set_status_calls == [], (
+        f"healed entry must not trigger a status write, got {set_status_calls}"
     )
 
     # Re-opened after a close: gh_closed clears AND a still-poisoned status
@@ -679,11 +707,15 @@ def test_single_poll_heals_never_dispatched_entry_with_completed_status(isolated
         isolated_autoswe_dir, "gh:owner_repo_1",
         autoswe_status="fixed", last_dispatched_command=None, gh_closed=True,
     )
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["gh_closed"] is False
     assert entry["autoswe_status"] is None
     assert set_status_calls == []
+    assert clear_status_calls == [1], (
+        f"reopened poisoned entry must also have its stale label cleared, "
+        f"got {clear_status_calls}"
+    )
 
 
 def test_single_poll_heal_skips_entry_with_dispatch_evidence(isolated_autoswe_dir, monkeypatch, tmp_path):
@@ -704,7 +736,7 @@ def test_single_poll_heal_skips_entry_with_dispatch_evidence(isolated_autoswe_di
         isolated_autoswe_dir, "gh:owner_repo_1",
         autoswe_status="fixed", last_dispatched_command=None, attempt_count=1,
     )
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["autoswe_status"] == "fixed", (
         f"legacy completed entry with dispatch evidence must not be demoted, "
@@ -714,6 +746,9 @@ def test_single_poll_heal_skips_entry_with_dispatch_evidence(isolated_autoswe_di
         f"only the Phase-3 mirror of autoswe:fixed may be written, "
         f"got {set_status_calls}"
     )
+    assert clear_status_calls == [], (
+        f"skipped heal must not clear the label, got {clear_status_calls}"
+    )
 
     # Case 2: only first_dispatched_at set (the second disjunct).
     _seed_queue(
@@ -721,7 +756,7 @@ def test_single_poll_heal_skips_entry_with_dispatch_evidence(isolated_autoswe_di
         autoswe_status="fixed", last_dispatched_command=None,
         first_dispatched_at="2026-01-02T00:00:00Z",
     )
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["autoswe_status"] == "fixed", (
         f"entry with first_dispatched_at must not be demoted, "
@@ -730,6 +765,9 @@ def test_single_poll_heal_skips_entry_with_dispatch_evidence(isolated_autoswe_di
     assert set_status_calls == [(1, "autoswe:fixed")], (
         f"only the Phase-3 mirror of autoswe:fixed may be written, "
         f"got {set_status_calls}"
+    )
+    assert clear_status_calls == [], (
+        f"skipped heal must not clear the label, got {clear_status_calls}"
     )
 
 
@@ -748,7 +786,7 @@ def test_single_poll_heal_skips_entry_with_bot_completion_comment(isolated_autos
         autoswe_status="fixed", last_dispatched_command=None, bot_comment_ids=[999],
     )
 
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["autoswe_status"] == "fixed", (
         f"entry with a bot completion comment must not be demoted, "
@@ -757,6 +795,9 @@ def test_single_poll_heal_skips_entry_with_bot_completion_comment(isolated_autos
     assert set_status_calls == [(1, "autoswe:fixed")], (
         f"only the Phase-3 mirror of autoswe:fixed may be written, "
         f"got {set_status_calls}"
+    )
+    assert clear_status_calls == [], (
+        f"skipped heal must not clear the label, got {clear_status_calls}"
     )
 
 
@@ -776,14 +817,18 @@ def test_single_poll_heal_still_fires_with_welcome_only_bot_comment(isolated_aut
         bot_comment_ids=[42], welcome_comment_id=42,
     )
 
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["autoswe_status"] is None, (
         f"welcome-only bot comment is not dispatch evidence; "
         f"poison must be healed, got {entry['autoswe_status']!r}"
     )
     assert set_status_calls == [], (
-        f"healed entry must not trigger any label write, got {set_status_calls}"
+        f"healed entry must not trigger any status write, got {set_status_calls}"
+    )
+    assert clear_status_calls == [1], (
+        f"heal must clear the stale terminal label on the live issue, "
+        f"got {clear_status_calls}"
     )
 
 
@@ -803,7 +848,7 @@ def test_single_poll_heal_skips_legacy_completed_entry_with_pr_number(isolated_a
         autoswe_status="fixed", last_dispatched_command=None, pr_number=42,
     )
 
-    set_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
     entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
     assert entry["autoswe_status"] == "fixed", (
         f"legacy completed entry with pr_number must not be demoted, "
@@ -812,5 +857,8 @@ def test_single_poll_heal_skips_legacy_completed_entry_with_pr_number(isolated_a
     assert set_status_calls == [(1, "autoswe:fixed")], (
         f"only the Phase-3 mirror of autoswe:fixed may be written, "
         f"got {set_status_calls}"
+    )
+    assert clear_status_calls == [], (
+        f"skipped heal must not clear the label, got {clear_status_calls}"
     )
 
