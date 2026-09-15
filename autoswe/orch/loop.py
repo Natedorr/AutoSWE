@@ -1018,16 +1018,35 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                         # _kind_from_command to convert — otherwise /sync
                         # and /pr both fall through to the "fixed"
                         # default.
-                        last_cmd = task_entry.get("last_dispatched_command") or "/fix"
-                        closed_status = completed_status_for(
-                            _kind_from_command(last_cmd)
-                        )
-                        task_entry["autoswe_status"] = closed_status
-                        try:
-                            tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
-                        except RuntimeError as e:
-                            log(f"[WARN] {slug}: could not set closed-status tag {closed_status!r}: {e}")
-                        log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
+                        # Only fabricate the phase's COMPLETED status when
+                        # the entry's current status shows real work: a
+                        # COMPLETED status (already terminal — confirm) or
+                        # a RUNNING status (dispatch in flight when the
+                        # issue closed).  Otherwise the last dispatch
+                        # produced no work (failed/error/waiting/skipped/
+                        # aborted/planned/review_failed/...) and writing a
+                        # terminal would be the same false-terminal class
+                        # as #258 — leave status unchanged, no label.
+                        current_status = task_entry.get("autoswe_status")
+                        if (
+                            current_status in COMPLETED_STATUSES
+                            or current_status in RUNNING_STATUSES
+                        ):
+                            last_cmd = task_entry.get("last_dispatched_command") or "/fix"
+                            closed_status = completed_status_for(
+                                _kind_from_command(last_cmd)
+                            )
+                            task_entry["autoswe_status"] = closed_status
+                            try:
+                                tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
+                            except RuntimeError as e:
+                                log(f"[WARN] {slug}: could not set closed-status tag {closed_status!r}: {e}")
+                            log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
+                        else:
+                            log(
+                                f"[CLOSED] {slug} — issue closed on platform, "
+                                f"status {current_status!r} unchanged (no completed work)"
+                            )
                 continue
             if task_entry.get("gh_closed", False):
                 task_entry["gh_closed"] = False

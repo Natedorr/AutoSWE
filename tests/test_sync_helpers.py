@@ -672,6 +672,44 @@ def test_single_poll_gh_closed_refused_only_entry_status_unchanged(isolated_auto
     )
 
 
+def test_single_poll_gh_closed_failed_dispatch_entry_status_unchanged(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """Entry with attempt_count > 0 but current status 'failed' (last
+    dispatch produced no work) → closing the issue must NOT fabricate a
+    terminal: the old code would map /fix → 'fixed' even though no diff
+    was produced, which is the same false-terminal class as #258.
+    The fix gates fabrication on the entry's current status being
+    COMPLETED or RUNNING; 'failed' is neither, so status stays unchanged
+    and no terminal label is written."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="failed", last_dispatched_command="/fix",
+        attempt_count=1,
+    )
+
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[])
+
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["gh_closed"] is True
+    assert entry["autoswe_status"] == "failed", (
+        f"failed-dispatch entry must keep its status (no fabricated terminal), "
+        f"got {entry['autoswe_status']!r}"
+    )
+    assert set_status_calls == [], (
+        f"no terminal label may be written when the last dispatch failed, "
+        f"got {set_status_calls}"
+    )
+    assert clear_status_calls == [], (
+        f"closed entries are skipped before the heal block; "
+        f"no label clear expected, got {clear_status_calls}"
+    )
+
+
 def test_single_poll_heals_never_dispatched_entry_with_completed_status(isolated_autoswe_dir, monkeypatch, tmp_path):
     """Pre-#258 poison: open issue, never dispatched, but queue says 'fixed'
     (the fabricated terminal) → every poll heals it back to None."""
