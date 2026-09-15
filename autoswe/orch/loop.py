@@ -1051,30 +1051,34 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             if task_entry.get("gh_closed", False):
                 task_entry["gh_closed"] = False
                 log(f"[REOPENED] {slug} — issue reopened on platform")
-            # Self-heal pre-#258 poison, on every poll: a never-dispatched
-            # entry (last_dispatched_command is None) can legitimately hold
-            # no COMPLETED status — emit() always records the dispatch
-            # command it maps from. Entries still carrying one (e.g.
-            # "fixed") were fabricated by the old gh_closed path; reset
-            # to neutral so decide() takes the fresh-discovery path and
-            # Phase 3 stops re-mirroring the false terminal label.
+            # Self-heal pre-#258 poison, on every poll: an entry with no
+            # real dispatch (attempt_count == 0) can legitimately hold no
+            # COMPLETED status. Entries still carrying one (e.g. "fixed")
+            # were fabricated by the old gh_closed path; reset to neutral
+            # so decide() takes the fresh-discovery path and Phase 3 stops
+            # re-mirroring the false terminal label.
+            # The gate is attempt_count == 0 (not last_dispatched_command is
+            # None) because the REFUSED emit path writes last_dispatched_command
+            # without writing attempt_count — a refused-only entry poisoned by
+            # pre-#258 gh_closed fabrication would be missed by a
+            # last_dispatched_command-is-None gate (issue #258 M-2).
             # Legacy exception: a queue.json written by an older version can
-            # hold a genuinely-completed entry with no
-            # last_dispatched_command (normalize_legacy_status maps "done"
-            # → "fixed" when the command is absent). attempt_count and
-            # first_dispatched_at are written only by the dispatch path, and
-            # a bot completion comment is posted on every real dispatch —
-            # so any of those set is positive evidence a dispatch happened.
-            # fix_summary, pr_number, and plan_file_path are likewise written
-            # only by completed handler runs (emit.py), so they count too:
-            # a legacy completed entry whose bot comments were lost (queue
-            # wipe + rebuilt bot_comment_ids, or a deleted completion
-            # comment) still carries one of them and must not be demoted.
-            # The welcome comment is is_bot=True and gets backfilled into
-            # bot_comment_ids by Phase 1, so it is excluded from the
-            # evidence set: a #258-poisoned entry (zero dispatches, welcome
-            # posted) carries bot_comment_ids=[welcome_id] and must still
-            # be healed. Skip the heal for entries with dispatch evidence.
+            # hold a genuinely-completed entry with no last_dispatched_command
+            # (normalize_legacy_status maps "done" → "fixed" when the command
+            # is absent). attempt_count and first_dispatched_at are written
+            # only by the dispatch path, and a bot completion comment is
+            # posted on every real dispatch — so any of those set is positive
+            # evidence a dispatch happened. fix_summary, pr_number, and
+            # plan_file_path are likewise written only by completed handler
+            # runs (emit.py), so they count too: a legacy completed entry
+            # whose bot comments were lost (queue wipe + rebuilt
+            # bot_comment_ids, or a deleted completion comment) still carries
+            # one of them and must not be demoted. The welcome comment is
+            # is_bot=True and gets backfilled into bot_comment_ids by
+            # Phase 1, so it is excluded from the evidence set: a
+            # #258-poisoned entry (zero dispatches, welcome posted) carries
+            # bot_comment_ids=[welcome_id] and must still be healed.
+            # Skip the heal for entries with dispatch evidence.
             welcome_id = task_entry.get("welcome_comment_id")
             non_welcome_bot = (
                 set(task_entry.get("bot_comment_ids") or ())
@@ -1090,24 +1094,30 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             )
             if (
                 not has_dispatch_evidence
-                and task_entry.get("last_dispatched_command") is None
+                and int(task_entry.get("attempt_count") or 0) == 0
                 and task_entry.get("autoswe_status") in COMPLETED_STATUSES
             ):
+                # Attempt the label clear FIRST; only reset the queue status
+                # when the clear succeeds (or is a no-op). If the API write
+                # fails, leave the COMPLETED status in place so the next
+                # poll retries the heal — clearing the status before the
+                # label would strand the stale terminal label forever
+                # (issue #258 M-1: acceptance #2 requires no false terminal
+                # visible to a label-watching driver).
+                try:
+                    tracker.clear_status(task_entry["issue_number"])
+                except RuntimeError as e:
+                    log(
+                        f"[WARN] {slug}: could not clear stale status label "
+                        f"(will retry next poll): {e}"
+                    )
+                    continue
                 log(
-                    f"[HEAL] {slug} — never-dispatched entry carries "
+                    f"[HEAL] {slug} — no-dispatch entry carries "
                     f"{task_entry['autoswe_status']!r}; resetting to "
                     f"neutral (issue #258)"
                 )
                 task_entry["autoswe_status"] = None
-                # The pre-#258 code also wrote the matching autoswe:* label
-                # on the live issue; clear it now instead of waiting for the
-                # next real dispatch, so a label-watching driver sees the
-                # neutral state immediately (issue #258 acceptance #1/#2).
-                # No-op when the issue carries no autoswe:* label.
-                try:
-                    tracker.clear_status(task_entry["issue_number"])
-                except RuntimeError as e:
-                    log(f"[WARN] {slug}: could not clear stale status label: {e}")
 
         # --- Phase 3: Label mirror for terminal tasks ---
         # Only call set_status when the issue's current status (from labels/tags

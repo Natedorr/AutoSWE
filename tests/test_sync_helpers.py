@@ -900,3 +900,113 @@ def test_single_poll_heal_skips_legacy_completed_entry_with_pr_number(isolated_a
         f"skipped heal must not clear the label, got {clear_status_calls}"
     )
 
+
+def test_single_poll_heal_clear_failure_keeps_status_for_retry(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """M-1: if tracker.clear_status raises RuntimeError, the heal must NOT
+    commit autoswe_status = None — the COMPLETED status stays in place so
+    the next poll retries the heal. Otherwise a transient API error would
+    strand the stale terminal label forever (queue neutral, label still up)."""
+    import json
+
+    import autoswe.orch.loop as loop_mod
+    import autoswe.providers.factory as factory_mod
+    from autoswe.orch.types import ApiState
+    from autoswe.providers.base import NormalizedIssue
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixed", last_dispatched_command=None,
+    )
+
+    clear_raised = []
+
+    class FailingClearTracker:
+        def set_status(self, issue_num, label):
+            pass
+
+        def clear_status(self, issue_num):
+            clear_raised.append(issue_num)
+            raise RuntimeError("transient API error")
+
+        def post_comment(self, issue_num, body):
+            pass
+
+        def fetch_comments(self, *a, **kw):
+            return []
+
+        def slug_prefix(self):
+            return "gh"
+
+    def fake_read_api(tracker, *, bot_ids=None, prev_updated=None, force_fetch=None):
+        result = {}
+        for num in [1]:
+            result[num] = ApiState(
+                issue=NormalizedIssue(
+                    number=num, title="Test", body="Body",
+                    owner="owner", repo="repo", state="open",
+                    is_pull_request=False, labels=[],
+                    last_updated="2026-01-01T00:00:00Z",
+                ),
+                comments=(),
+            )
+        return result
+
+    monkeypatch.setattr(loop_mod, "get_tracker", lambda r: FailingClearTracker())
+    monkeypatch.setattr(factory_mod, "get_tracker", lambda r: FailingClearTracker())
+    monkeypatch.setattr(loop_mod, "read_api", fake_read_api)
+
+    loop_mod.poll(
+        {
+            "GITHUB_PAT": "fake", "CLAUDE_API_KEY": "fake",
+            "MAX_CONCURRENT": 1, "SILENT_REPORTING": True,
+            "WORKTREE_DIR": str(tmp_path / "worktrees"),
+        },
+        mode="sync",
+        repo_filter="owner/repo",
+    )
+
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert clear_raised == [1], (
+        f"clear_status must have been attempted, got {clear_raised}"
+    )
+    assert entry["autoswe_status"] == "fixed", (
+        f"failed clear must leave status COMPLETED for next-poll retry, "
+        f"got {entry['autoswe_status']!r}"
+    )
+
+
+def test_single_poll_heals_refused_only_poisoned_entry(isolated_autoswe_dir, monkeypatch, tmp_path):
+    """M-2: a refused-only entry (last_dispatched_command set, attempt_count
+    unset) poisoned by pre-#258 gh_closed fabrication must be healed.
+    The old gate (last_dispatched_command is None) missed this class
+    because the REFUSED emit path writes last_dispatched_command without
+    writing attempt_count."""
+    import json
+
+    repos_path = isolated_autoswe_dir / "config" / "repos.json"
+    repos_path.write_text(
+        json.dumps({"owner/repo": {"provider": "github", "pat": "fake", "base_branch": "main"}})
+    )
+    _seed_queue(
+        isolated_autoswe_dir, "gh:owner_repo_1",
+        autoswe_status="fixed", last_dispatched_command="/review",
+        # no attempt_count — the REFUSED emit path doesn't write it
+    )
+
+    set_status_calls, clear_status_calls = _run_poll(isolated_autoswe_dir, monkeypatch, tmp_path, open_issues=[1])
+    entry = _read_queue(isolated_autoswe_dir, "gh:owner_repo_1")
+    assert entry["autoswe_status"] is None, (
+        f"refused-only poisoned entry must be healed to neutral, "
+        f"got {entry['autoswe_status']!r}"
+    )
+    assert set_status_calls == [], (
+        f"healed entry must not trigger any status write, got {set_status_calls}"
+    )
+    assert clear_status_calls == [1], (
+        f"heal must clear the stale terminal label, got {clear_status_calls}"
+    )
+
