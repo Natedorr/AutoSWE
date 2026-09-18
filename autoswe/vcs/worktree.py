@@ -133,8 +133,13 @@ def _get_default_branch(main: Path, base_branch: str) -> str:
 
     Fallback chain:
     1. origin/HEAD symbolic ref (e.g. "refs/heads/main")
-    2. base_branch (from repos.json config — authoritative default)
-    3. Check which of main/master exists via git ls-remote
+    2. ``ls-remote --symref origin HEAD`` — the authoritative remote default.
+       Git >= 2.30 no longer creates the local ``origin/HEAD`` symbolic ref on
+       clone, so this is what drives detection on fresh clones (issue #260).
+       It must precede base_branch, which may be a user-supplied ``--branch``
+       value rather than a configured default.
+    3. base_branch (from repos.json config — authoritative default)
+    4. Check which of main/master exists via git ls-remote
     """
     # 1. Try origin/HEAD symbolic ref
     head = _run(
@@ -147,11 +152,26 @@ def _get_default_branch(main: Path, base_branch: str) -> str:
         if branch:
             return branch
 
-    # 2. Fall back to configured base_branch
+    # 2. Query the remote's HEAD directly. Works on fresh clones where the
+    #    local origin/HEAD ref does not exist. Output is
+    #    "ref: refs/heads/<name>\tHEAD" plus the SHA line.
+    symref = _run(
+        ["git", "-C", str(main), "ls-remote", "--symref", "origin", "HEAD"],
+        check=False,
+    )
+    if symref.returncode == 0:
+        for line in symref.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("ref: refs/heads/"):
+                branch = line.split("\t", 1)[0][len("ref: refs/heads/"):]
+                if branch:
+                    return branch
+
+    # 3. Fall back to configured base_branch
     if base_branch:
         return base_branch
 
-    # 3. Last resort: check main then master via ls-remote
+    # 4. Last resort: check main then master via ls-remote
     for candidate in ("main", "master"):
         result = _run(
             ["git", "-C", str(main), "ls-remote", "--heads", "origin", candidate],
@@ -176,16 +196,28 @@ def ensure_clone(
         main.parent.mkdir(parents=True, exist_ok=True)
         log(f"[WORKTREE] Cloning {owner}/{repo} -> {main}")
         _run(["git", "clone", clone_url, str(main)])
-        # Verify the repo has commits (empty repos have no branches to checkout)
+        # Same branch selection as the existing-clone path (issue #260):
+        # base_branch may be a custom --branch value that doesn't exist on
+        # origin yet, so the fresh-clone path must verify the repo's default
+        # branch, never the raw --branch value.
+        branch_for_main = default_branch or _get_default_branch(main, base_branch)
+
+        # Verify the repo has commits on the target branch (empty repos have no refs)
         verify = _run(
-            ["git", "-C", str(main), "rev-parse", "--verify", f"origin/{base_branch}"],
+            ["git", "-C", str(main), "rev-parse", "--verify", f"origin/{branch_for_main}"],
             check=False,
         )
         if verify.returncode != 0:
             raise RuntimeError(
-                f"Repository {owner}/{repo} has no commits on '{base_branch}'; "
+                f"Repository {owner}/{repo} has no commits on '{branch_for_main}'; "
                 "autoSWE requires an initialized repository."
             )
+
+        # A fresh clone lands on the remote default branch, which can differ
+        # from branch_for_main — force _main onto it for parity with the
+        # existing-clone path.
+        _run(["git", "-C", str(main), "checkout", branch_for_main])
+        _run(["git", "-C", str(main), "reset", "--hard", f"origin/{branch_for_main}"])
     else:
         # Update the remote URL so token stays current
         _run(["git", "-C", str(main), "remote", "set-url", "origin", clone_url])

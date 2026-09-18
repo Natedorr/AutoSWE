@@ -41,8 +41,8 @@ class GitWorld:
 
         <tmp_path>/
           remote/owner_repo.git              # bare repo (the "origin")
-          worktrees/gh-owner_repo/_main      # main clone
-          worktrees/gh-owner_repo/issue-N    # issue worktrees
+          worktrees/owner_repo/_main         # main clone
+          worktrees/owner_repo/issue-N       # issue worktrees
 
     The constructor monkeypatches ``AUTOSWE_DIR`` and the GitHubProvider
     ``clone_url`` so that ``ensure_clone`` works without network access.
@@ -245,12 +245,12 @@ class GitWorld:
         return f"autoswe/issue-{issue_num}"
 
     def worktree_path_for(self, issue_num: int) -> Path:
-        """Return the expected worktree path for an issue."""
-        return self._worktrees_dir / f"gh-{self._owner}_{self._repo}" / f"issue-{issue_num}"
+        """Return the expected worktree path for an issue (production layout)."""
+        return self._worktrees_dir / f"{self._owner}_{self._repo}" / f"issue-{issue_num}"
 
     def main_clone_path(self) -> Path:
-        """Return the expected _main clone path."""
-        return self._worktrees_dir / f"gh-{self._owner}_{self._repo}" / "_main"
+        """Return the expected _main clone path (production layout)."""
+        return self._worktrees_dir / f"{self._owner}_{self._repo}" / "_main"
 
     # ------------------------------------------------------------------
     # State introspection

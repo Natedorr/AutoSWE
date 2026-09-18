@@ -821,6 +821,77 @@ class TestBranchRemote:
         )
         assert branch.stdout.strip() == world.branch_name(1)
 
+    def test_E6c_fresh_clone_base_created_from_default(self, git_world: GitWorld):
+        """E6c: fresh clone (no _main/) + missing --branch base + default exists.
+
+        Regression test for issue #260: on the first run against a repo
+        (fresh deployment, or after the worktrees dir is purged) ensure_clone
+        used to verify ``origin/{base_branch}`` — the missing --branch value
+        itself — and fail with the misleading 'has no commits' error before
+        create_worktree's base-branch guard could run. Now the base branch is
+        created on origin from the default branch and the issue branch is
+        forked from it.
+        """
+        world = git_world
+        world.init_remote(initial_files={"README.md": "# test"})
+        # Deliberately no make_main_clone() — ensure_clone must do the fresh clone.
+
+        wt = create_worktree(
+            world.owner, world.repo, 1, "strategy/NewName",
+            "fake-token", world.cfg(), "github",
+            default_branch="main",
+        )
+
+        assert wt.exists()
+        main = world.main_clone_path()
+        assert main.exists()
+        # The requested base branch now exists on origin.
+        ls = subprocess.run(
+            ["git", "-C", str(main), "ls-remote", "--heads", "origin", "strategy/NewName"],
+            capture_output=True, text=True, check=True,
+        )
+        assert ls.stdout.strip(), "strategy/NewName should have been pushed to origin"
+        # The issue branch is forked from it.
+        branch = subprocess.run(
+            ["git", "-C", str(wt), "branch", "--show-current"],
+            capture_output=True, text=True, check=True,
+        )
+        assert branch.stdout.strip() == world.branch_name(1)
+        # _main must sit on the default branch, never the raw --branch value.
+        cur = subprocess.run(
+            ["git", "-C", str(main), "branch", "--show-current"],
+            capture_output=True, text=True, check=True,
+        )
+        assert cur.stdout.strip() == "main"
+
+    def test_E6d_fresh_clone_no_fallback_error_not_misleading(self, git_world: GitWorld):
+        """E6d: fresh clone + missing base + no fallback → 'does not exist on origin'.
+
+        ensure_clone must succeed on the fresh-clone path (it verifies
+        origin/main, not origin/nonexistent) and leave the hard error to
+        create_worktree's base-branch guard — never the misleading
+        'has no commits' message.
+        """
+        world = git_world
+        world.init_remote(initial_files={"README.md": "# test"})
+
+        with pytest.raises(RuntimeError, match="does not exist on origin"):
+            create_worktree(
+                world.owner, world.repo, 1, "nonexistent",
+                "fake-token", world.cfg(), "github",
+                default_branch=None,
+            )
+
+        # ensure_clone must have completed the fresh clone and left _main on
+        # the repo's default branch (auto-detected via origin/HEAD).
+        main = world.main_clone_path()
+        assert main.exists()
+        cur = subprocess.run(
+            ["git", "-C", str(main), "branch", "--show-current"],
+            capture_output=True, text=True, check=True,
+        )
+        assert cur.stdout.strip() == "main"
+
     def test_E8_stale_worktree_dir(self, git_world: GitWorld):
         """E8: Worktree dir exists but .git is missing → next git call fails."""
         world = git_world

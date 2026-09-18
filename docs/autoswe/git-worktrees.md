@@ -25,8 +25,10 @@ Path helpers (`vcs/worktree.py`):
 
 ### `ensure_clone(owner, repo, token, cfg, base_branch, provider)`
 
-1. If `_main/` doesn't exist → `git clone` via VCS `clone_url()` (token embedded)
-2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch + checkout base_branch + reset --hard origin/{base_branch}`
+1. If `_main/` doesn't exist → `git clone` via VCS `clone_url()` (token embedded), then `checkout + reset --hard` to the resolved branch (step 2)
+2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch + checkout + reset --hard origin/{branch}`
+
+   Both paths resolve the `_main` checkout branch via `default_branch or _get_default_branch(_main, base_branch)` — **never** the raw `--branch` value, which may not exist on origin yet (a user-supplied `/plan --branch strategy/X` where `strategy/X` is new; issue #260). A missing base branch is forked from the default by `create_worktree`, not by `ensure_clone`. Both paths verify `origin/{branch}` and raise `RuntimeError("… has no commits on '…'")` when the repo has no usable branch (empty repos).
 3. `_ensure_repo_exclude(_main)` — idempotently seeds the shared repo-local git exclude (see below)
 
 ### Repo-local git exclude (`_ensure_repo_exclude`)
