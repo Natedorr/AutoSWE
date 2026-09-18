@@ -51,6 +51,15 @@ class DispatchResult:
     # persist them on the shipped queue entry. None for every other kind.
     pr_number: int | None = None
     pr_url: str | None = None
+    # For kind="retry": the slash command _run_retry actually REPLAYED, after its
+    # fallback rules (non-replayable -> /fix, /review on failed -> /fix). None for
+    # every other kind. emit() records this as last_replayed_command (NOT
+    # last_dispatched_command, which stays the literal "/retry" so decide()'s
+    # re-dispatch dedup can match it) and as the phase, so a subsequent /retry
+    # re-replays the same command instead of silently promoting a failed /plan
+    # to /fix (issue: "a failed plan is retried as a plan, not silently
+    # promoted to /fix").
+    replayed_command: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +102,8 @@ def run(
     if kind in (
         "noop", "skip", "abort", "post_welcome",
         "advance_watermark", "mark_failed_limit", "refused",
+        "ci_failed", "ci_recovered", "ci_error_warn",
+        "retry_deferred_pr",
     ):
         return None
 
@@ -125,6 +136,14 @@ def run(
         return _to_dispatch(hr, task)
 
     if kind == "fix":
+        if action.trigger == "ci":
+            # Failure text is fetched lazily here — only once a CI-triggered
+            # fix is actually dispatched (issue #245 plan §2.2) — so a red
+            # build that's still being throttled/parked never costs a log
+            # download. Best-effort: get_ci_failures() degrades to an empty
+            # list on any read failure, leaving the CIStatus summary already
+            # in `guidance` (built in decide()) as the fallback text.
+            guidance = _append_ci_failures(guidance, world, cfg, rc)
         if action.user_reply_text is not None:
             hr = coder.resume_fix(
                 task, action.user_reply_text, rc, cfg,
@@ -176,7 +195,46 @@ def run(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_dispatch(hr: HandlerResult, task: dict, review_file_path: str | None = None) -> DispatchResult:
+def _append_ci_failures(guidance: str, world: World, cfg: dict, repo_cfg: dict) -> str:
+    """Append real CI failure text to a CI-triggered fix's guidance.
+
+    Calls ``VCSProvider.get_ci_failures`` (issue #245 plan §2.1/§2.2) — the
+    one I/O call the CI auto-fix path makes outside the read cycle, deferred
+    to here so it only happens for a fix that is actually being dispatched.
+    Best-effort: any failure (including a backend without the capability)
+    leaves *guidance* unchanged; the CIStatus summary already in it is a
+    usable, if less detailed, fallback.
+    """
+    ci = world.ci
+    if ci is None or not ci.head_sha:
+        return guidance
+    try:
+        from autoswe.providers.factory import get_vcs
+        vcs = get_vcs(repo_cfg)
+        branch = world.task.plan_branch or vcs.branch_name(world.task.issue_number)
+        max_chars = cfg.get("CI_LOG_MAX_CHARS", 4000)
+        failures = vcs.get_ci_failures(branch, ci.head_sha, max_chars=max_chars)
+    except Exception as e:
+        get_debug_logger().warning(
+            "CI auto-fix: get_ci_failures failed for %s: %s: %s",
+            world.task.slug, type(e).__name__, e,
+        )
+        return guidance
+    if not failures:
+        return guidance
+    lines = [guidance, "", "Failure details:"]
+    for f in failures:
+        lines.append(f"\n**{f.check}**" + (f" ([run]({f.url}))" if f.url else ""))
+        if f.excerpt:
+            lines.append(f"```\n{f.excerpt}\n```")
+    return "\n".join(lines)
+
+def _to_dispatch(
+    hr: HandlerResult,
+    task: dict,
+    review_file_path: str | None = None,
+    replayed_command: str | None = None,
+) -> DispatchResult:
     """Convert HandlerResult (from planner/coder) to DispatchResult."""
     return DispatchResult(
         done_content=hr.done_content,
@@ -186,6 +244,7 @@ def _to_dispatch(hr: HandlerResult, task: dict, review_file_path: str | None = N
         plan_file_path=hr.plan_file_path,
         review_file_path=review_file_path or hr.review_file_path,
         verdict=hr.verdict,
+        replayed_command=replayed_command,
     )
 
 
@@ -236,6 +295,19 @@ def _run_sync(
                 )
             else:
                 summary = f"Already up to date with `origin/{sync_base}`."
+            # Issue #245 §1.4: surface the cross-linkage checklist (if any
+            # observation has been persisted) so an operator sees which edges
+            # exist without a separate `queue status` lookup.
+            from autoswe.vcs.linkage import render_linkage_checklist
+            checklist = render_linkage_checklist(task)
+            if checklist:
+                summary = f"{summary}\n\n{checklist}"
+            # Issue #245 §2.2: surface the last CI observation (report-only —
+            # no decision is taken here) alongside the linkage checklist.
+            from autoswe.providers.adapter import render_ci_status
+            ci_summary = render_ci_status(task)
+            if ci_summary:
+                summary = f"{summary}\n\n{ci_summary}"
             return DispatchResult(
                 done_content=f"DONE_SUMMARY\t{summary}\t{commit_sha}",
             )
@@ -515,8 +587,13 @@ def _run_retry(
             )
         return _to_dispatch(hr, task)
 
-    # Look at what was last dispatched and replay it
-    last_cmd = world.task.last_dispatched_command
+    # Replay the last SUBSTANTIVE command that actually ran. last_replayed_command
+    # records what a prior /retry replayed (and is set ONLY on a retry — every
+    # other dispatch clears it), so it takes precedence over last_dispatched_command,
+    # which is now the literal "/retry" (the triggering command) and non-replayable.
+    # When the last dispatch was a plain /plan / /fix / /review (no intervening
+    # retry), last_replayed_command is None and we fall back to the dispatch watermark.
+    last_cmd = world.task.last_replayed_command or world.task.last_dispatched_command
     if last_cmd in _NON_REPLAYABLE_COMMANDS:
         last_cmd = "/fix"
     # A /review watermark on a failed/error task must replay as /fix, not a
@@ -558,4 +635,7 @@ def _run_retry(
                                 progress_callback=progress_callback,
                                 fork_session=fork_session_id is not None,
                                 fork_session_id=fork_session_id)
-    return _to_dispatch(hr, task)
+    # Record the command we actually ran (not the literal "/retry") so the
+    # dispatch watermark reflects the replayed work and the next /retry
+    # re-replays the same command.
+    return _to_dispatch(hr, task, replayed_command=last_cmd)

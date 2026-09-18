@@ -1,0 +1,45 @@
+{
+  "api": {
+    "issue": {
+      "number": 13,
+      "title": "PR deferred issue",
+      "body": "Description.",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open"
+    },
+    "comments": [
+      {
+        "body": "PR deferred — CI still running (1 pending) — retry /pr when green. Will retry automatically once CI is green.\n\n<!-- autoswe-bot -->",
+        "created_at": "2026-01-01T10:00:00Z",
+        "author_login": "BOT",
+        "id": 1,
+        "is_bot": true
+      }
+    ]
+  },
+  "task": {
+    "slug": "gh:owner_repo_13",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 13,
+    "title": "PR deferred issue",
+    "status": "fixed",
+    "plan_branch": "issue-13",
+    "base_branch": "main",
+    "attempt_count": 1,
+    "last_dispatched_command": "/fix",
+    "session_id": null,
+    "provider": "github",
+    "last_dispatched_command_id": 1,
+    "last_consumed_reply_id": 1,
+    "welcome_comment_id": null,
+    "bot_comment_ids": [1],
+    "pr_deferred": true
+  },
+  "ci": {
+    "state": "success"
+  },
+  "cfg": {},
+  "repo_cfg": {}
+}

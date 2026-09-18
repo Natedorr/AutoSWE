@@ -65,12 +65,18 @@ def test_pi_mcp_json_bakes_python_not_token():
 
 def test_pi_mcp_json_path():
     """pi_mcp_json_path joins the agent dir with mcp.json (and expands ~)."""
-    from pathlib import Path
+    from pathlib import Path, PurePath
 
     from autoswe.harness.mcp_config import pi_mcp_json_path
 
     assert pi_mcp_json_path("/tmp/agent") == Path("/tmp/agent") / "mcp.json"
-    assert str(pi_mcp_json_path("~/.pi/agent")).endswith(".pi/agent/mcp.json")
+    # Expand ``~`` and assert on the path parts, not the separator string — on
+    # Windows the expanded path uses ``\`` (e.g. C:\Users\<u>\.pi\agent), so a
+    # POSIX ``endswith(".pi/agent/mcp.json")`` check fails there.
+    expanded = PurePath(pi_mcp_json_path("~/.pi/agent"))
+    assert expanded.name == "mcp.json"
+    assert expanded.parent.name == "agent"
+    assert expanded.parent.parent.name == ".pi"
 
 
 def test_autoswe_repo_root_points_at_mcp_servers():
@@ -455,6 +461,75 @@ def test_pr_gate_flags_per_repo_override():
     assert _flag("PR_REQUIRE_SYNC", cfg, {"pr_require_sync": False}) is False
     assert _flag("PR_REQUIRE_CI", cfg, {"pr_require_ci": False}) is False
     assert _flag("PR_REQUIRE_CI", cfg, {"pr_require_ci": True}) is True
+
+
+# ---------------------------------------------------------------------------
+# PR_CI_ERROR_POLICY (fail-safe policy for CI state="error" at the /pr gate)
+# ---------------------------------------------------------------------------
+
+def test_pr_ci_error_policy_defaults_to_block(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "block"
+
+
+def test_pr_ci_error_policy_env_override(isolated_autoswe_dir, monkeypatch):
+    monkeypatch.setenv("PR_CI_ERROR_POLICY", "open")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "open"
+
+
+def test_pr_ci_error_policy_from_env_file(isolated_autoswe_dir):
+    autoswe_env = isolated_autoswe_dir / "config" / "autoswe.env"
+    autoswe_env.write_text("PR_CI_ERROR_POLICY=open\n", encoding="utf-8")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "open"
+
+
+def test_pr_ci_error_policy_case_insensitive(isolated_autoswe_dir, monkeypatch):
+    monkeypatch.setenv("PR_CI_ERROR_POLICY", "BLOCK")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "block"
+
+
+def test_pr_ci_error_policy_unknown_value_falls_back_to_block(
+    isolated_autoswe_dir, monkeypatch, caplog,
+):
+    """A typo (e.g. 'BLOCKED') is not a valid policy; fall back to the
+    fail-safe 'block' rather than silently opening the gate."""
+    monkeypatch.setenv("PR_CI_ERROR_POLICY", "BLOCKED")
+
+    from autoswe.core.config import load_config
+
+    cfg = load_config()
+
+    assert cfg["PR_CI_ERROR_POLICY"] == "block"
+    assert "PR_CI_ERROR_POLICY" in caplog.text
+
+
+def test_pr_ci_error_policy_per_repo_override():
+    """pr_gate._policy lets a repo_cfg override (lowercase key) beat the cfg."""
+    from autoswe.vcs.pr_gate import _policy
+
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "block"}, {}, "block") == "block"
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "block"},
+                   {"pr_ci_error_policy": "open"}, "block") == "open"
+    assert _policy("PR_CI_ERROR_POLICY", {"PR_CI_ERROR_POLICY": "open"},
+                   {"pr_ci_error_policy": "block"}, "block") == "block"
 
 
 def test_load_repos_config_parses_json(isolated_autoswe_dir):
@@ -1226,3 +1301,166 @@ def test_load_init_prompt_fallback():
     prompt = load_init_prompt({"init_prompt": "/nonexistent/init.txt"})
     assert len(prompt) > 50
     assert "CLAUDE.md" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Linkage config keys (issue #245 §4)
+# ---------------------------------------------------------------------------
+
+def test_link_commit_trailer_defaults_true(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["LINK_COMMIT_TRAILER"] is True
+
+
+def test_link_commit_trailer_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("LINK_COMMIT_TRAILER=false\n", encoding="utf-8")
+    assert load_config()["LINK_COMMIT_TRAILER"] is False
+
+
+def test_auto_close_on_merge_defaults_true(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["AUTO_CLOSE_ON_MERGE"] is True
+
+
+def test_auto_close_on_merge_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("AUTO_CLOSE_ON_MERGE=false\n", encoding="utf-8")
+    assert load_config()["AUTO_CLOSE_ON_MERGE"] is False
+
+
+# ---------------------------------------------------------------------------
+# CI watch config keys (issue #245 §2.2)
+# ---------------------------------------------------------------------------
+
+def test_ci_watch_defaults_true(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["CI_WATCH"] is True
+
+
+def test_ci_watch_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("CI_WATCH=false\n", encoding="utf-8")
+    assert load_config()["CI_WATCH"] is False
+
+
+def test_ci_poll_interval_sec_defaults_120(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["CI_POLL_INTERVAL_SEC"] == 120
+
+
+def test_ci_poll_interval_sec_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("CI_POLL_INTERVAL_SEC=45\n", encoding="utf-8")
+    assert load_config()["CI_POLL_INTERVAL_SEC"] == 45
+
+
+def test_auto_fix_on_gate_failure_defaults_true(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["AUTO_FIX_ON_GATE_FAILURE"] is True
+
+
+def test_auto_fix_on_gate_failure_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("AUTO_FIX_ON_GATE_FAILURE=false\n", encoding="utf-8")
+    assert load_config()["AUTO_FIX_ON_GATE_FAILURE"] is False
+
+
+def test_gate_max_fix_attempts_defaults_2(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["GATE_MAX_FIX_ATTEMPTS"] == 2
+
+
+def test_gate_max_fix_attempts_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("GATE_MAX_FIX_ATTEMPTS=5\n", encoding="utf-8")
+    assert load_config()["GATE_MAX_FIX_ATTEMPTS"] == 5
+
+
+def test_ci_log_max_chars_defaults_4000(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["CI_LOG_MAX_CHARS"] == 4000
+
+
+def test_ci_log_max_chars_env_override(isolated_autoswe_dir):
+    from autoswe.core.config import CONFIG_FILE, load_config
+    CONFIG_FILE.write_text("CI_LOG_MAX_CHARS=1000\n", encoding="utf-8")
+    assert load_config()["CI_LOG_MAX_CHARS"] == 1000
+
+
+def test_done_state_defaults_empty(isolated_autoswe_dir):
+    from autoswe.core.config import load_config
+    assert load_config()["done_state"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Azure done_state / done_states validation at config load (issue #245 §1.5)
+# ---------------------------------------------------------------------------
+
+def test_load_repos_config_done_state_in_default_set_ok(isolated_autoswe_dir):
+    repos_json = isolated_autoswe_dir / "config" / "repos.json"
+    repos_json.write_text(
+        '{"o/p/r": {"provider": "azure", "pat": "t", "done_state": "Done"}}',
+        encoding="utf-8",
+    )
+    from autoswe.core.config import load_config, load_repos_config
+
+    result = load_repos_config(load_config())
+    assert result["o/p/r"]["done_state"] == "Done"
+
+
+def test_load_repos_config_done_state_outside_default_set_raises(isolated_autoswe_dir):
+    repos_json = isolated_autoswe_dir / "config" / "repos.json"
+    repos_json.write_text(
+        '{"o/p/r": {"provider": "azure", "pat": "t", "done_state": "Resolved"}}',
+        encoding="utf-8",
+    )
+    from autoswe.core.config import load_config, load_repos_config
+
+    try:
+        load_repos_config(load_config())
+        assert False, "should have raised ValueError"
+    except ValueError as e:
+        assert "done_state" in str(e)
+
+
+def test_load_repos_config_done_state_outside_default_ok_with_custom_done_states(isolated_autoswe_dir):
+    repos_json = isolated_autoswe_dir / "config" / "repos.json"
+    repos_json.write_text(
+        '{"o/p/r": {"provider": "azure", "pat": "t", "done_state": "Resolved", '
+        '"done_states": ["Resolved", "Removed"]}}',
+        encoding="utf-8",
+    )
+    from autoswe.core.config import load_config, load_repos_config
+
+    result = load_repos_config(load_config())
+    assert result["o/p/r"]["done_state"] == "Resolved"
+
+
+def test_load_repos_config_no_cfg_skips_done_state_validation(isolated_autoswe_dir):
+    """Without a cfg argument, done_state validation is skipped (back-compat)."""
+    repos_json = isolated_autoswe_dir / "config" / "repos.json"
+    repos_json.write_text(
+        '{"o/p/r": {"provider": "azure", "pat": "t", "done_state": "Resolved"}}',
+        encoding="utf-8",
+    )
+    from autoswe.core.config import load_repos_config
+
+    result = load_repos_config()  # no cfg -> no validation
+    assert result["o/p/r"]["done_state"] == "Resolved"
+
+
+def test_build_repo_cfg_folds_global_done_state(isolated_autoswe_dir):
+    """A global done_state fills in for an Azure repo with no per-repo override."""
+    from autoswe.providers.factory import build_repo_cfg
+
+    rcfg = build_repo_cfg("o", "p/r", {"done_state": "Done"}, repos_cfg=None, provider="azure")
+    assert rcfg["done_state"] == "Done"
+
+
+def test_build_repo_cfg_repo_override_beats_global_done_state(isolated_autoswe_dir):
+    from autoswe.providers.factory import build_repo_cfg
+
+    repos_cfg = {"o/p/r": {"provider": "azure", "done_state": "Resolved"}}
+    rcfg = build_repo_cfg("o", "p/r", {"done_state": "Done"}, repos_cfg=repos_cfg)
+    assert rcfg["done_state"] == "Resolved"

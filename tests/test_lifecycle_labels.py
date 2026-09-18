@@ -3,10 +3,15 @@
 from autoswe.tracking.assignment import _auto_assign_issue
 from autoswe.tracking.labels import (
     AUTOSWE_LABELS,
+    CI_WATCH_STATUSES,
+    SHIPPING_BLOCKING_STATUSES,
+    VALID_STATUSES,
     _ensure_repo_labels,
     _kind_from_command,
     _set_autoswe_status,
+    _validate_status,
     completed_status_for,
+    running_status_for,
 )
 from tests.conftest import load_fixture
 
@@ -181,3 +186,79 @@ def test_auto_assign_issue_skips_when_already_assigned(
     _auto_assign_issue("o", "r", 5, fake_token, username="testuser")
 
     assert assign_calls == [], "Should skip if user already assigned"
+
+
+# ---------------------------------------------------------------------------
+# ci_failed status (issue #245 plan §2.3, P3)
+# ---------------------------------------------------------------------------
+
+def test_ci_failed_is_a_valid_status():
+    """ci_failed must be registered so _validate_status accepts it (bare and prefixed)."""
+    assert "ci_failed" in VALID_STATUSES
+    _validate_status("ci_failed")
+    _validate_status("autoswe:ci_failed")
+
+
+def test_ci_failed_has_a_label():
+    """autoswe:ci_failed must exist so _ensure_repo_labels / _set_autoswe_status work."""
+    assert "autoswe:ci_failed" in AUTOSWE_LABELS
+    assert AUTOSWE_LABELS["autoswe:ci_failed"]["color"]
+    assert AUTOSWE_LABELS["autoswe:ci_failed"]["description"]
+
+
+def test_ci_failed_blocks_shipping_like_test_failed():
+    """ci_failed must gate /pr exactly like test_failed (issue #245 plan §2.3)."""
+    assert "ci_failed" in SHIPPING_BLOCKING_STATUSES
+    assert "test_failed" in SHIPPING_BLOCKING_STATUSES
+
+
+def test_ci_failed_is_watched_by_the_ci_poll():
+    """ci_failed stays in CI_WATCH_STATUSES so a stuck ci_failed task keeps
+    being polled for recovery (green build clears it back)."""
+    assert "ci_failed" in CI_WATCH_STATUSES
+
+
+def test_set_autoswe_status_accepts_ci_failed(
+    fake_token, mock_gh_request, gh_route_table
+):
+    gh_route_table[("GET", "/repos/o/r/issues/1/labels")] = [
+        {"name": "autoswe:fixed"},
+    ]
+    put_calls = []
+
+    def capture_put(method, path, token, body):
+        put_calls.append(body)
+        return {}
+
+    gh_route_table[("PUT", "/repos/o/r/issues/1/labels")] = capture_put
+
+    _set_autoswe_status("o", "r", 1, "autoswe:ci_failed", fake_token)
+
+    new_labels = put_calls[0]["labels"]
+    assert new_labels == ["autoswe:ci_failed"]
+
+
+# ---------------------------------------------------------------------------
+# running_status_for fallback for pure bookkeeping kinds (issue #245 plan §2.3)
+# ---------------------------------------------------------------------------
+
+
+def test_running_status_for_falls_back_to_current_status():
+    """A kind with no RUNNING verb (skip/abort/ci_failed/etc.) should use the
+    task's current status as the transient label, not a hardcoded 'fixing' —
+    so a failed corrective set_status effect leaves the label truthful
+    instead of stuck mid-transition."""
+    assert running_status_for("ci_failed", current_status="fixed") == "fixed"
+    assert running_status_for("ci_error_warn", current_status="ci_failed") == "ci_failed"
+    assert running_status_for("skip", current_status="planned") == "planned"
+
+
+def test_running_status_for_defaults_to_fixing_without_current_status():
+    """Backward-compatible default when no current_status is supplied."""
+    assert running_status_for("ci_failed") == "fixing"
+
+
+def test_running_status_for_known_kinds_ignore_current_status():
+    """Kinds with a dedicated RUNNING verb use it regardless of current_status."""
+    assert running_status_for("fix", current_status="planned") == "fixing"
+    assert running_status_for("plan", current_status="fixed") == "planning"

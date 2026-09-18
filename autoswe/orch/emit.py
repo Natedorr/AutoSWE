@@ -41,11 +41,21 @@ _KIND_TO_PHASE = {
     "retry": "fix",
 }
 
+# Slash command → phase name. Used for a /retry that REPLAYED a command: the
+# replayed command's phase, not the literal "retry" (fix) — so a replayed /plan
+# records last_phase="plan" and the running label reads planning, not fixing.
+_COMMAND_TO_PHASE = {
+    "/plan": "plan",
+    "/fix": "fix",
+    "/review": "review",
+}
+
 
 def _field_lifecycle_patch(
     kind: str,
     new_status: str,
     result: DispatchResult,
+    phase_override: str | None = None,
 ) -> dict:
     """Pure function: compute lifecycle field mutations for (kind, new_status, result).
 
@@ -56,11 +66,16 @@ def _field_lifecycle_patch(
     Computing this once up front (before the review early-return) eliminates
     the ordering fragility of inlined mutations that *must* happen before
     the early return.
+
+    phase_override: the phase to record for last_phase/resume_phase, overriding
+    the kind→phase map. For a /retry this is the phase of the command actually
+    replayed (a replayed /plan → "plan", so the running label reads planning,
+    not fixing). None falls back to the kind map (the non-retry default).
     """
     patch: dict = {}
 
     # last_phase + resume_phase
-    phase = _KIND_TO_PHASE.get(kind)
+    phase = phase_override or _KIND_TO_PHASE.get(kind)
     if phase:
         patch["last_phase"] = phase
         patch["resume_phase"] = phase
@@ -69,7 +84,10 @@ def _field_lifecycle_patch(
     #  * plan + planned  -> persist the path the planner wrote
     #  * plan + waiting  -> leave existing value alone (mid-conversation)
     #  * fix / retry / sync / ship_pr -> always clear (consumed or N/A)
-    if kind == "plan":
+    # A /retry that replayed a /plan must behave like a /plan here (persist the
+    # plan path on planned), otherwise replaying a failed plan loses it.
+    retry_replayed_plan = kind == "retry" and result.replayed_command == "/plan"
+    if kind == "plan" or retry_replayed_plan:
         if new_status == "planned" and result.plan_file_path:
             patch["plan_file_path"] = result.plan_file_path
         elif new_status != "waiting":
@@ -296,6 +314,59 @@ def emit(
         )
 
     if kind == "mark_failed_limit":
+        if action.limit_reason == "ci":
+            # CI auto-fix budget exhausted (issue #245 plan §2.3-§2.5, brake 1)
+            # — park at ci_failed rather than failed: this is the remote
+            # twin of test_failed, non-terminal and recovered by a human
+            # /fix (not /retry, which would just re-arm the same auto-fix
+            # loop). guard_blocked stays False so /fix isn't refused.
+            from autoswe.orch.gate_policy import gate_max_fix_attempts
+            max_attempts = gate_max_fix_attempts(cfg, world.repo_cfg)
+            ci = world.ci
+            pre_status = task.ci_failed_from_status if task.status == "ci_failed" else task.status
+            msg = (
+                f"CI auto-fix budget ({max_attempts} attempt(s)) exhausted for this commit. "
+                f"Post `/fix` to continue manually.{BOT_MARKER}"
+            )
+            return (
+                Effect(kind="post_comment", body=msg),
+                Effect(kind="set_status", status="ci_failed"),
+                Effect(
+                    kind="patch_queue",
+                    queue_patch={
+                        "autoswe_status": "ci_failed",
+                        "ci_failed_from_status": pre_status,
+                        "ci_last_notified_sha": ci.head_sha if ci else None,
+                        "first_dispatched_at": None,
+                        "pending_command": None,
+                    },
+                ),
+            )
+        if action.limit_reason == "gate":
+            # Local test-gate auto-fix budget exhausted (issue #245 §2.5) —
+            # the task is already parked at test_failed; post a one-time
+            # notice (test_gate_limit_notified) so it doesn't repeat every
+            # poll, and leave recovery to a human /fix (not /retry, which
+            # would just re-arm the same auto-fix loop).
+            from autoswe.orch.gate_policy import gate_max_fix_attempts
+            max_attempts = gate_max_fix_attempts(cfg, world.repo_cfg)
+            msg = (
+                f"Test gate auto-fix budget ({max_attempts} attempt(s)) exhausted for this commit. "
+                f"Post `/fix` to continue manually.{BOT_MARKER}"
+            )
+            return (
+                Effect(kind="post_comment", body=msg),
+                Effect(kind="set_status", status="test_failed"),
+                Effect(
+                    kind="patch_queue",
+                    queue_patch={
+                        "autoswe_status": "test_failed",
+                        "test_gate_limit_notified": True,
+                        "first_dispatched_at": None,
+                        "pending_command": None,
+                    },
+                ),
+            )
         if action.limit_reason == "time":
             max_hours = cfg.get("MAX_TOTAL_HOURS", 2)
             msg = f"Time limit ({max_hours}h) reached. Post `/retry` to continue.{BOT_MARKER}"
@@ -373,6 +444,136 @@ def emit(
             ),
         )
 
+    if kind == "ci_failed":
+        # First red build (or a new failing head_sha) on a watched task —
+        # park it at ci_failed with the failure text (issue #245 plan §2.3).
+        # Non-terminal: /fix, /retry, /skip, /abort and new-comment restarts
+        # all keep working via SHIPPING_BLOCKING_STATUSES + _check_restart_or_guard.
+        ci = world.ci
+        pre_status = task.ci_failed_from_status if task.status == "ci_failed" else task.status
+        lines = ["🔴 **CI failed** on the pushed branch."]
+        if ci and ci.failing:
+            lines.append("")
+            lines.append("Failing checks:")
+            lines.extend(f"- {name}" for name in ci.failing)
+        if ci and ci.summary:
+            lines.append("")
+            lines.append(ci.summary)
+        if ci and ci.url:
+            lines.append("")
+            lines.append(f"[View run]({ci.url})")
+        lines.append("")
+        lines.append(
+            "This is non-terminal — post `/fix` to address it (or `/retry`). "
+            "`/pr` is blocked while CI is red."
+        )
+        body = "\n".join(lines) + BOT_MARKER
+        return (
+            Effect(kind="post_comment", body=body),
+            Effect(kind="set_status", status="ci_failed"),
+            Effect(
+                kind="patch_queue",
+                queue_patch={
+                    "autoswe_status": "ci_failed",
+                    "ci_failed_from_status": pre_status,
+                    "ci_last_notified_sha": ci.head_sha if ci else None,
+                    "ci_error_notified": False,
+                    "ci_error_notified_sha": None,
+                    # Mirrors _field_lifecycle_patch's clearing for every other
+                    # entry into SHIPPING_BLOCKING_STATUSES (test_failed etc.):
+                    # the next /fix should get a fresh MAX_TOTAL_HOURS clock,
+                    # not one still counting from a stale earlier dispatch.
+                    "first_dispatched_at": None,
+                },
+            ),
+        )
+
+    if kind == "ci_recovered":
+        # Green build observed while resting at ci_failed — clear back to
+        # the status the task was in before CI turned red.
+        restore_status = task.ci_failed_from_status or "fixed"
+        body = f"✅ **CI green** — cleared back to `{restore_status}`.{BOT_MARKER}"
+        return (
+            Effect(kind="post_comment", body=body),
+            Effect(kind="set_status", status=restore_status),
+            Effect(
+                kind="patch_queue",
+                queue_patch={
+                    "autoswe_status": restore_status,
+                    "ci_failed_from_status": None,
+                    "ci_last_notified_sha": None,
+                    "ci_error_notified": False,
+                    "ci_error_notified_sha": None,
+                    # Green build — reset rule 3: the shared gate-recovery
+                    # counter and per-commit watermark both clear so the next
+                    # red build (a fresh regression, not the one just fixed)
+                    # gets a full budget.
+                    "gate_attempt_count": 0,
+                    "gate_last_fixed_sha": None,
+                },
+            ),
+        )
+
+    if kind == "retry_deferred_pr":
+        # Green CI observed while a create_pr effect was deferred (issue #245
+        # §2.6) — re-emit create_pr; the existing idempotency guard
+        # (find_existing_pr) makes the re-emit safe even if a human already
+        # posted /pr in the meantime. pr_head/pr_base are recomputed exactly
+        # as the original auto-create-PR-after-fix path did.
+        pr_head = _resolve_branch(task.owner, task.repo, task.issue_number, None, task.provider)
+        pr_base = task.base_branch
+        body_parts = [f"Fixes #{task.issue_number}"]
+        issue_body = task.body or ""
+        fix_summary = task.fix_summary or ""
+        if issue_body:
+            body_parts.append(f"**Issue:**\n\n{issue_body}")
+        if fix_summary:
+            body_parts.append(f"**Fix Summary:**\n\n{fix_summary}")
+        body_parts.append("\nOpened by autoSWE.")
+        pr_body = "\n\n".join(body_parts)
+        return (
+            # Clear the flag before re-attempting: if the create_pr effect
+            # below defers again (a flapping build going pending/red between
+            # the observation above and the actual API call), its own
+            # deferred path re-sets pr_deferred — this order lets that stick.
+            Effect(kind="patch_queue", queue_patch={"pr_deferred": False}),
+            Effect(
+                kind="create_pr",
+                pr_title=f"Fixes #{task.issue_number}: {task.title}",
+                pr_body=pr_body,
+                pr_head=pr_head,
+                pr_base=pr_base,
+            ),
+        )
+
+    if kind == "ci_error_warn":
+        # CI could not be consulted (API error) — a one-time notice, never a
+        # status change: an error is never treated as a pass or a fail.
+        # _dispatch_task flips the label to a transient "running" status
+        # before this runs (there is no Claude call to gate it on), so the
+        # set_status effect below is required to restore it — not optional
+        # bookkeeping — and the queue_patch must restore autoswe_status too,
+        # since the same transient flip already landed directly on the live
+        # queue entry.
+        ci = world.ci
+        summary = (ci.summary if ci else "") or "the CI API could not be consulted"
+        body = (
+            f"⚠️ **CI status unknown** — {summary}. This is a one-time notice; "
+            f"the task status is unchanged.{BOT_MARKER}"
+        )
+        return (
+            Effect(kind="post_comment", body=body),
+            Effect(kind="set_status", status=task.status),
+            Effect(
+                kind="patch_queue",
+                queue_patch={
+                    "autoswe_status": task.status,
+                    "ci_error_notified": True,
+                    "ci_error_notified_sha": ci.head_sha if ci else None,
+                },
+            ),
+        )
+
     # --- Claude actions (result should be DispatchResult) ---
 
     if result is None:
@@ -389,23 +590,62 @@ def emit(
     # --- Common queue patch for all Claude actions ---
     old_status = task.status
 
+    # last_dispatched_command stays the TRIGGERING command ("/retry" for a retry).
+    # That is what decide()'s re-dispatch dedup compares against the slash command
+    # (`last_dispatched_command == slash_cmd`); overwriting it with the replayed
+    # command ("/plan") broke the match and made the same /retry comment
+    # re-dispatch every poll. The command actually REPLAYED is tracked separately
+    # in last_replayed_command, which a subsequent /retry follows.
     pending_command = _KIND_TO_COMMAND.get(kind, "/fix")
+    # The command a /retry actually replayed (None for every non-retry kind — this
+    # also clears any stale value left by a prior /retry, so it never dangles).
+    replayed_command = result.replayed_command if kind == "retry" else None
+    # The replayed command's phase, so last_phase/resume_phase and the checkpoint
+    # backend reflect what actually ran (a replayed /plan → "plan").
+    replayed_phase = _COMMAND_TO_PHASE.get(replayed_command) if replayed_command else None
 
     log(f"[EMIT] {task.slug} status {old_status}->{new_status} attempt={action.attempt_count}")
+    # A gate-triggered fix (CI or the local test gate) has no triggering
+    # comment (decide()'s auto-fix branches never scanned comments), so it
+    # must NOT touch the dispatch/reply watermarks — action.triggering_comment_id
+    # is None here, and writing that through would regress
+    # last_dispatched_command_id / last_consumed_reply_id to 0, letting an
+    # already-handled slash command re-match as "new" on the next poll
+    # (issue #245 plan §2.4/§2.5).
+    gate_triggered = kind == "fix" and action.trigger in ("ci", "gate")
+    dispatch_command_id = task.last_dispatched_command_id if gate_triggered else action.triggering_comment_id
+    consumed_reply_id = task.last_consumed_reply_id if gate_triggered else action.triggering_comment_id
     queue_patch = {
         "autoswe_status": new_status,
         "last_dispatched_command": pending_command,
-        "last_dispatched_command_id": action.triggering_comment_id,
-        "last_consumed_reply_id": action.triggering_comment_id,
+        "last_dispatched_command_id": dispatch_command_id,
+        "last_consumed_reply_id": consumed_reply_id,
         "attempt_count": action.attempt_count,
         "pending_command": None,
         "pending_guidance": None,
         "pending_user_reply": None,
+        "last_replayed_command": replayed_command,
     }
 
     # Persist plan_branch from --branch so subsequent commands (/pr, /sync) use it
     if action.plan_branch:
         queue_patch["plan_branch"] = action.plan_branch
+
+    # Shared recoverable-gate bookkeeping (issue #245 §2.5, brakes 1-3). A
+    # gate-triggered fix (CI or the local test gate) bumps the shared counter
+    # and per-commit watermark; every human-dispatched Claude action resets
+    # the counter (reset rule 3 — never on a push the agent itself made, only
+    # on a green signal or a human command) and clears the test-gate
+    # exhaustion notice so a fresh cycle can notify again if it recurs.
+    if kind == "fix" and action.trigger in ("ci", "gate"):
+        queue_patch["gate_attempt_count"] = task.gate_attempt_count + 1
+        if action.trigger == "ci":
+            queue_patch["gate_last_fixed_sha"] = world.ci.head_sha if world.ci else None
+        else:
+            queue_patch["gate_last_fixed_sha"] = task.test_failed_sha
+    else:
+        queue_patch["gate_attempt_count"] = 0
+        queue_patch["test_gate_limit_notified"] = False
 
     # Update session_id if Claude returned one (skip for review — review
     # uses a throwaway session and should not overwrite the persistent fix session)
@@ -423,7 +663,10 @@ def emit(
         # and a failed retry leaves the checkpoint intact for the next /retry.
         # Review is excluded above: its throwaway session is not a checkpoint.
         if new_status != "failed" and _KIND_TO_PHASE.get(kind) is not None:
-            phase = _KIND_TO_PHASE.get(kind)
+            # A /retry records the phase of the command it replayed (a replayed
+            # /plan → "plan"), so the checkpoint backend tag reflects the backend
+            # that actually produced this session.
+            phase = replayed_phase or _KIND_TO_PHASE.get(kind)
             queue_patch["last_good_session_id"] = session_id
             # Tag which backend produced this checkpoint. A /retry later only
             # forks when the checkpoint's backend matches the phase's resolved
@@ -442,7 +685,7 @@ def emit(
     # Merge lifecycle field mutations (last_phase, resume_phase, plan_file_path,
     # review_file_path, first_dispatched_at, _guard_blocked). Computed once up
     # front so the review early-return below cannot skip them.
-    queue_patch.update(_field_lifecycle_patch(kind, new_status, result))
+    queue_patch.update(_field_lifecycle_patch(kind, new_status, result, replayed_phase))
 
     # Review verdict gates the next step. _map_done_to_status parsed the
     # verdict embedded in the review text:
@@ -451,6 +694,23 @@ def emit(
     #   * Blocked          -> "review_blocked"  (non-terminal, /pr blocked)
     # Keep not clearing plan_file_path/session_id so a later /fix still has the plan.
     if kind == "review":
+        if new_status == "failed":
+            # The review handler raised/timed out (e.g. reviewer.py's
+            # asyncio.TimeoutError / Exception branches) — done_content is
+            # "FAILED: ..." rather than "REVIEW_READY\t...". Render this the
+            # same way every other handler's FAILED result is rendered
+            # (lines below, `elif new_status == "failed":`) instead of
+            # falling into the REVIEW_READY formatting, which would produce
+            # a near-blank "## Review" comment with no failure reason.
+            reason = done[7:].strip() if done.startswith("FAILED:") else done
+            fail_msg = f"Failed: {reason}\n\nPost `/retry` to continue.{BOT_MARKER}"
+            queue_patch["session_id"] = None
+            queue_patch["rereview_after_fix"] = False
+            return (
+                Effect(kind="post_comment", body=fail_msg),
+                Effect(kind="set_status", status="failed"),
+                Effect(kind="patch_queue", queue_patch=queue_patch),
+            )
         review_text = done[len("REVIEW_READY\t"):] if done.startswith("REVIEW_READY\t") else ""
         if new_status == "review_blocked":
             gate_note = (
@@ -614,6 +874,11 @@ def emit(
         effects.append(Effect(kind="set_status", status="test_failed"))
         # No pending re-review — the gate, not the reviewer, produced this state.
         queue_patch["rereview_after_fix"] = False
+        # Shared gate policy bookkeeping (issue #245 §2.5): persist the
+        # failing commit + failure text so _decide_test_gate can auto-fix on
+        # the next poll without re-running anything.
+        queue_patch["test_failed_sha"] = commit_sha
+        queue_patch["test_failure_detail"] = detail
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 
     elif new_status == "aborted":

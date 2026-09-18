@@ -208,5 +208,4 @@ Be specific: cite file paths and line ranges where applicable. Use the Read tool
 to inspect individual files when the diff is unclear or you need to see surrounding
 context.
 
-Your final answer is also validated against a JSON schema: put the full report
-in `report_markdown` and a short verdict in `verdict`.
+{{OUTPUT_FORMAT_NOTE}}

@@ -57,6 +57,8 @@ No method takes a `repo_cfg` argument: the provider instance is constructed from
 | `normalize_comment_body(comment)` | `tuple[str, bool]` | Provider-specific body cleanup; returns `(body, is_bot)` |
 | `slug_prefix()` | `str` | Queue-slug prefix for this provider (`gh` / `ado`) |
 | `pid_prefix()` | `str` | PID-file stem prefix for this provider (`gh_` / `ado_`) |
+| `capabilities()` | `frozenset[Capability]` | Edges this tracker manages without an extra call — see [Capability model](#capability-model-providersbase) |
+| `close_issue(issue_number, reason="completed")` | `None` | Close the issue/work item (edge E5). `reason` is GitHub's vocabulary (`"completed"` / `"not_planned"`) on every provider |
 
 ### `VCSProvider` (Protocol)
 
@@ -68,13 +70,40 @@ No method takes a `repo_cfg` argument: the provider instance is constructed from
 | `open_pull_request(branch, base, title, body)` | `PRResult` | Open PR; raises on failure |
 | `link_branch_to_issue(issue_number, commit_sha, branch)` | `None` | Link branch to issue in platform UI (no-op default for Azure) |
 | `get_ci_status(branch, ref_sha=None)` | `CIStatus` | Combined CI status for the branch head — used by `vcs/pr_gate.py` to gate `/pr` |
+| `get_ci_failures(branch, ref_sha=None, *, limit=3, max_chars=4000)` | `list[CIFailure]` | Feedback text for up to `limit` failing checks (issue #245 §2.1/§4, P4) — fetched lazily in `orch/run.py` only when a CI-triggered fix is actually dispatched. Best-effort: a read failure yields `[]` rather than raising. |
 | `commit_url(commit_sha)` | `str \| None` | Clickable URL for a commit, or None |
 | `branch_url(branch)` | `str \| None` | Clickable URL for a branch, or None |
 | `worktree_path_parts()` | `tuple[str, ...]` | Path parts for worktree/clone dirs — GitHub `(owner, repo)`, Azure `(org, project, repo)` |
 | `resolve_repo_id()` | `str \| None` | Platform-specific repo id for URLs (Azure: Git repo UUID; GitHub: no-op) |
 | `slug_prefix()` / `pid_prefix()` | `str` | Queue-slug / PID-file stem prefixes |
+| `capabilities()` | `frozenset[Capability]` | Linkage/CI edges this VCS backend supports — see [Capability model](#capability-model-providersbase) |
+| `link_pr_to_issue(issue_number, pr_number)` | `None` | Create the machine-readable PR<->issue link (edge E3); no-op where the link is implicit (GitHub's closing keyword) |
+| `get_linkage(issue_number, branch, pr_number)` | `LinkageState` | Read current linkage state, provider-agnostic |
+| `commit_trailer(issue_number)` | `str` | Commit-message trailer for edge E2 (GitHub: `"Refs #N"`; Azure: `"#N"`) |
 
-`CIStatus` (`providers/base.py`) is a provider-agnostic dataclass: `state` (`"success" \| "pending" \| "failure" \| "none"`), `total`, `failing: list[str]`, `pending_count`, `summary`. `"none"` means no CI is configured on the repo — treated as a pass so autoSWE never blocks forever on repos without checks.
+## Capability model (`providers/base.py`)
+
+The two platforms are not symmetric (issue #245). `Capability` is a `StrEnum` naming every edge that might be platform-managed on one provider and not the other: `BRANCH_LINK`, `PR_ISSUE_LINK`, `AUTO_CLOSE_ON_MERGE`, `CI_PER_COMMIT`, `CI_LOGS`, `MERGE_STATUS`. Both protocols expose `capabilities() -> frozenset[Capability]`; `factory.get_vcs` / `factory.get_tracker` assert structural Protocol conformance at construction, so a provider missing a method fails at wiring time, not deep inside a handler at dispatch.
+
+The rule for every consumer: **a missing capability produces a logged, queryable "missing" entry — never a silent skip, never a fabricated pass.** `autoswe/vcs/linkage.py:ensure_links` is the canonical consumer — see [pipeline.md](pipeline.md) and [data-model.md](data-model.md) (`linkage_state` / `linkage_missing`).
+
+| Capability | GitHub | Azure DevOps |
+|---|---|---|
+| `BRANCH_LINK` | ✅ `createLinkedBranch` GraphQL | ❌ unverified (plan §1.3) — declared absent until a live probe confirms otherwise |
+| `PR_ISSUE_LINK` | ✅ closing keyword in PR body (`link_pr_to_issue` is a no-op) | ✅ `workItemRefs` on PR create/update |
+| `AUTO_CLOSE_ON_MERGE` (tracker) | ✅ `Fixes #N` closes the issue on merge | ❌ no mechanic — `close_issue` is always a real write |
+| `CI_PER_COMMIT` / `CI_LOGS` / `MERGE_STATUS` | ✅ | ✅ |
+
+`LinkageState` (`providers/base.py`) is the normalized answer to "how linked is this task?": `branch_linked`, `pr_linked`, `closes_on_merge`, `merged`, `pr_number`, `head_sha`, `merge_state`, `missing: tuple[str, ...]`.
+
+`CIStatus` (`providers/base.py`) is a provider-agnostic dataclass: `state` (`"success" \| "pending" \| "failure" \| "none" \| "error"`), `head_sha`, `stale`, `url`, `total`, `failing: list[str]`, `neutral`, `pending_count`, `summary`.
+
+- `"none"` means the API was consulted successfully and the repo has **no** CI configured — treated as a pass so autoSWE never blocks forever on repos without checks.
+- `"error"` means the CI API could **not** be consulted (network failure, bad PAT, unresolvable branch head). It is never treated as a pass and never triggers an auto-fix; `pr_gate` blocks on it unless the repo opts into `PR_CI_ERROR_POLICY=open` (default `block`).
+- `stale=True` marks a verdict that belongs to a different commit than the one requested (Azure's `sourceVersion` predates the branch head). Stale verdicts are reported as `state="pending"` so the gate waits for a fresh build rather than trusting an out-of-date result.
+- `neutral` counts checks that ran but verified nothing (`neutral`/`skipped` conclusions on GitHub) — reported separately instead of being collapsed into `"none"`.
+
+`CIFailure` (`providers/base.py`) is the provider-agnostic shape one failing check's feedback text takes: `check` (job/task/definition name), `url`, `excerpt` (pre-truncated by the provider to `max_chars`). GitHub's `get_ci_failures` reads check-run `output.annotations` (JSON, no log download) for each failing check-run, falling back to `actions/runs/{id}/jobs` failed-step names when the check-runs source itself is unavailable (the classic-PAT 403 case). Azure's reads each failed build-timeline record's structured `issues` array — also JSON, no log download. Both are best-effort: any read failure yields `[]`, leaving the `CIStatus` summary already in the fix guidance as the fallback text.
 
 
 ## Registry (`providers/factory.py`)
@@ -100,12 +129,12 @@ Both trackers populate `NormalizedIssue.state` (`"open"` / `"closed"`) so the di
 ## GitHub Implementation (`providers/github/`)
 
 - **`tracker.py:GitHubTracker`** — wraps `tracking/api.py` helpers. Lazily ensures labels. Normalizes `author_login` to `BOT`/`OWNER`/`AUTHOR` in `fetch_comments()`. `state` comes straight from the issue's `state` field. All outbound comment bodies (POST/PATCH) are passed through `redact_outbound()` to prevent leaking host filesystem paths or credential-bearing URLs into comments.
-- **`vcs.py:GitHubVCS`** — HTTPS clone URL with `x-access-token:`, `gh pr create` with GitHub API fallback, `gh pr list` for existing PR check. PR title and body are redacted before creation. `link_branch_to_issue()` uses the GitHub GraphQL API (`createLinkedBranch` mutation) — fetches the issue `node_id` via REST, then POSTs to `/graphql`. Handles "already exists" errors as idempotent no-ops. Raises `MissingScopeError` on permission failures. `get_ci_status()` combines check-runs (`GET /commits/{sha}/check-runs`) and the legacy combined status (`GET /commits/{sha}/status`): any failure/cancelled/timed_out/action_required conclusion wins, else any non-completed run is `pending`, else `success` if at least one check passed, else `none`. `normalize_comment_body()` is identity (GitHub comments arrive clean). `commit_url()` / `branch_url()` build the `github.com` links; `worktree_path_parts()` is `(owner, repo)`.
+- **`vcs.py:GitHubVCS`** — HTTPS clone URL with `x-access-token:`, `gh pr create` with GitHub API fallback, `gh pr list` for existing PR check. PR title and body are redacted before creation. `link_branch_to_issue()` uses the GitHub GraphQL API (`createLinkedBranch` mutation) — fetches the issue `node_id` via REST, then POSTs to `/graphql`. Handles "already exists" errors as idempotent no-ops. Raises `MissingScopeError` on permission failures. `get_ci_status()` combines check-runs (`GET /commits/{sha}/check-runs`) and the legacy combined status (`GET /commits/{sha}/status`): any failure/cancelled/timed_out/action_required conclusion wins, else any non-completed run is `pending`, else `success` if at least one check passed (neutral/skipped checks count toward `neutral`, still passing), else `none` — but only if the check-runs source actually answered. An unresolvable branch head, or a check-runs read that errored with no fallback data, returns `error` (fail-safe). A check-runs **403** (the documented classic-PAT-on-private-repo case) falls back to `GET /actions/runs?head_sha=`, the PAT-friendly endpoint. `normalize_comment_body()` is identity (GitHub comments arrive clean). `commit_url()` / `branch_url()` build the `github.com` links; `worktree_path_parts()` is `(owner, repo)`.
 
 ## Azure Implementation (`providers/azure/`)
 
 - **`tracker.py:AzureTracker`** — WIQL for discovery, batch API for expand (chunked at 100 ids/request, then merged, de-duped, and sorted by id — `list-work-items.md` Common Pitfalls #3), tag-based label mirror (semicolons in `System.Tags`). Normalizes `author_login` same way as GitHub. `state` maps `System.State`: `Closed`/`Done`/`Removed` → `"closed"`, otherwise `"open"`. HTML stripping via `_StripHTML` parser preserves `<AUTOSWE_*>` tags. All outbound comment bodies are redacted via `redact_outbound()`. `normalize_comment_body()` is where the provider-specific read-path cleanup lives: HTML/entity unescaping + div unwrapping + re-appending the bot marker on bot comments.
-- **`vcs.py:AzureVCS`** — Azure Repos REST API for clone URL, PR creation, PR discovery. PAT embedded in HTTPS URL. PR title and body are redacted before creation. `link_branch_to_issue()` is a documented no-op (Azure DevOps has no equivalent feature). `get_ci_status()` queries the most recent Azure Pipelines build for the branch (`GET .../_apis/build/builds?branchName=...`); `notStarted`/`inProgress` → `pending`, `failed`/`canceled` → `failure`, `succeeded`/`partiallySucceeded` → `success`, no builds → `none`. `commit_url()` / `branch_url()` build `dev.azure.com` links (URL-encoding each path segment, using the resolved repo UUID when available); `worktree_path_parts()` is `(org, project, repo)`.
+- **`vcs.py:AzureVCS`** — Azure Repos REST API for clone URL, PR creation, PR discovery. PAT embedded in HTTPS URL. PR title and body are redacted before creation. `link_branch_to_issue()` is a documented no-op (Azure DevOps has no equivalent feature). `get_ci_status()` queries the most recent Azure Pipelines build for the branch (`GET .../_apis/build/builds?branchName=...`); `notStarted`/`inProgress` → `pending`, `failed`/`canceled` → `failure`, `succeeded`/`partiallySucceeded` → `success`, no builds → `none`, a build API read that errors → `error`. When `ref_sha` (the branch head) is given and the build's `sourceVersion` differs from it, the build is **stale**: it no longer represents the current commit, so the status is `pending` with `stale=True` (a stale `canceled` build therefore no longer blocks the PR forever). `head_sha` carries the build's `sourceVersion`; `url` is the build-results link. `commit_url()` / `branch_url()` build `dev.azure.com` links (URL-encoding each path segment, using the resolved repo UUID when available); `worktree_path_parts()` is `(org, project, repo)`.
 
 Both providers own their branch convention via `VCSProvider.branch_name()` — the single source of the `autoswe/issue-{N}` name, so `ship.open_pr` and `pr_gate.preflight_pr` can no longer disagree.
 

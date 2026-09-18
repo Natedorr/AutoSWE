@@ -1,0 +1,8 @@
+{
+  "kind": "fix",
+  "slug": "gh:owner_repo_11",
+  "plan_branch": "issue-11",
+  "guidance": "CI failed on the pushed branch.\n\nFailing checks:\n- build\n\n1 check(s) failing: build",
+  "attempt_count": 1,
+  "trigger": "ci"
+}

@@ -51,6 +51,12 @@ Key: comments must include `user` dicts with `login` (GitHub) or `createdBy.uniq
 
 Each scenario has `world.json` (API state, task state, config) and `expected_action.json` (the Action kind, branch, guidance, etc.). Tests load the JSON, construct `World`, call `decide(world)`, and assert the returned `Action` matches the expected one. Parametrized over all scenario directories.
 
+`test_decide_ignores_world_ci_outside_watch_statuses` (same file) re-runs every fixture whose task status is *not* in `CI_WATCH_STATUSES` with `World.ci` populated by a real `CIStatus` (any state) and asserts the output is byte-identical to the `ci=None` baseline — `World.ci` stays inert outside the CI-watched statuses. No new decide fixtures were needed for P2: `read_ci`'s eligibility/throttle/plumbing is covered directly in `tests/test_provider_adapter.py` instead, since nothing about it is a `World -> Action` decision.
+
+The `ci_*` fixtures cover the CI-watched branches directly, including the P4 auto-fix rows: `ci_first_failure` (auto-fix dispatches a `/fix`, `AUTO_FIX_ON_GATE_FAILURE` default on), `ci_first_failure_auto_fix_off` / `ci_auto_fix_off_via_repo_override` (brake 4 — the config gate, global and per-repo), `ci_budget_exhausted_marks_ci_failed` / `ci_max_fix_attempts_repo_override` (brake 1 — the shared counter), and `ci_same_sha_no_double_dispatch` (brake 2 — the per-commit watermark). The corresponding emit fixtures (`ci_auto_fix_dispatch_action`, `ci_budget_exhausted_action`, `ci_auto_fix_human_command_resets_counter`) cover brake 3 (the reset rule) and the `gate_attempt_count` / `gate_last_fixed_sha` queue bookkeeping.
+
+**Gate unification (issue #245 §2.5) and pr_deferred (§2.6) fixtures:** the `gate_*` decide fixtures mirror the `ci_*` ones for the local test gate — `gate_test_failed_first_failure_auto_fix` (auto-dispatch), `gate_test_failed_budget_exhausted` (brake 1, shared with CI), `gate_test_failed_same_sha_no_double_dispatch` (brake 2), `gate_test_failed_auto_fix_off` (brake 4) — plus `gate_pr_deferred_retries_on_green_ci` (the `retry_deferred_pr` re-emit row). The matching emit fixtures (`gate_test_failed_auto_fix_dispatch_action`, `gate_test_failed_budget_exhausted_action`, `gate_retry_deferred_pr_action`) exercise the shared bump/reset logic and the `create_pr` re-emission. `tests/test_test_gate.py` unit-tests the shared prompt-assembly helper (`orch/gate_policy.build_gate_guidance`) directly — one function producing both the CI-style and local-test-gate-style guidance block — plus `gate_max_fix_attempts` / `auto_fix_on_gate_failure` config resolution. `tests/test_provider_adapter.py`'s `create_pr` CI-gate tests assert `pr_deferred=True` is recorded (instead of an "post /pr again" comment) on every deferred reason (pending/failing/error). `TRANSITIONS` rows `test_gate_auto_fix_dispatches_fix`, `test_gate_auto_fix_budget_exhausted_stays_parked`, and `pr_deferred_retries_on_green_ci` run these end-to-end through the full sync+dispatch cycle.
+
 ## Layer 3 — Emit Fixtures (Layer C)
 
 **Location:** `tests/fixtures/emit/<scenario>/`
@@ -521,6 +527,8 @@ These layers test infrastructure concerns that don't fit the decide/run/emit mod
 | `tests/test_concurrency.py` | PID collision (crashed process leaves .pid without .done), repo lock contention, MAX_CONCURRENT gate, comment ID backfill race, RUNNING states protection (comments arriving mid-run), welcome post interleaving |
 | `tests/test_drift_detection.py` | Queue/API divergence scenarios: orphan RUNNING tasks, deleted plan comments, gh_closed reopen, bot_comment_ids backfill, deleted comment watermarks, closed PR tracking, label/queue status drift, author allowlist, auto-dispatch |
 | `tests/test_fake_parity.py` | Verifies fakes implement the full IssueTracker and VCSProvider protocol; covers all GET/PUT/POST routes for both GitHub and Azure fakes; comment ID uniqueness; provider parity for shared operations |
+| `tests/test_capabilities.py` | `Capability` declarations for both providers' tracker/VCS classes; `factory.get_tracker`/`get_vcs` structural Protocol conformance assert (issue #245) |
+| `tests/test_linkage.py` | `autoswe.vcs.linkage.ensure_links` decision logic — steady-state no-op, self-heal, capability-gated writes, E5 close-on-merge idempotency, declared-absence reporting, checklist rendering |
 
 **Key patterns:**
 

@@ -237,8 +237,9 @@ Azure DevOps uses JSON Patch for creating and updating work items. This is NOT a
 
 | Operation | Description |
 |---|---|
-| `add` | Set or change a scalar field value. **Note:** on `System.Tags` `add` is additive — it merges into the existing tag set. To replace tags, `remove` then `add` (see [replace-tags-on-work-item.md](replace-tags-on-work-item.md)). |
+| `add` | Set or change a scalar field value. **Note:** on `System.Tags` `add` is additive — it merges into the existing tag set. To replace tags, use a single `replace` (see [replace-tags-on-work-item.md](replace-tags-on-work-item.md)). |
 | `remove` | Clear a field (no `value` needed) |
+| `replace` | Set a field exactly to `value`. **Use this for `System.Tags`** — it overwrites the whole tag set. You cannot combine two ops on the same field in one body (HTTP 400 VS403691). |
 
 ### Content-Type
 

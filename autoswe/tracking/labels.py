@@ -24,6 +24,7 @@ AUTOSWE_LABELS = {
     "autoswe:review_failed":  {"color": "fbca04", "description": "Review found issues — needs /fix"},
     "autoswe:review_blocked": {"color": "d73a4a", "description": "Review blocked — critical findings, needs /fix"},
     "autoswe:test_failed":    {"color": "d73a4a", "description": "Fix pushed but test suite failing — needs /fix"},
+    "autoswe:ci_failed":  {"color": "d73a4a", "description": "CI red on pushed branch"},
     "autoswe:waiting":    {"color": "fbca04", "description": "Agent asked a question"},
     "autoswe:failed":     {"color": "d73a4a", "description": "Agent errored"},
     "autoswe:skipped":    {"color": "ffffff", "description": "Skipped by user"},
@@ -38,7 +39,7 @@ _PREFIX = "autoswe:"
 VALID_STATUSES = frozenset(
     {"pending", "planning", "fixing", "syncing", "reviewing", "shipping",
      "planned", "fixed", "synced", "shipped", "reviewed",
-     "review_failed", "review_blocked", "test_failed",
+     "review_failed", "review_blocked", "test_failed", "ci_failed",
      "waiting", "failed", "skipped", "aborted", "error"}
 )
 
@@ -50,12 +51,26 @@ TERMINAL_STATUSES = COMPLETED_STATUSES | frozenset({"failed", "skipped", "aborte
 # task is NOT done: /pr is blocked until the user posts /fix (which re-reviews).
 REVIEW_BLOCKING_STATUSES = frozenset({"review_failed", "review_blocked"})
 
+# Blocking, auto-fixable gate statuses (issue #245 plan §2.5): one policy,
+# two signals. test_failed is the local post-fix test gate
+# (harness/test_gate.py — the fix committed and pushed, but the branch suite
+# is red); ci_failed is its remote twin (the pushed branch's CI build is
+# red). Both share the same attempt counter (task.gate_attempt_count), reset
+# rule, AUTO_FIX_ON_GATE_FAILURE switch, and prompt-assembly helper — see
+# orch/gate_policy.py.
+RECOVERABLE_GATE_STATUSES = frozenset({"test_failed", "ci_failed"})
+
 # Non-terminal resting states where shipping is blocked: the review verdicts
-# (review_failed/review_blocked) plus the post-fix test gate (test_failed —
-# the fix committed and pushed, but the branch suite is red). /pr is refused
-# until a /fix re-runs the blocking check green; restarts start a fresh
-# MAX_ATTEMPTS budget (the prior phase finished, the gate is a new signal).
-SHIPPING_BLOCKING_STATUSES = REVIEW_BLOCKING_STATUSES | frozenset({"test_failed"})
+# (review_failed/review_blocked) plus the recoverable gate statuses above.
+# /pr is refused until a /fix re-runs the blocking check green; restarts
+# start a fresh MAX_ATTEMPTS budget (the prior phase finished, the gate is a
+# new signal).
+SHIPPING_BLOCKING_STATUSES = REVIEW_BLOCKING_STATUSES | RECOVERABLE_GATE_STATUSES
+
+# Statuses eligible for the read-only CI watch (issue #245 plan §2.2): a
+# branch has been pushed and the task is resting, so a build may be running
+# or have already finished for it.
+CI_WATCH_STATUSES = frozenset({"fixed", "shipped", "synced", "ci_failed"})
 
 # Action kind → status mappings (module-level to avoid per-call allocation)
 _KIND_TO_RUNNING = {
@@ -85,14 +100,21 @@ _CMD_TO_KIND = {
 }
 
 
-def running_status_for(kind: str, last_phase: str | None = None) -> str:
+def running_status_for(
+    kind: str, last_phase: str | None = None, current_status: str | None = None
+) -> str:
     """Return the RUNNING status for an action kind.
 
     For ``retry`` the status depends on ``last_phase`` (plan→planning, fix→fixing).
+    Pure bookkeeping kinds (skip/abort/ci_failed/ci_recovered/ci_error_warn/etc.)
+    have no dedicated RUNNING verb and no backend call to gate on — they fall
+    back to ``current_status`` (the task isn't visibly changing state) instead
+    of the misleading hardcoded "fixing", so a failed corrective effect leaves
+    the label at the task's real status rather than stuck mid-transition.
     """
     if kind == "retry" and last_phase == "plan":
         return "planning"
-    return _KIND_TO_RUNNING.get(kind, "fixing")
+    return _KIND_TO_RUNNING.get(kind, current_status or "fixing")
 
 
 def completed_status_for(kind: str) -> str:

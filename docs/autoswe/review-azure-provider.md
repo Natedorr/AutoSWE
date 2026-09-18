@@ -51,10 +51,11 @@ ship → pr_gate.preflight_pr → AzureVCS.get_ci_status (latest build for branc
 ```
 
 Status is carried as a **work item tag** (`autoswe:***`), not a state field —
-`set_status` (:352) is a GET tags → strip `autoswe:*` → JSON-Patch
-`remove`+`add` on `/fields/System.Tags` (two-op patch; ADO's `add` on
-`System.Tags` is additive server-side, so the `remove` is what makes it a
-true replace — issue #235, documented in the docstring).
+`set_status` (:352) is a GET tags → strip `autoswe:*` → a **single** JSON-Patch
+`op:"replace"` on `/fields/System.Tags`. ADO applies `add` on `System.Tags`
+additively server-side, and it rejects two ops on the same field in one body
+(HTTP 400 VS403691), so `replace` is the only op that sets the tag set exactly
+(issue #235 follow-up, documented in the docstring).
 
 ## 2. Interface Integrity (Q2)
 
@@ -205,8 +206,8 @@ Differences vs GitHub (review F-1/F-2/F-3 apply **in kind**):
      parity wart, not a bug.
 - `set_status` tag handling (:352–395): strips caller-supplied
   `autoswe:` prefix to prevent `autoswe:autoswe:pending`, preserves
-  non-autoswe tags, and issues the two-op JSON-Patch. Solid; the only
-  cost is a GET+PATCH per status transition (2 calls vs 1 on GitHub's
+  non-autoswe tags, and issues a single `op:"replace"` JSON-Patch. Solid; the
+  only cost is a GET+PATCH per status transition (2 calls vs 1 on GitHub's
   labels API), which at current volume is noise.
 - `post_comment` (:309) / `update_comment` (:322) return `int | None` /
   `None`; failures propagate as exceptions into `apply_effect` — i.e.
@@ -277,7 +278,7 @@ serve both backends.
 | F-7a | **Medium** | `azure/vcs.py:209–239` (`$top=1`, branch-only query; `ref_sha` unused, :215–217) | Gate decides on the branch's latest build regardless of head commit — stale-build false green/red possible; `canceled` stale build blocks `/pr` indefinitely | When `ref_sha` is supplied, compare build `sourceVersion` to it; mismatch → `pending` (build running for the right commit) rather than success/failure; add `sourceVersion` to `CIStatus` |
 | F-8a | **Medium** | `azure/tracker.py:36–48` + :226–236 (content-pattern bot fallback) | User comment matching `_BOT_CONTENT_PATTERNS` is relabeled `BOT` (author lost, command ignored); providers can disagree on the same body vs GitHub's marker-only path | Marker-only for *authorship*; use content patterns only to *recover* bot-ness of markerless legacy bot posts where `createdBy` matches the bot identity (ADO exposes `createdBy` — use it) |
 | F-9a | **Low** | `azure/api.py:69–124` (`_ado_request`) | PAT travels in every header **and** is embedded in `clone_url()` (vcs.py:146) → PAT sits in worktree remotes on disk; `git remote -v` / worktree snapshots leak it. `redact_outbound` covers outbound payloads, not local git config | After initial clone+push, rewrite remote to credential-less URL + git credential helper/store, or store PAT in a per-repo `~/.git-credentials` with restrictive perms; document rotation on PAT change |
-| F-10a | **Low** | `azure/tracker.py:352–395` (`set_status` GET+PATCH) | Two API calls per status transition; non-atomic read-modify-write (a human editing tags between GET and PATCH loses their edit — `remove` then `add` overwrites the whole tag set) | Acceptable at current volume; if tag contention shows up, switch to a single `op:"replace"` JSON-Patch computed from server-side values, or move status to a dedicated ADO field |
+| F-10a | **Low** | `azure/tracker.py:352–395` (`set_status` GET+PATCH) | Two API calls per status transition; non-atomic read-modify-write (a human editing tags between GET and PATCH loses their edit — the `replace` overwrites the whole tag set). *Fixed:* the old two-op `remove`+`add` was rejected by ADO (VS403691) so no tag ever posted; now a single `op:"replace"`. | Residual contention is now only the GET/PATCH race; acceptable at current volume. If tag contention shows up, compute the value server-side (WIQL) or move status to a dedicated ADO field |
 | F-11a | **Info** | `azure/vcs.py:201–206` (`link_branch_to_issue` no-op) | ADO *does* support branch↔work-item links (Development control, deep-dive); no-op foregoes the "which ticket does this build cover" surface the deep-dive highlights | Optional: POST `git/branches/{branch}/links` when the branch is pushed; purely telemetry, no control dependency |
 
 **SHARED with the GitHub review** (same shared code, both providers

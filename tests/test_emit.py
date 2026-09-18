@@ -29,7 +29,7 @@ from autoswe.orch.types import (
     TaskState,
     World,
 )
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "emit"
 
@@ -107,16 +107,30 @@ def _load_world(data: dict) -> World:
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
         fix_summary=task_data.get("fix_summary", ""),
+        ci_failed_from_status=task_data.get("ci_failed_from_status"),
+        ci_last_notified_sha=task_data.get("ci_last_notified_sha"),
+        ci_error_notified=task_data.get("ci_error_notified", False),
+        ci_error_notified_sha=task_data.get("ci_error_notified_sha"),
+        gate_attempt_count=task_data.get("gate_attempt_count", task_data.get("ci_attempt_count", 0)),
+        gate_last_fixed_sha=task_data.get("gate_last_fixed_sha", task_data.get("ci_last_fixed_sha")),
+        test_failed_sha=task_data.get("test_failed_sha"),
+        test_failure_detail=task_data.get("test_failure_detail"),
+        test_gate_limit_notified=task_data.get("test_gate_limit_notified", False),
+        pr_deferred=task_data.get("pr_deferred", False),
     )
 
     cfg = _default_cfg()
     cfg.update(data.get("cfg", {}))
+
+    ci_data = data.get("ci")
+    ci = CIStatus(**ci_data) if ci_data is not None else None
 
     return World(
         api=api,
         task=task,
         cfg=cfg,
         repo_cfg=data.get("repo_cfg", {}),
+        ci=ci,
     )
 
 
@@ -133,6 +147,7 @@ def _load_action(data: dict) -> Action:
         user_reply_text=data.get("user_reply_text"),
         limit_reason=data.get("limit_reason"),
         refused_command=data.get("refused_command"),
+        trigger=data.get("trigger"),
     )
 
 
@@ -235,10 +250,10 @@ def _discover_fixtures() -> list[Path]:
 @pytest.mark.parametrize("scenario", _discover_fixtures(), ids=lambda p: p.name)
 def test_emit(scenario: Path):
     """Parametrized emit test: world + action + result -> expected effects."""
-    world = _load_world(json.loads((scenario / "world.json").read_text()))
-    action = _load_action(json.loads((scenario / "action.json").read_text()))
+    world = _load_world(json.loads((scenario / "world.json").read_text(encoding="utf-8")))
+    action = _load_action(json.loads((scenario / "action.json").read_text(encoding="utf-8")))
     result = _load_result(scenario / "result.json")
-    expected_list = json.loads((scenario / "expected_effects.json").read_text())
+    expected_list = json.loads((scenario / "expected_effects.json").read_text(encoding="utf-8"))
 
     effects = emit(action, result, world)
     expected = [dict(e) for e in expected_list]
@@ -412,6 +427,104 @@ def test_retry_clears_review_file_path():
     assert patch["review_file_path"] is None
 
 
+def test_retry_replay_plan_records_plan_command():
+    """A /retry that REPLAYED a /plan must record last_replayed_command=/plan
+    (and last_phase=plan), while last_dispatched_command stays the triggering
+    /retry.
+
+    Regression for the E2E-12 bug: the command a /retry actually ran must be
+    remembered so a subsequent /retry re-replays it instead of falling back to
+    /fix (the docs forbid silently promoting a failed /plan to a fix). It is
+    stored in last_replayed_command, NOT last_dispatched_command — that field
+    must stay "/retry" so decide()'s re-dispatch dedup can match the triggering
+    command (overwriting it with "/plan" made the same /retry re-dispatch every
+    poll).
+    """
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "retry_clears_guard" / "world.json").read_text()
+    ))
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "retry_clears_guard" / "action.json").read_text()
+    ))
+    # The replayed /plan timed out -> failed.
+    result = DispatchResult(
+        done_content="FAILED: timeout during plan phase",
+        session_id=None,
+        replayed_command="/plan",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "retry must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("last_replayed_command") == "/plan", (
+        "a /retry that replayed /plan must record last_replayed_command=/plan, "
+        f"(got {patch.get('last_replayed_command')!r})"
+    )
+    assert patch.get("last_dispatched_command") == "/retry", (
+        "last_dispatched_command must stay the triggering '/retry' so the "
+        "re-dispatch dedup matches (got "
+        f"{patch.get('last_dispatched_command')!r})"
+    )
+    assert patch.get("last_phase") == "plan", (
+        "a replayed /plan must record last_phase=plan so the running label "
+        f"reads planning, not fixing (got {patch.get('last_phase')!r})"
+    )
+    assert patch.get("resume_phase") == "plan"
+    assert patch.get("autoswe_status") == "failed"
+
+
+def test_retry_replay_fix_records_fix_command():
+    """A /retry that replayed a /fix records last_replayed_command=/fix and
+    last_phase=fix (last_dispatched_command stays the triggering /retry) — the
+    common case, pinned so the replayed-command recording does not regress."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "retry_clears_guard" / "world.json").read_text()
+    ))
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "retry_clears_guard" / "action.json").read_text()
+    ))
+    result = DispatchResult(
+        done_content="FAILED: timeout during fix phase",
+        session_id=None,
+        replayed_command="/fix",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "retry must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("last_replayed_command") == "/fix"
+    assert patch.get("last_dispatched_command") == "/retry"
+    assert patch.get("last_phase") == "fix"
+    assert patch.get("resume_phase") == "fix"
+
+
+def test_non_retry_dispatch_clears_last_replayed_command():
+    """A plain /fix dispatch must clear last_replayed_command so a replayed
+    command never dangles past the /retry that set it — the next /retry should
+    then fall back to last_dispatched_command (/fix), not a stale replayed value."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "world.json").read_text()
+    ))
+    action = _load_action(json.loads(
+        (FIXTURE_DIR / "fix_action_success" / "action.json").read_text()
+    ))
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tfixed the bug\n",
+        session_id="sess-fix-1",
+    )
+
+    effects = emit(action, result, world)
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "fix must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("last_replayed_command") is None, (
+        "a non-retry dispatch must clear last_replayed_command (got "
+        f"{patch.get('last_replayed_command')!r})"
+    )
+
+
 def test_fix_success_sets_last_good_session_id():
     """A non-failed run that persists a session_id must record it as the
     last-known-good checkpoint so /retry can fork from it later."""
@@ -533,6 +646,49 @@ def test_review_success_does_not_set_last_good_session_id():
         "review's throwaway session must not become a fork checkpoint"
     )
     # Review also must not overwrite the persistent session_id.
+    assert patch.get("session_id") is None
+
+
+def test_review_failed_renders_explicit_failure_not_blank_review():
+    """A FAILED review result (reviewer.py raised/timed out) must render as an
+    explicit failure comment, not a near-blank '## Review' section.
+
+    Before the fix, the `kind == "review"` branch in emit() ran unconditionally
+    and only knew how to format REVIEW_READY text — a `FAILED: ...` done_content
+    fell through to an empty review_text/gate_note, producing a content-less
+    '## Review' comment that hid the actual error from the user."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "plan_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="review",
+        slug=world.task.slug,
+        plan_branch=world.task.plan_branch,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="FAILED: review error: codex executable not found on PATH",
+        cost_usd=None,
+        duration_seconds=5.0,
+        session_id=None,
+    )
+
+    effects = emit(action, result, world)
+
+    comments = [e for e in effects if e.kind == "post_comment"]
+    assert comments, "a failed review must post a comment"
+    body = comments[0].body
+    assert "## Review" not in body
+    assert "Failed:" in body
+    assert "codex executable not found on PATH" in body
+
+    statuses = [e for e in effects if e.kind == "set_status"]
+    assert statuses and statuses[0].status == "failed"
+
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "a failed review must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
     assert patch.get("session_id") is None
 
 

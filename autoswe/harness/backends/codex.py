@@ -629,8 +629,13 @@ class CodexBackend:
         # is a no-op for this backend; the anti-runaway guard is the wall-clock
         # timeout applied below (spec.timeout).
 
-        # Append the prompt behind `--` so prompts starting with `-` are safe
-        cmd.extend(["--", spec.prompt])
+        # The prompt is delivered over stdin, not the command line: `codex
+        # exec -` reads the prompt from stdin (docs/codex/non-interactive-mode.md).
+        # Review prompts alone can exceed 37k characters, well past Windows'
+        # ~32k CreateProcess command-line limit — passing spec.prompt as a
+        # trailing argv element made codex fail to launch for any nontrivial
+        # prompt. `_write_stdin` below writes it once the process is spawned.
+        cmd.append("-")
 
         # Build environment
         env = dict(os.environ)
@@ -659,11 +664,22 @@ class CodexBackend:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.DEVNULL,  # Codex waits for stdin EOF before running
+                # The prompt is delivered over stdin (see the `cmd.append("-")`
+                # above), not the command line, so it never hits the OS argv
+                # length limit.
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=spec.cwd,
+                # StreamReader limit threads to BOTH stdout and stderr pipes.
+                # Default is 64 KiB: a single JSONL line larger than that makes
+                # readline() raise ValueError, which is not in retryable
+                # exceptions (TimeoutError/OSError) and would crash the poller.
+                # Raise it past _MAX_STREAM_BYTES so any line the byte budget
+                # allows is readable; the residual case (line > limit) is
+                # caught in read_stdout_jsonl below.
+                limit=_MAX_STREAM_BYTES + 1,
             )
         except FileNotFoundError as e:
             raise RuntimeError(
@@ -673,6 +689,28 @@ class CodexBackend:
 
         # Accumulator for in-place mutation by _parse_jsonl_line
         acc = _CodexAccumulator()
+
+        async def _write_stdin() -> None:
+            """Write the prompt to codex's stdin and close it.
+
+            Runs CONCURRENTLY with the stdout/stderr readers (in the gather
+            below) — not before them. If the prompt exceeds the stdin pipe
+            buffer, ``drain()`` blocks until codex consumes it; codex may emit
+            startup output on stdout while still reading stdin, so the readers
+            must be running at the same time to avoid a pipe-buffer deadlock.
+            If codex dies before reading, the write raises BrokenPipeError —
+            harmless, since the run is already failing (nonzero exit) and the
+            error path below surfaces codex's stderr, so we swallow it.
+            """
+            stdin = getattr(process, "stdin", None)
+            if stdin is None:
+                return
+            try:
+                stdin.write(spec.prompt.encode("utf-8"))
+                await stdin.drain()
+                stdin.close()
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                log(f"[CODEX] could not write prompt to stdin: {e} — continuing (the run will report the exit code)")
 
         async def read_stderr() -> bytes:
             """Collect stderr output in chunks, bounded by _MAX_STREAM_BYTES.
@@ -707,11 +745,37 @@ class CodexBackend:
             and unbounded memory growth.  After the limit is hit, the pipe
             is drained (discarding data) so the child process does not block
             on a full pipe buffer.
+
+            Also guards the StreamReader limit: the process is spawned with
+            ``limit=_MAX_STREAM_BYTES + 1`` so any line the byte budget
+            allows is readable.  If a single line still exceeds the limit,
+            ``readline()`` raises ``ValueError``; we flag the turn failed and
+            drain (discarding data) so the child does not block — the run
+            surfaces as a backend error (subtype='error'), never a poller
+            crash.  ``readline()`` clears the reader's internal buffer on
+            this error, so the drain below sees a fresh stream to EOF.
             """
             if process.stdout:
                 total_bytes = 0
                 while True:
-                    raw = await process.stdout.readline()
+                    try:
+                        raw = await process.stdout.readline()
+                    except ValueError:
+                        # A single JSONL line exceeded the StreamReader limit
+                        # (limit=_MAX_STREAM_BYTES + 1).  Fail the turn, drain
+                        # the rest so the child does not block, and let the
+                        # returncode/turn_failed path turn this into an error
+                        # RunResult instead of letting the ValueError escape
+                        # the poller (it is not a retryable exception).
+                        log(f"[CODEX] single JSONL line exceeded the StreamReader limit ({_MAX_STREAM_BYTES + 1} bytes) — truncating stream")
+                        acc.turn_failed = True
+                        # Use read() not readline() — if the child writes
+                        # non-newline data, readline() would block forever.
+                        while True:
+                            leftover = await process.stdout.read(64 * 1024)
+                            if not leftover:
+                                break
+                        break
                     if not raw:
                         break
                     total_bytes += len(raw)
@@ -741,6 +805,7 @@ class CodexBackend:
                 asyncio.gather(
                     read_stdout_jsonl(),
                     read_stderr(),
+                    _write_stdin(),
                     return_exceptions=False,
                 ),
                 timeout=spec.timeout,
@@ -751,7 +816,12 @@ class CodexBackend:
             log(f"[CODEX] timeout after {spec.timeout}s — killed process")
             raise
 
-        returncode = process.returncode
+        # Reap the process so `returncode` is set. On the Windows proactor
+        # event loop, draining the pipes does not reliably mark the process
+        # exited, so reading `process.returncode` here can yield `None` and
+        # turn a successful run into `subtype: error`. `wait()` is a no-op
+        # once the process has already exited (e.g. after a timeout kill).
+        returncode = await process.wait()
         duration = time.monotonic() - t0
 
         if returncode != 0:

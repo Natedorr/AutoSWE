@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 
 from autoswe.commands.parser import parse_slash_command
 from autoswe.core.logging_utils import log
+from autoswe.orch.gate_policy import (
+    auto_fix_on_gate_failure,
+    build_gate_guidance,
+    gate_max_fix_attempts,
+)
 from autoswe.orch.types import Action, World
 from autoswe.providers.base import NormalizedComment
 from autoswe.tracking.comments import (
@@ -20,6 +25,7 @@ from autoswe.tracking.comments import (
     _is_autoswe_bot_comment,
 )
 from autoswe.tracking.labels import (
+    CI_WATCH_STATUSES,
     COMPLETED_STATUSES,
     RUNNING_STATUSES,
     SHIPPING_BLOCKING_STATUSES,
@@ -106,16 +112,27 @@ def _has_user_reply_after(
     Handles mixed watermark types: when the fallback returns a timestamp
     (str), compares by created_at. When IDs are available (int), compares
     by ID.
+
+    A comment whose body is empty or whitespace-only is not a reply — it
+    carries no steer. Without this guard an empty OWNER comment (which the
+    Azure UI can produce) would fall through to the plain-text resume path
+    in ``_handle_reply`` with ``user_reply_text=""`` and re-run the current
+    phase for no input (issue: spurious /plan resume).
     """
     # Determine comparison mode: if after_id is int, compare by ID.
     # If after_id is str (timestamp fallback), compare by timestamp.
     use_ids = isinstance(after_id, int)
 
+    def _is_real_reply(c) -> bool:
+        # not a bot AND carries non-whitespace body text (issue: empty
+        # OWNER comment must not resume the phase).
+        return not _is_autoswe_bot_comment(c) and bool((c.body or "").strip())
+
     if use_ids:
         user_after = [
             c
             for c in comments
-            if not _is_autoswe_bot_comment(c)
+            if _is_real_reply(c)
             and c.id is not None
             and c.id > (after_id or 0)
             and c.id > (last_consumed or 0)
@@ -127,7 +144,7 @@ def _has_user_reply_after(
         user_after = [
             c
             for c in comments
-            if not _is_autoswe_bot_comment(c)
+            if _is_real_reply(c)
             and c.created_at > after_ts
             and c.created_at > consumed_ts
         ]
@@ -581,6 +598,155 @@ def _check_restart_or_guard(
 
 
 # ---------------------------------------------------------------------------
+# CI watch (issue #245 plan §2.3-§2.5 — auto-fix on the shared gate policy)
+# ---------------------------------------------------------------------------
+
+
+def _decide_ci(world: World) -> Action | None:
+    """React to a fresh CI observation on a resting, CI-watched task.
+
+    Only consulted when there is no slash command this poll (an explicit
+    user command always takes precedence; CI is re-consulted next cycle).
+    Comments only on a state *change*, per the table in the plan:
+
+    * ``failure``, AUTO_FIX_ON_GATE_FAILURE on, budget left, new head_sha ->
+      auto-dispatch a ``/fix`` (``Action(kind="fix", trigger="ci")``) with the
+      CI failure text as guidance (fetched lazily in Layer B — see ``run.py``).
+    * ``failure``, budget exhausted -> ``mark_failed_limit`` (``ci``) parks the
+      task at ``ci_failed`` and asks for a human ``/fix``.
+    * ``failure``, AUTO_FIX_ON_GATE_FAILURE off -> the old P3 behaviour: park
+      directly at ``ci_failed`` with the failure text, human ``/fix`` recovers.
+    * ``failure``, already at ``ci_failed`` with the same head_sha -> noop (no
+      comment churn — this is the case decide()'s SHA watermark alone can't
+      cover, since the task no longer eligible for auto-fix once parked).
+    * ``pending`` / ``stale`` / ``none`` -> noop.
+    * ``error`` -> one-time warning comment, status untouched. Never treated
+      as a failure — no auto-fix, ever, on an unconsultable signal.
+    * ``success`` while at ``ci_failed`` -> clear back to the prior status.
+    * ``success`` while ``task.pr_deferred`` -> re-emit the deferred
+      ``create_pr`` effect (issue #245 §2.6).
+
+    Returns None for "nothing to do", the same contract as every other
+    decide() helper.
+    """
+    task = world.task
+    ci = world.ci
+    if ci is None or task.status not in CI_WATCH_STATUSES:
+        return None
+    if ci.stale or ci.state in ("pending", "none"):
+        return None
+
+    if ci.state == "failure":
+        if task.status == "ci_failed":
+            # Already parked (auto-fix off, or budget was exhausted). Only a
+            # human command (via the terminal-restart machinery elsewhere)
+            # moves it forward; re-notify only if the sha genuinely changed
+            # without autoSWE's own dispatch having done so (e.g. a manual
+            # force-push while blocked).
+            if ci.head_sha == task.ci_last_notified_sha:
+                return None
+            return Action(kind="ci_failed", slug=task.slug)
+
+        if not auto_fix_on_gate_failure(world.cfg, world.repo_cfg):
+            return Action(kind="ci_failed", slug=task.slug)
+
+        # Brake 2 (per-commit watermark): never dispatch twice for the same commit.
+        if ci.head_sha is not None and ci.head_sha == task.gate_last_fixed_sha:
+            return None
+
+        # Brake 1 (shared counter): a gate-triggered loop never spends the
+        # human /fix budget (task.attempt_count), only gate_attempt_count.
+        max_attempts = gate_max_fix_attempts(world.cfg, world.repo_cfg)
+        if task.gate_attempt_count >= max_attempts:
+            log(f"[LIMIT] {task.slug} CI auto-fix budget exhausted: "
+                f"gate_attempt_count={task.gate_attempt_count} >= GATE_MAX_FIX_ATTEMPTS={max_attempts}")
+            return Action(kind="mark_failed_limit", slug=task.slug, limit_reason="ci")
+
+        # Guidance text is built here from the pure CIStatus already fetched
+        # this cycle (decide() stays I/O-free); get_ci_failures() is fetched
+        # lazily in Layer B only when this fix is actually dispatched.
+        guidance = build_gate_guidance(
+            "CI failed on the pushed branch.", failing=list(ci.failing), summary=ci.summary,
+        )
+        log(f"[DECIDE] {task.slug} CI auto-fix: head_sha={ci.head_sha} "
+            f"gate_attempt={task.gate_attempt_count + 1}/{max_attempts}")
+        return Action(
+            kind="fix",
+            slug=task.slug,
+            plan_branch=task.plan_branch,
+            guidance=guidance,
+            attempt_count=task.attempt_count,
+            trigger="ci",
+        )
+
+    if ci.state == "error":
+        if task.ci_error_notified and ci.head_sha == task.ci_error_notified_sha:
+            return None  # already warned once for this exact commit
+        return Action(kind="ci_error_warn", slug=task.slug)
+    if ci.state == "success":
+        if task.status == "ci_failed":
+            return Action(kind="ci_recovered", slug=task.slug)
+        if task.pr_deferred:
+            return Action(kind="retry_deferred_pr", slug=task.slug)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Local test gate (issue #245 plan §2.5 — the local half of the shared policy)
+# ---------------------------------------------------------------------------
+
+
+def _decide_test_gate(world: World) -> Action | None:
+    """React to a resting task parked at ``test_failed``.
+
+    Unlike CI (a polled remote signal), the local post-fix test gate's
+    outcome is already known and stored on the task the moment it lands in
+    ``test_failed`` (``emit()``'s ``test_failed`` branch persists
+    ``test_failed_sha`` / ``test_failure_detail``) — no read step is needed,
+    so this fires on the very next poll with no slash command, mirroring
+    ``_decide_ci`` but keyed off stored fields instead of ``World.ci``.
+
+    Shares ``gate_attempt_count`` / ``gate_last_fixed_sha`` and
+    ``AUTO_FIX_ON_GATE_FAILURE`` with the CI signal (issue #245 §2.5): a
+    human /fix from ``test_failed`` resets the counter via emit()'s common
+    reset rule exactly like a human /fix from ``ci_failed`` does.
+    """
+    task = world.task
+    if task.status != "test_failed":
+        return None
+    if not auto_fix_on_gate_failure(world.cfg, world.repo_cfg):
+        return None
+
+    sha = task.test_failed_sha
+    # Brake 2 (per-commit watermark): never dispatch twice for the same commit.
+    if sha is not None and sha == task.gate_last_fixed_sha:
+        return None
+
+    # Brake 1 (shared counter).
+    max_attempts = gate_max_fix_attempts(world.cfg, world.repo_cfg)
+    if task.gate_attempt_count >= max_attempts:
+        if task.test_gate_limit_notified:
+            return None  # already told the user once for this exhausted budget
+        log(f"[LIMIT] {task.slug} test-gate auto-fix budget exhausted: "
+            f"gate_attempt_count={task.gate_attempt_count} >= GATE_MAX_FIX_ATTEMPTS={max_attempts}")
+        return Action(kind="mark_failed_limit", slug=task.slug, limit_reason="gate")
+
+    guidance = build_gate_guidance(
+        "🧪 Test gate failed on the pushed branch.", excerpt=task.test_failure_detail or "",
+    )
+    log(f"[DECIDE] {task.slug} test-gate auto-fix: sha={sha} "
+        f"gate_attempt={task.gate_attempt_count + 1}/{max_attempts}")
+    return Action(
+        kind="fix",
+        slug=task.slug,
+        plan_branch=task.plan_branch,
+        guidance=guidance,
+        attempt_count=task.attempt_count,
+        trigger="gate",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main state machine
 # ---------------------------------------------------------------------------
 
@@ -659,6 +825,20 @@ def decide(world: World) -> Action:
             action = _reply_transition(world, status, dispatch_slash=True)
             if action is not None:
                 return action
+
+        # Shared recoverable-gate policy (issue #245 §2.5): cheap local gate
+        # first, remote gate second. Neither status can co-occur, so order
+        # only matters as documentation of intent.
+        gate_action = _decide_test_gate(world)
+        if gate_action is not None:
+            return gate_action
+
+        # CI watch: no slash command this poll, so a fresh CI observation
+        # (fixed/shipped/synced/ci_failed only — see CI_WATCH_STATUSES) may
+        # park the task at ci_failed, warn once on error, or clear it back.
+        ci_action = _decide_ci(world)
+        if ci_action is not None:
+            return ci_action
 
         return Action(kind="noop", slug=task.slug)
 

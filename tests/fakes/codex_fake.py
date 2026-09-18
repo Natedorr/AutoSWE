@@ -118,17 +118,46 @@ class FakeStreamReader:
         return b""
 
 
+class FakeStdin:
+    """Async stdin sink that records the bytes the backend writes to it.
+
+    CodexBackend delivers the prompt over stdin (not the command line) so a
+    review-sized prompt never hits the OS argv length limit. This records
+    what is written so tests can assert the prompt went to stdin. ``record``
+    is a callback handed the decoded prompt text so the owning call record
+    can capture it.
+    """
+
+    def __init__(self, record=None):
+        self._record = record
+        self._buf = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self._buf.extend(data)
+
+    async def drain(self) -> None:
+        if self._record is not None and self._buf:
+            self._record(self._buf.decode("utf-8"))
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeProcess:
     """Subprocess stand-in for asyncio.create_subprocess_exec.
 
     The CodexBackend reads ``process.stdout.readline()`` in a loop and
-    ``process.stderr.read()`` concurrently. This fake feeds prebuilt
-    JSONL lines on stdout and empty stderr.
+    ``process.stderr.read()`` concurrently, and writes the prompt to
+    ``process.stdin``. This fake feeds prebuilt JSONL lines on stdout, empty
+    stderr, and a stdin sink that records the written prompt via
+    *record_prompt*.
     """
 
-    def __init__(self, stdout_lines: list[str], returncode: int = 0):
+    def __init__(self, stdout_lines: list[str], returncode: int = 0, record_prompt=None):
         self.stdout = FakeStreamReader(stdout_lines)
         self.stderr = FakeStreamReader([])  # stderr always empty
+        self.stdin = FakeStdin(record=record_prompt)
         self.returncode = returncode
 
     def kill(self) -> None:
@@ -187,12 +216,13 @@ def _parse_command(cmd: list[str]) -> dict:
     result.setdefault("bypass", False)
     result.setdefault("approve_for_me", False)
 
-    # Prompt is after "--"
-    try:
-        sep_idx = cmd.index("--")
-        result["prompt_prefix"] = (cmd[sep_idx + 1] if sep_idx + 1 < len(cmd) else "")[:80]
-    except ValueError:
-        result["prompt_prefix"] = ""
+    # The prompt is delivered over stdin (the trailing "-" argv marker tells
+    # codex to read it from there), not argv, so it is not parseable from
+    # *cmd*. ``prompt`` / ``prompt_prefix`` are seeded empty here and filled
+    # in by the caller once the backend writes to the fake stdin (see
+    # ``_record_prompt`` in ``patch()`` below) — mirrors PiFake.
+    result["prompt"] = ""
+    result["prompt_prefix"] = ""
 
     result["is_resume"] = "resume" in result
     return result
@@ -349,12 +379,21 @@ class CodexFake:
             handles the await).
             """
             # Record the parsed command
-            self.calls.append(_parse_command(list(cmd)))
+            call = _parse_command(list(cmd))
+            self.calls.append(call)
 
             # Build the JSONL response
             lines, returncode = self._next_jsonl()
             self._call_index += 1
-            return FakeProcess(lines, returncode=returncode)
+
+            # The prompt arrives on stdin, not argv: when the backend writes
+            # it to the fake stdin, record it on the call dict so tests can
+            # assert it (and confirm the command line stayed short).
+            def _record_prompt(text: str) -> None:
+                call["prompt"] = text
+                call["prompt_prefix"] = text[:80]
+
+            return FakeProcess(lines, returncode=returncode, record_prompt=_record_prompt)
 
         async def fake_create_subprocess_exec(*cmd, **kwargs):
             return _make_process(cmd)

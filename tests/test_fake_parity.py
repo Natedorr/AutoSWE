@@ -482,6 +482,28 @@ class TestProviderParity:
             az.unpatch(az_mod, az_original)
         assert ci.state == "pending"
 
+        # error state: both fakes raise on the CI endpoint -> provider reports
+        # state="error" (never a vacuous "none" pass).
+        gh_err = GitHubFake()
+        gh_err.set_ci_status("error")
+        gh_mod, gh_original = gh_err.patch()
+        try:
+            vcs = GitHubVCS({"owner": "o", "repo": "r", "token": "tok"})
+            ci = vcs.get_ci_status("autoswe/issue-1", ref_sha="deadbeef")
+        finally:
+            gh_err.unpatch(gh_mod, gh_original)
+        assert ci.state == "error"
+
+        az_err = AzureFake()
+        az_err.set_ci_status("error")
+        az_mod, az_original = az_err.patch()
+        try:
+            vcs = AzureVCS({"org": "o", "project": "p", "repo": "r", "pat": "tok"})
+            ci = vcs.get_ci_status("autoswe/issue-1")
+        finally:
+            az_err.unpatch(az_mod, az_original)
+        assert ci.state == "error"
+
     def test_both_update_comment(self):
         """Both providers must support updating existing comments."""
         gh = GitHubFake()

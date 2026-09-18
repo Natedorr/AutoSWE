@@ -1,0 +1,23 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "CI status unknown",
+      "CI API returned 403",
+      "one-time notice",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "fixed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "fixed",
+      "ci_error_notified": true,
+      "ci_error_notified_sha": "abc1234"
+    }
+  }
+]

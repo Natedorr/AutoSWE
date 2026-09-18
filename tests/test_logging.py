@@ -289,6 +289,33 @@ def test_log_masks_stdout(capfd):
     assert "ghp_" not in captured.out
 
 
+def test_log_non_cp1252_stdout_does_not_raise(monkeypatch):
+    """A character the console can't encode (emoji/CJK) must not kill the run.
+
+    Regression: on Windows the console stdout is cp1252; a log line carrying a
+    character outside it (e.g. the pi backend's ``\U0001f4ad`` thinking-progress
+    marker) used to raise UnicodeEncodeError from the print and abort the whole
+    fix/plan/review run. log() must degrade to a printable (``?``) form instead.
+    """
+    import io
+
+    buf = io.BytesIO()
+    # A genuine cp1252 stream: print() of an out-of-range char raises here.
+    out = io.TextIOWrapper(buf, encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", out)
+
+    # Must not raise even though the emoji is unrepresentable in cp1252.
+    log("progress \U0001f4ad thinking delta")
+
+    out.flush()
+    rendered = buf.getvalue().decode("cp1252")
+    # The emoji is replaced (not dropped wholesale); the ASCII context survives.
+    assert "progress" in rendered
+    assert "thinking delta" in rendered
+    assert "\U0001f4ad" not in rendered
+    assert "?" in rendered
+
+
 def test_init_debug_logger_has_sensitive_filter(tmp_path):
     """init_debug_logger() should attach SensitiveLogFilter."""
     logger = init_debug_logger(tmp_path)

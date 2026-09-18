@@ -72,11 +72,18 @@ def _run_pi(spec, fake, backend=None):
     return asyncio.run(_inner()), fake
 
 
-def _mock_process(stdout: str = "", stderr: str = "", returncode: int = 0):
+def _mock_process(stdout: str = "", stderr: str = "", returncode: int = 0, limit: int | None = None):
     """A controllable process whose stdout is line-oriented, stderr is chunked.
 
     Mirrors the shape of PiBackend's readers: ``stdout.readline()`` for the
     JSONL loop and ``stderr.read(n)`` for the chunked stderr collector.
+
+    ``limit`` models the asyncio StreamReader limit (issue #251).  When set, a
+    line longer than ``limit`` makes ``readline()`` raise ``ValueError`` exactly
+    as the real StreamReader does on a limit overrun, so tests can prove the
+    backend's ``limit=_MAX_STREAM_BYTES + 1`` kwarg keeps a large single line
+    readable.  ``None`` (default) leaves ``readline()`` unbounded (pre-fix
+    mock behaviour).
     """
 
     class _Stdout:
@@ -90,6 +97,10 @@ def _mock_process(stdout: str = "", stderr: str = "", returncode: int = 0):
             if self._pos < len(self._lines):
                 line = self._lines[self._pos]
                 self._pos += 1
+                if limit is not None and len(line) > limit:
+                    # Real StreamReader on overrun: raise ValueError wrapping the
+                    # LimitOverrunError; the loop buffer is then drained via read().
+                    raise ValueError("Separator is not found, and chunk exceed the limit")
                 return line
             return b""
 
@@ -108,11 +119,34 @@ def _mock_process(stdout: str = "", stderr: str = "", returncode: int = 0):
             self._pos += len(out)
             return out
 
+    class _Stdin:
+        """A stdin sink that records the bytes the backend writes to it.
+
+        The PiBackend delivers the prompt over stdin (not the command line) so
+        a /fix-sized prompt never hits Windows' ``cmd /c`` ~8191-char limit.
+        This records ``wrote`` (the written bytes) so tests can assert the
+        prompt reached stdin.
+        """
+
+        def __init__(self):
+            self.wrote = bytearray()
+            self.closed = False
+
+        def write(self, data: bytes) -> None:
+            self.wrote.extend(data)
+
+        async def drain(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.closed = True
+
     class _Process:
         def __init__(self):
             self.returncode = returncode
             self.stdout = _Stdout(stdout.encode())
             self.stderr = _Stderr(stderr.encode())
+            self.stdin = _Stdin()
             self.killed = False
 
         def kill(self):
@@ -539,17 +573,38 @@ def test_argv_includes_session_dir_when_set():
     assert cmd[cmd.index("--session-dir") + 1] == "~/.pi/sessions"
 
 
-def test_argv_prompt_after_separator():
+def test_argv_prompt_not_on_command_line():
+    """The prompt is NOT a positional arg — it is delivered over stdin.
+
+    Regression for the live Azure+pi run: a /fix prompt is 10-20 KB, and
+    passing it inline through Windows' `cmd /c` (used to launch pi.cmd) hit the
+    ~8191-char command-line limit, so pi died at spawn with
+    "The command line is too long."  The prompt now rides stdin, so no matter
+    how long it is it never appears in the argv.
+    """
     cmd = _argv(spec=_spec(prompt="Fix the bug"))
-    dash = cmd.index("--")
-    assert cmd[dash + 1] == "Fix the bug"
-    assert cmd[-1] == "Fix the bug"
+    assert "Fix the bug" not in cmd
+    # There is no `--` separator any more: the prompt is not a positional arg.
+    assert "--" not in cmd
 
 
-def test_argv_prompt_starting_with_dash_safe():
-    cmd = _argv(spec=_spec(prompt="-Fix the bug"))
-    dash = cmd.index("--")
-    assert cmd[dash + 1] == "-Fix the bug"
+def test_argv_very_long_prompt_stays_off_command_line():
+    """A /fix-sized prompt never inflates the command line.
+
+    Models the live failure: build an argv with a 17 KB prompt and assert the
+    resulting command line is short — well under the ~8191 char `cmd /c` limit
+    that the inline prompt used to blow past.
+    """
+    long_prompt = "Implement the change described in this spec. " * 600
+    assert len(long_prompt) > 8191  # the very size that used to fail
+    cmd = _argv(spec=_spec(prompt=long_prompt))
+    # None of the prompt text is on the command line.
+    assert long_prompt not in cmd
+    assert "--" not in cmd
+    # Approximate command-line length is small (just the flags), far under the
+    # Windows `cmd /c` cap.
+    approx_cmdline_len = sum(len(a) for a in cmd) + len(cmd)
+    assert approx_cmdline_len < 8191
 
 
 def test_argv_windows_prefix_precedes_pi():
@@ -802,15 +857,21 @@ def test_parse_tool_execution_end_success_fires_done():
     assert not acc.has_error
 
 
-def test_parse_tool_execution_end_is_error_sets_flag():
-    """A tool result with isError: true flips the error flag (spec-documented tradeoff)."""
+def test_parse_tool_execution_end_is_error_does_not_flag_run():
+    """A tool result with isError: true does NOT set the run's error flag.
+
+    pi reports a tool error to the LLM and continues (docs/pi/extensions.md);
+    the agent normally recovers. Sinking the run to "error" on a transient tool
+    nonzero exit discarded clean, verified runs, so isError now logs but leaves
+    has_error untouched. extension_error / error events still set the flag.
+    """
     acc = _PiAccumulator()
     cb = Mock()
     _parse_line(json.dumps({
         "type": "tool_execution_end",
         "toolCallId": "t1", "toolName": "grep", "args": {}, "isError": True,
     }), acc, cb)
-    assert acc.has_error is True
+    assert acc.has_error is False
     # A failing tool does not fire the "Tool done" success line.
     assert not any("Tool done" in c[0][0] for c in cb.call_args_list)
 
@@ -1297,11 +1358,13 @@ def test_run_subtype_killed_text_fallback():
     assert result.text == "Half done,"
 
 
-def test_run_iserror_tool_flips_success_to_error():
-    """A tool result with isError: true flips an rc-0 run to subtype error.
+def test_run_iserror_tool_does_not_flip_success():
+    """A tool result with isError: true on an rc-0 run does NOT sink the subtype.
 
-    This is the documented tradeoff (memory: pi-backend-iserror-tradeoff): any
-    failing tool, even a routine nonzero-exit grep, marks the run as errored.
+    pi reports the tool error to the LLM and continues; the agent typically
+    recovers. A clean rc-0 run that emitted a valid final message_end is
+    "success" even though a mid-run tool had a nonzero exit — the transient
+    failure no longer discards the run's real output.
     """
     stream = _jsonl(
         {"type": "session", "id": "pi-tool", "version": 3},
@@ -1317,8 +1380,77 @@ def test_run_iserror_tool_flips_success_to_error():
             return await PiBackend().run(_spec())
 
     result = asyncio.run(_run())
-    assert result.subtype == "error"
+    assert result.subtype == "success"
+    assert result.ok is True
     assert result.text == "done"
+
+
+# ---------- Process reaping (returncode from wait) ----------
+
+
+def test_run_returncode_read_via_wait_not_attribute():
+    """A successful run is reaped via ``await process.wait()``, not the attribute.
+
+    Regression for the Windows proactor loop: after the pipe drain, the
+    ``process.returncode`` attribute is still ``None`` (the child has not been
+    reaped yet), so reading it directly misclassifies a clean exit as
+    ``subtype: error``. The backend must call ``await process.wait()`` to obtain
+    the real exit code. This mock models that: the attribute stays ``None``
+    until ``wait()`` is awaited, which then sets it and returns the code.
+    """
+    stream = _jsonl(
+        {"type": "session", "id": "pi-wait", "version": 3},
+        {"type": "message_end",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+        {"type": "agent_end"},
+    )
+
+    class _UnreapedProcess:
+        def __init__(self, data: bytes):
+            self.returncode = None  # not yet reaped
+            self._final = 0
+            self.stdout = _StdoutReader(data)
+            self.stderr = _StderrReader(b"")
+
+        def kill(self):
+            pass
+
+        async def wait(self) -> int:
+            self.returncode = self._final
+            return self.returncode
+
+    class _StdoutReader:
+        def __init__(self, data: bytes):
+            self._lines = data.splitlines(keepends=True)
+
+        async def readline(self) -> bytes:
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+        async def read(self, size: int = -1) -> bytes:
+            return b""
+
+    class _StderrReader:
+        def __init__(self, data: bytes):
+            self._data = data
+
+        async def read(self, size: int = -1) -> bytes:
+            return b""
+
+    proc = _UnreapedProcess(stream.encode())
+    assert proc.returncode is None  # precondition: not reaped
+
+    async def _run():
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            return await PiBackend().run(_spec())
+
+    result = asyncio.run(_run())
+    assert result.subtype == "success", (
+        f"a clean exit must be reaped to success, got {result.subtype}"
+    )
+    assert result.ok is True
+    assert result.text == "ok"
 
 
 # ---------- Timeout / kill ----------
@@ -1415,6 +1547,144 @@ def test_run_stderr_bound_truncates_no_crash(monkeypatch):
     assert result.subtype == "success"
 
 
+# ---------- StreamReader limit (issue #251 — large single JSON line) ----------
+
+
+def test_pi_spawn_passes_stream_reader_limit():
+    """create_subprocess_exec is called with limit=_MAX_STREAM_BYTES + 1.
+
+    Without this, asyncio uses the default 64 KiB StreamReader limit and a
+    single JSON line larger than that makes readline() raise ValueError
+    (uncaught, not retryable) — crashing the poller.
+    """
+    stream = _jsonl(
+        {"type": "session", "id": "pi-sm", "version": 3},
+        {"type": "agent_end"},
+    )
+    proc = _mock_process(stdout=stream, returncode=0)
+
+    async def _run():
+        mock_exec = AsyncMock(return_value=proc)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await PiBackend().run(_spec())
+        return mock_exec
+
+    mock_exec = asyncio.run(_run())
+    assert mock_exec.call_count == 1
+    # limit is a kwarg to create_subprocess_exec, so it lands in call_args.kwargs
+    # (not in the *cmd spread positional args).
+    assert mock_exec.call_args.kwargs.get("limit") == _MAX_STREAM_BYTES + 1
+
+
+def test_pi_large_unicode_json_line_parses_successfully():
+    """A single JSON line whose UTF-8 bytes exceed 64 KiB parses to success.
+
+    Regression for issue #251: with the StreamReader limit raised to
+    _MAX_STREAM_BYTES + 1, a legitimately large event (here a 200 KiB
+    multi-byte Unicode payload in the assistant message) is read by
+    readline() and parsed — not truncated by the old 64 KiB default limit.
+
+    The mock reader enforces the *actual* limit the backend passes to
+    create_subprocess_exec, so this is a genuine guard: if the backend ever
+    stops raising the limit, the reader regains the 64 KiB default and the
+    >64 KiB line raises ValueError, failing the run to error.
+    """
+    big_text = "€" * 200_000  # 3 bytes/char → ~600 KB of UTF-8 on one line
+    stream = _jsonl(
+        {"type": "session", "id": "pi-big", "version": 3},
+        {"type": "message_end",
+         "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": big_text}]}},
+        {"type": "agent_end"},
+    )
+    # The message_end line alone is well past the old 64 KiB limit.
+    big_line_bytes = max(len(line.encode("utf-8")) for line in stream.splitlines())
+    assert big_line_bytes > 64 * 1024, "test line must exceed the old 64 KiB limit"
+
+    # Mirror the real spawn limit back into the mock reader. When the backend
+    # omits ``limit`` we fall back to the real asyncio StreamReader default
+    # (asyncio.streams._DEFAULT_LIMIT == 64 KiB) so the mock models the
+    # pre-fix behaviour exactly — making this a genuine regression guard.
+    default = asyncio.streams._DEFAULT_LIMIT
+
+    async def _run():
+        def _spawn(*cmd, **kwargs):
+            return _mock_process(stdout=stream, returncode=0,
+                                 limit=kwargs.get("limit", default))
+
+        mock_exec = AsyncMock(side_effect=_spawn)
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            return await PiBackend().run(_spec())
+
+    result = asyncio.run(_run())
+    assert result.subtype == "success"
+    assert result.session_id == "pi-big"
+    # The large multi-byte payload round-trips intact.
+    assert big_text in result.text
+
+
+def test_pi_readline_valueerror_degrades_to_error_and_drains():
+    """A single line over the StreamReader limit yields an error, not a crash.
+
+    Simulates readline() raising ValueError (the wrapped LimitOverrunError
+    that asyncio raises when a line exceeds the configured limit) on the
+    first line, then verifies the backend: flags has_error, drains the
+    remaining stdout (via read(), not readline()), returns subtype='error',
+    and lets no exception escape.
+    """
+
+    class _OverLimitStdoutReader:
+        """readline() raises ValueError on first call, then read() drains to EOF."""
+
+        def __init__(self, residual: bytes):
+            self._residual = residual
+            self._res_pos = 0
+            self.readline_calls = 0
+            self.read_calls = 0
+            self.read_bytes_total = 0
+
+        async def readline(self) -> bytes:
+            self.readline_calls += 1
+            # Real StreamReader clears its internal buffer on the limit error,
+            # so any subsequent readline() would see an (already-drained) fresh
+            # stream. We track the call count to prove the backend does NOT
+            # re-loop readline() after the error — it breaks and drains via
+            # read() instead, so an unterminated pathological write can't hang.
+            if self.readline_calls == 1:
+                raise ValueError("Separator is not found, and chunk exceed the limit")
+            return b""
+
+        async def read(self, size: int = -1) -> bytes:
+            self.read_calls += 1
+            out = self._residual[self._res_pos:self._res_pos + size]
+            self._res_pos += len(out)
+            self.read_bytes_total += len(out)
+            return out
+
+    residual = b"trailing-data\n" * 100  # ~1.8 KB to drain after the failure
+    reader = _OverLimitStdoutReader(residual)
+    proc = _mock_process(stdout="", returncode=0)
+    proc.stdout = reader
+
+    async def _run():
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            return await PiBackend().run(_spec())
+
+    # No exception escapes — this is the whole point of issue #251.
+    result = asyncio.run(_run())
+    assert result.subtype == "error", "an over-limit line must produce subtype=error"
+    assert result.ok is False
+    # readline() was attempted exactly once (it raised the limit error); the
+    # backend then broke and drained via read() — it did NOT re-loop readline(),
+    # which on a pathological unterminated stream could block forever.
+    assert reader.readline_calls == 1, (
+        f"readline() must be called exactly once, got {reader.readline_calls}"
+    )
+    # The drain loop consumed the residual via read() (not readline()).
+    assert reader.read_calls >= 1
+    assert reader.read_bytes_total == len(residual), "all residual data must be drained"
+
+
 # ---------- Failure surfaces ----------
 
 
@@ -1470,6 +1740,38 @@ def test_run_passes_cwd():
     assert mock_exec.call_args[1]["cwd"] == "/tmp/worktree"
     # pi does not use a -C flag (unlike Codex) — cwd is passed as a kwarg.
     assert "-C" not in mock_exec.call_args[0]
+
+
+def test_run_prompt_delivered_over_stdin_not_command_line():
+    """The prompt is written to the subprocess's stdin, never the command line.
+
+    End-to-end regression for the live Azure+pi failure where a /fix-sized
+    prompt passed inline through `cmd /c` hit the ~8191-char command-line limit
+    ("The command line is too long"). This asserts the real backend writes the
+    full prompt to ``process.stdin`` AND that the argv carries none of it.
+    """
+    long_prompt = "Implement this change. " * 600  # > 8191 chars, the old failure size
+    spec = _spec(prompt=long_prompt)
+    proc = _mock_process(stdout=_jsonl(
+        {"type": "session", "id": "s", "version": 3},
+        {"type": "message_end",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+        {"type": "agent_end"},
+    ), returncode=0)
+
+    async def _run():
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            return await PiBackend().run(spec)
+
+    result = asyncio.run(_run())
+    assert result.subtype == "success"
+    # The prompt reached stdin, byte-for-byte.
+    assert proc.stdin.wrote == long_prompt.encode("utf-8")
+    assert proc.stdin.closed is True
+    # ... and is NOT on the command line.
+    argv = _build_argv(spec, {}, "pi", [], "s")
+    assert long_prompt not in argv
+    assert "--" not in argv
 
 
 def test_run_env_agent_dir_maps_to_pi_coding_agent_dir(monkeypatch):

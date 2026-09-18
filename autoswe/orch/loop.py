@@ -32,7 +32,7 @@ from autoswe.orch.decide import decide
 from autoswe.orch.emit import emit
 from autoswe.orch.run import DispatchResult, run
 from autoswe.orch.types import ApiState, TaskState, World
-from autoswe.providers.adapter import apply_effect, read_api
+from autoswe.providers.adapter import apply_effect, read_api, read_ci
 from autoswe.providers.factory import build_repo_cfg, get_tracker, get_vcs
 from autoswe.tracking.comments import record_bot_comment_id
 from autoswe.tracking.labels import (
@@ -119,8 +119,16 @@ def _build_poll_task(
     api: ApiState,
     cfg: dict,
     repo_cfg: dict,
+    *,
+    vcs=None,
 ) -> PollTask:
-    """Build TaskState + World from queue entry and API snapshot."""
+    """Build TaskState + World from queue entry and API snapshot.
+
+    When *vcs* is given, also reads this cycle's CI observation (issue #245
+    plan §2.2) — eligibility, throttling, and queue caching are handled by
+    ``providers.adapter.read_ci``; a task not due for a check yields
+    ``World.ci=None`` without any API call.
+    """
     t = queue[slug]
     raw_status = t.get("autoswe_status")
     status = normalize_legacy_status(raw_status, t.get("last_dispatched_command"))
@@ -129,8 +137,17 @@ def _build_poll_task(
         t["autoswe_status"] = status
     # Override the registry-read status with the normalised value
     t["autoswe_status"] = status
+    ci_status = None
+    if vcs is not None:
+        try:
+            ci_status = read_ci(vcs, t, cfg, repo_cfg)
+        except Exception as e:  # CI read is best-effort; never blocks the poll
+            dbg.warning("_build_poll_task: %s: read_ci failed: %s", slug, e)
+    # Snapshot TaskState after read_ci so a fresh CI observation made this
+    # cycle (read_ci mutates ci_status/ci_last_checked on `t` in place) is
+    # reflected in the same cycle's handler dict, not just the next one.
     ts = TaskState.from_queue(slug, t)
-    world = World(api=api, task=ts, cfg=cfg, repo_cfg=repo_cfg)
+    world = World(api=api, task=ts, cfg=cfg, repo_cfg=repo_cfg, ci=ci_status)
     return PollTask(slug=slug, task_state=ts, world=world)
 
 
@@ -146,7 +163,9 @@ def _build_welcome_comment(slash_cmd: str, guidance: str, slug: str, bot_name: s
     else:
         template = (
             "autoSWE picked up this issue (`{{SLUG}}`).\n\n"
-            "**Available Commands:**\n"
+            "<details>\n"
+            "<summary>Commands</summary>\n"
+            "\n"
             "- `/plan` - Start a planning session (reads code, asks questions, posts a plan)\n"
             "- `/plan --branch <name>` - Plan on a specific branch (default: main)\n"
             "- `/fix` - Implement the fix (runs Claude with code-editing permissions; restarts a failed/error task)\n"
@@ -158,8 +177,11 @@ def _build_welcome_comment(slash_cmd: str, guidance: str, slug: str, bot_name: s
             "- `/sync` - Pull the branch from upstream to keep it up to date\n"
             "- `/retry` - Retry a failed task (resets attempt counter)\n"
             "- `/skip` - Skip this issue\n"
-            "- `/abort` - Cancel the current task\n\n"
+            "- `/abort` - Cancel the current task\n"
+            "\n"
             "You can add guidance: `/fix with performance focus`\n"
+            "\n"
+            "</details>\n"
             "\n<!-- autoswe-bot -->"
         )
         template = template.replace("{bot_name}", bot_name)
@@ -290,6 +312,7 @@ def _dispatch_task(
         running = running_status_for(
             action.kind,
             task_entry.get("resume_phase") or task_entry.get("last_phase"),
+            task_entry.get("autoswe_status"),
         )
         try:
             tracker.set_status(issue_num, f"autoswe:{running}")
@@ -683,7 +706,7 @@ def _recover_orphaned_worktrees(cfg: dict, queue: dict, repos_cfg: dict) -> None
             token = os.environ.get("PAT", "") or repo_cfg.get("pat", "")
             ensure_clone(owner, repo, token, cfg, base_branch=base_branch, provider=provider)
             msg = f"autoswe: recovered orphaned changes from interrupted run (issue #{issue_num})"
-            commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider)
+            commit_and_push(wt, owner, repo, issue_num, msg, base_branch, provider, cfg=cfg)
             log(f"[RECOVER] {slug}: committed and pushed orphaned changes")
         except Exception as e:
             dbg.error("recover: commit_and_push failed for %s: %s", slug, e, exc_info=True)
@@ -731,7 +754,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
 
     Returns the number of tasks processed (actions that weren't noop).
     """
-    repos_cfg = load_repos_config()
+    repos_cfg = load_repos_config(cfg)
     repo_keys = [k for k in repos_cfg if not k.startswith("_")]
 
     if repo_filter:
@@ -776,12 +799,13 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             continue
 
         tracker = get_tracker(repo_cfg)
+        vcs = get_vcs(repo_cfg)
         provider = repo_cfg.get("provider", "github")
 
         # Resolve a platform-specific repo identifier (Azure: Git repo UUID —
         # web URLs require UUID, not display name; GitHub: no-op).
         try:
-            repo_id = get_vcs(repo_cfg).resolve_repo_id()
+            repo_id = vcs.resolve_repo_id()
             if repo_id:
                 repo_cfg["repo_id"] = repo_id
         except Exception as e:  # repo_id resolution is optional — fallback to repo name
@@ -811,7 +835,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             # Do NOT confuse with PID-file stems which use underscores
             # (``gh_``/``ado_``) via slug_to_filename() — that's what
             # _is_repo_locked() uses.
-            stem_prefix = f"{get_vcs(repo_cfg).slug_prefix()}:{owner}_{repo}_"
+            stem_prefix = f"{vcs.slug_prefix()}:{owner}_{repo}_"
 
             prev_updated: dict[int, str | None] = {}
             force_fetch: set[int] = set()
@@ -883,7 +907,7 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             )
 
             # Build TaskState + World
-            pt = _build_poll_task(queue, slug, api, cfg, repo_cfg)
+            pt = _build_poll_task(queue, slug, api, cfg, repo_cfg, vcs=vcs)
             action = decide(pt.world)
 
             # Bookkeeping: update last_comment_sync and last_updated
@@ -990,8 +1014,10 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
                         )
                     )
                     task_entry["autoswe_status"] = closed_status
-                    with contextlib.suppress(RuntimeError):
+                    try:
                         tracker.set_status(task_entry["issue_number"], f"autoswe:{closed_status}")
+                    except RuntimeError as e:
+                        log(f"[WARN] {slug}: could not set closed-status tag {closed_status!r}: {e}")
                     log(f"[CLOSED] {slug} — issue closed on platform, marking {closed_status}")
                 continue
             if task_entry.get("gh_closed", False):
@@ -1013,10 +1039,12 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
             if qs in _MIRROR_STATUSES:
                 api_state = api_states.get(task_entry["issue_number"])
                 if api_state is not None and api_state.issue.status != qs:
-                    with contextlib.suppress(RuntimeError):
+                    try:
                         tracker.set_status(
                             task_entry["issue_number"], f"autoswe:{qs}"
                         )
+                    except RuntimeError as e:
+                        log(f"[WARN] {slug}: could not mirror status tag {qs!r}: {e}")
 
         # --- Phase 4: Auto-purge worktrees for gone remote branches ---
         # When a remote autoswe/issue-N branch is deleted (PR merged +

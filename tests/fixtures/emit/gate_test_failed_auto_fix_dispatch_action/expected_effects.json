@@ -1,0 +1,22 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": ["Addressed test gate failure"]
+  },
+  {
+    "kind": "set_status",
+    "status": "fixed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "fixed",
+      "last_dispatched_command": "/fix",
+      "last_dispatched_command_id": 42,
+      "last_consumed_reply_id": 42,
+      "attempt_count": 1,
+      "gate_attempt_count": 1,
+      "gate_last_fixed_sha": "deadbeef"
+    }
+  }
+]

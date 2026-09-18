@@ -5,6 +5,8 @@ Azure DevOps REST API.
 """
 from __future__ import annotations
 
+import re
+
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
 from autoswe.providers.azure.api import (
@@ -12,9 +14,10 @@ from autoswe.providers.azure.api import (
     _encode_path_segment,
     _normalize_azure_parts,
     ado_get,
+    ado_patch_json,
     ado_post,
 )
-from autoswe.providers.base import CIStatus, PRResult
+from autoswe.providers.base import Capability, CIFailure, CIStatus, LinkageState, PRResult
 
 dbg = get_debug_logger()
 
@@ -22,6 +25,25 @@ dbg = get_debug_logger()
 _PENDING_STATUSES = {"notStarted", "inProgress", "postponed", "cancelling"}
 _FAILURE_RESULTS = {"failed", "canceled"}
 _SUCCESS_RESULTS = {"succeeded", "partiallySucceeded"}
+
+# Azure PR mergeStatus values, mapped onto LinkageState.merge_state.
+_MERGE_STATE_MAP = {
+    "succeeded": "clean",
+    "conflicts": "conflicts",
+    "rejectedByPolicy": "conflicts",
+    "failure": "conflicts",
+    "queued": "pending",
+    "notSet": "unknown",
+}
+
+
+def _issue_number_from_branch(branch: str) -> int | None:
+    """Best-effort extraction of the issue number from the autoSWE branch
+    naming convention (``autoswe/issue-{n}``) — the only place ADO's PR
+    create/update calls learn which work item to link (edge E3), since
+    ``VCSProvider.open_pull_request`` carries no issue number."""
+    m = re.search(r"issue-(\d+)$", branch)
+    return int(m.group(1)) if m else None
 
 
 class AzureVCS:
@@ -155,7 +177,15 @@ class AzureVCS:
         return f"autoswe/issue-{issue_number}"
 
     def find_existing_pr(self, branch: str) -> PRResult | None:
-        """Check if an active PR for the branch already exists."""
+        """Check if an active PR for the branch already exists.
+
+        Returns the PR's **web** URL (see :meth:`_web_pr_url`), not the raw
+        ``url`` field the list API returns — that field is the ``_apis/...``
+        request URL, which is not the clickable link the user expects. The
+        fresh-create path (:meth:`open_pull_request`) builds the same web URL,
+        so a re-dispatched ``/pr`` posts a consistent link (issue #252 follow-up:
+        the idempotent "already exists" comment used to show the raw API URL).
+        """
         path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories/"
             f"{self._repo_enc}/pullrequests"
@@ -166,11 +196,24 @@ class AzureVCS:
         prs = result.get("value", [])
         if prs:
             pr = prs[0]
+            pr_id = pr.get("pullRequestId")
             return PRResult(
-                number=pr.get("pullRequestId"),
-                url=pr.get("url", ""),
+                number=pr_id,
+                url=self._web_pr_url(pr_id),
             )
         return None
+
+    def _web_pr_url(self, pr_id: int | None) -> str:
+        """Build the clickable ADO web URL for a PR id.
+
+        ADO's REST responses expose the ``_apis/...`` request URL in ``url``,
+        which is not what a human wants to click. The web form is
+        ``.../_git/{repo}/pullrequest/{id}`` — the same shape the browser and
+        the open-PR path produce.
+        """
+        if not pr_id:
+            return ""
+        return f"https://dev.azure.com/{self._org}/{self._project}/_git/{self._repo}/pullrequest/{pr_id}"
 
     def open_pull_request(
         self,
@@ -190,12 +233,17 @@ class AzureVCS:
             "title": redact_outbound(title),
             "description": redact_outbound(body),
         }
+        issue_num = _issue_number_from_branch(branch)
+        if issue_num is not None:
+            # E3: link the PR to the work item at creation time so it never
+            # depends on a separate follow-up call succeeding.
+            pr_data["workItemRefs"] = [{"id": issue_num}]
         result = ado_post(path, self._pat, body=pr_data)
         # ADO returns the API URL in "url"; construct the clickable web URL instead
         pr_id = result.get("pullRequestId")
         return PRResult(
             number=pr_id,
-            url=f"https://dev.azure.com/{self._org}/{self._project}/_git/{self._repo}/pullrequest/{pr_id}" if pr_id else "",
+            url=self._web_pr_url(pr_id),
         )
 
     def link_branch_to_issue(
@@ -209,8 +257,13 @@ class AzureVCS:
     def get_ci_status(self, branch: str, ref_sha: str | None = None) -> CIStatus:
         """Return CI status from the most recent Azure Pipelines build for *branch*.
 
-        ``ref_sha`` is unused — Azure Pipelines builds are queried by branch,
-        not commit SHA (kept for VCSProvider protocol parity with GitHub).
+        ``ref_sha`` pins the verdict to a specific commit via the build's
+        ``sourceVersion``: builds are queried by branch, not SHA, so when the
+        latest build's ``sourceVersion`` differs from *ref_sha* the verdict
+        is stale — it belongs to an older commit. Stale verdicts are reported
+        as ``state="pending", stale=True`` (a build for the requested commit
+        is presumably coming) rather than trusting the old result as green
+        or red. A stale *canceled* build therefore no longer blocks forever.
         """
         path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/build/builds"
@@ -220,7 +273,9 @@ class AzureVCS:
         try:
             result = ado_get(path, self._pat)
         except Exception:
-            return CIStatus(state="none", summary="could not query builds")
+            # Fail-safe: the build API could not be consulted. Never report
+            # "no CI" from a failed read — the gate blocks on state="error".
+            return CIStatus(state="error", summary="could not query builds")
 
         builds = result.get("value", [])
         if not builds:
@@ -230,11 +285,192 @@ class AzureVCS:
         name = (latest.get("definition") or {}).get("name", "build")
         status = latest.get("status")
         build_result = latest.get("result")
+        # sourceVersion is the build's commit; keep it verbatim for display
+        # and only compare case-insensitively (Azure shas are lowercase but
+        # a caller may pass a mixed-case ref).
+        source_version = latest.get("sourceVersion") or None
+        build_id = latest.get("id")
+        build_url = (
+            f"https://dev.azure.com/{self._org}/{self._project}"
+            f"/_build/results?buildId={build_id}"
+        ) if build_id else None
+
+        # Staleness: the latest build ran on a different commit than the
+        # one requested. No claim when ref_sha is absent or the build
+        # payload has no sourceVersion (older pipelines omit it).
+        if (
+            ref_sha
+            and source_version
+            and source_version.lower() != str(ref_sha).lower()
+        ):
+            return CIStatus(
+                state="pending", stale=True, head_sha=source_version,
+                url=build_url, total=1, pending_count=0,
+                summary=f"build '{name}' predates branch head (stale)",
+            )
 
         if status in _PENDING_STATUSES:
-            return CIStatus(state="pending", total=1, pending_count=1, summary=f"build '{name}' in progress")
+            return CIStatus(
+                state="pending", head_sha=source_version, url=build_url,
+                total=1, pending_count=1, summary=f"build '{name}' in progress",
+            )
         if build_result in _FAILURE_RESULTS:
-            return CIStatus(state="failure", total=1, failing=[name], summary=f"build '{name}' failed")
+            return CIStatus(
+                state="failure", head_sha=source_version, url=build_url,
+                total=1, failing=[name], summary=f"build '{name}' failed",
+            )
         if build_result in _SUCCESS_RESULTS:
-            return CIStatus(state="success", total=1, summary=f"build '{name}' succeeded")
-        return CIStatus(state="none", total=1, summary="no build result")
+            return CIStatus(
+                state="success", head_sha=source_version, url=build_url,
+                total=1, summary=f"build '{name}' succeeded",
+            )
+        return CIStatus(
+            state="none", head_sha=source_version, url=build_url,
+            total=1, summary="no build result",
+        )
+
+    def get_ci_failures(
+        self, branch: str, ref_sha: str | None = None, *, limit: int = 3, max_chars: int = 4000,
+    ) -> list[CIFailure]:
+        """Feedback text for up to *limit* failed timeline records (issue #245 §2.1).
+
+        Reads the build's timeline and reports each failed record's
+        ``issues`` (structured warning/error entries Azure Pipelines already
+        attaches — no log download required). Best-effort: any read failure
+        yields an empty list.
+        """
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/build/builds"
+            f"?branchName=refs/heads/{branch}&statusFilter=all&$top=1"
+            f"&queryOrder=queueTimeDescending"
+        )
+        try:
+            result = ado_get(path, self._pat)
+        except Exception:
+            return []
+        builds = result.get("value", [])
+        if not builds:
+            return []
+        latest = builds[0]
+        source_version = latest.get("sourceVersion") or None
+        if ref_sha and source_version and source_version.lower() != str(ref_sha).lower():
+            return []  # stale build — not the commit we were asked about
+        build_id = latest.get("id")
+        if not build_id:
+            return []
+        build_url = (
+            f"https://dev.azure.com/{self._org}/{self._project}"
+            f"/_build/results?buildId={build_id}"
+        )
+
+        timeline_path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/build/builds/"
+            f"{build_id}/timeline"
+        )
+        try:
+            timeline = ado_get(timeline_path, self._pat)
+        except Exception:
+            return []
+
+        failures: list[CIFailure] = []
+        for record in timeline.get("records", []):
+            if len(failures) >= limit:
+                break
+            if record.get("result") not in _FAILURE_RESULTS:
+                continue
+            issues = record.get("issues") or []
+            excerpt = "\n".join(
+                str(i.get("message", "")) for i in issues if i.get("message")
+            )
+            if not excerpt:
+                excerpt = f"{record.get('type', 'record')} failed (no issue detail available)"
+            failures.append(CIFailure(
+                check=record.get("name", "build"),
+                url=f"{build_url}&view=logs&j={record.get('id')}" if record.get("id") else build_url,
+                excerpt=excerpt[:max_chars],
+            ))
+        return failures
+
+    def capabilities(self) -> frozenset[Capability]:
+        """ADO declares PR/CI/merge edges but not branch-link or auto-close.
+
+        No platform-managed issue->branch link exists (E1, §1.3 — unverified,
+        so the declared-absent no-op stays until a live probe confirms
+        otherwise), and merging never transitions a work item's state (E5 —
+        ``close_issue`` is a real write the tracker must perform).
+        """
+        return frozenset({
+            Capability.PR_ISSUE_LINK,
+            Capability.CI_PER_COMMIT,
+            Capability.CI_LOGS,
+            Capability.MERGE_STATUS,
+        })
+
+    def commit_trailer(self, issue_number: int) -> str:
+        """Return the Azure Boards commit-message trailer (issue #245 E2).
+
+        ``#N`` in a commit message is ADO's auto-link convention — it
+        associates the commit with the work item without triggering a state
+        transition (Azure Boards never auto-closes on commit or merge).
+        """
+        return f"#{issue_number}"
+
+    def link_pr_to_issue(self, issue_number: int, pr_number: int) -> None:
+        """Attach the work item to the PR via ``workItemRefs`` (edge E3).
+
+        ``workItemRefs`` on update is replace-semantics (send the complete
+        desired list, not a delta) — safe here because autoSWE only ever
+        links the one issue the PR was opened for.
+        """
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories/"
+            f"{self._repo_enc}/pullrequests/{pr_number}"
+        )
+        ado_patch_json(path, self._pat, body={"workItemRefs": [{"id": issue_number}]})
+
+    def get_linkage(
+        self, issue_number: int, branch: str, pr_number: int | None,
+    ) -> LinkageState:
+        """Read the current linkage state for *issue_number* / *pr_number*.
+
+        Best-effort: any read failure reports ``pr_link`` as missing rather
+        than raising, so ``ensure_links`` can proceed with self-heal writes.
+        ADO has no branch-link capability (§1.3), so ``"branch"`` is always
+        reported missing — a declared absence, not a failed read.
+        """
+        missing: list[str] = ["branch"]
+        if pr_number is None:
+            missing.append("pr_link")
+            return LinkageState(missing=tuple(missing))
+
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/git/repositories/"
+            f"{self._repo_enc}/pullrequests/{pr_number}?include=workItemRefs"
+        )
+        try:
+            pr = ado_get(path, self._pat)
+        except Exception as e:
+            dbg.warning("get_linkage: could not fetch PR %s: %s: %s",
+                        pr_number, type(e).__name__, e)
+            missing.append("pr_link")
+            return LinkageState(pr_number=pr_number, missing=tuple(missing))
+
+        refs = pr.get("workItemRefs") or []
+        pr_linked = any(str(r.get("id")) == str(issue_number) for r in refs)
+        if not pr_linked:
+            missing.append("pr_link")
+
+        merged = pr.get("status") == "completed"
+        merge_state = _MERGE_STATE_MAP.get(pr.get("mergeStatus"), "unknown")
+        head_sha = (pr.get("lastMergeSourceCommit") or {}).get("commitId")
+
+        return LinkageState(
+            branch_linked=False,
+            pr_linked=pr_linked,
+            closes_on_merge=False,  # ADO never auto-closes on merge (E5)
+            merged=merged,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            merge_state=merge_state,
+            missing=tuple(missing),
+        )

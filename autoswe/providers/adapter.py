@@ -13,15 +13,119 @@ the ``normalize_comment_body`` hook) plus one registry entry — nothing else.
 from __future__ import annotations
 
 import contextlib
+from dataclasses import asdict
+from datetime import datetime, timezone
 
+from autoswe.core.config import resolve_flag
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.orch.types import ApiState, Effect
-from autoswe.providers.base import IssueTracker, NormalizedComment
+from autoswe.providers.base import CIStatus, IssueTracker, NormalizedComment, VCSProvider
 from autoswe.providers.factory import get_vcs
 from autoswe.tracking.comments import BOT_MARKER, record_bot_comment_id
+from autoswe.tracking.labels import CI_WATCH_STATUSES
+from autoswe.vcs.linkage import ensure_links
 from autoswe.vcs.pr_gate import preflight_pr
 
 dbg = get_debug_logger()
+
+
+def _ci_poll_interval_sec(cfg: dict, repo_cfg: dict) -> int:
+    """Resolve CI_POLL_INTERVAL_SEC: a per-repo override beats cfg."""
+    for source in (repo_cfg.get("ci_poll_interval_sec"), cfg.get("CI_POLL_INTERVAL_SEC")):
+        if source is None:
+            continue
+        try:
+            return int(source)
+        except (TypeError, ValueError):
+            continue
+    return 120
+
+
+def read_ci(
+    vcs: VCSProvider,
+    task_entry: dict,
+    cfg: dict,
+    repo_cfg: dict,
+    *,
+    now: datetime | None = None,
+) -> CIStatus | None:
+    """Read CI status for one watched task — report-only (issue #245 plan §2.2).
+
+    Eligible only when ``autoswe_status`` is in ``CI_WATCH_STATUSES`` and a
+    branch can be resolved for the task, and only when ``CI_WATCH`` is on
+    (cfg, per-repo override). Throttled by ``CI_POLL_INTERVAL_SEC`` against
+    the persisted ``ci_last_checked`` watermark on *task_entry*, so a
+    ``--drain`` loop makes at most one API call per watched task per
+    interval.
+
+    On an actual read, caches the result on *task_entry* as ``ci_status``
+    (a dict) and refreshes ``ci_last_checked``, so ``/sync`` and
+    ``queue status`` can render the last-known state even on cycles that
+    don't re-consult the API.
+
+    Returns ``None`` when CI was NOT consulted this cycle (ineligible,
+    disabled, or throttled) — a distinct, checkable state from an actual
+    ``CIStatus`` (mirrors the ``comments_fetched`` idiom). Never makes a
+    decision; ``decide()`` does not consume this value yet.
+    """
+    if not resolve_flag("CI_WATCH", cfg, repo_cfg, default=True):
+        return None
+    if task_entry.get("autoswe_status") not in CI_WATCH_STATUSES:
+        return None
+
+    branch = task_entry.get("plan_branch")
+    if not branch:
+        try:
+            branch = vcs.branch_name(task_entry["issue_number"])
+        except Exception:
+            return None
+    if not branch:
+        return None
+
+    now = now or datetime.now(timezone.utc)
+    last_checked = task_entry.get("ci_last_checked")
+    if last_checked:
+        try:
+            last_dt = datetime.fromisoformat(str(last_checked).replace("Z", "+00:00"))
+            elapsed = (now - last_dt).total_seconds()
+        except ValueError:
+            elapsed = None  # malformed watermark -> treat as due
+        if elapsed is not None and elapsed < _ci_poll_interval_sec(cfg, repo_cfg):
+            return None
+
+    try:
+        status = vcs.get_ci_status(branch)
+    except Exception as e:  # defensive — providers already fail-safe internally
+        dbg.warning("read_ci: %s: get_ci_status failed: %s", task_entry.get("id", branch), e)
+        return None
+
+    task_entry["ci_last_checked"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    task_entry["ci_status"] = asdict(status)
+    return status
+
+
+def render_ci_status(task: dict) -> str:
+    """Human-readable CI-watch summary for a task (issue #245 plan §2.2).
+
+    Rendered from the cached ``ci_status`` / ``ci_last_checked`` fields that
+    ``read_ci`` persists — the last observation made, which may predate the
+    current cycle when throttled or when the task isn't currently eligible.
+    Report-only: no status changes or decisions are implied. Returns ``""``
+    when CI has never been consulted for this task.
+    """
+    status = task.get("ci_status")
+    if not isinstance(status, dict):
+        return ""
+    lines = [f"CI watch: {status.get('state', 'unknown')}"]
+    if status.get("stale"):
+        lines[0] += " (stale)"
+    if status.get("summary"):
+        lines.append(f"  {status['summary']}")
+    if status.get("url"):
+        lines.append(f"  {status['url']}")
+    if task.get("ci_last_checked"):
+        lines.append(f"  last checked: {task['ci_last_checked']}")
+    return "\n".join(lines)
 
 
 def read_api(
@@ -49,6 +153,16 @@ def read_api(
     prev_updated = prev_updated or {}
     force_fetch = force_fetch or set()
 
+    # Whether the provider advances the issue's updated timestamp when a
+    # comment is posted.  The "unchanged timestamp -> skip" shortcut below is
+    # only sound when that is true (GitHub: a comment bumps `updated_at`).  On
+    # Azure DevOps a comment does NOT bump `System.ChangedDate`, so relying on
+    # it means a user's new `/fix`/`/pr` is never re-fetched and the poller
+    # stalls (issue: comments not seen after autoSWE's own tag write advanced
+    # the stored timestamp).  Providers without the capability default to True
+    # so the GitHub fast path is unchanged.
+    comments_bump = getattr(tracker, "comments_bump_updated", True)
+
     issues = tracker.list_open_issues()
 
     result: dict[int, ApiState] = {}
@@ -60,6 +174,8 @@ def read_api(
         # - issue is force-fetched
         # - no stored timestamp or provider gave no timestamp
         # - timestamp changed
+        # - provider doesn't bump the timestamp on comments (Azure) — the
+        #   timestamp can't signal a new comment, so always re-fetch
         stored = prev_updated.get(num)
         current = issue.last_updated
         should_fetch = (
@@ -68,6 +184,7 @@ def read_api(
             or stored is None
             or current is None
             or current != stored
+            or not comments_bump
         )
 
         if should_fetch:
@@ -148,10 +265,16 @@ def apply_effect(
         if cfg is not None and task_entry is not None:
             ok, reason = preflight_pr(task_entry, cfg, repo_cfg, do_sync=False, vcs=vcs)
             if not ok:
+                # pr_deferred (issue #245 §2.6): record it on the task instead
+                # of asking the human to re-post /pr — the next green CI
+                # observation re-emits this create_pr effect (decide()'s
+                # retry_deferred_pr row), and find_existing_pr below already
+                # makes that re-emit idempotent.
+                task_entry["pr_deferred"] = True
                 with contextlib.suppress(Exception):
                     comment_id = tracker.post_comment(
                         issue_num,
-                        f"PR deferred — {reason}. Post `/pr` when ready.{BOT_MARKER}",
+                        f"PR deferred — {reason}. Will retry automatically once CI is green.{BOT_MARKER}",
                     )
                     record_bot_comment_id(task_entry, comment_id)
                 return
@@ -188,6 +311,9 @@ def apply_effect(
                     task_entry["pr_number"] = pr.number
                 if pr.url:
                     task_entry["pr_url"] = pr.url
+            if task_entry is not None:
+                with contextlib.suppress(Exception):
+                    ensure_links(task_entry, repo_cfg, cfg, phase="pr_open", vcs=vcs)
         elif task_entry is not None:
             # Idempotent skip: the PR already exists but the queue entry lost
             # its cached identity (e.g. a crash between create and save).
@@ -196,3 +322,5 @@ def apply_effect(
                 task_entry["pr_number"] = existing.number
             if existing.url:
                 task_entry["pr_url"] = existing.url
+            with contextlib.suppress(Exception):
+                ensure_links(task_entry, repo_cfg, cfg, phase="pr_open", vcs=vcs)

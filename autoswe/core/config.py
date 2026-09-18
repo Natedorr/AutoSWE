@@ -85,6 +85,20 @@ def _as_bool(value: str | None, default: str = "false") -> bool:
     return str(value or default).strip().lower() in ("true", "1", "yes", "on")
 
 
+def resolve_flag(name: str, cfg: dict, repo_cfg: dict, default: bool = True) -> bool:
+    """Resolve a boolean flag: a per-repo override (lowercase key) beats cfg.
+
+    Shared by any caller that needs the cfg/repo_cfg override pattern (e.g.
+    ``PR_REQUIRE_SYNC``/``PR_REQUIRE_CI`` in ``vcs.pr_gate``, ``CI_WATCH`` in
+    ``providers.adapter``) so it isn't reimplemented or imported from a
+    module-private helper in an unrelated module.
+    """
+    override = repo_cfg.get(name.lower())
+    if override is not None:
+        return bool(override)
+    return bool(cfg.get(name, default))
+
+
 def _load_json_config(filepath: Path) -> dict:
     """Read a JSON config file, returning ``{}`` on missing/corrupt file."""
     if filepath.exists():
@@ -144,6 +158,7 @@ def load_config() -> dict:
         "SYNC_STRATEGY": os.environ.get("SYNC_STRATEGY", "merge"),  # "merge" | "rebase"
         "PR_REQUIRE_SYNC": _as_bool(os.environ.get("PR_REQUIRE_SYNC"), "true"),
         "PR_REQUIRE_CI": _as_bool(os.environ.get("PR_REQUIRE_CI"), "true"),
+        "PR_CI_ERROR_POLICY": os.environ.get("PR_CI_ERROR_POLICY", "block"),
         "AGENT_RETRY_ON_SUBTYPE": os.environ.get("AGENT_RETRY_ON_SUBTYPE", ""),
         "WORKTREE_ORPHAN_POLICY": os.environ.get("WORKTREE_ORPHAN_POLICY", "commit"),
         "AUTO_PURGE_BRANCHES": _as_bool(os.environ.get("AUTO_PURGE_BRANCHES")),
@@ -152,6 +167,21 @@ def load_config() -> dict:
         "TEST_COMMAND": os.environ.get("TEST_COMMAND", ""),
         "MAX_TURNS": int(os.environ.get("MAX_TURNS", 200)),
         "REVIEW_MAX_TURNS": int(os.environ.get("REVIEW_MAX_TURNS", 80)),
+        "LINK_COMMIT_TRAILER": _as_bool(os.environ.get("LINK_COMMIT_TRAILER"), "true"),
+        "AUTO_CLOSE_ON_MERGE": _as_bool(os.environ.get("AUTO_CLOSE_ON_MERGE"), "true"),
+        "CI_WATCH": _as_bool(os.environ.get("CI_WATCH"), "true"),
+        "CI_POLL_INTERVAL_SEC": int(os.environ.get("CI_POLL_INTERVAL_SEC", 120)),
+        # Shared recoverable-gate policy (issue #245 §2.5): one switch/budget
+        # drives auto-fix for BOTH the local post-fix test gate (test_failed)
+        # and the remote CI watch (ci_failed) — see orch/gate_policy.py.
+        "AUTO_FIX_ON_GATE_FAILURE": _as_bool(os.environ.get("AUTO_FIX_ON_GATE_FAILURE"), "true"),
+        "GATE_MAX_FIX_ATTEMPTS": int(os.environ.get("GATE_MAX_FIX_ATTEMPTS", 2)),
+        "CI_LOG_MAX_CHARS": int(os.environ.get("CI_LOG_MAX_CHARS", 4000)),
+        # Azure done-state resolution (issue #245 §1.5): "" means "discover,
+        # else fall back to Closed" — see providers/azure/tracker.py. Read via
+        # os.environ.get(...) directly (not the dict-literal key above) since
+        # the key is intentionally lowercase to mirror repos.json casing.
+        "done_state": os.environ.get("done_state") or "",  # noqa: SIM112
     }
     if CONFIG_FILE.exists():
         # Snapshot the defaults before the file-parse loop overwrites the
@@ -162,6 +192,7 @@ def load_config() -> dict:
                 "AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS",
                 "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES",
                 "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS",
+                "CI_POLL_INTERVAL_SEC", "GATE_MAX_FIX_ATTEMPTS", "CI_LOG_MAX_CHARS",
             )
         }
         for line in CONFIG_FILE.read_text().splitlines():
@@ -173,7 +204,7 @@ def load_config() -> dict:
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
                     v = v[1:-1]
                 cfg[k.strip()] = v
-        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS"):
+        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS", "CI_POLL_INTERVAL_SEC", "GATE_MAX_FIX_ATTEMPTS", "CI_LOG_MAX_CHARS"):
             raw = cfg.get(int_key)
             if raw is None:
                 continue
@@ -197,13 +228,36 @@ def load_config() -> dict:
         cfg["PR_REQUIRE_CI"] = _as_bool(cfg.get("PR_REQUIRE_CI"), "true")
         cfg["AUTO_PURGE_BRANCHES"] = _as_bool(cfg.get("AUTO_PURGE_BRANCHES"))
         cfg["TEST_GATE"] = _as_bool(cfg.get("TEST_GATE"), "true")
+        cfg["LINK_COMMIT_TRAILER"] = _as_bool(cfg.get("LINK_COMMIT_TRAILER"), "true")
+        cfg["AUTO_CLOSE_ON_MERGE"] = _as_bool(cfg.get("AUTO_CLOSE_ON_MERGE"), "true")
+        cfg["CI_WATCH"] = _as_bool(cfg.get("CI_WATCH"), "true")
+        cfg["AUTO_FIX_ON_GATE_FAILURE"] = _as_bool(cfg.get("AUTO_FIX_ON_GATE_FAILURE"), "true")
     # Parse ALLOWED_AUTHORS as a set for O(1) lookup
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()
     cfg["ALLOWED_AUTHORS"] = {a.strip() for a in _raw.split(",") if a.strip()} if _raw else set()
+    _normalise_ci_error_policy(cfg)
     return cfg
 
 
-def load_repos_config() -> dict:
+def _normalise_ci_error_policy(cfg: dict) -> None:
+    """Normalise and validate ``PR_CI_ERROR_POLICY`` (``block`` | ``open``).
+
+    Case-insensitive; an unknown value logs a warning and falls back to
+    ``block`` — the fail-safe default, so a typo can't silently open the
+    gate on unconsultable CI.
+    """
+    valid = {"block", "open"}
+    raw = str(cfg.get("PR_CI_ERROR_POLICY", "block")).strip().lower()
+    if raw not in valid:
+        get_debug_logger().warning(
+            "config: PR_CI_ERROR_POLICY=%r is not %s, using 'block'",
+            cfg.get("PR_CI_ERROR_POLICY"), sorted(valid),
+        )
+        raw = "block"
+    cfg["PR_CI_ERROR_POLICY"] = raw
+
+
+def load_repos_config(cfg: dict | None = None) -> dict:
     """Load per-repo settings from repos.json.
 
     Keys are ``owner/repo`` for GitHub, ``org/project/repo`` for Azure.
@@ -211,6 +265,13 @@ def load_repos_config() -> dict:
     Requires the ``provider`` field on each entry (``"github"`` or ``"azure"``).
     Rejects Azure DevOps entries that lack a ``pat`` field.
     Validates Azure entries have required fields.
+
+    When *cfg* is given, each Azure entry's ``done_state`` (per-repo override,
+    falling back to ``cfg["done_state"]``) is validated against its
+    ``done_states`` (per-repo override, falling back to
+    ``providers.azure.tracker.DEFAULT_DONE_STATES``) — issue #245 §1.5. A
+    ``done_state`` outside the terminal set is a startup error, not a runtime
+    surprise: writing it would leave the work item rediscovered forever.
     """
     raw = _load_json_config(REPOS_CONFIG_FILE)
 
@@ -241,8 +302,31 @@ def load_repos_config() -> dict:
             entry["org"] = parts[0]
             entry["project"] = parts[1]
             entry["repo"] = parts[2]
+            if cfg is not None:
+                _validate_done_state(key, entry, cfg)
         validated[key] = entry
     return validated
+
+
+def _validate_done_state(repo_key: str, entry: dict, cfg: dict) -> None:
+    """Raise if an Azure entry's effective ``done_state`` isn't terminal.
+
+    Deferred import avoids a hard dependency from core/config.py on the
+    provider package at module-load time.
+    """
+    from autoswe.providers.azure.tracker import DEFAULT_DONE_STATES
+
+    done_state = entry.get("done_state") or cfg.get("done_state")
+    if not done_state:
+        return  # not set -> resolved at runtime (discovery, then "Closed")
+    done_states = tuple(entry.get("done_states") or DEFAULT_DONE_STATES)
+    if done_state not in done_states:
+        raise ValueError(
+            f"repos.json entry '{repo_key}' has done_state={done_state!r}, which is "
+            f"not in done_states={list(done_states)}. Writing a non-terminal state "
+            "would leave the work item rediscovered on every poll — add it to "
+            "'done_states' or pick a value already in that set."
+        )
 
 
 # Recognized backend names (populated as new backends are added).

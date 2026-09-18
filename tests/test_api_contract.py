@@ -143,6 +143,15 @@ GITHUB_READS: dict[str, list[tuple[str, str]]] = {
         ("number", "int"), ("head", "dict"), ("base", "dict"),
         ("head.ref", "str"), ("base.ref", "str"),
     ],
+    "get_commit": [
+        ("sha", "str"),
+    ],
+    "list_check_runs": [
+        ("total_count", "int"), ("check_runs", "list"),
+    ],
+    "list_actions_runs": [
+        ("total_count", "int"), ("workflow_runs", "list"),
+    ],
 }
 
 AZURE_READS: dict[str, list[tuple[str, str]]] = {
@@ -179,6 +188,9 @@ AZURE_READS: dict[str, list[tuple[str, str]]] = {
     "create_pullrequest": [
         ("pullRequestId", "int"), ("sourceRefName", "str"),
         ("targetRefName", "str"), ("status", "int"),
+    ],
+    "list_builds": [
+        ("count", "int"), ("value", "list"),
     ],
 }
 

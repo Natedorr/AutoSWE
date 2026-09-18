@@ -18,7 +18,7 @@ from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import runner
 from autoswe.harness.ask_user_question import make_can_use_tool
-from autoswe.harness.prompts import _find_plan_in_comments, build_review_prompt
+from autoswe.harness.prompts import _find_plan_in_comments, _output_format_note, build_review_prompt
 from autoswe.harness.runner import HandlerResult
 from autoswe.harness.schemas import REVIEW_SCHEMA, output_format_for
 from autoswe.providers.factory import get_tracker
@@ -167,7 +167,17 @@ def run_review(
         comments = []
         plan_text = ""
 
-    # 4. Build prompt
+    # 4. Build prompt. The harness must be resolved first so the prompt's
+    # {{OUTPUT_FORMAT_NOTE}} can be gated on the backend's structured_output
+    # capability — pi/codex never receive an output_format, so the JSON-schema
+    # note (which Claude Code enforces) is dropped for them and the report stays
+    # plain markdown (issue #235 follow-up).
+    harness = resolve_harness("review", repo_cfg, cfg or {})
+    review_model = harness.get("model")
+    log(f"[REVIEW] {task['id']} session=NEW model={review_model or 'default'} diff_stat_lines={diff_stat.count(chr(10))}")
+    output_format_note = _output_format_note(
+        runner.backend_has_capability(harness, "structured_output"), "review",
+    )
     prompt = build_review_prompt(
         task,
         repo_root=str(wt_path),
@@ -176,11 +186,8 @@ def run_review(
         diff_stat=diff_stat,
         diff_text=diff_text,
         guidance=guidance,
+        output_format_note=output_format_note,
     )
-
-    harness = resolve_harness("review", repo_cfg, cfg or {})
-    review_model = harness.get("model")
-    log(f"[REVIEW] {task['id']} session=NEW model={review_model or 'default'} diff_stat_lines={diff_stat.count(chr(10))}")
 
     # 5. Read-only session (fresh, no resume)
     state = {}
@@ -222,8 +229,10 @@ def run_review(
             output_format=review_output_format,
         )
     except asyncio.TimeoutError:
+        log(f"[REVIEW] {task['id']} timed out during review phase")
         return HandlerResult("FAILED: timeout during review phase")
     except Exception as e:  # State-machine boundary -- any handler failure becomes a FAILED result for emit().
+        log(f"[REVIEW] {task['id']} review error: {e}")
         return HandlerResult(f"FAILED: review error: {e}")
 
     # Backstop: roll back any worktree edits the review session made (issue #166).

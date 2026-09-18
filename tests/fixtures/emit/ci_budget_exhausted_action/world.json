@@ -1,0 +1,42 @@
+{
+  "api": {
+    "issue": {
+      "number": 5,
+      "title": "CI watch issue",
+      "body": "",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_5",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 5,
+    "title": "CI watch issue",
+    "status": "fixed",
+    "plan_branch": "issue-5",
+    "base_branch": "main",
+    "attempt_count": 1,
+    "session_id": null,
+    "provider": "github",
+    "guard_blocked": false,
+    "last_dispatched_command_id": null,
+    "last_consumed_reply_id": null,
+    "welcome_comment_id": null,
+    "bot_comment_ids": [],
+    "gate_attempt_count": 2,
+    "gate_last_fixed_sha": "abc1234"
+  },
+  "ci": {
+    "state": "failure",
+    "head_sha": "abc1234",
+    "failing": ["build"],
+    "url": "https://github.com/o/r/actions/runs/1",
+    "summary": "1 check(s) failing: build"
+  },
+  "cfg": {"GATE_MAX_FIX_ATTEMPTS": 2},
+  "repo_cfg": {}
+}

@@ -378,6 +378,72 @@ class TestAzureEdgeCases:
                 ado_live_cfg["pat"],
             )
 
+
+@pytest.mark.live
+class TestAzureBranchLinkProbe:
+    """Plan §1.3: does the generic relations API accept an ``ArtifactLink``
+    branch relation? Unverified before this probe — resolves whether ADO ever
+    gains ``Capability.BRANCH_LINK`` (issue #245).
+
+    Probes against work item #1 (the same throwaway target other live tests
+    use) with a relation that is added then immediately removed, so the probe
+    leaves no residue on a real project.
+    """
+
+    def test_artifact_link_branch_relation(self, ado_live_cfg):
+        from autoswe.providers.azure.api import _ado_api_version, _encode_path_segment, ado_get, ado_patch
+        from autoswe.providers.azure.vcs import AzureVCS
+
+        vcs = AzureVCS(ado_live_cfg)
+        repo_id = vcs.resolve_repo_id()
+        assert repo_id, "could not resolve repo UUID — cannot build the artifact URL"
+
+        project_enc = _encode_path_segment(ado_live_cfg["project"])
+        artifact_url = f"vstfs:///Git/Ref/{project_enc}%2F{repo_id}%2FGBautoswe%2Fbranch-link-probe"
+        patch_path = _ado_api_version(
+            f"https://dev.azure.com/{_encode_path_segment(ado_live_cfg['org'])}/{project_enc}"
+            "/_apis/wit/workitems/1"
+        )
+
+        try:
+            ado_patch(patch_path, ado_live_cfg["pat"], body=[
+                {"op": "add", "path": "/relations/-",
+                 "value": {"rel": "ArtifactLink", "url": artifact_url,
+                           "attributes": {"name": "Branch"}}},
+            ])
+            accepted = True
+        except RuntimeError as e:
+            # A rejection (400/422) is itself the answer: ADO has no branch
+            # relation type at this API surface, so BRANCH_LINK stays absent.
+            accepted = False
+            print(f"[BRANCH_LINK PROBE] ArtifactLink branch relation rejected: {e}")
+
+        if accepted:
+            print("[BRANCH_LINK PROBE] ArtifactLink branch relation ACCEPTED — "
+                  "review the relation on work item 1 and consider declaring "
+                  "Capability.BRANCH_LINK for Azure.")
+            # Clean up: remove the relation we just added so the probe is a
+            # no-op on the real project. Relations are index-addressed, so
+            # re-fetch to find where ours landed.
+            wi = ado_get(
+                _ado_api_version(
+                    f"https://dev.azure.com/{_encode_path_segment(ado_live_cfg['org'])}/{project_enc}"
+                    "/_apis/wit/workitems/1?$expand=relations"
+                ),
+                ado_live_cfg["pat"],
+            )
+            relations = wi.get("relations", [])
+            idx = next(
+                (i for i, r in enumerate(relations) if r.get("url") == artifact_url), None,
+            )
+            if idx is not None:
+                ado_patch(patch_path, ado_live_cfg["pat"], body=[
+                    {"op": "remove", "path": f"/relations/{idx}"},
+                ])
+        # This test is exploratory by design (plan §1.3) — it reports the
+        # outcome above rather than asserting a specific one, since either
+        # answer is the information the probe exists to produce.
+
     def test_get_status_untagged_issue(self, ado_live_cfg):
         from autoswe.providers.base import NormalizedIssue
         from autoswe.providers.factory import get_tracker

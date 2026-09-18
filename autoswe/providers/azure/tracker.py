@@ -6,10 +6,12 @@ orchestrator code is backend-agnostic.
 """
 from __future__ import annotations
 
+import contextlib
 import html
 import re
 from html.parser import HTMLParser
 
+from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
 from autoswe.providers.azure.api import (
     _ado_api_version,
@@ -21,11 +23,17 @@ from autoswe.providers.azure.api import (
     ado_post,
     ado_post_patch,
 )
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import Capability, NormalizedComment, NormalizedIssue
 from autoswe.tracking.comments import _BOT_CONTENT_PATTERNS, BOT_MARKER
 from autoswe.tracking.labels import _validate_status
 
+dbg = get_debug_logger()
+
 _PREFIX = "autoswe:"
+
+# Default terminal-state set for reads (issue #245 plan §1.5) — the set
+# already hardcoded pre-#245, lifted into a per-repo-overridable constant.
+DEFAULT_DONE_STATES: tuple[str, ...] = ("Closed", "Done", "Removed")
 
 # ADO's batch work-item GET caps the number of ids per request (undocumented).
 # Keep well under that cap — docs/azure-devops-api/list-work-items.md,
@@ -93,6 +101,13 @@ class AzureTracker:
         }
     """
 
+    # ADO does not advance ``System.ChangedDate`` when a comment is posted —
+    # only field changes (state, tags) do. So the poller's "unchanged
+    # timestamp -> skip comment fetch" shortcut would silently drop a user's
+    # new slash command (the only way a task moves is a comment). Tell
+    # read_api to always re-fetch comments (providers/adapter.py).
+    comments_bump_updated = False
+
     def __init__(self, repo_cfg: dict):
         self._repo_cfg = repo_cfg
         # Accept the PAT under either key so hand-built repo_cfg dicts (e.g. the
@@ -109,6 +124,11 @@ class AzureTracker:
         # URL-encode for safe use in request URLs
         self._org_enc = _encode_path_segment(self._org)
         self._project_enc = _encode_path_segment(self._project)
+
+        # Per (project, work item type) discovery cache (issue #245 §1.5):
+        # avoids re-querying workitemtypes/{type}/states on every close_issue.
+        self._completed_state_cache: dict[str, str] = {}
+        self._removed_state_cache: dict[str, str] = {}
 
     # ---- Repo ID resolution ----
 
@@ -128,14 +148,32 @@ class AzureTracker:
     def pid_prefix(self) -> str:
         return "ado_"
 
+    def capabilities(self) -> frozenset[Capability]:
+        """Azure declares no tracker capabilities: merge never transitions the
+        work item's state, so ``close_issue`` is always a real write (E5)."""
+        return frozenset()
+
     # ---- Protocol: IssueTracker ----
+
+    def _resolve_done_states(self) -> tuple[str, ...]:
+        """Return the terminal-state set for reads (issue #245 §1.5).
+
+        A per-repo ``done_states`` override (``repos.json``) beats the
+        default ``("Closed", "Done", "Removed")`` set — the same set already
+        hardcoded pre-#245, now overridable for a custom process.
+        """
+        override = self._repo_cfg.get("done_states")
+        if override:
+            return tuple(override)
+        return DEFAULT_DONE_STATES
 
     def list_open_issues(self) -> list[NormalizedIssue]:
         """Return all open work items via WIQL + batch expand."""
+        done_states_sql = ",".join(f"'{s}'" for s in self._resolve_done_states())
         wiql = {
             "query": (
                 "SELECT [System.Id] FROM WorkItems "
-                "WHERE [System.State] NOT IN ('Closed','Done','Removed') "
+                f"WHERE [System.State] NOT IN ({done_states_sql}) "
                 f"AND [System.TeamProject] = '{self._project}'"
             ),
         }
@@ -248,6 +286,13 @@ class AzureTracker:
                     id=c.get("id"),
                 )
             )
+        # ADO's comments API returns comments newest-first (descending by id),
+        # unlike GitHub which returns oldest-first. Every downstream consumer
+        # (watermark detection, _find_last_completion_id's reversed() scan,
+        # resume detection) assumes ascending order, so sort by comment id
+        # (monotonically increasing) ascending at the source. A None id sorts
+        # last — it can't anchor a watermark anyway.
+        results.sort(key=lambda c: (c.id is None, c.id if c.id is not None else 0))
         return results
 
     # ---- Pure helpers (no network) ----
@@ -355,15 +400,38 @@ class AzureTracker:
         GETs the current work item, strips existing autoswe:* tags,
         appends the new status tag, and PATCHes via JSON-Patch.
 
-        The write is a two-op patch — ``remove`` then ``add`` on
-        ``/fields/System.Tags``. ADO applies ``op: "add"`` on ``System.Tags``
-        additively (it merges the value into the existing tag set instead of
-        replacing the field), so a lone ``add`` re-merges the tags we just
-        stripped and the status tags accumulate across transitions. Clearing
-        the field first guarantees the written value is the complete tag set
-        (issue #235).
+        The write is a **single** ``op: "replace"`` on
+        ``/fields/System.Tags`` whose value is the complete tag set. Two
+        constraints force this shape:
+
+        - ADO rejects two operations on the same field in one patch body
+          (HTTP 400 VS403691 — "A field cannot be updated more than once in
+          the same update"), so the old remove-then-add pair failed the whole
+          write and no tag was ever posted (issue #235 follow-up).
+        - ``op: "add"`` on ``System.Tags`` is additive on the server (it
+          merges into the existing set), so a lone ``add`` re-merges the tags
+          we stripped. ``replace`` is the only op that sets the field exactly.
+
+        There are three independent call sites for this method across a
+        dispatch cycle (running-status at dispatch start, the terminal status
+        from emit(), and the sync-phase closed/mirror passes), each doing its
+        own unsynchronized GET-then-PATCH. Back-to-back calls can race — the
+        second call's GET can miss the first call's PATCH — so this retries
+        once with a fresh GET on a PATCH failure instead of losing the write
+        silently (issue: live E2E showed work items land with no autoswe tag
+        at all after a fast status transition, with no error surfaced).
         """
         _validate_status(status)
+        last_error: RuntimeError | None = None
+        for _attempt in range(2):
+            try:
+                self._set_status_once(issue_number, status)
+                return
+            except RuntimeError as e:
+                last_error = e
+        raise last_error
+
+    def _set_status_once(self, issue_number: int, status: str) -> None:
         # Read current tags
         get_path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
@@ -381,17 +449,16 @@ class AzureTracker:
         new_tags = [t for t in tags if not t.startswith(_PREFIX)]
         new_tags.append(f"{_PREFIX}{normalized_status}")
 
-        # PATCH via JSON-Patch: remove first, then add. ``add`` on System.Tags
-        # is additive on the server (see docstring), so the ``remove`` is what
-        # makes this a true replace of the tag set.
+        # PATCH via JSON-Patch: a single ``replace`` on System.Tags. A second
+        # op on the same field in one body is rejected (VS403691), and ``add``
+        # is additive, so ``replace`` is what makes this a true set (docstring).
         patch_path = _ado_api_version(
             f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
         )
         ado_patch(
             patch_path, self._pat,
             body=[
-                {"op": "remove", "path": "/fields/System.Tags"},
-                {"op": "add", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
+                {"op": "replace", "path": "/fields/System.Tags", "value": "; ".join(new_tags)},
             ],
         )
 
@@ -425,6 +492,116 @@ class AzureTracker:
             body=[{"op": "add", "path": "/fields/System.AssignedTo", "value": login}],
         )
 
+    def _discover_completed_state(self, work_item_type: str) -> str | None:
+        """Discover the ``Completed``-category state for *work_item_type*.
+
+        Queries ``workitemtypes/{type}/states`` and caches the result (plus
+        any ``Removed``-category state found alongside it) per work item type
+        for the life of this tracker instance — this needs only ``vso.work``
+        read scope, unlike the process-admin-gated process API, and is the
+        correct answer for a custom/inherited process (issue #245 §1.5).
+        """
+        if not work_item_type:
+            return None
+        if work_item_type in self._completed_state_cache:
+            return self._completed_state_cache[work_item_type]
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitemtypes/"
+            f"{_encode_path_segment(work_item_type)}/states"
+        )
+        try:
+            result = ado_get(path, self._pat)
+        except Exception as e:
+            dbg.warning(
+                "_discover_completed_state: states lookup failed for %r: %s: %s",
+                work_item_type, type(e).__name__, e,
+            )
+            return None
+        states = result.get("value", [])
+        completed = [s["name"] for s in states if s.get("category") == "Completed"]
+        removed = [s["name"] for s in states if s.get("category") == "Removed"]
+        if len(completed) > 1:
+            dbg.warning(
+                "_discover_completed_state: %d states with category=Completed for %r "
+                "(%s) — using %r; set 'done_state' explicitly to disambiguate",
+                len(completed), work_item_type, completed, completed[0],
+            )
+        if removed:
+            self._removed_state_cache[work_item_type] = removed[0]
+        if completed:
+            self._completed_state_cache[work_item_type] = completed[0]
+            return completed[0]
+        return None
+
+    def _resolve_done_state(self, repo_cfg: dict, work_item_type: str, reason: str) -> str:
+        """Resolve the state value to write for *reason* (issue #245 §1.5).
+
+        Resolution order: per-repo/global ``done_state`` override (already
+        merged onto *repo_cfg* by ``build_repo_cfg``) -> runtime discovery ->
+        fallback ``"Closed"``. ``reason="not_planned"`` prefers a discovered
+        ``Removed``-category state over the ``done_state`` override, since the
+        override is meant for the "completed" case; it falls back to the same
+        chain when no such state was found.
+        """
+        if reason != "completed":
+            self._discover_completed_state(work_item_type)  # populates removed cache
+            removed = self._removed_state_cache.get(work_item_type)
+            if removed:
+                return removed
+        override = repo_cfg.get("done_state")
+        if override:
+            return override
+        discovered = self._discover_completed_state(work_item_type)
+        if discovered:
+            return discovered
+        return "Closed"
+
+    def close_issue(self, issue_number: int, reason: str = "completed") -> None:
+        """Close a work item by transitioning ``System.State`` (edge E5).
+
+        Azure has no merge-triggered close, so this is always a real write.
+        Idempotent: a work item already in a terminal state (per
+        ``_resolve_done_states``) is left untouched. A 400 from the PATCH
+        (unresolvable state, missing ``System.Reason``, or a process that
+        forbids a direct jump) is reported loudly — once, via a posted
+        comment — rather than retried with a guessed state.
+        """
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/"
+            f"{issue_number}?fields=System.WorkItemType,System.State"
+        )
+        raw = ado_get(path, self._pat)
+        fields = raw.get("fields", {})
+        work_item_type = fields.get("System.WorkItemType", "")
+        current_state = fields.get("System.State", "")
+        if current_state in self._resolve_done_states():
+            return  # already terminal
+
+        target_state = self._resolve_done_state(self._repo_cfg, work_item_type, reason)
+        patch_path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
+        )
+        try:
+            ado_patch(
+                patch_path, self._pat,
+                body=[{"op": "add", "path": "/fields/System.State", "value": target_state}],
+            )
+        except RuntimeError as e:
+            if "HTTP 400" in str(e):
+                dbg.warning(
+                    "close_issue: state=%r rejected (HTTP 400) for work item %d "
+                    "(type=%r): %s", target_state, issue_number, work_item_type, e,
+                )
+                with contextlib.suppress(Exception):
+                    self.post_comment(
+                        issue_number,
+                        "autoSWE could not close this work item automatically "
+                        f"(state `{target_state}` was rejected). Set `done_state` "
+                        "in repos.json for this repo, or close it manually.",
+                    )
+                return
+            raise
+
     # ---- Internal helpers ----
 
     def _to_normalized(self, raw: dict) -> NormalizedIssue:
@@ -435,7 +612,7 @@ class AzureTracker:
         tags_raw = fields.get("System.Tags", "") or ""
         labels = [t.strip() for t in tags_raw.split(";") if t.strip()] if tags_raw else []
         raw_state = fields.get("System.State", "New")
-        state = "closed" if raw_state in ("Closed", "Done", "Removed") else "open"
+        state = "closed" if raw_state in self._resolve_done_states() else "open"
         return NormalizedIssue(
             number=raw["id"],
             title=title,
@@ -448,4 +625,5 @@ class AzureTracker:
             status=self._extract_status(labels),
             last_updated=fields.get("System.ChangedDate"),
             creator_login=fields.get("System.CreatedBy", {}).get("uniqueName", ""),
+            work_item_type=fields.get("System.WorkItemType", ""),
         )

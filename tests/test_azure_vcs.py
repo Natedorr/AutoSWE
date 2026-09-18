@@ -5,6 +5,7 @@ import pytest
 
 from autoswe.providers.azure.api import _ado_api_version, ado_patch_json
 from autoswe.providers.azure.vcs import AzureVCS
+from autoswe.providers.base import Capability
 from tests.conftest import load_ado_fixture
 
 
@@ -377,8 +378,353 @@ def test_get_ci_status_no_builds_is_none(vcs, mock_ado_request, ado_route_table)
     assert ci.state == "none"
 
 
-def test_get_ci_status_request_error_is_none(vcs, mock_ado_request, ado_route_table):
-    """No route stubbed → request raises → treated as none, not a crash."""
+def test_get_ci_status_request_error_is_error(vcs, mock_ado_request, ado_route_table):
+    """No route stubbed → request raises → error, not a vacuous 'none' pass.
+
+    Fail-safe: the build API could not be consulted, so the result is
+    ``state="error"`` — the gate blocks on it rather than shipping blind.
+    """
     ci = vcs.get_ci_status("autoswe/issue-100")
 
-    assert ci.state == "none"
+    assert ci.state == "error"
+    assert "could not query builds" in ci.summary
+
+
+def test_get_ci_status_success_carries_head_sha_and_url(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "ABC1234DEF", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100")
+
+    assert ci.state == "success"
+    assert ci.head_sha == "ABC1234DEF"
+    assert ci.url == "https://dev.azure.com/my-org/my-project/_build/results?buildId=7"
+
+
+def test_get_ci_status_stale_source_version_is_pending(vcs, mock_ado_request, ado_route_table):
+    """Latest build predates the requested commit → stale, not green.
+
+    A build that succeeded on an *older* commit is not evidence the current
+    head is green — report pending + stale so the gate waits for a fresh
+    build instead of a false green.
+    """
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "oldsha", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100", ref_sha="newsha")
+
+    assert ci.state == "pending"
+    assert ci.stale is True
+    assert ci.head_sha == "oldsha"
+
+
+def test_get_ci_status_stale_canceled_build_no_longer_blocks_as_failure(
+    vcs, mock_ado_request, ado_route_table,
+):
+    """A stale canceled build is pending, not a permanent failure.
+
+    The existing pin (fresh canceled → failure) is preserved; this covers the
+    staleness flip: a canceled build for an *older* commit stops blocking the
+    gate as a hard failure until a build for the requested head lands.
+    """
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "canceled",
+                   "sourceVersion": "oldsha", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100", ref_sha="newsha")
+
+    assert ci.state == "pending"
+    assert ci.stale is True
+
+
+@pytest.mark.parametrize(
+    "ref_sha",
+    ["newsha", "NEWsha"],
+    ids=["exact-case", "mixed-case"],
+)
+def test_get_ci_status_fresh_source_version_is_not_stale(
+    vcs, mock_ado_request, ado_route_table, ref_sha,
+):
+    """A build on the *requested* commit is fresh, not stale.
+
+    The staleness comparison is case-insensitive, so both an exact-case match
+    and a mixed-case match on the same build read as a fresh verdict — the
+    build's real result, not a pending/stale stand-in. This pins the match arm
+    of the ``source_version.lower() != str(ref_sha).lower()`` comparison that
+    the mismatch rows above only exercise in the other direction.
+    """
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "newsha", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100", ref_sha=ref_sha)
+
+    assert ci.state == "success"
+    assert ci.stale is False
+    assert ci.head_sha == "newsha"
+
+
+# -- get_ci_failures (issue #245 plan §2.1/§4, P4 — CI auto-fix feedback text) --
+
+_TIMELINE_PREFIX = "https://dev.azure.com/my-org/my-project/_apis/build/builds/7/timeline"
+
+
+def test_get_ci_failures_reads_failed_record_issues(vcs, mock_ado_request, ado_route_table):
+    # More specific route registered first: mock_ado_request matches by
+    # prefix in insertion order, and the timeline path also startswith
+    # _BUILDS_PREFIX.
+    ado_route_table[("GET", _TIMELINE_PREFIX)] = {
+        "records": [
+            {"id": "r1", "name": "Build", "type": "Task", "result": "failed",
+             "issues": [{"type": "error", "message": "compile error on line 10"}]},
+            {"id": "r2", "name": "Checkout", "type": "Task", "result": "succeeded", "issues": []},
+        ],
+    }
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "failed",
+                   "sourceVersion": "abc1234", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="abc1234")
+
+    assert len(failures) == 1
+    assert failures[0].check == "Build"
+    assert "compile error on line 10" in failures[0].excerpt
+
+
+def test_get_ci_failures_respects_limit(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _TIMELINE_PREFIX)] = {
+        "records": [
+            {"id": f"r{i}", "name": f"task{i}", "type": "Task", "result": "failed", "issues": []}
+            for i in range(5)
+        ],
+    }
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "failed",
+                   "sourceVersion": "abc1234", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="abc1234", limit=2)
+
+    assert len(failures) == 2
+
+
+def test_get_ci_failures_truncates_excerpt(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _TIMELINE_PREFIX)] = {
+        "records": [
+            {"id": "r1", "name": "Build", "type": "Task", "result": "failed",
+             "issues": [{"type": "error", "message": "x" * 500}]},
+        ],
+    }
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "failed",
+                   "sourceVersion": "abc1234", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="abc1234", max_chars=50)
+
+    assert len(failures[0].excerpt) == 50
+
+
+def test_get_ci_failures_no_failed_records_returns_empty(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _TIMELINE_PREFIX)] = {
+        "records": [
+            {"id": "r1", "name": "Build", "type": "Task", "result": "succeeded", "issues": []},
+        ],
+    }
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "abc1234", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="abc1234")
+
+    assert failures == []
+
+
+def test_get_ci_failures_no_builds_returns_empty(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {"count": 0, "value": []}
+
+    failures = vcs.get_ci_failures("autoswe/issue-100")
+
+    assert failures == []
+
+
+def test_get_ci_failures_stale_build_returns_empty(vcs, mock_ado_request, ado_route_table):
+    """A build for an older commit than ref_sha carries no relevant failure text."""
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "failed",
+                   "sourceVersion": "oldsha", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    failures = vcs.get_ci_failures("autoswe/issue-100", ref_sha="newsha")
+
+    assert failures == []
+
+
+def test_get_ci_failures_request_error_returns_empty(vcs, mock_ado_request, ado_route_table):
+    failures = vcs.get_ci_failures("autoswe/issue-100")
+
+    assert failures == []
+
+
+def test_get_ci_status_no_ref_sha_no_staleness_claim(vcs, mock_ado_request, ado_route_table):
+    """Without ref_sha the provider can't claim staleness — fresh verdicts."""
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "sourceVersion": "whatever", "id": 7,
+                   "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100")
+
+    assert ci.state == "success"
+    assert ci.stale is False
+
+
+def test_get_ci_status_source_version_missing_no_staleness_claim(
+    vcs, mock_ado_request, ado_route_table,
+):
+    """Older pipelines omit sourceVersion → no staleness claim even with ref_sha."""
+    ado_route_table[("GET", _BUILDS_PREFIX)] = {
+        "count": 1,
+        "value": [{"status": "completed", "result": "succeeded",
+                   "id": 7, "definition": {"name": "CI"}}],
+    }
+
+    ci = vcs.get_ci_status("autoswe/issue-100", ref_sha="newsha")
+
+    assert ci.state == "success"
+    assert ci.stale is False
+    assert ci.head_sha is None
+
+
+# ---------------------------------------------------------------------------
+# E3 — workItemRefs on PR create/update (issue #245)
+# ---------------------------------------------------------------------------
+
+def test_open_pull_request_includes_work_item_refs(vcs, mock_ado_request, ado_route_table):
+    """PR creation attaches workItemRefs from the branch's issue number."""
+    fixture = load_ado_fixture("pullrequest_created.json")
+    ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = fixture
+
+    vcs.open_pull_request(
+        branch="autoswe/issue-101", base="main", title="Fix", body="body",
+    )
+
+    call = mock_ado_request.calls[0]
+    assert call["body"]["workItemRefs"] == [{"id": 101}]
+
+
+def test_open_pull_request_no_work_item_refs_for_non_issue_branch(vcs, mock_ado_request, ado_route_table):
+    """A branch that doesn't match the autoswe/issue-N convention gets no
+    workItemRefs — the write is best-effort, not assumed."""
+    fixture = load_ado_fixture("pullrequest_created.json")
+    ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests")] = fixture
+
+    vcs.open_pull_request(branch="some/other-branch", base="main", title="Fix", body="body")
+
+    call = mock_ado_request.calls[0]
+    assert "workItemRefs" not in call["body"]
+
+
+def test_link_pr_to_issue_patches_work_item_refs(vcs, mock_ado_request, ado_route_table):
+    """link_pr_to_issue (self-heal path) PATCHes workItemRefs onto the PR."""
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests/43")] = {}
+
+    vcs.link_pr_to_issue(101, 43)
+
+    call = mock_ado_request.calls[0]
+    assert call["method"] == "PATCH"
+    assert call["body"] == {"workItemRefs": [{"id": 101}]}
+
+
+def test_commit_trailer_is_hash_issue_number(vcs):
+    """Azure's commit-message convention is bare #N (auto-link, no auto-close)."""
+    assert vcs.commit_trailer(101) == "#101"
+
+
+# ---------------------------------------------------------------------------
+# get_linkage (issue #245)
+# ---------------------------------------------------------------------------
+
+def test_get_linkage_no_pr_reports_pr_link_and_branch_missing(vcs):
+    state = vcs.get_linkage(101, "autoswe/issue-101", None)
+    assert "branch" in state.missing
+    assert "pr_link" in state.missing
+    assert state.pr_linked is False
+
+
+def test_get_linkage_linked_pr(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests/43")] = {
+        "pullRequestId": 43,
+        "status": "active",
+        "mergeStatus": "succeeded",
+        "workItemRefs": [{"id": "101"}],
+        "lastMergeSourceCommit": {"commitId": "cafebabe"},
+    }
+
+    state = vcs.get_linkage(101, "autoswe/issue-101", 43)
+
+    assert state.pr_linked is True
+    assert "pr_link" not in state.missing
+    assert state.merged is False
+    assert state.merge_state == "clean"
+    assert state.head_sha == "cafebabe"
+
+
+def test_get_linkage_unlinked_pr_reports_pr_link_missing(vcs, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests/43")] = {
+        "pullRequestId": 43, "status": "completed", "mergeStatus": "succeeded",
+        "workItemRefs": [],
+    }
+
+    state = vcs.get_linkage(101, "autoswe/issue-101", 43)
+
+    assert state.pr_linked is False
+    assert "pr_link" in state.missing
+    assert state.merged is True
+
+
+def test_get_linkage_read_failure_records_pr_link_missing(vcs, mock_ado_request, ado_route_table):
+    def _raise(method, path, pat, body):
+        raise RuntimeError("Azure API ... -> HTTP 503")
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/git/repositories/my-repo/pullrequests/43")] = _raise
+
+    state = vcs.get_linkage(101, "autoswe/issue-101", 43)
+
+    assert "pr_link" in state.missing
+
+
+# ---------------------------------------------------------------------------
+# E1 — ADO branch-link capability (unverified per plan §1.3)
+# ---------------------------------------------------------------------------
+
+def test_azure_declares_no_branch_link_capability(vcs):
+    assert Capability.BRANCH_LINK not in vcs.capabilities()

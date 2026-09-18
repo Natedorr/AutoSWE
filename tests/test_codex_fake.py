@@ -285,6 +285,30 @@ class TestCodexFakeFidelity:
         assert "sandbox" not in fake.calls[0]
         assert fake.calls[0]["bypass"] is True
 
+    def test_prompt_delivered_over_stdin(self):
+        """The prompt is written to stdin, not argv — never appears in the
+        command and is recorded via the fake stdin sink (mirrors PiFake)."""
+        fake = CodexFake()
+        fake.script_response("ok", session_id="s1")
+
+        spec = _make_spec()
+        spec.prompt = "A" * 45_000  # well over Windows' ~32k CreateProcess argv limit
+
+        from autoswe.harness.backends.codex import CodexBackend
+
+        async def _run():
+            with fake:
+                backend = CodexBackend()
+                return await backend.run(spec)
+
+        result = _run_async(_run())
+
+        assert result.subtype == "success"
+        assert len(fake.calls) == 1
+        call = fake.calls[0]
+        assert call["prompt"] == spec.prompt
+        assert call["prompt_prefix"] == spec.prompt[:80]
+
     def test_multiple_responses(self):
         """Multiple scripted responses are consumed in order."""
         fake = CodexFake()

@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 # Re-export the existing RunResult so types.py is self-contained
 from autoswe.harness.runner import RunResult  # noqa: F401
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue
 
 # --------------------------------------------------------------------------
 # Declarative field registry — single source of truth for TaskState ↔ queue
@@ -57,6 +57,7 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("session_id", "session_id", None),
     TaskField("last_good_session_id", "last_good_session_id", None),
     TaskField("last_good_session_backend", "last_good_session_backend", None),
+    TaskField("last_replayed_command", "last_replayed_command", None),
     TaskField("pr_number", "pr_number", None),
     TaskField("guard_blocked", "_guard_blocked", False),
     TaskField("gh_closed", "gh_closed", False),
@@ -80,6 +81,29 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     TaskField("fix_summary", "fix_summary", ""),
     TaskField("rereview_after_fix", "rereview_after_fix", False),
     TaskField("pr_url", "pr_url", None),
+    TaskField("linkage_state", "linkage_state", None),
+    TaskField("linkage_missing", "linkage_missing", (),
+              transform=lambda v: tuple(v) if isinstance(v, list) else v),
+    TaskField("ci_last_checked", "ci_last_checked", None),
+    TaskField("ci_status", "ci_status", None),
+    TaskField("ci_failed_from_status", "ci_failed_from_status", None),
+    TaskField("ci_last_notified_sha", "ci_last_notified_sha", None),
+    TaskField("ci_error_notified", "ci_error_notified", False),
+    TaskField("ci_error_notified_sha", "ci_error_notified_sha", None),
+    # Shared recoverable-gate policy (issue #245 §2.5) — one counter and one
+    # per-commit watermark drive auto-fix for BOTH test_failed (local test
+    # gate) and ci_failed (remote CI watch). See orch/gate_policy.py.
+    TaskField("gate_attempt_count", "gate_attempt_count", 0),
+    TaskField("gate_last_fixed_sha", "gate_last_fixed_sha", None),
+    # Local test-gate bookkeeping, parallel to the ci_* fields above but
+    # specific to the test_failed signal.
+    TaskField("test_failed_sha", "test_failed_sha", None),
+    TaskField("test_failure_detail", "test_failure_detail", None),
+    TaskField("test_gate_limit_notified", "test_gate_limit_notified", False),
+    # pr_deferred (issue #245 §2.6): a create_pr effect blocked by pending/
+    # failing/unreachable CI sets this instead of asking the user to re-post
+    # /pr; the next green CI observation re-emits create_pr and clears it.
+    TaskField("pr_deferred", "pr_deferred", False),
 )
 
 
@@ -157,6 +181,14 @@ class TaskState:
     # fix (the SDK can't resolve a foreign-backend session id). Never cleared on
     # FAILED, mirroring last_good_session_id.
     last_good_session_backend: str | None = None
+    # The slash command a /retry actually REPLAYED (after its fallback rules:
+    # non-replayable -> /fix, /review on failed -> /fix). Set by emit() only for
+    # kind="retry"; a subsequent /retry follows THIS (the last substantive command
+    # that ran) instead of last_dispatched_command, which stays the literal
+    # "/retry" so the re-dispatch dedup in decide() can match it. A plain
+    # /plan / /fix / /review dispatch clears it (see emit()) so it never dangles
+    # past the retry that set it. None otherwise.
+    last_replayed_command: str | None = None
     created_at: str = ""
     last_synced: str = ""
     provider: str = "github"
@@ -182,6 +214,54 @@ class TaskState:
     # pr_number is the machine-facing cache (idempotency, result.json); pr_url
     # is the human-facing link for operators inspecting queue.json.
     pr_url: str | None = None
+    # Last observed LinkageState (as a dict) and its missing-edge names, set by
+    # autoswe.vcs.linkage.ensure_links at branch/PR-open/merge-observation call
+    # sites (issue #245 §1.4). Rendered as a checklist by `queue status` / `/sync`.
+    linkage_state: dict | None = None
+    linkage_missing: tuple[str, ...] = ()
+    # Last-known CI observation, cached by autoswe.providers.adapter.read_ci
+    # (issue #245 plan §2.2) — the watermark timestamp and the serialized
+    # CIStatus. Rendered by ``/sync`` and ``queue status``; a value here
+    # persists across cycles that don't re-consult the API (throttled).
+    ci_last_checked: str | None = None
+    ci_status: dict | None = None
+    # CI-watch bookkeeping for the ci_failed status (issue #245 plan §2.3, P3).
+    # ci_failed_from_status is the status to restore on a green build — set
+    # when decide()/emit() first parks the task at ci_failed, cleared on
+    # recovery. ci_last_notified_sha is the head_sha of the last failure
+    # already surfaced as a comment, so an unchanged red build doesn't churn
+    # a comment every poll. ci_error_notified is a one-time flag for the
+    # "CI could not be consulted" warning, so an error streak comments once;
+    # ci_error_notified_sha is the head_sha (possibly None) that flag was
+    # raised for, so a new push during a persistent error streak still warns.
+    ci_failed_from_status: str | None = None
+    ci_last_notified_sha: str | None = None
+    ci_error_notified: bool = False
+    ci_error_notified_sha: str | None = None
+    # Shared recoverable-gate auto-fix bookkeeping (issue #245 plan §2.5). One
+    # counter, kept *separate* from attempt_count so a gate-triggered loop can
+    # never consume the budget a human /fix depends on (brake 1), drives
+    # auto-fix recovery for BOTH ci_failed and test_failed. Resets to 0 only
+    # on a green signal (ci_recovered) or a human-dispatched Claude action
+    # (emit()'s common patch); never on a push the agent itself made.
+    # gate_last_fixed_sha is the per-commit watermark (brake 2): an auto-fix
+    # is dispatched at most once per head/local commit, checked before the
+    # counter so a lost/reset counter still can't loop on an unchanged commit.
+    gate_attempt_count: int = 0
+    gate_last_fixed_sha: str | None = None
+    # Local test-gate (test_failed) bookkeeping, parallel to the ci_* fields
+    # above. test_failed_sha is the commit the branch suite is currently red
+    # for; test_failure_detail is the pytest output tail used to build the
+    # auto-fix guidance; test_gate_limit_notified is a one-time flag so an
+    # exhausted gate budget comments once, not every poll (mirrors
+    # ci_error_notified).
+    test_failed_sha: str | None = None
+    test_failure_detail: str | None = None
+    test_gate_limit_notified: bool = False
+    # pr_deferred (issue #245 plan §2.6): a create_pr effect blocked by
+    # pending/failing/unreachable CI sets this instead of asking the user to
+    # re-post /pr; the next green CI observation re-emits create_pr.
+    pr_deferred: bool = False
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:
@@ -232,6 +312,12 @@ class World:
     task: TaskState
     cfg: dict
     repo_cfg: dict
+    # This poll's CI observation, or None when not consulted this cycle
+    # (ineligible, CI_WATCH off, or throttled — issue #245 plan §2.2). A
+    # distinct, checkable state from an actual CIStatus, mirroring the
+    # ``comments_fetched`` idiom. decide() does not consume this yet (P2 is
+    # report-only); it is plumbed through for /sync + queue status.
+    ci: CIStatus | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +335,10 @@ class Action:
         "mark_failed_limit",
         "refused",
         "review",
+        "ci_failed",
+        "ci_recovered",
+        "ci_error_warn",
+        "retry_deferred_pr",
     ]
     slug: str
     plan_branch: str | None = None
@@ -257,11 +347,20 @@ class Action:
     attempt_count: int = 0
     triggering_comment_id: int | None = None
     user_reply_text: str | None = None
-    limit_reason: Literal["attempts", "time"] | None = None
+    limit_reason: Literal["attempts", "time", "ci", "gate"] | None = None
     # For kind="refused": the slash command that was refused
     # (e.g. "/pr" on a failed task, "/fix" on a guard-blocked task).
     # emit() uses it to pick the refusal message.
     refused_command: str | None = None
+    # Set to "ci" or "gate" for a kind="fix" auto-dispatched by the shared
+    # recoverable-gate policy (issue #245 plan §2.3-§2.5) — distinguishes it
+    # from a human-triggered "fix" so emit() bumps the shared
+    # gate_attempt_count / gate_last_fixed_sha watermark instead of the phase
+    # attempt_count. "ci" is the remote CI watch (run() fetches and appends
+    # get_ci_failures() text to the guidance); "gate" is the local post-fix
+    # test gate (guidance is already fully assembled by decide()). None for
+    # every human dispatch.
+    trigger: Literal["ci", "gate"] | None = None
 
 
 @dataclass(frozen=True)

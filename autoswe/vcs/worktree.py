@@ -7,7 +7,7 @@ from autoswe.core.config import AUTOSWE_DIR
 from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.factory import get_vcs
-from autoswe.providers.github.vcs import MissingScopeError
+from autoswe.vcs.linkage import ensure_links
 
 dbg = get_debug_logger()
 
@@ -81,6 +81,51 @@ def _run(args: list, cwd: Path | None = None, check: bool = True) -> subprocess.
     if args and args[0] == "git":
         args = [args[0], "-c", "credential.helper=", *args[1:]]
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check, **GIT_TEXT_ARGS)
+
+
+# Lines written to the shared repo-local git exclude. These keep build
+# artifacts (from any pytest run a coding session does) and the auto-generated
+# CLAUDE.md out of the per-issue branch:
+#   - __pycache__ / *.pyc / .pytest_cache: never staged by `git add -A`, so
+#     autoSWE and the agent's own commits both skip them.
+#   - CLAUDE.md: the initializer (autoswe.harness.initializer) generates it for
+#     the coding agent's benefit but must NOT commit it to the feature branch.
+#     Git-ignoring it (vs. merely leaving it untracked) is what lets it survive
+#     the review phase's `git clean -fd` backstop (ensure_worktree_unchanged)
+#     without re-dirtying the branch every cycle (finding C2).
+_REPO_EXCLUDE_LINES = (
+    "__pycache__/",
+    "*.pyc",
+    ".pytest_cache/",
+    "CLAUDE.md",
+)
+
+
+def _ensure_repo_exclude(main: Path) -> None:
+    """Idempotently append autoSWE's exclusion lines to the shared repo exclude.
+
+    ``main`` is the per-repo full clone. Its ``.git/info/exclude`` is *shared*
+    by every linked issue worktree (``git worktree add``), so writing it here
+    once covers all worktrees for the repo and both providers. It is a local,
+    non-committed override, so it never appears in a PR. Pure Python; never
+    raises (best-effort — a failure here should not block a worktree build).
+    """
+    exclude = main / ".git" / "info" / "exclude"
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        present = {
+            line.strip() for line in existing.splitlines() if line.strip() and not line.strip().startswith("#")
+        }
+        missing = [ln for ln in _REPO_EXCLUDE_LINES if ln not in present]
+        if not missing:
+            return
+        block = "\n".join(missing)
+        if existing and not existing.endswith("\n"):
+            block = "\n" + block
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text((existing + block + "\n").lstrip("\n"), encoding="utf-8")
+    except Exception as e:  # Non-fatal: a missing/readonly exclude must not block work.
+        dbg.debug("ensure_repo_exclude failed (non-fatal): %s", e)
 
 
 def _get_default_branch(main: Path, base_branch: str) -> str:
@@ -174,11 +219,31 @@ def ensure_clone(
     _run(["git", "-C", str(main), "checkout", branch_for_main])
     _run(["git", "-C", str(main), "reset", "--hard", f"origin/{branch_for_main}"])
 
+    # Regardless of fresh-clone vs. reuse, keep the shared repo-local exclude
+    # current so build artifacts and the auto-generated CLAUDE.md stay out of
+    # every issue worktree's branch (finding C2).
+    _ensure_repo_exclude(main)
+
 
 def is_dirty(wt: Path) -> bool:
     """Return True if the worktree has uncommitted changes or untracked files."""
     result = _run(["git", "-C", str(wt), "status", "--porcelain"], check=False)
     return bool(result.stdout.strip())
+
+
+def resolve_branch_head(wt: Path) -> str | None:
+    """Return the worktree's ``HEAD`` sha, or ``None`` if it cannot be resolved.
+
+    Used to correlate a provider CI verdict against the commit the branch is
+    actually at (Azure ``sourceVersion`` staleness, e.g.). Best-effort: a
+    missing/corrupt worktree or a ``rev-parse`` failure simply yields ``None``
+    so the caller falls back to a staleness-agnostic CI read.
+    """
+    if not wt.exists():
+        return None
+    result = _run(["git", "-C", str(wt), "rev-parse", "HEAD"], check=False)
+    sha = result.stdout.strip() if result.returncode == 0 else ""
+    return sha or None
 
 
 def fetch_prune(main: Path) -> None:
@@ -512,24 +577,20 @@ def create_worktree(
         # Best-effort: link branch to issue in platform UI (Development sidebar).
         # Runs BEFORE the remote branch is pushed, so the GraphQL createLinkedBranch
         # mutation can create the ref. Reused branches (branch_exists=True) skip this.
+        # Routed through ensure_links (issue #245 E1) so the capability model and
+        # missing-edge bookkeeping apply uniformly across call sites; failures are
+        # swallowed inside ensure_links itself (best-effort, never blocks the push).
         if cfg.get("LINK_BRANCH_TO_ISSUE", True):
-            try:
-                full_sha_result = _run(
-                    ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],
-                    check=False,
+            full_sha_result = _run(
+                ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],
+                check=False,
+            )
+            full_base_sha = full_sha_result.stdout.strip()
+            if full_base_sha:
+                ensure_links(
+                    {"issue_number": issue_num}, repo_cfg, cfg,
+                    phase="branch", vcs=get_vcs(repo_cfg), base_sha=full_base_sha,
                 )
-                full_base_sha = full_sha_result.stdout.strip()
-                if full_base_sha:
-                    get_vcs(repo_cfg).link_branch_to_issue(
-                        issue_num, full_base_sha, branch,
-                    )
-            except MissingScopeError:
-                dbg.warning(
-                    "WORKTREE: link_branch_to_issue skipped — "
-                    "PAT missing permission to create linked branch"
-                )
-            except Exception as e:  # Best-effort; log and continue.
-                dbg.warning("WORKTREE: link_branch_to_issue failed: %s", e, exc_info=True)
 
     if new_branch and push_new:
         _run(["git", "-C", str(main), "push", "-u", "origin", branch])
@@ -539,14 +600,31 @@ def create_worktree(
     return wt
 
 
-def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, base_branch: str = "main", provider: str = "github") -> dict:
+def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, base_branch: str = "main", provider: str = "github", *, before_sha: str | None = None, cfg: dict | None = None) -> dict:
     """Stage, commit (if changes), and push.
 
+    When ``LINK_COMMIT_TRAILER`` is enabled (default) *msg* gets the
+    provider's ``commit_trailer()`` appended (edge E2, issue #245) — e.g.
+    GitHub's ``"Refs #12"`` or Azure's ``"#12"`` — so the commit shows up in
+    the issue's Development/links timeline without closing it.
+
     Preserves Claude auto-commits as a commit trail rather than squashing:
-    - If Claude auto-committed during the session, the last commit is amended
-      with the proper message and all other auto-commits are kept intact.
-    - If Claude did not auto-commit, working-tree changes are staged into a
+    - If the coding agent auto-committed during the session, the last commit is
+      amended with the proper message and all other auto-commits are kept
+      intact.
+    - If the agent did not auto-commit, working-tree changes are staged into a
       single new commit.
+
+    *before_sha* (issue #180 / pi E2E) is the branch head captured BEFORE the
+    coding session ran. It is the correct baseline for "new commits this
+    session": a weaker backend (pi) may *commit AND push* during the session, in
+    which case the ``git fetch`` below has already synced ``origin/{branch}`` up
+    to the agent's push — so ``origin/{branch}..HEAD`` is empty and the work is
+    invisible, and autoSWE wrongly reports "no changes detected" and skips the
+    post-fix test gate. Comparing against the pre-session head makes a pushed
+    session commit visible. When *None* (callers with no session baseline, e.g.
+    the CLAUDE.md initializer or the orphan-recovery path) the legacy
+    ``origin/{branch}`` baseline is used.
 
     Returns dict with:
       - committed: bool
@@ -554,7 +632,12 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
       - branch: str      (branch name, e.g. "autoswe/issue-42")
     """
     repo_cfg = {"owner": owner, "repo": repo, "token": "", "provider": provider}
-    branch = get_vcs(repo_cfg).branch_name(issue_num)
+    vcs = get_vcs(repo_cfg)
+    branch = vcs.branch_name(issue_num)
+    if (cfg or {}).get("LINK_COMMIT_TRAILER", True):
+        trailer = vcs.commit_trailer(issue_num)
+        if trailer and trailer not in msg:
+            msg = f"{msg}\n\n{trailer}"
     dbg.debug("WORKTREE: commit_and_push msg=%s", msg)
 
     # Check for in-progress merge/rebase operations
@@ -578,22 +661,47 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
     # Fetch latest remote state (keeps token current, picks up prior pushes)
     _run(["git", "-C", str(wt), "fetch", "origin"], check=False)
 
-    # If local branch is behind remote (prior push), rebase so worktree is current.
-    # Without this, reused worktrees accumulate stale state between dispatch cycles.
+    # Baseline for "new commits from this session". Prefer the pre-session head
+    # captured by the caller (before_sha) — a pushed session commit moves
+    # origin/{branch} up (via the fetch above), which would hide it against that
+    # baseline. Fall back to origin/{branch} for callers with no session
+    # baseline (CLAUDE.md initializer, orphan recovery).
+    baseline = before_sha or f"origin/{branch}"
+
+    # If the local branch is behind origin but has NO work of its own ahead of
+    # the session baseline, fast-forward it to origin so the worktree is
+    # current. A reset --hard to origin here is SAFE when we're purely behind:
+    # every local commit is already reachable on origin, so nothing is
+    # discarded — it just moves the local ref forward. Critically, this is what
+    # exposes a session commit the agent pushed directly (a weaker backend like
+    # pi may commit via its bash tool and push without updating the local
+    # branch ref, leaving HEAD behind origin): the forward reset lands the
+    # pushed commit on the local ref so the ahead-check below can see it.
+    # We guard against the diverged case (local has commits NOT on origin) so
+    # a concurrent push can never trigger a reset that discards local work.
     behind = _run(["git", "-C", str(wt), "log", f"HEAD..origin/{branch}", "--oneline"], check=False)
-    if behind.stdout.strip():
+    ahead = _run(["git", "-C", str(wt), "log", f"{baseline}..HEAD", "--oneline"], check=False)
+    if behind.stdout.strip() and not ahead.stdout.strip():
+        # Purely behind (no local work of our own): fast-forward to origin.
+        # This exposes a session commit the agent pushed directly — a weaker
+        # backend (pi) may commit via its bash tool and push without updating
+        # the local branch ref, leaving HEAD behind origin.
         _run(["git", "-C", str(wt), "reset", "--hard", f"origin/{branch}"])
         log(f"[WORKTREE] Reset {branch} to match origin (was behind)")
+        # The forward reset moved HEAD to origin, so re-read the ahead range —
+        # the pre-reset value is now stale and would miss the exposed commit.
+        ahead = _run(["git", "-C", str(wt), "log", f"{baseline}..HEAD", "--oneline"], check=False)
 
     log(f"[WORKTREE] Starting commit_and_push on {branch}: msg={msg[:80]!r}")
 
-    # Check if Claude Code already committed during this session.
-    # Compare against origin/{branch} (not base_branch) so we only see commits
-    # from the current dispatch cycle — after the reset-to-origin above,
-    # anything ahead of origin/{branch} is new work from this session.
-    # This preserves the commit trail: each /fix run adds its own commit(s)
-    # rather than squashing everything into one.
-    ahead = _run(["git", "-C", str(wt), "log", f"origin/{branch}..HEAD", "--oneline"], check=False)
+    # Check if the coding agent already committed during this session.
+    # *ahead* is commits from the session baseline (before_sha, or
+    # origin/{branch} when no baseline is supplied) — the current dispatch
+    # cycle only, NOT prior /fix runs. Using origin/{branch} alone would miss
+    # the case where a weaker backend (pi) committed AND pushed, because the
+    # fetch above has already synced origin/{branch} up to that push. This
+    # preserves the commit trail: each /fix run adds its own commit(s) rather
+    # than squashing into one.
     if ahead.stdout.strip():
         ahead_lines = ahead.stdout.strip().split("\n")
         count = len(ahead_lines)
@@ -618,7 +726,16 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
         log(f"[WORKTREE] git commit ({commit_sha[:8]}) on {branch}: {msg[:60]!r}")
         return {"committed": True, "commit_sha": commit_sha, "branch": branch}
 
-    _run(["git", "-C", str(wt), "add", "-A"])
+    # Stage everything EXCEPT build artifacts. The shared repo-local exclude
+    # (see _ensure_repo_exclude) already keeps these out for worktrees built after
+    # this change; the pathspec is defense-in-depth so a /fix commit is clean even
+    # on a worktree whose main clone predates that write. CLAUDE.md is NOT excluded
+    # here — it is git-ignored via the repo exclude (not a stage-exclusion) so it
+    # survives the review's `git clean -fd` backstop without being committed.
+    _run([
+        "git", "-C", str(wt), "add", "-A",
+        ":(exclude)**/__pycache__/", ":(exclude)**/*.pyc", ":(exclude)**/.pytest_cache/",
+    ])
     diff = _run(["git", "-C", str(wt), "diff", "--cached", "--quiet"], check=False)
     if diff.returncode == 0:
         log(f"[WORKTREE] No changes to commit in {wt}")
