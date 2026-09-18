@@ -23,10 +23,12 @@ Path helpers (`vcs/worktree.py`):
 
 ## Lifecycle
 
-### `ensure_clone(owner, repo, token, cfg, base_branch, provider)`
+### `ensure_clone(owner, repo, token, cfg, base_branch, provider, default_branch=None)`
 
 1. If `_main/` doesn't exist → `git clone` via VCS `clone_url()` (token embedded)
-2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch + checkout base_branch + reset --hard origin/{base_branch}`
+2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch`
+3. On **both** paths the `_main` checkout branch is resolved identically: `default_branch or _get_default_branch(...)` (origin/HEAD auto-detect). `base_branch` is never used for the `_main` checkout or the commit-verification guard — it may be a custom `--branch` value that doesn't exist on origin yet, and `create_worktree` creates a missing base from the default downstream (issue #260)
+4. `rev-parse --verify origin/{branch}` — hard `RuntimeError("has no commits on …")` for genuinely empty repos, then `checkout <branch> + reset --hard origin/<branch>`
 
 ### `create_worktree(owner, repo, issue_num, base_branch, token, cfg, provider)`
 

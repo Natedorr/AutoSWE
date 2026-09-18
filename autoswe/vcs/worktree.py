@@ -87,18 +87,33 @@ def _get_default_branch(main: Path, base_branch: str) -> str:
     """Determine the repo's actual default branch for _main checkout.
 
     Fallback chain:
-    1. origin/HEAD symbolic ref (e.g. "refs/heads/main")
+    1. origin/HEAD ref — symbolic on git < 2.33 clones, an *indirect* ref on
+       git >= 2.33 (where ``git symbolic-ref`` refuses it, so fall back to
+       ``rev-parse --symbolic-full-name``, which reads both ref types)
     2. base_branch (from repos.json config — authoritative default)
     3. Check which of main/master exists via git ls-remote
     """
-    # 1. Try origin/HEAD symbolic ref
+    # 1. Try origin/HEAD symbolic ref (e.g. "refs/heads/main")
     head = _run(
         ["git", "-C", str(main), "symbolic-ref", "--short", "origin/HEAD"],
         check=False,
     )
+    if head.returncode != 0:
+        # git >= 2.33 clones store origin/HEAD as an indirect ref —
+        # `symbolic-ref` fails on it, but rev-parse still resolves it.
+        head = _run(
+            ["git", "-C", str(main), "rev-parse", "--symbolic-full-name",
+             "origin/HEAD"],
+            check=False,
+        )
     if head.returncode == 0:
         ref = head.stdout.strip()
-        branch = ref.replace("refs/heads/", "") if ref.startswith("refs/heads/") else ref
+        if ref.startswith("refs/remotes/origin/"):
+            branch = ref[len("refs/remotes/origin/"):]
+        elif ref.startswith("refs/heads/"):
+            branch = ref[len("refs/heads/"):]
+        else:
+            branch = ref
         if branch:
             return branch
 
@@ -131,38 +146,33 @@ def ensure_clone(
         main.parent.mkdir(parents=True, exist_ok=True)
         log(f"[WORKTREE] Cloning {owner}/{repo} -> {main}")
         _run(["git", "clone", clone_url, str(main)])
-        # Verify the repo has commits (empty repos have no branches to checkout)
-        verify = _run(
-            ["git", "-C", str(main), "rev-parse", "--verify", f"origin/{base_branch}"],
-            check=False,
-        )
-        if verify.returncode != 0:
-            raise RuntimeError(
-                f"Repository {owner}/{repo} has no commits on '{base_branch}'; "
-                "autoSWE requires an initialized repository."
-            )
     else:
         # Update the remote URL so token stays current
         _run(["git", "-C", str(main), "remote", "set-url", "origin", clone_url])
         # Hard pull so _main is always current for new worktrees.
-        # Use default_branch for _main checkout; fall back to auto-detection.
-        # base_branch may be a custom --branch value that doesn't exist on _main.
         _run(["git", "-C", str(main), "fetch", "origin"])
-        branch_for_main = default_branch or _get_default_branch(main, base_branch)
 
-        # Verify the repo has commits on the target branch (empty repos have no refs)
-        verify = _run(
-            ["git", "-C", str(main), "rev-parse", "--verify", f"origin/{branch_for_main}"],
-            check=False,
+    # Resolve the _main checkout branch identically on both the fresh-clone
+    # and existing-clone paths (issue #260): default_branch when the caller
+    # knows the repo default, else auto-detection. base_branch may be a custom
+    # --branch value that doesn't exist on origin yet — it must never drive
+    # the _main checkout or the "has no commits" guard here; create_worktree
+    # creates a missing base from the default downstream.
+    branch_for_main = default_branch or _get_default_branch(main, base_branch)
+
+    # Verify the repo has commits on the target branch (empty repos have no refs)
+    verify = _run(
+        ["git", "-C", str(main), "rev-parse", "--verify", f"origin/{branch_for_main}"],
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise RuntimeError(
+            f"Repository {owner}/{repo} has no commits on '{branch_for_main}'; "
+            "autoSWE requires an initialized repository."
         )
-        if verify.returncode != 0:
-            raise RuntimeError(
-                f"Repository {owner}/{repo} has no commits on '{branch_for_main}'; "
-                "autoSWE requires an initialized repository."
-            )
 
-        _run(["git", "-C", str(main), "checkout", branch_for_main])
-        _run(["git", "-C", str(main), "reset", "--hard", f"origin/{branch_for_main}"])
+    _run(["git", "-C", str(main), "checkout", branch_for_main])
+    _run(["git", "-C", str(main), "reset", "--hard", f"origin/{branch_for_main}"])
 
 
 def is_dirty(wt: Path) -> bool:
