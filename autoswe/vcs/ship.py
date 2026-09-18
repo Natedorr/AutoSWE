@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.base import PRResult
 from autoswe.providers.factory import get_tracker, get_vcs
+from autoswe.vcs import worktree as worktree_mod
 from autoswe.vcs.linkage import ensure_links
 from autoswe.vcs.pr_gate import preflight_pr
 
@@ -132,6 +133,27 @@ def open_pr(
         dbg.debug("SHIP: preflight blocked PR: %s", reason)
         return f"FAILED: {reason}"
 
+    # The configured PR base must actually exist on origin — otherwise the
+    # provider rejects the PR (GitHub HTTP 422 "base invalid"). The base comes
+    # from repos.json / the queue entry and defaults to a guessed "main" when
+    # unset, which is wrong for repos whose real default is e.g. "master"
+    # (issue #260). When the worktree can answer, fall back to the repo's
+    # actual default branch; when it can't (no worktree, no network), proceed
+    # as before so the provider's own error surfaces.
+    base_fallback_note = ""
+    try:
+        wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
+        if wt.exists() and not worktree_mod.remote_branch_exists_on(wt, base_branch):
+            actual_default = worktree_mod.remote_default_branch(wt)
+            if actual_default and actual_default != base_branch:
+                log(f"[SHIP] base branch '{base_branch}' missing on origin — "
+                    f"targeting repo default '{actual_default}' (issue #260)")
+                base_fallback_note = (f" (base fell back to repo default "
+                                      f"{actual_default})")
+                base_branch = actual_default
+    except Exception as e:  # Guard is best-effort; never block the PR on it
+        dbg.debug("SHIP: base-branch existence check failed: %s", e)
+
     # Build informative PR body from task data
     fix_summary = task.get("fix_summary", "") or ""
     issue_body = task.get("body", "") or ""
@@ -173,7 +195,7 @@ def open_pr(
         log(f"[SHIP] PR created: {pr_ref} base={base_branch} head={branch}")
         with contextlib.suppress(Exception):
             tracker.post_comment(issue_num,
-               "Pull request opened: " + pr_display + AUTOSWE_BOT_FOOTER)
+               "Pull request opened: " + pr_display + base_fallback_note + AUTOSWE_BOT_FOOTER)
         _record_pr(task, pr_url, pr_result.number)
         with contextlib.suppress(Exception):
             ensure_links(task, rcfg, cfg, phase="pr_open", vcs=vcs)

@@ -97,6 +97,14 @@ Strategy is controlled by `cfg["SYNC_STRATEGY"]` (default: `"merge"`).
 6. On success → `git push --force-with-lease origin <branch>`, return `{"synced": True, "conflict": False, "branch": ..., "ahead": N}`
 7. On conflict → leave worktree in rebase-in-progress state, return `{"synced": False, "conflict": True, "branch": ..., "conflict_files": [...], "rebase": True}`
 
+## Remote Ref Checks
+
+### `remote_branch_exists(main, branch)` / `remote_branch_exists_on(wt, branch)` / `remote_default_branch(wt)`
+
+- `remote_branch_exists(main, branch)` — **local** check: `origin/<branch>` present in the main clone's remote-tracking refs (call `fetch_prune()` first so they reflect the remote). Used by `purge_gone_branches`.
+- `remote_branch_exists_on(wt, branch)` — **live** `git ls-remote origin refs/heads/<branch>` check; does not trust stale tracking refs. Fails closed (False) on any error. Used by `ship.open_pr` to guard the PR base (issue #260).
+- `remote_default_branch(wt)` — the repo's actual default branch per origin (`git ls-remote --symref origin HEAD`), or None. Fallback target when the configured PR base does not exist on origin.
+
 ## Branch Naming
 
 `autoswe/issue-{N}` is the only authoritative format. Both GitHub and Azure providers use the same convention (see `providers/github/vcs.py:32` and `providers/azure/vcs.py:65`).

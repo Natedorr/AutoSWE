@@ -132,8 +132,8 @@ def _get_default_branch(main: Path, base_branch: str) -> str:
     """Determine the repo's actual default branch for _main checkout.
 
     Fallback chain:
-    1. origin/HEAD ref — symbolic on git < 2.33 clones, an *indirect* ref on
-       git >= 2.33 (where ``git symbolic-ref`` refuses it, so fall back to
+    1. origin/HEAD ref — symbolic on older git clones, an *indirect* ref on
+       recent ones (where ``git symbolic-ref`` refuses it, so fall back to
        ``rev-parse --symbolic-full-name``, which reads both ref types)
     2. base_branch (from repos.json config — authoritative default)
     3. Check which of main/master exists via git ls-remote
@@ -144,8 +144,8 @@ def _get_default_branch(main: Path, base_branch: str) -> str:
         check=False,
     )
     if head.returncode != 0:
-        # git >= 2.33 clones store origin/HEAD as an indirect ref —
-        # `symbolic-ref` fails on it, but rev-parse still resolves it.
+        # git >= 2.33 clones store origin/HEAD as an indirect ref (observed on
+        # git 2.43) — `symbolic-ref` refuses it, but rev-parse still resolves it.
         head = _run(
             ["git", "-C", str(main), "rev-parse", "--symbolic-full-name",
              "origin/HEAD"],
@@ -268,6 +268,41 @@ def remote_branch_exists(main: Path, branch: str) -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+def remote_branch_exists_on(wt: Path, branch: str) -> bool:
+    """Live check (``git ls-remote``) that ``refs/heads/<branch>`` exists on origin.
+
+    Unlike :func:`remote_branch_exists` this does not trust local
+    remote-tracking refs — the worktree may never have fetched the branch in
+    question. A failed ``ls-remote`` (network, no origin, no git dir) yields
+    False, so callers must treat this as best-effort.
+    """
+    result = _run(
+        ["git", "-C", str(wt), "ls-remote", "origin", f"refs/heads/{branch}"],
+        check=False,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def remote_default_branch(wt: Path) -> str | None:
+    """The repo's actual default branch per origin, or None.
+
+    Uses ``git ls-remote --symref origin HEAD`` so the answer comes from the
+    remote (works even when local tracking refs are stale or absent).
+    """
+    result = _run(
+        ["git", "-C", str(wt), "ls-remote", "--symref", "origin", "HEAD"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("ref:"):
+            ref = line[len("ref:"):].split("\t", 1)[0].strip()
+            if ref.startswith("refs/heads/"):
+                return ref[len("refs/heads/"):]
+    return None
 
 
 def remove_worktree(main: Path, wt: Path, branch: str) -> bool:

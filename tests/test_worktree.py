@@ -2823,6 +2823,103 @@ def test_remote_branch_exists_false(tmp_path, monkeypatch):
         assert remote_branch_exists(tmp_path / "_main", "autoswe/issue-5") is False
 
 
+def test_remote_branch_exists_on_true(tmp_path, monkeypatch):
+    """remote_branch_exists_on: live ls-remote hit → True (issue #260)."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        calls.append(list(args))
+        return MagicMock(returncode=0, stdout="cad33b\trefs/heads/master\n", stderr="")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import remote_branch_exists_on
+        assert remote_branch_exists_on(tmp_path / "wt", "master") is True
+
+    # The check must be a live ls-remote against refs/heads/<branch>.
+    assert any(
+        "ls-remote" in c and "refs/heads/master" in c for c in calls
+    ), f"expected ls-remote refs/heads/master, got: {calls}"
+
+
+def test_remote_branch_exists_on_false_when_absent(tmp_path, monkeypatch):
+    """remote_branch_exists_on: empty ls-remote output → False."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    def fake_run(args, cwd=None, check=True):
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import remote_branch_exists_on
+        assert remote_branch_exists_on(tmp_path / "wt", "main") is False
+
+
+def test_remote_branch_exists_on_false_on_error(tmp_path, monkeypatch):
+    """remote_branch_exists_on: ls-remote failure (network/no origin) → False."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    def fake_run(args, cwd=None, check=True):
+        return MagicMock(returncode=128, stdout="", stderr="fatal: no origin")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import remote_branch_exists_on
+        assert remote_branch_exists_on(tmp_path / "wt", "main") is False
+
+
+def test_remote_default_branch_parses_symref(tmp_path, monkeypatch):
+    """remote_default_branch parses the 'ref: …' line of ls-remote --symref."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    def fake_run(args, cwd=None, check=True):
+        assert "--symref" in args and "HEAD" in args
+        return MagicMock(
+            returncode=0,
+            stdout="ref: refs/heads/master\tHEAD\ncad33b\tHEAD\n",
+            stderr="",
+        )
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import remote_default_branch
+        assert remote_default_branch(tmp_path / "wt") == "master"
+
+
+def test_remote_default_branch_none_on_failure(tmp_path, monkeypatch):
+    """remote_default_branch: ls-remote failure → None (best-effort)."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    def fake_run(args, cwd=None, check=True):
+        return MagicMock(returncode=128, stdout="", stderr="")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import remote_default_branch
+        assert remote_default_branch(tmp_path / "wt") is None
+
+
+def test_remote_default_branch_none_without_symref_line(tmp_path, monkeypatch):
+    """remote_default_branch: no 'ref:' line in output → None."""
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    def fake_run(args, cwd=None, check=True):
+        return MagicMock(returncode=0, stdout="cad33b\tHEAD\n", stderr="")
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import remote_default_branch
+        assert remote_default_branch(tmp_path / "wt") is None
+
+
 def test_remove_worktree_removes_dir_and_branch(tmp_path, monkeypatch):
     """remove_worktree removes the dir and force-deletes the local branch."""
     monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
