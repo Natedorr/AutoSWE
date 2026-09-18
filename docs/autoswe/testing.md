@@ -386,7 +386,7 @@ The function-boundary `GitFake` is fast but cannot catch: push rejections, detac
 The following were formerly xfail but now have explicit detection and clear `RuntimeError` messages:
 
 - **H1**: Empty repo — raises `RuntimeError("has no commits on")` after clone/fetch
-- **E6**: Nonexistent base_branch — when a distinct `default_branch` is available (e.g. `/plan --branch strategy/X` where `strategy/X` is new), the requested branch is auto-created from the default on origin and worktree creation proceeds (E6b). Only when there is no usable fallback (requested base == default, or default also missing) does it raise `RuntimeError("does not exist on origin")`
+- **E6**: Nonexistent base_branch — when a distinct `default_branch` is available (e.g. `/plan --branch strategy/X` where `strategy/X` is new), the requested branch is auto-created from the default on origin and worktree creation proceeds (E6b), including on the **fresh-clone** path where `_main/` does not yet exist (E6c — the issue #260 regression test: `ensure_clone` verifies `origin/{default}` on a fresh clone, never the raw `--branch` value). Only when there is no usable fallback (requested base == default, or default also missing) does it raise `RuntimeError("does not exist on origin")` — asserted on the fresh-clone path too (E6d), so the misleading `"has no commits"` message is reserved for genuinely empty repos (H1)
 - **I1**: Merge in progress — raises `RuntimeError` for unresolved conflicts; commits cleanly when resolved
 - **I2**: Rebase in progress — same pattern as I1
 ## Key Seams

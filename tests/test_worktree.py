@@ -1330,15 +1330,18 @@ def test_azure_ensure_clone_inline_repo_cfg(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_get_default_branch_origin_head(tmp_path, monkeypatch):
-    """_get_default_branch reads origin/HEAD symbolic ref."""
+    """_get_default_branch reads the origin/HEAD symbolic ref."""
     monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
     import autoswe.vcs.worktree as wt
     monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    symbolic_ref_calls = []
 
     def fake_run(args, cwd=None, check=True):
         result = MagicMock()
         cmd_str = " ".join(args)
         if "symbolic-ref" in cmd_str:
+            symbolic_ref_calls.append(args)
             result.returncode = 0
             result.stdout = "refs/heads/develop\n"
         else:
@@ -1354,6 +1357,50 @@ def test_get_default_branch_origin_head(tmp_path, monkeypatch):
         result = _get_default_branch(main, "main")
 
     assert result == "develop"
+    # The origin/HEAD ref must be queried by FULL refname — the short
+    # "origin/HEAD" spelling fails to resolve as a symbolic ref on recent git.
+    assert symbolic_ref_calls
+    for c in symbolic_ref_calls:
+        assert "refs/remotes/origin/HEAD" in c
+
+
+def test_get_default_branch_origin_head_refname_regression(tmp_path, monkeypatch):
+    """symbolic-ref is called with the full refname, not the short origin/HEAD.
+
+    Regression for the auto-detection gap behind issue #260: recent git
+    (verified on 2.43) fails ``git symbolic-ref --short origin/HEAD`` with
+    'not a symbolic ref' on a fresh clone even though the ref exists, while
+    ``symbolic-ref --short refs/remotes/origin/HEAD`` succeeds and prints
+    ``origin/<name>``.
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        cmd_str = " ".join(args)
+        if "symbolic-ref" in cmd_str:
+            if "refs/remotes/origin/HEAD" in cmd_str:
+                result.returncode = 0
+                result.stdout = "origin/main\n"  # recent git output shape
+            else:
+                result.returncode = 128  # short form: "not a symbolic ref"
+                result.stdout = ""
+        else:
+            result.returncode = 1
+            result.stdout = ""
+        return result
+
+    main = tmp_path / "_main"
+    main.mkdir(parents=True)
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import _get_default_branch
+        result = _get_default_branch(main, "strategy/NewName")
+
+    # The full-refname lookup must win over the raw --branch base_branch.
+    assert result == "main"
 
 
 def test_get_default_branch_fallback_to_base_branch(tmp_path, monkeypatch):
@@ -1364,7 +1411,7 @@ def test_get_default_branch_fallback_to_base_branch(tmp_path, monkeypatch):
 
     def fake_run(args, cwd=None, check=True):
         result = MagicMock()
-        result.returncode = 1  # symbolic-ref fails
+        result.returncode = 1  # symbolic-ref and ls-remote --symref both fail
         result.stdout = ""
         return result
 
@@ -1376,6 +1423,42 @@ def test_get_default_branch_fallback_to_base_branch(tmp_path, monkeypatch):
         result = _get_default_branch(main, "master")
 
     assert result == "master"
+
+
+def test_get_default_branch_ls_remote_symref_fallback(tmp_path, monkeypatch):
+    """ls-remote --symref detects the remote default when origin/HEAD is absent.
+
+    Regression for issue #260: if the local origin/HEAD lookup fails on a
+    fresh clone, a fresh-clone ensure_clone with a custom --branch base_branch
+    must still resolve the real default (remote wins over base_branch, which
+    may be the raw --branch value).
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    def fake_run(args, cwd=None, check=True):
+        result = MagicMock()
+        cmd_str = " ".join(args)
+        if "symbolic-ref" in cmd_str:
+            result.returncode = 1
+            result.stdout = ""
+        elif "ls-remote" in cmd_str:
+            result.returncode = 0
+            result.stdout = "ref: refs/heads/main\tHEAD\nabc123\tHEAD\n"
+        else:
+            result.returncode = 1
+            result.stdout = ""
+        return result
+
+    main = tmp_path / "_main"
+    main.mkdir(parents=True)
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import _get_default_branch
+        result = _get_default_branch(main, "strategy/NewName")
+
+    assert result == "main"
 
 
 def test_get_default_branch_ls_remote_fallback(tmp_path, monkeypatch):
@@ -1444,6 +1527,91 @@ def test_ensure_clone_custom_branch_uses_default(tmp_path, monkeypatch):
     assert "main" in checkout_calls[0], \
         f"_main should checkout 'main', got: {checkout_calls[0]}"
     assert "custom-branch" not in checkout_calls[0]
+
+
+def test_ensure_clone_fresh_uses_default_branch(tmp_path, monkeypatch):
+    """Fresh-clone path verifies/checks out default_branch, never the raw base_branch.
+
+    Regression for issue #260: when _main is absent, ensure_clone must resolve
+    the _main checkout branch the same way as the existing-clone path.
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    run_calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        run_calls.append(list(args))
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        return result
+
+    main = tmp_path / "worktrees" / "o_r" / "_main"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    # Deliberately no main.mkdir() — the fresh-clone path runs.
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import ensure_clone
+        ensure_clone("o", "r", "token", _cfg(), base_branch="custom-branch",
+                     default_branch="main")
+
+    # Verify targets origin/main — the raw --branch value is never verified.
+    verify_calls = [c for c in run_calls if "rev-parse" in c]
+    assert any("origin/main" in " ".join(c) for c in verify_calls), \
+        f"fresh-clone verify should target origin/main, got: {verify_calls}"
+    assert not any("origin/custom-branch" in " ".join(c) for c in run_calls), \
+        "raw --branch value must never be verified on a fresh clone"
+    # checkout + reset --hard target the default branch (parity with existing path).
+    checkout_calls = [c for c in run_calls if "checkout" in c]
+    assert len(checkout_calls) == 1
+    assert "main" in checkout_calls[0]
+    reset_calls = [c for c in run_calls if "reset" in c]
+    assert len(reset_calls) == 1
+    assert "origin/main" in reset_calls[0]
+
+
+def test_ensure_clone_fresh_auto_detects_default(tmp_path, monkeypatch):
+    """Fresh-clone path without default_branch: remote default drives the target.
+
+    Models a clone where the local origin/HEAD lookup fails, so detection
+    falls through to ``ls-remote --symref origin HEAD`` — the raw --branch
+    value is never used.
+    """
+    monkeypatch.setenv("AUTOSWE_DIR", str(tmp_path))
+    import autoswe.vcs.worktree as wt
+    monkeypatch.setattr(wt, "AUTOSWE_DIR", tmp_path)
+
+    run_calls = []
+
+    def fake_run(args, cwd=None, check=True):
+        run_calls.append(list(args))
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        cmd_str = " ".join(args)
+        if "symbolic-ref" in cmd_str:
+            result.returncode = 1  # no usable local origin/HEAD ref
+        elif "ls-remote" in cmd_str and "--symref" in cmd_str:
+            result.stdout = "ref: refs/heads/master\tHEAD\nabc123\tHEAD\n"
+        return result
+
+    main = tmp_path / "worktrees" / "o_r" / "_main"
+    main.parent.mkdir(parents=True, exist_ok=True)
+    # Deliberately no main.mkdir() — the fresh-clone path runs.
+
+    with patch("autoswe.vcs.worktree._run", side_effect=fake_run):
+        from autoswe.vcs.worktree import ensure_clone
+        ensure_clone("o", "r", "token", _cfg(), base_branch="custom-branch")
+
+    verify_calls = [c for c in run_calls if "rev-parse" in c]
+    assert any("origin/master" in " ".join(c) for c in verify_calls), \
+        f"remote-HEAD detection should drive the verify target, got: {verify_calls}"
+    checkout_calls = [c for c in run_calls if "checkout" in c]
+    assert len(checkout_calls) == 1
+    assert "master" in checkout_calls[0]
+    assert not any("custom-branch" in " ".join(c) for c in run_calls)
 
 
 # ---------------------------------------------------------------------------
