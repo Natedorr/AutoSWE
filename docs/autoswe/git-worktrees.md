@@ -23,11 +23,13 @@ Path helpers (`vcs/worktree.py`):
 
 ## Lifecycle
 
-### `ensure_clone(owner, repo, token, cfg, base_branch, provider)`
+### `ensure_clone(owner, repo, token, cfg, base_branch, provider, default_branch=None)`
 
 1. If `_main/` doesn't exist → `git clone` via VCS `clone_url()` (token embedded)
-2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch + checkout base_branch + reset --hard origin/{base_branch}`
-3. `_ensure_repo_exclude(_main)` — idempotently seeds the shared repo-local git exclude (see below)
+2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch`
+3. On **both** paths the `_main` checkout branch is resolved identically: `default_branch or _get_default_branch(...)` (origin/HEAD auto-detect). `base_branch` is never used for the `_main` checkout or the commit-verification guard — it may be a custom `--branch` value that doesn't exist on origin yet, and `create_worktree` creates a missing base from the default downstream (issue #260)
+4. `rev-parse --verify origin/{branch}` — hard `RuntimeError("has no commits on …")` for genuinely empty repos, then `checkout <branch> + reset --hard origin/<branch>`
+5. `_ensure_repo_exclude(_main)` — idempotently seeds the shared repo-local git exclude (see below)
 
 ### Repo-local git exclude (`_ensure_repo_exclude`)
 
@@ -46,9 +48,9 @@ file out of the per-issue branch (finding C2):
   (`ensure_worktree_unchanged`) without re-dirtying the branch every cycle.
 
 The exclude is written in **two places** so it is always present: at the end of
-`ensure_clone` (fresh clone), and — because the dispatch **reuses** the pre-synced
-worktree and never re-runs `ensure_clone` — at the top of `ensure_claude_md`, which runs on
-every plan/fix/review phase.
+`ensure_clone` (both the fresh-clone and reuse paths), and — because the dispatch
+**reuses** the pre-synced worktree and never re-runs `ensure_clone` — at the top of
+`ensure_claude_md`, which runs on every plan/fix/review phase.
 
 ### `create_worktree(owner, repo, issue_num, base_branch, token, cfg, provider)`
 
@@ -94,6 +96,14 @@ Strategy is controlled by `cfg["SYNC_STRATEGY"]` (default: `"merge"`).
 5. `git rebase origin/{base_branch}`
 6. On success → `git push --force-with-lease origin <branch>`, return `{"synced": True, "conflict": False, "branch": ..., "ahead": N}`
 7. On conflict → leave worktree in rebase-in-progress state, return `{"synced": False, "conflict": True, "branch": ..., "conflict_files": [...], "rebase": True}`
+
+## Remote Ref Checks
+
+### `remote_branch_exists(main, branch)` / `remote_branch_exists_on(wt, branch)` / `remote_default_branch(wt)`
+
+- `remote_branch_exists(main, branch)` — **local** check: `origin/<branch>` present in the main clone's remote-tracking refs (call `fetch_prune()` first so they reflect the remote). Used by `purge_gone_branches`.
+- `remote_branch_exists_on(wt, branch)` — **live** `git ls-remote origin refs/heads/<branch>` check; does not trust stale tracking refs. Fails closed (False) on any error. Used by `ship.open_pr` to guard the PR base (issue #260).
+- `remote_default_branch(wt)` — the repo's actual default branch per origin (`git ls-remote --symref origin HEAD`), or None. Fallback target when the configured PR base does not exist on origin.
 
 ## Branch Naming
 

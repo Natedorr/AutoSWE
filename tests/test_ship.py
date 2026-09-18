@@ -296,6 +296,123 @@ def test_open_pr_uses_base_branch_not_plan_branch(mock_gh_post_comment):
     assert call_kwargs[1]["branch"] == "autoswe/issue-1"
 
 
+# ---------------------------------------------------------------------------
+# open_pr — PR base existence guard (issue #260)
+# ---------------------------------------------------------------------------
+
+def _stub_wt_guard(monkeypatch, tmp_path, *, wt_exists: bool,
+                   branch_exists: bool, default: str | None):
+    """Point ship's worktree lookup at *tmp_path* and stub the live checks."""
+    wt = tmp_path / "wt"
+    if wt_exists:
+        wt.mkdir(exist_ok=True)
+    else:
+        wt = tmp_path / "no-such-wt"
+    monkeypatch.setattr(
+        "autoswe.vcs.ship.worktree_mod.worktree_path",
+        lambda *a, **kw: wt,
+    )
+    monkeypatch.setattr(
+        "autoswe.vcs.ship.worktree_mod.remote_branch_exists_on",
+        lambda wt_path, branch: branch_exists,
+    )
+    monkeypatch.setattr(
+        "autoswe.vcs.ship.worktree_mod.remote_default_branch",
+        lambda wt_path: default,
+    )
+    return wt
+
+
+def test_open_pr_base_missing_falls_back_to_repo_default(mock_gh_post_comment, monkeypatch, tmp_path):
+    """Configured base missing on origin → PR targets the repo's actual default.
+
+    Regression for issue #260 / the /pr HTTP 422 'base invalid': repos whose
+    real default is 'master' but whose queue entry says 'main' (guessed
+    default) must not fail PR creation — the base falls back to the actual
+    default branch reported by origin.
+    """
+    task = make_task()
+    task["base_branch"] = "main"  # does not exist on origin
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=True,
+                   branch_exists=False, default="master")
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")
+    # PR targeted the actual default, not the missing configured base.
+    assert mock_vcs.open_pull_request.call_args[1]["base"] == "master"
+    # The fallback is announced on the issue, not just in the log.
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
+    assert "base fell back to repo default master" in comment_body
+
+
+def test_open_pr_base_exists_keeps_configured_base(mock_gh_post_comment, monkeypatch, tmp_path):
+    """Configured base exists on origin → no fallback, no note."""
+    task = make_task()
+    task["base_branch"] = "main"
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=True,
+                   branch_exists=True, default="master")
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert mock_vcs.open_pull_request.call_args[1]["base"] == "main"
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
+    assert "fell back" not in comment_body
+
+
+def test_open_pr_no_worktree_skips_base_guard(mock_gh_post_comment, monkeypatch, tmp_path):
+    """No worktree → guard is skipped; behavior is exactly as before."""
+    task = make_task()
+    task["base_branch"] = "main"
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=False,
+                   branch_exists=False, default=None)
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert mock_vcs.open_pull_request.call_args[1]["base"] == "main"
+
+
+def test_open_pr_base_missing_default_unknown_proceeds(mock_gh_post_comment, monkeypatch, tmp_path):
+    """Base missing but default unresolvable → proceed with the configured
+    base so the provider's own error surfaces (no silent guess)."""
+    task = make_task()
+    task["base_branch"] = "main"
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=True,
+                   branch_exists=False, default=None)
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert mock_vcs.open_pull_request.call_args[1]["base"] == "main"
+
+
 def test_open_pr_comment_includes_footer(mock_gh_post_comment):
     """Completion comment should end with autoswe-bot footer."""
     task = make_task()
