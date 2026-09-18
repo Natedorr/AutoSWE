@@ -1796,6 +1796,10 @@ def test_run_env_agent_dir_maps_to_pi_coding_agent_dir(monkeypatch):
 
 def test_run_env_agent_dir_absent_leaves_env_unset(monkeypatch):
     """No agent_dir field → PI_CODING_AGENT_DIR is not injected."""
+    # The child env copies os.environ, so an ambient PI_CODING_AGENT_DIR
+    # (e.g. running under a pi agent session) would break the assertion —
+    # strip it so the test is deterministic on any host.
+    monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
     proc = _mock_process(stdout=_jsonl(
         {"type": "session", "id": "s", "version": 3},
         {"type": "message_end",
@@ -1958,8 +1962,13 @@ def test_pi_mcp_comment_env_routed_into_subprocess_env():
     assert env["AUTOSWE_SUPPRESS_POSTING"] == "1"
 
 
-def test_pi_mcp_no_comment_server_no_env_route():
+def test_pi_mcp_no_comment_server_no_env_route(monkeypatch):
     """Without autoswe_comment in mcp_servers, no comment env is routed."""
+    # The child env copies os.environ, so ambient AUTOSWE_* vars (e.g. when the
+    # suite runs inside an autoSWE dispatch) would break the assertion —
+    # strip them so the test is deterministic on any host.
+    monkeypatch.delenv("AUTOSWE_COMMENT_ID", raising=False)
+    monkeypatch.delenv("AUTOSWE_SUPPRESS_POSTING", raising=False)
     proc = _mock_process(stdout=_jsonl(
         {"type": "session", "id": "s", "version": 3},
         {"type": "message_end",
