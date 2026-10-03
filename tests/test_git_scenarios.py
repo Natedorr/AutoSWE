@@ -822,13 +822,15 @@ class TestBranchRemote:
         assert branch.stdout.strip() == world.branch_name(1)
 
     def test_E6c_fresh_clone_missing_base_created_from_default(self, git_world: GitWorld):
-        """E6c: fresh clone + missing --branch base + default exists → no error.
+        """E6c: fresh clone (no _main/) + missing --branch base + default exists.
 
-        Regression for issue #260: with no ``_main/`` clone yet (first run on
-        the repo), ``ensure_clone`` used to verify ``origin/<--branch value>``
-        and fail with the misleading "has no commits" error. Now the missing
-        base is created from the default branch on origin and the issue branch
-        forks from it — same outcome as E6b, but through the fresh-clone path.
+        Regression for issue #260: on the first run against a repo (fresh
+        deployment, or after the worktrees dir is purged), ``ensure_clone``
+        used to verify ``origin/<--branch value>`` and fail with the
+        misleading "has no commits" error before create_worktree's
+        base-branch guard could run. Now the missing base is created from the
+        default branch on origin and the issue branch forks from it — same
+        outcome as E6b, but through the fresh-clone path.
         """
         world = git_world
         world.init_remote(initial_files={"README.md": "# test"})
@@ -842,9 +844,11 @@ class TestBranchRemote:
         )
 
         assert wt.exists()
+        main = world.main_clone_path()
+        assert main.exists()
         # The requested base branch now exists on the remote.
         ls = subprocess.run(
-            ["git", "ls-remote", "--heads", str(world.remote_dir.resolve()), "strategy/NewName"],
+            ["git", "-C", str(main), "ls-remote", "--heads", "origin", "strategy/NewName"],
             capture_output=True, text=True, check=True,
         )
         assert ls.stdout.strip(), "strategy/NewName should have been pushed to origin"
@@ -863,6 +867,12 @@ class TestBranchRemote:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert base_sha == head_sha, "issue branch must be forked from the new base"
+        # _main must sit on the default branch, never the raw --branch value.
+        cur = subprocess.run(
+            ["git", "-C", str(main), "branch", "--show-current"],
+            capture_output=True, text=True, check=True,
+        )
+        assert cur.stdout.strip() == "main"
 
     def test_E6d_fresh_clone_missing_base_no_fallback(self, git_world: GitWorld):
         """E6d: fresh clone + missing base + no usable fallback → clear error.
@@ -876,9 +886,37 @@ class TestBranchRemote:
         world.init_remote(initial_files={"README.md": "# test"})
         # Deliberately NO make_main_clone(): fresh-clone path.
 
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(RuntimeError, match="does not exist on origin"):
             create_worktree(
                 world.owner, world.repo, 1, "nonexistent-base",
+                "fake-token", world.cfg(), "github",
+                default_branch=None,
+            )
+
+        # ensure_clone must have completed the fresh clone and left _main on
+        # the repo's default branch (auto-detected via origin/HEAD).
+        main = world.main_clone_path()
+        assert main.exists()
+        cur = subprocess.run(
+            ["git", "-C", str(main), "branch", "--show-current"],
+            capture_output=True, text=True, check=True,
+        )
+        assert cur.stdout.strip() == "main"
+
+    def test_E6d_fresh_clone_no_fallback_error_not_misleading(self, git_world: GitWorld):
+        """E6d: fresh clone + missing base + no fallback → not 'has no commits'.
+
+        The base-branch guard must win over the empty-repo guard: the error
+        for a missing base is "does not exist on origin" (recoverable via
+        /retry), never the misleading "has no commits" message, which is
+        reserved for genuinely empty repos (H1).
+        """
+        world = git_world
+        world.init_remote(initial_files={"README.md": "# test"})
+
+        with pytest.raises(RuntimeError) as excinfo:
+            create_worktree(
+                world.owner, world.repo, 1, "nonexistent",
                 "fake-token", world.cfg(), "github",
                 default_branch=None,
             )

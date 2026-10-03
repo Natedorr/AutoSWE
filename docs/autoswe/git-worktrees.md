@@ -6,18 +6,18 @@ These are plain `git worktree`s — one working tree per issue, all sharing a si
 
 ```
 {WORKTREE_DIR}/                          # default: {AUTOSWE_DIR}/worktrees/
-  gh-owner_repo/                         # GitHub: provider-prefixed dir
-    _main/                               # Canonical clone, always on base_branch, never edited by Claude
+  owner_repo/                            # GitHub: provider path parts, no extra prefix
+    _main/                               # Canonical clone, always on the resolved default branch, never edited by Claude
     issue-42/                            # Worktree for issue #42, branch: autoswe/issue-42
     issue-103/
-  ado-org_proj_repo/                     # Azure: provider-prefixed dir
+  org_proj_repo/                         # Azure DevOps: provider path parts
     _main/
     issue-7/
 ```
 
 Path helpers (`vcs/worktree.py`):
 - `_worktrees_root(cfg)` — resolves `WORKTREE_DIR` (absolute or relative to `AUTOSWE_DIR`)
-- `_repo_dir(owner, repo, cfg, provider)` — per-repo directory (provider-prefixed)
+- `_repo_dir(owner, repo, cfg, provider)` — per-repo directory (provider path parts joined, e.g. ``owner_repo``)
 - `main_clone_path(owner, repo, cfg, provider)` — `_repo_dir / "_main"`
 - `worktree_path(owner, repo, issue_num, cfg, provider)` — `_repo_dir / "issue-{N}"`
 
@@ -25,11 +25,10 @@ Path helpers (`vcs/worktree.py`):
 
 ### `ensure_clone(owner, repo, token, cfg, base_branch, provider, default_branch=None)`
 
-1. If `_main/` doesn't exist → `git clone` via VCS `clone_url()` (token embedded)
-2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch`
-3. On **both** paths the `_main` checkout branch is resolved identically: `default_branch or _get_default_branch(...)` (origin/HEAD auto-detect). `base_branch` is never used for the `_main` checkout or the commit-verification guard — it may be a custom `--branch` value that doesn't exist on origin yet, and `create_worktree` creates a missing base from the default downstream (issue #260)
-4. `rev-parse --verify origin/{branch}` — hard `RuntimeError("has no commits on …")` for genuinely empty repos, then `checkout <branch> + reset --hard origin/<branch>`
-5. `_ensure_repo_exclude(_main)` — idempotently seeds the shared repo-local git exclude (see below)
+1. If `_main/` doesn't exist → `git clone` via VCS `clone_url()` (token embedded), then the shared verify/checkout/reset (step 3)
+2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch` and the shared verify/checkout/reset (step 3)
+3. **Shared** (both paths, via `_checkout_main_branch`): resolve the `_main` checkout branch as `branch_for_main = default_branch or _get_default_branch(_main, base_branch)` — **never** the raw `--branch` value, which may not exist on origin yet (a user-supplied `/plan --branch strategy/X` where `strategy/X` is new; issue #260). Auto-detection queries the local `origin/HEAD` ref (with a `rev-parse --symbolic-full-name` fallback for indirect refs on recent git), then `ls-remote --symref origin HEAD`, then `base_branch`, then a main/master ls-remote probe. Verify `origin/{branch_for_main}` — raising `RuntimeError("… has no commits on '…'")` when the repo has no usable branch (empty repos) — then `checkout branch_for_main` + `reset --hard origin/{branch_for_main}`. A missing base branch is forked from the default by `create_worktree`, not by `ensure_clone`.
+4. `_ensure_repo_exclude(_main)` — idempotently seeds the shared repo-local git exclude (see below)
 
 ### Repo-local git exclude (`_ensure_repo_exclude`)
 
