@@ -834,6 +834,32 @@ def emit(
                 )
             )
 
+    elif new_status == "pr_blocked":
+        # /pr refused by the preflight gate (branch-sync or CI not green,
+        # issue #277): the work is done and the branch is fine — only the
+        # gate is red. Hold the pre-command resting state (typically `fixed`)
+        # instead of emitting `failed` (which labels.md reserves for handler
+        # errors and guard trips), and post the visible refusal. The common
+        # queue patch above already advanced the dispatch watermarks, so
+        # decide()'s dedup guard suppresses a re-refusal of the same /pr on
+        # the next poll.
+        reason = done[len("PR_BLOCKED:"):].strip()
+        held_status = task.status or "fixed"
+        # The common queue_patch above carries autoswe_status=new_status
+        # ("pr_blocked") — that is an emit-internal status string, not a
+        # persistable state. Overwrite it so the queue row and the label
+        # mirror both hold the pre-command resting state.
+        queue_patch["autoswe_status"] = held_status
+        body = (
+            f"🚫 **PR not opened** — {reason}\n\n"
+            f"Post `/retry` to continue.{BOT_MARKER}"
+        )
+        effects.append(Effect(kind="post_comment", body=body))
+        effects.append(Effect(kind="set_status", status=held_status))
+        # No session clear: no agent run broke — the checkpoint stays intact
+        # for the eventual /fix or /retry.
+        effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
+
     elif new_status == "failed":
         reason = done[7:].strip() if done.startswith("FAILED:") else done
         fail_msg = f"Failed: {reason}\n\nPost `/retry` to continue.{BOT_MARKER}"

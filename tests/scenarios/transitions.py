@@ -1035,10 +1035,15 @@ TRANSITIONS: list[dict[str, Any]] = [
             "no_git_calls": True,
         },
     },
-    # ---- PR preflight gate: CI pending blocks ----
+    # ---- PR preflight gate: CI pending blocks (issue #277: resting-state hold) ----
     {
         "name": "pr_blocked_by_ci_pending",
-        "description": "Fixed task; /pr from user while CI is still running → stays failed with gate message",
+        "description": (
+            "Fixed task; /pr from user while CI is still running -> the preflight "
+            "gate refuses and the task HOLDS its resting state (`fixed`) with the "
+            "gate message, not `failed` (issue #277: a preflight block is not a "
+            "handler error)."
+        ),
         "skip_providers": ["azure"],
         "start": {
             "issue": {"body": "Fix.\n\n/fix"},
@@ -1072,9 +1077,56 @@ TRANSITIONS: list[dict[str, Any]] = [
             },
         },
         "expect": {
-            "label_after": "autoswe:failed",
-            "autoswe_status": "failed",
-            "comment_contains": ["Failed:", "CI still running"],
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["PR not opened", "CI still running"],
+        },
+    },
+    # ---- PR preflight gate: CI failing blocks (issue #277 / E2E-11) ----
+    {
+        "name": "pr_blocked_by_ci_failing",
+        "description": (
+            "Fixed task; /pr from user while CI is RED (E2E-11) -> the preflight "
+            "gate refuses and the task HOLDS its resting state (`fixed`) with the "
+            "gate message, not `failed`. This is the exact path the live E2E-11 "
+            "pass observed as a wrong-state transition."
+        ),
+        "skip_providers": ["azure"],
+        "start": {
+            "issue": {"body": "Fix.\n\n/fix"},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "failure",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["PR not opened", "CI failing"],
         },
     },
     # ---- PR preflight gate: clean sync + CI success ships ----
