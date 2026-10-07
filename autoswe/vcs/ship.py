@@ -131,7 +131,12 @@ def open_pr(
     ok, reason = preflight_pr(task, cfg, rcfg, progress_callback=progress_callback)
     if not ok:
         dbg.debug("SHIP: preflight blocked PR: %s", reason)
-        return f"FAILED: {reason}"
+        # A preflight block is NOT a handler error: the work is done and the
+        # branch is fine, the gate (sync or CI) just isn't green yet. Return a
+        # distinct marker so emit() holds the pre-command resting state
+        # (typically `fixed`) instead of emitting `failed` — `failed` is
+        # reserved for handler errors and guard trips (issue #277, labels.md).
+        return f"PR_BLOCKED: {reason}"
 
     # The configured PR base must actually exist on origin — otherwise the
     # provider rejects the PR (GitHub HTTP 422 "base invalid"). The base comes

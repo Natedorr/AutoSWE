@@ -264,6 +264,12 @@ def _map_done_to_status(done_content: str, kind: str = "fix", verdict: str | Non
         return "reviewed"
     elif done_content.startswith("WAITING:"):
         return "waiting"
+    elif done_content.startswith("PR_BLOCKED:"):
+        # /pr refused by the preflight gate (branch-sync or CI not green).
+        # NOT terminal and NOT a handler error — emit() holds the pre-command
+        # resting state (typically `fixed`) and posts the refusal. `failed`
+        # stays reserved for handler errors and guard trips (issue #277).
+        return "pr_blocked"
     elif done_content.startswith("FAILED:"):
         return "failed"
     elif done_content.startswith("TESTS_FAILED"):

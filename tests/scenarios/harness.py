@@ -493,9 +493,17 @@ def _script_git_ops(
                 "branch": branch,
             })
 
-    # sync_branch scripting: conflict scenarios get a conflict result;
-    # everything else gets a clean sync result
-    if row_meta.get("script_sync_conflict"):
+    # sync_branch scripting: conflict scenarios get a conflict result; a
+    # scripted sync FAILURE (issue #277 sync-gate row) gets a non-conflict
+    # synced=False result; everything else gets a clean sync result
+    if row_meta.get("script_sync_fail"):
+        gt_fake.script_sync({
+            "synced": False,
+            "conflict": False,
+            "branch": branch,
+            "error": "branch behind base",
+        })
+    elif row_meta.get("script_sync_conflict"):
         # Conflict resolution scenario — sync_branch returns a merge conflict
         gt_fake.script_sync({
             "synced": False,

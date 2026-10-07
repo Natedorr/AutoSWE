@@ -32,6 +32,7 @@ def _make_world(
     session_id=None,
     last_phase="plan",
     last_dispatched_command=None,
+    last_replayed_command=None,
     base_branch="main",
     provider="github",
     plan_file_path=None,
@@ -63,6 +64,7 @@ def _make_world(
             attempt_count=1,
             first_dispatched_at=None,
             last_dispatched_command=last_dispatched_command,
+            last_replayed_command=last_replayed_command,
             last_dispatched_command_id=1,
             last_consumed_reply_id=1,
             session_id=session_id,
@@ -443,20 +445,105 @@ def test_run_retry_replays_plan():
 
 
 def test_run_retry_after_pr_falls_back_to_fix():
-    """When /pr was last dispatched, retry should fall back to /fix instead
-    of replaying /pr (which would create a duplicate PR)."""
+    """When /pr was last dispatched on a task with NO completed work to ship
+    (status not in COMPLETED_STATUSES), retry falls back to /fix instead of
+    replaying /pr (which would create a duplicate PR or ship nothing)."""
     world = _make_world(last_dispatched_command="/pr")
     action = Action(kind="retry", slug=world.task.slug)
 
-    with patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship:
+        with patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+            mock_fix.return_value = HandlerResult("DONE_SUMMARY\tretried\tzzy")
+            result = run(action, world)
+
+    assert isinstance(result, DispatchResult)
+    mock_fix.assert_called_once()
+    assert not mock_ship.called
+
+
+def test_run_retry_replays_pr_on_completed_task():
+    """A /pr refused by the preflight gate (issue #277) leaves the task at its
+    COMPLETED resting state with last_dispatched_command "/pr". A subsequent
+    /retry must REPLAY /pr (re-run the gate + ship) instead of falling back to
+    /fix — falling back would re-run the fixer, make no changes, and the #276
+    no-change guard would demote fixed->test_failed + consume gate budget."""
+    world = _make_world(status="fixed", last_dispatched_command="/pr")
+    action = Action(kind="retry", slug=world.task.slug)
+
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_ship.return_value = "PR_BLOCKED: CI failing: 1 check(s) failing: ci"
+        result = run(action, world)
+
+    # open_pr is re-attempted; the fixer is NOT re-run.
+    assert isinstance(result, DispatchResult)
+    mock_ship.assert_called_once()
+    assert not mock_fix.called
+    # The replayed command is threaded so emit records it (not "/retry"), and a
+    # still-red gate re-landed pr_blocked holds the resting state.
+    assert result.done_content == "PR_BLOCKED: CI failing: 1 check(s) failing: ci"
+    assert result.replayed_command == "/pr"
+    # A PR_BLOCKED refusal carries no PR identity.
+    assert result.pr_number is None
+    assert result.pr_url is None
+
+
+def test_run_retry_replays_pr_success_carries_identity():
+    """Once the gate is green, a /retry that replays /pr actually opens the PR:
+    open_pr returns DONE and the cached PR identity is lifted into the result so
+    emit() persists it on the shipped queue entry (like the direct ship_pr
+    path)."""
+    world = _make_world(status="fixed", last_dispatched_command="/pr")
+    action = Action(kind="retry", slug=world.task.slug)
+
+    def _fake_open_pr(task, *a, **kw):
+        task["pr_number"] = 12
+        task["pr_url"] = "https://github.com/owner/repo/pull/12"
+        return "DONE: PR #12"
+
+    with patch("autoswe.orch.run.ship.open_pr", side_effect=_fake_open_pr) as mock_ship:
+        result = run(action, world)
+
+    assert isinstance(result, DispatchResult)
+    mock_ship.assert_called_once()
+    assert result.done_content == "DONE: PR #12"
+    assert result.replayed_command == "/pr"
+    assert result.pr_number == 12
+    assert result.pr_url == "https://github.com/owner/repo/pull/12"
+
+
+def test_run_retry_replayed_pr_command_takes_precedence():
+    """last_replayed_command ("/pr", recorded by a prior /retry that replayed
+    /pr) takes precedence over last_dispatched_command ("/retry"), so a
+    repeat /retry re-replays /pr instead of promoting to /fix."""
+    world = _make_world(status="fixed", last_dispatched_command="/retry",
+                        last_replayed_command="/pr")
+    action = Action(kind="retry", slug=world.task.slug)
+
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_ship.return_value = "PR_BLOCKED: CI still running (1 pending)"
+        result = run(action, world)
+
+    mock_ship.assert_called_once()
+    assert not mock_fix.called
+    assert result.replayed_command == "/pr"
+
+
+def test_run_retry_replays_pr_only_when_completed():
+    """The /pr replay is gated on COMPLETED_STATUSES: a `failed` task with a
+    stale /pr watermark still falls back to /fix (a failed task has no work
+    to ship)."""
+    world = _make_world(status="failed", last_dispatched_command="/pr")
+    action = Action(kind="retry", slug=world.task.slug)
+
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
         mock_fix.return_value = HandlerResult("DONE_SUMMARY\tretried\tzzy")
         result = run(action, world)
 
     assert isinstance(result, DispatchResult)
     mock_fix.assert_called_once()
-    # ship.open_pr must NOT be called
-    with patch("autoswe.orch.run.ship.open_pr") as mock_ship:
-        pass  # just verify it wasn't called above
     assert not mock_ship.called
 
 

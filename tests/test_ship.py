@@ -707,8 +707,13 @@ def test_open_pr_body_minimal_when_no_issue_body(mock_gh_post_comment):
 class TestOpenPrPreflightGate:
     """open_pr() must consult preflight_pr() before creating/finding a PR."""
 
-    def test_blocked_by_preflight_returns_failed(self, monkeypatch, mock_gh_post_comment):
-        """preflight_pr() returning not-ok short-circuits with FAILED, no PR lookup."""
+    def test_blocked_by_preflight_returns_pr_blocked(self, monkeypatch, mock_gh_post_comment):
+        """preflight_pr() returning not-ok short-circuits with PR_BLOCKED, no PR lookup.
+
+        Issue #277: a preflight block is not a handler error, so open_pr must
+        NOT return ``FAILED:`` (which would park the task at ``failed``) — it
+        returns ``PR_BLOCKED:`` and emit() holds the pre-command resting state.
+        """
         monkeypatch.setattr(
             "autoswe.vcs.ship.preflight_pr",
             lambda *a, **kw: (False, "CI failing: 1 check(s) failing: build"),
@@ -724,10 +729,31 @@ class TestOpenPrPreflightGate:
             from autoswe.vcs.ship import open_pr
             result = open_pr(task, {"GITHUB_TOKEN": "tok"})
 
-        assert result == "FAILED: CI failing: 1 check(s) failing: build"
+        assert result == "PR_BLOCKED: CI failing: 1 check(s) failing: build"
         mock_vcs.find_existing_pr.assert_not_called()
         mock_vcs.open_pull_request.assert_not_called()
         mock_get_tracker.return_value.post_comment.assert_not_called()
+
+    def test_blocked_by_sync_gate_returns_pr_blocked(self, monkeypatch, mock_gh_post_comment):
+        """The sync gate refuses with the same PR_BLOCKED marker as the CI gate."""
+        monkeypatch.setattr(
+            "autoswe.vcs.ship.preflight_pr",
+            lambda *a, **kw: (False, "branch behind base and sync failed: stale remote"),
+        )
+        task = make_task()
+
+        with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+             patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+            mock_vcs = _mock_vcs()
+            mock_get_vcs.return_value = mock_vcs
+            mock_get_tracker.return_value = _mock_tracker()
+
+            from autoswe.vcs.ship import open_pr
+            result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+        assert result == "PR_BLOCKED: branch behind base and sync failed: stale remote"
+        mock_vcs.find_existing_pr.assert_not_called()
+        mock_vcs.open_pull_request.assert_not_called()
 
     def test_passing_preflight_proceeds_to_create_pr(self, monkeypatch, mock_gh_post_comment):
         """preflight_pr() returning ok lets open_pr proceed as normal."""
