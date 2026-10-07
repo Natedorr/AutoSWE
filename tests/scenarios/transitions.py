@@ -2762,10 +2762,17 @@ TRANSITIONS: list[dict[str, Any]] = [
             {"text": "The flag is already red; making the canary pass would require touching tests/, which the issue forbids. No changes made.", "session_id": "s-fix-resumed", "subtype": "success"},
         ],
         "git_calls": ["commit_and_push"],
-        "meta": {"script_no_changes": True},
+        "meta": {"script_no_changes": True, "script_head_sha": "deadbeef"},
         "expect": {
             "label_after": "autoswe:test_failed",
             "autoswe_status": "test_failed",
+            # Gate-brake bookkeeping (review F1 for issue #276): the gate-
+            # triggered emit must re-pin the red commit so brake 2 (per-commit
+            # watermark) halts a same-sha auto-dispatch, and bump the shared
+            # budget so brake 1 exhausts after GATE_MAX_FIX_ATTEMPTS.
+            "gate_attempt_count": 1,
+            "gate_last_fixed_sha": "deadbeef",
+            "test_failed_sha": "deadbeef",
             "comment_contains": ["Test gate failed", "marked done", "FAIL: 1 failed"],
             "claude_permission": "bypassPermissions",
         },

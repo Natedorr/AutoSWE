@@ -434,6 +434,19 @@ def patched_world(
         pm.patch_gh_post_comment(fake)
         pm.patch_api_fake(fake)
 
+        # Issue #276: deterministic branch head for the no-changes arm. The
+        # real _get_branch_head_sha runs git against the fake (non-repo)
+        # worktree and would return None — so a row whose fix commits nothing
+        # would persist an empty test_failed_sha, defeating the gate-brake
+        # assertions. Rows can pin the head via meta {"script_head_sha": "<sha>"}.
+        row_meta = row_meta or {}
+        if row_meta.get("script_head_sha"):
+            import autoswe.harness.coder as coder_mod
+            orig_head_sha = coder_mod._get_branch_head_sha
+            head_sha = row_meta["script_head_sha"]
+            coder_mod._get_branch_head_sha = lambda wt, branch: head_sha
+            pm.add(lambda: setattr(coder_mod, "_get_branch_head_sha", orig_head_sha))
+
         yield HarnessWorld(
             fake=fake,
             claude=cl_fake,

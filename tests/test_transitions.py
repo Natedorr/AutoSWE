@@ -118,7 +118,10 @@ def test_transition(
     # Queue task assertions
     queue_fields = {}
     for key in ("autoswe_status", "session_id", "pending_command", "attempt_count",
-                "plan_branch", "rereview_after_fix", "pr_number"):
+                "plan_branch", "rereview_after_fix", "pr_number",
+                # Gate-brake bookkeeping (issue #276 review F1): rows can pin
+                # the shared recoverable-gate counters/watermarks.
+                "gate_attempt_count", "gate_last_fixed_sha", "test_failed_sha"):
         if key in expect:
             queue_fields[key] = expect[key]
 
@@ -231,7 +234,10 @@ def test_transition_codex(
     # Queue task assertions
     queue_fields = {}
     for key in ("autoswe_status", "session_id", "pending_command", "attempt_count",
-                "plan_branch", "rereview_after_fix", "pr_number"):
+                "plan_branch", "rereview_after_fix", "pr_number",
+                # Gate-brake bookkeeping (issue #276 review F1): rows can pin
+                # the shared recoverable-gate counters/watermarks.
+                "gate_attempt_count", "gate_last_fixed_sha", "test_failed_sha"):
         if key in expect:
             queue_fields[key] = expect[key]
 
@@ -346,7 +352,10 @@ def test_transition_pi(
 
     queue_fields = {}
     for key in ("autoswe_status", "session_id", "pending_command", "attempt_count",
-                "plan_branch", "rereview_after_fix", "pr_number"):
+                "plan_branch", "rereview_after_fix", "pr_number",
+                # Gate-brake bookkeeping (issue #276 review F1): rows can pin
+                # the shared recoverable-gate counters/watermarks.
+                "gate_attempt_count", "gate_last_fixed_sha", "test_failed_sha"):
         if key in expect:
             queue_fields[key] = expect[key]
     if queue_fields:
