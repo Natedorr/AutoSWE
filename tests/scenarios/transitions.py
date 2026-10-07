@@ -2719,6 +2719,58 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "test_gate_no_changes_stays_test_failed",
+        "description": (
+            "Task at test_failed, gate auto-fix dispatches a resumed /fix whose "
+            "session correctly makes NO changes (commit_and_push reports "
+            "committed: False — the fixture-driven red suite cannot legally be "
+            "cleared). The post-fix test gate must still run on the existing "
+            "branch head and, being red, the task must re-land the non-terminal "
+            "`test_failed` instead of being promoted to terminal `fixed` by a "
+            "`DONE: no changes detected` pass-through (issue #276 / E2E-11 "
+            "gate auto-retry). The shared gate brakes (per-commit watermark + "
+            "attempt budget) then bound any further auto-retry."
+        ),
+        "start": {
+            "issue": {"body": "Set flag.txt to red. Do not touch tests/"},
+            "labels": ["autoswe:test_failed"],
+            "comments": [
+                {
+                    "body": "🧪 **Test gate failed** — the branch suite is red, so `/fix` is **not** marked done.\n\n**Failure:**\n\n```\nsuite failing (exit 1)\n```\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Set flag.txt to red", "body": "Set flag.txt to red. Do not touch tests/",
+                "autoswe_status": "test_failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+                "test_failed_sha": "deadbeef",
+                "test_failure_detail": "suite failing (exit 1)",
+            },
+        },
+        "repos": {"test_command": "echo 'FAIL: 1 failed, 1 passed' && exit 1"},
+        "claude_responses": [
+            {"text": "The flag is already red; making the canary pass would require touching tests/, which the issue forbids. No changes made.", "session_id": "s-fix-resumed", "subtype": "success"},
+        ],
+        "git_calls": ["commit_and_push"],
+        "meta": {"script_no_changes": True},
+        "expect": {
+            "label_after": "autoswe:test_failed",
+            "autoswe_status": "test_failed",
+            "comment_contains": ["Test gate failed", "marked done", "FAIL: 1 failed"],
+            "claude_permission": "bypassPermissions",
+        },
+    },
+    {
         "name": "test_gate_auto_fix_budget_exhausted_stays_parked",
         "description": (
             "Task at test_failed whose gate auto-fix budget is already spent "
@@ -2834,6 +2886,7 @@ CODEX_TRANSITIONS: list[str] = [
     "attempts_guard_fires_on_restart",     # MAX_ATTEMPTS guard fires (decide-level, backend-agnostic)
     "failed_then_fix_restarts",            # /fix on a failed task re-dispatches (issue #192)
     "fix_red_suite_marks_test_failed",     # Post-fix test gate red → test_failed (backend-agnostic gate in _finalize_fix)
+    "test_gate_no_changes_stays_test_failed",  # No-changes fix on a red branch re-lands test_failed, not fixed (issue #276)
 ]
 
 

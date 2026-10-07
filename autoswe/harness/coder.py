@@ -614,7 +614,12 @@ def _finalize_fix(
     *run_gate* (issue #222): when a caller has already run the post-fix test
     gate before committing (the ``error_max_turns`` rescue path), pass
     ``run_gate=False`` so the suite is not executed twice. The commit/push
-    flow itself is identical either way.
+    flow itself is identical either way. The gate also guards the
+    no-changes outcome (issue #276): when the session committed nothing but
+    the branch head carries work whose suite is red, the task must re-land
+    ``test_failed`` (via ``TESTS_FAILED``) instead of being promoted to the
+    terminal ``fixed`` — a no-change ``DONE`` on a red branch would silently
+    clear the gate verdict.
 
     *before_sha*: the branch head captured BEFORE the coding session ran,
     handed to ``commit_and_push`` so it can still detect work the agent
@@ -653,6 +658,30 @@ def _finalize_fix(
         return HandlerResult(f"FAILED: commit/push error: {e}")
 
     if not commit_result["committed"]:
+        # No-changes outcome (issue #276): the session left the worktree
+        # unmodified, but the branch head may still carry work whose suite is
+        # red (e.g. a gate auto-fix that correctly declined to change an
+        # already-committed fix). The gate must guard the no-changes path too
+        # — a no-change DONE on a red branch would otherwise promote the task
+        # out of test_failed to terminal `fixed`. run_gate=False (the rescue
+        # path) already pre-validated the gate green, so skip the re-run.
+        if run_gate:
+            gate = run_test_gate(wt, cfg, repo_cfg, progress_callback=progress_callback)
+            if not gate.ok:
+                log(f"[FIX] {task['id']} no changes, but test gate RED: {gate.reason} "
+                    "— refusing terminal `fixed`")
+                head = _get_branch_head_sha(
+                    wt, get_vcs({"owner": owner, "repo": repo, "token": "", "provider": provider}).branch_name(issue_num)
+                )
+                detail = gate.reason + (f"\n{gate.output}" if gate.output else "")
+                return HandlerResult(
+                    f"TESTS_FAILED\t{detail}\t{head or ''}",
+                    cost_usd=run_result.cost_usd,
+                    duration_seconds=run_result.duration_seconds,
+                    session_id=session_id,
+                )
+            if not gate.ran:
+                log(f"[FIX] {task['id']} no changes, test gate skipped: {gate.reason}")
         log(f"[FIX] {task['id']} NO CHANGES DETECTED — worktree unmodified by session")
         return HandlerResult(
             "DONE: no changes detected",

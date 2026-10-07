@@ -11,6 +11,10 @@ Placement: ``coder._finalize_fix`` runs the gate *after* ``commit_and_push``
 so the agent's work is never lost to a red gate — the branch keeps the work
 and the task lands in the non-terminal ``test_failed`` state (a comment shows
 the failure, ``/pr`` is blocked until a ``/fix`` re-runs the gate green).
+The gate guards the no-changes outcome too (issue #276): when the session
+committed nothing, the gate still runs on the existing branch head before a
+``DONE: no changes detected`` is allowed to reach ``fixed`` — a no-change
+``DONE`` on a red branch must re-land ``test_failed``.
 
 Outcomes:
 

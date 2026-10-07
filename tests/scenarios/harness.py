@@ -465,11 +465,20 @@ def _script_git_ops(
 
     # commit_and_push always needs a scripted commit result
     if "commit_and_push" in git_calls:
-        gt_fake.script_commit({
-            "committed": True,
-            "commit_sha": "abc1234",
-            "branch": branch,
-        })
+        if row_meta.get("script_no_changes"):
+            # Issue #276 rows: the session made no changes — commit_and_push
+            # reports committed: False (no sha) so the no-changes arm of
+            # _finalize_fix runs.
+            gt_fake.script_commit({
+                "committed": False,
+                "branch": branch,
+            })
+        else:
+            gt_fake.script_commit({
+                "committed": True,
+                "commit_sha": "abc1234",
+                "branch": branch,
+            })
 
     # sync_branch scripting: conflict scenarios get a conflict result;
     # everything else gets a clean sync result
