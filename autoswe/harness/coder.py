@@ -310,6 +310,26 @@ def _run_fix_session(
             session_id=run_result.session_id,
         )
 
+    # MCP post_question (issue #275 — mirror planner's MCP branch): backends
+    # without a can_use_tool interception (e.g. pi) have no AskUserQuestion
+    # path; their questions arrive through the MCP comment server and land in
+    # RunResult.question_posted. The comment is already on the thread, so no
+    # fallback post is needed — just pause, exactly like the planner. Gated on
+    # the "mcp" capability so backends that can't post via MCP (e.g. Codex,
+    # whose parser always sets question_posted=False) keep the straight-
+    # through behavior documented in E2E-03b. Checked BEFORE the ok check on
+    # purpose, matching the planner: once a question is on the thread the
+    # run's authoritative outcome is "waiting on the user" even if the session
+    # then hit its turn cap — the session is resumable.
+    if runner.backend_has_capability(harness, "mcp") and run_result.question_posted:
+        log(f"[FIX] {task['id']} question posted via MCP — pausing (WAITING: questions)")
+        return HandlerResult(
+            "WAITING: questions",
+            cost_usd=run_result.cost_usd,
+            duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
+        )
+
     if not run_result.ok:
         # Graceful commit-on-cap (issue #222): a run that spent its whole turn
         # budget can still hold a complete, uncommitted diff (the #216 failure
@@ -526,10 +546,25 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
     ).branch_name(issue_num)
     fast_forward_worktree(wt, ff_branch)
 
+    # Name the question tool the way this backend's adapter exposes it
+    # (Phase 3 pattern, mirroring planner.resume_plan): pi/codex have no
+    # native AskUserQuestion tool — only the MCP comment server does — so the
+    # resume prompt must reference the resolved backend's tool name.
+    resume_harness = resolve_harness("fix", repo_cfg or {}, cfg or {})
+    question_tool = runner.comment_tool_names(resume_harness).get(
+        "post_question", "mcp__autoswe_comment__post_question"
+    )
+    has_mcp = runner.backend_has_capability(resume_harness, "mcp")
+    question_clause = (
+        f"the `{question_tool}` tool" if has_mcp else "`AskUserQuestion`"
+    )
+
     resume_prompt = (
         f"The user replied to your question(s):\n\n{user_text}\n\n"
-        "Continue implementing the fix. You may call AskUserQuestion again "
-        "if needed, or proceed to make the code changes.\n\n"
+        f"Continue implementing the fix. If you need further clarification "
+        f"before proceeding, call {question_clause} again and then STOP and "
+        f"end your turn — do not keep coding and do not answer your own "
+        f"question.\n\n"
         "When done, summarize what you changed."
     )
 

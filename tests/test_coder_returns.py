@@ -4,7 +4,7 @@ import subprocess
 from contextlib import ExitStack
 from unittest.mock import patch
 
-from autoswe.harness.runner import RunResult
+from autoswe.harness.runner import HandlerResult, RunResult
 from autoswe.harness.test_gate import GateResult
 
 
@@ -697,3 +697,221 @@ def test_non_max_turns_failure_not_rescued(tmp_path):
     assert res.done_content.startswith("FAILED")
     mock_commit.assert_not_called()
     mock_gate.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #275: MCP post_question on the fix path (pi fixer pauses → waiting)
+# ---------------------------------------------------------------------------
+
+
+def _question_stack(tmp_path, backend: str, run_result: RunResult,
+                    harness_override=None):
+    """Shared patch stack for the MCP question tests.
+
+    Resolves the fix harness to *backend* (so the "mcp" capability gate is
+    exercised against the real backend), stubs the worktree plumbing, and
+    scripts runner.run to return *run_result*. Returns (stack, finalize_mock).
+    """
+    harness = harness_override or {"backend": backend, "model": "m"}
+
+    def fake_run(prompt, **kwargs):
+        return run_result
+
+    stack = _patch_worktree(tmp_path)
+    stack.enter_context(_fetch_comments_patch())
+    stack.enter_context(patch("autoswe.vcs.worktree.get_merge_conflict_files", return_value=[]))
+    stack.enter_context(patch("autoswe.vcs.worktree.get_vcs", return_value=_fake_vcs()))
+    stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+    if harness is not None:
+        stack.enter_context(
+            patch("autoswe.harness.coder.resolve_harness", return_value=harness)
+        )
+    finalize_mock = stack.enter_context(
+        patch("autoswe.harness.coder._finalize_fix",
+              return_value=HandlerResult("DONE: no changes detected"))
+    )
+    return stack, finalize_mock
+
+
+def test_run_fix_pi_mcp_question_returns_waiting(tmp_path):
+    """pi fixer that posts a question via MCP → WAITING: questions.
+
+    The pi backend has no can_use_tool interception, so RunResult.
+    question_posted is the ONLY question signal; _run_fix_session must honor
+    it (mirroring the planner's MCP branch) and pause instead of finalizing —
+    the E2E-03b D-pi failure where /fix emitted `fixed` with zero changes
+    and a dangling question (issue #275).
+    """
+    from autoswe.harness.coder import run_fix
+
+    # The pi parser sets ok=True when the stream reaches agent_end — the
+    # question-terminal semantics live in the handler, not the parser.
+    rr = RunResult("Asked the user which file to edit.", "s-fix-q",
+                   "success", question_posted=True)
+    stack, finalize_mock = _question_stack(tmp_path, "pi", rr)
+    with stack:
+        with patch("autoswe.harness.coder.commit_and_push",
+                   return_value=FAKE_COMMIT_RESULT) as mock_commit:
+            res = run_fix(make_task(), None, {"provider": "github"}, {}, wt=tmp_path)
+
+    assert res.done_content == "WAITING: questions", (
+        f"question_posted on an mcp-capable backend must pause, got: {res.done_content!r}"
+    )
+    assert res.session_id == "s-fix-q", "the resumed session id must be preserved"
+    assert not finalize_mock.called, "must not commit/push when waiting on a question"
+    mock_commit.assert_not_called()
+
+
+def test_run_fix_claude_code_mcp_question_returns_waiting(tmp_path):
+    """Claude Code also advertises the "mcp" capability, so a fix session that
+    calls MCP post_question pauses too — unifying both question routes
+    (issue #275: the two routes must behave identically)."""
+    from autoswe.harness.coder import run_fix
+
+    rr = RunResult("Posted a question to the issue.", "s-fix-q",
+                   "success", question_posted=True)
+    stack, finalize_mock = _question_stack(tmp_path, "claude_code", rr)
+    with stack:
+        res = run_fix(make_task(), None, {"provider": "github"}, {}, wt=tmp_path)
+
+    assert res.done_content == "WAITING: questions"
+    assert res.session_id == "s-fix-q"
+    finalize_mock.assert_not_called()
+
+
+def test_run_fix_codex_question_posted_not_honored(tmp_path):
+    """Codex advertises no "mcp" capability, so a (forced) question_posted flag
+    must NOT pause the run — the documented straight-through behavior of
+    E2E-03b pass B stands for codex."""
+    from autoswe.harness.coder import run_fix
+
+    rr = RunResult("Just did the fix.", "s-fix-cx", "success", question_posted=True)
+    stack, finalize_mock = _question_stack(tmp_path, "codex", rr)
+    with stack:
+        finalize_mock.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc1234")
+        res = run_fix(make_task(), None, {"provider": "github"}, {}, wt=tmp_path)
+
+    assert not res.done_content.startswith("WAITING"), (
+        f"codex must not pause on question_posted, got: {res.done_content!r}"
+    )
+    assert res.done_content == "DONE_SUMMARY\tfixed\tabc1234"
+    finalize_mock.assert_called_once()
+
+
+def test_run_fix_state_question_wins_over_mcp_flag(tmp_path):
+    """When both signals are present, the can_use_tool state path wins
+    (same precedence as the planner) — no double handling, one WAITING."""
+    from autoswe.harness import coder
+
+    rr = RunResult("Both signals.", "s-fix-both", "success", question_posted=True)
+
+    def fake_run(prompt, **kwargs):
+        if kwargs.get("state") is not None:
+            kwargs["state"]["asked_question_md"] = "## Questions\n\nWhich approach?"
+        return rr
+
+    stack = _patch_worktree(tmp_path)
+    stack.enter_context(_fetch_comments_patch())
+    stack.enter_context(patch("autoswe.vcs.worktree.get_merge_conflict_files", return_value=[]))
+    stack.enter_context(patch("autoswe.vcs.worktree.get_vcs", return_value=_fake_vcs()))
+    stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+    stack.enter_context(
+        patch("autoswe.harness.coder.resolve_harness",
+              return_value={"backend": "claude_code", "model": "m"})
+    )
+    finalize_mock = stack.enter_context(patch("autoswe.harness.coder._finalize_fix"))
+    with stack:
+        res = coder.run_fix(make_task(), None, {"provider": "github"}, {}, wt=tmp_path)
+
+    assert res.done_content == "WAITING: questions"
+    finalize_mock.assert_not_called()
+
+
+def test_run_fix_question_beats_failure_subtype(tmp_path):
+    """A run that posted a question and THEN hit its turn cap still pauses.
+
+    The MCP flag is checked before the ok check, matching the planner: with a
+    question on the thread the run's authoritative outcome is "waiting on the
+    user" and the session is resumable — the no-work error_max_turns FAILED
+    path (and its rescue probe) must not fire.
+    """
+    from autoswe.harness.coder import run_fix
+
+    rr = RunResult("Turns ran out.", "s-fix-cap", "error_max_turns",
+                   ok=False, question_posted=True)
+    stack, finalize_mock = _question_stack(tmp_path, "pi", rr)
+    with stack:
+        stack_work_probe = patch(
+            "autoswe.harness.coder._worktree_has_committable_work", return_value=True
+        )
+        stack_work_probe.start()
+        try:
+            with patch("autoswe.harness.coder.commit_and_push",
+                       return_value=FAKE_COMMIT_RESULT) as mock_commit:
+                res = run_fix(make_task(), None, {"provider": "github"}, {}, wt=tmp_path)
+        finally:
+            stack_work_probe.stop()
+
+    assert res.done_content == "WAITING: questions", (
+        f"question must beat error_max_turns, got: {res.done_content!r}"
+    )
+    mock_commit.assert_not_called()
+    finalize_mock.assert_not_called()
+
+
+def test_resume_fix_mcp_question_returns_waiting(tmp_path):
+    """A resumed fix that asks a second question via MCP pauses again —
+    resume_fix shares _run_fix_session, so the same flag check applies."""
+    from autoswe.harness.coder import resume_fix
+
+    rr = RunResult("Another question.", "s-fix-resumed",
+                   "success", question_posted=True)
+    stack, finalize_mock = _question_stack(tmp_path, "pi", rr)
+    with stack:
+        res = resume_fix(
+            make_task(session_id="s-fix-orig"), "Put it in src/toolbox.py.",
+            {"provider": "github"}, {},
+        )
+
+    assert res.done_content == "WAITING: questions"
+    assert res.session_id == "s-fix-resumed"
+    finalize_mock.assert_not_called()
+
+
+def test_resume_fix_prompt_names_backend_question_tool(tmp_path):
+    """resume_fix names the question tool the way the resolved backend's
+    adapter exposes it (Phase 3 pattern, mirroring planner.resume_plan) — a pi
+    fixer only has the MCP tool, never a native AskUserQuestion."""
+    from autoswe.harness.coder import resume_fix
+
+    rr = RunResult("Done.", "s-fix-done", "success")
+    prompts = []
+
+    def fake_run(prompt, **kwargs):
+        prompts.append(prompt)
+        return rr
+
+    stack = _patch_worktree(tmp_path)
+    stack.enter_context(_fetch_comments_patch())
+    stack.enter_context(patch("autoswe.vcs.worktree.get_merge_conflict_files", return_value=[]))
+    stack.enter_context(patch("autoswe.vcs.worktree.get_vcs", return_value=_fake_vcs()))
+    stack.enter_context(patch("autoswe.harness.runner.run", side_effect=fake_run))
+    stack.enter_context(
+        patch("autoswe.harness.coder.resolve_harness",
+              return_value={"backend": "pi", "model": "m"})
+    )
+    with stack:
+        resume_fix(
+            make_task(session_id="s-fix-orig"), "src/toolbox.py.",
+            {"provider": "github"}, {},
+        )
+
+    assert len(prompts) == 1
+    prompt = prompts[0]
+    # The real PiBackend names the tool without a double underscore (see
+    # PiBackend.comment_tool_names); assert it is named and is the MCP comment
+    # tool, not the native Claude spelling only.
+    assert "post_question" in prompt, f"prompt must name the MCP question tool: {prompt[:300]!r}"
+    assert "autoswe_comment" in prompt
+    # The stop rule must be in the resume prompt too.
+    assert "STOP" in prompt

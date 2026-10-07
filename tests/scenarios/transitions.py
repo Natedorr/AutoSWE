@@ -202,6 +202,33 @@ TRANSITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "fresh_fix_mcp_question",
+        "description": (
+            "No existing task; /fix in body → the fixer pauses mid-run and posts "
+            "a question via MCP → waiting, not fixed (issue #275 / E2E-03b step 1). "
+            "Dual-axis: ClaudeFake honors question_posted directly; the pi axis maps "
+            "mcp_tool=post_question to script_mcp_question so the real PiBackend "
+            "parser sets RunResult.question_posted. _run_fix_session must honor the "
+            "flag (gated on the 'mcp' capability) and return WAITING before any "
+            "commit/push — the regression was /fix emitting 'fixed' with zero "
+            "changes and a dangling question."
+        ),
+        "start": {
+            "issue": {"body": "Add a `utcnow_iso()` helper. Before editing any file, ask me which file it should live in.\n\n/fix"},
+            "queue_task": None,
+        },
+        "claude_responses": [
+            {"text": "Posted a question to the issue.", "session_id": "s-fix-q-42", "subtype": "success",
+             "question_posted": True, "mcp_tool": "post_question"},
+        ],
+        "git_calls": ["create_worktree"],
+        "expect": {
+            "label_after": "autoswe:waiting",
+            "autoswe_status": "waiting",
+            "session_id": "s-fix-q-42",
+        },
+    },
+    {
         "name": "fresh_skip_command",
         "description": "No existing task; /skip → skipped immediately",
         "start": {
@@ -2822,6 +2849,7 @@ CODEX_TRANSITIONS: list[str] = [
 PI_TRANSITIONS: list[str] = [
     "fresh_plan_command",                              # Plan phase: real --tools read-only enforcement (no degrade)
     "fresh_fix_command",                               # Fix phase: --tools read_write allowlist
+    "fresh_fix_mcp_question",                          # Fix phase: MCP post_question → waiting (issue #275 / E2E-03b regression)
     "pi_retry_forks_from_pi_checkpoint",               # /retry: pi forks (--fork) from a pi checkpoint
     "retry_no_fork_when_checkpoint_backend_mismatches",  # codex checkpoint vs pi fix → fresh (provenance gate rejects)
     "waiting_resume_mcp_post_plan",                    # waiting -> planned via MCP post_plan on the pi axis (MCP event drives PLAN_READY, no tag in text)

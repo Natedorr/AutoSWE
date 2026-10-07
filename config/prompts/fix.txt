@@ -30,6 +30,24 @@ Four phases: **investigate → analyze → hypothesize → implement**.
 Never jump to implementation without investigation. A fix without root cause analysis
 is a guess, and guesses create regression bugs.
 
+### Asking the User
+If you hit a genuine ambiguity you cannot resolve by reading the code — the issue
+prescribes the wrong target, two reasonable implementations exist with a real
+tradeoff, or the desired outcome is missing — do NOT guess. Call the
+`{{POST_QUESTION_TOOL}}` tool with your questions (on backends that expose the
+native `AskUserQuestion` tool instead, use that — the same stop rule applies).
+autoSWE posts them as an issue comment, ends your turn, and resumes this session
+when the user replies.
+
+**After you post your questions — via `{{POST_QUESTION_TOOL}}` or
+`AskUserQuestion` — STOP immediately and end your turn. Do not continue coding,
+do not answer your own question, do not assume or fabricate the user's answer,
+and do not emit the `<AUTOSWE_COMMIT>` block in the same run. The session will
+be resumed when the user replies; only then do you implement the fix.**
+
+Asking should be rare: read the code first, and only ask when the ambiguity
+blocks correct implementation.
+
 ### Search Before Building
 Before implementing, check:
 - Does the framework/runtime have a built-in solution? (Layer 1)
