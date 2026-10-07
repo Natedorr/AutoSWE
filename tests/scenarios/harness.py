@@ -434,6 +434,19 @@ def patched_world(
         pm.patch_gh_post_comment(fake)
         pm.patch_api_fake(fake)
 
+        # Issue #276: deterministic branch head for the no-changes arm. The
+        # real _get_branch_head_sha runs git against the fake (non-repo)
+        # worktree and would return None — so a row whose fix commits nothing
+        # would persist an empty test_failed_sha, defeating the gate-brake
+        # assertions. Rows can pin the head via meta {"script_head_sha": "<sha>"}.
+        row_meta = row_meta or {}
+        if row_meta.get("script_head_sha"):
+            import autoswe.harness.coder as coder_mod
+            orig_head_sha = coder_mod._get_branch_head_sha
+            head_sha = row_meta["script_head_sha"]
+            coder_mod._get_branch_head_sha = lambda wt, branch: head_sha
+            pm.add(lambda: setattr(coder_mod, "_get_branch_head_sha", orig_head_sha))
+
         yield HarnessWorld(
             fake=fake,
             claude=cl_fake,
@@ -465,11 +478,20 @@ def _script_git_ops(
 
     # commit_and_push always needs a scripted commit result
     if "commit_and_push" in git_calls:
-        gt_fake.script_commit({
-            "committed": True,
-            "commit_sha": "abc1234",
-            "branch": branch,
-        })
+        if row_meta.get("script_no_changes"):
+            # Issue #276 rows: the session made no changes — commit_and_push
+            # reports committed: False (no sha) so the no-changes arm of
+            # _finalize_fix runs.
+            gt_fake.script_commit({
+                "committed": False,
+                "branch": branch,
+            })
+        else:
+            gt_fake.script_commit({
+                "committed": True,
+                "commit_sha": "abc1234",
+                "branch": branch,
+            })
 
     # sync_branch scripting: conflict scenarios get a conflict result;
     # everything else gets a clean sync result

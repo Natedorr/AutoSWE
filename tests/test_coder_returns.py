@@ -420,17 +420,74 @@ def test_finalize_fix_skipped_gate_returns_done_summary(tmp_path):
     assert hr.done_content.startswith("DONE_SUMMARY\t")
 
 
-def test_finalize_fix_no_changes_skips_gate(tmp_path):
-    task = make_task()
+def _finalize_no_changes(task, tmp_path, gate, head_sha="0123456789abcdef0123456789abcdef01234567"):
+    """Run _finalize_fix with commit_and_push reporting NO changes.
+
+    The branch head is stubbed via _get_branch_head_sha (the real
+    commit_and_push returns no sha on the no-changes path). Returns
+    (HandlerResult, mock_gate).
+    """
     from autoswe.harness import coder
     with patch("autoswe.harness.coder.commit_and_push", return_value=NO_CHANGES_RESULT):
-        with patch("autoswe.harness.coder.run_test_gate") as mock_gate:
-            hr = coder._finalize_fix(
-                task, _r("Done."), tmp_path, "o", "r", 1, "master", "github", "tok",
-                {}, {}, session_id="sess",
-            )
+        with patch("autoswe.harness.coder._get_branch_head_sha", return_value=head_sha):
+            with patch("autoswe.harness.coder.run_test_gate", return_value=gate) as mock_gate:
+                hr = coder._finalize_fix(
+                    task, _r("Done."), tmp_path, "o", "r", 1, "master", "github", "tok",
+                    {}, {}, session_id="sess",
+                )
+    return hr, mock_gate
+
+
+def test_finalize_fix_no_changes_red_suite_returns_tests_failed(tmp_path):
+    """Issue #276: no-changes + red gate must re-land test_failed, not fixed.
+
+    A gate auto-fix that correctly declines to change an already-committed
+    fix (fixture-driven red suite) must NOT be promoted out of test_failed —
+    _finalize_fix runs the gate on the existing branch head and returns
+    TESTS_FAILED with the head sha when it is red.
+    """
+    task = make_task()
+    gate = GateResult(ok=False, ran=True, reason="suite failing (exit 1)",
+                      output="assert flag == 'green'", command="pytest", duration_seconds=1.0)
+    hr, mock_gate = _finalize_no_changes(task, tmp_path, gate)
+    assert hr.done_content.startswith("TESTS_FAILED\t")
+    assert "suite failing (exit 1)" in hr.done_content
+    assert "assert flag == 'green'" in hr.done_content
+    # The branch head is preserved after the last tab.
+    assert hr.done_content.rstrip().endswith("0123456789abcdef0123456789abcdef01234567")
+    assert hr.session_id == "sess"
+    mock_gate.assert_called_once()
+
+
+def test_finalize_fix_no_changes_green_suite_returns_no_changes_done(tmp_path):
+    """No changes + green gate: the fix completes as a no-op (E2E-05)."""
+    task = make_task()
+    gate = GateResult(ok=True, ran=True, reason="suite green", command="pytest")
+    hr, mock_gate = _finalize_no_changes(task, tmp_path, gate)
     assert hr.done_content == "DONE: no changes detected"
-    mock_gate.assert_not_called()
+    mock_gate.assert_called_once()
+
+
+def test_finalize_fix_no_changes_skipped_gate_returns_no_changes_done(tmp_path):
+    """No changes + skipped (non-gating) gate: the fix completes as a no-op."""
+    task = make_task()
+    gate = GateResult(ok=True, ran=False, reason="no test suite detected")
+    hr, mock_gate = _finalize_no_changes(task, tmp_path, gate)
+    assert hr.done_content == "DONE: no changes detected"
+    mock_gate.assert_called_once()
+
+
+def test_finalize_fix_no_changes_red_suite_null_head_sha(tmp_path):
+    """No changes + red gate + unresolvable head sha: still TESTS_FAILED.
+
+    _get_branch_head_sha is best-effort — a None head must not raise; the
+    sha slot is empty (emit's test_failed branch tolerates a missing sha).
+    """
+    task = make_task()
+    gate = GateResult(ok=False, ran=True, reason="suite failing (exit 1)", command="pytest")
+    hr, _ = _finalize_no_changes(task, tmp_path, gate, head_sha=None)
+    assert hr.done_content.startswith("TESTS_FAILED\t")
+    assert hr.done_content.endswith("\t")
 
 
 def test_finalize_fix_run_gate_false_skips_gate(tmp_path):
