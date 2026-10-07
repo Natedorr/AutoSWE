@@ -260,6 +260,16 @@ def emit(
     task = world.task
     cfg = world.cfg
     kind = action.kind
+    # A /retry that REPLAYED a /pr (issue #277) must emit exactly like a direct
+    # ship for status/PR-identity purposes — shipped (not the retry default
+    # "fixed"), persist the PR identity, skip the auto-PR + fix-summary/re-review
+    # machinery, and leave the session checkpoint untouched. Watermark
+    # bookkeeping still uses the literal "retry" kind so last_dispatched_command
+    # stays "/retry" (decide() dedup) and last_replayed_command stays "/pr" (a
+    # subsequent /retry re-replays the /pr). This is byte-for-byte identical to
+    # `kind` for every other action.
+    effective_kind = "ship_pr" if (kind == "retry" and result is not None
+                                   and result.replayed_command == "/pr") else kind
 
     # --- No-Claude actions (result is None) ---
 
@@ -584,7 +594,7 @@ def emit(
     # The reviewer's structured verdict (issue #173 F-18) drives the status
     # gate first; _map_done_to_status falls back to the markdown regex only
     # when verdict is None.
-    new_status = _map_done_to_status(done, kind, verdict=result.verdict)
+    new_status = _map_done_to_status(done, effective_kind, verdict=result.verdict)
     session_id = result.session_id or task.session_id
 
     # --- Common queue patch for all Claude actions ---
@@ -662,7 +672,11 @@ def emit(
         # session_id), so /retry forks from the most recent *good* coding session
         # and a failed retry leaves the checkpoint intact for the next /retry.
         # Review is excluded above: its throwaway session is not a checkpoint.
-        if new_status != "failed" and _KIND_TO_PHASE.get(kind) is not None:
+        # effective_kind (not kind): a replayed /pr is a ship_pr, whose phase is
+        # unresolvable, so the checkpoint gate (is not None) is False and the
+        # fix session checkpoint is left intact — exactly as a direct /pr would
+        # leave it. A replayed /fix still records the checkpoint as before.
+        if new_status != "failed" and _KIND_TO_PHASE.get(effective_kind) is not None:
             # A /retry records the phase of the command it replayed (a replayed
             # /plan → "plan"), so the checkpoint backend tag reflects the backend
             # that actually produced this session.
@@ -685,7 +699,7 @@ def emit(
     # Merge lifecycle field mutations (last_phase, resume_phase, plan_file_path,
     # review_file_path, first_dispatched_at, _guard_blocked). Computed once up
     # front so the review early-return below cannot skip them.
-    queue_patch.update(_field_lifecycle_patch(kind, new_status, result, replayed_phase))
+    queue_patch.update(_field_lifecycle_patch(effective_kind, new_status, result, replayed_phase))
 
     # Review verdict gates the next step. _map_done_to_status parsed the
     # verdict embedded in the review text:
@@ -775,7 +789,7 @@ def emit(
         # same write that marks the task shipped. Each field is guarded
         # independently — a provider can supply the URL without the number
         # and vice versa.
-        if kind == "ship_pr":
+        if effective_kind == "ship_pr":
             if result.pr_number is not None:
                 queue_patch["pr_number"] = result.pr_number
             if result.pr_url:
@@ -785,7 +799,7 @@ def emit(
         # Mirrors _build_completion_comment's rfind pattern so tabs inside
         # the LLM-generated summary are preserved (the last tab separates
         # the summary from the commit SHA).
-        if kind in ("fix", "retry") and done.startswith("DONE_SUMMARY\t"):
+        if effective_kind in ("fix", "retry") and done.startswith("DONE_SUMMARY\t"):
             summary_rest = done[len("DONE_SUMMARY\t"):]
             tab_idx = summary_rest.rfind("\t")
             summary_text = summary_rest[:tab_idx].strip() if tab_idx >= 0 else summary_rest.strip()
@@ -802,14 +816,15 @@ def emit(
         # task — a latent re-review one poll away (issue #195). A re-review is
         # pending only when the just-finished run is a fix/retry that started
         # from a review-gating state; /pr and /sync never are.
-        rereview_pending = kind in ("fix", "retry") and old_status in REVIEW_BLOCKING_STATUSES
+        rereview_pending = effective_kind in ("fix", "retry") and old_status in REVIEW_BLOCKING_STATUSES
         queue_patch["rereview_after_fix"] = rereview_pending
 
         effects.append(Effect(kind="patch_queue", queue_patch=queue_patch))
 
         # Auto-create PR if fix completed and configured (but never when a
-        # re-review is pending — the gating verdict has not cleared yet).
-        if kind in ("fix", "retry") and cfg.get("AUTO_CREATE_PR") and task.pr_number is None and not rereview_pending:
+        # re-review is pending — the gating verdict has not cleared yet). A
+        # replayed /pr (effective_kind ship_pr) must NOT also fire an auto-PR.
+        if effective_kind in ("fix", "retry") and cfg.get("AUTO_CREATE_PR") and task.pr_number is None and not rereview_pending:
             pr_head = _resolve_branch(task.owner, task.repo, task.issue_number, None, task.provider)
             # PR target = the repo's configured base_branch, never plan_branch.
             # plan_branch is the branch the work was forked from (issue #196).

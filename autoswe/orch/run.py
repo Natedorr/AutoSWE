@@ -18,6 +18,7 @@ from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import coder, planner
 from autoswe.harness.runner import HandlerResult, backend_has_capability
 from autoswe.orch.types import Action, World
+from autoswe.tracking.labels import COMPLETED_STATUSES
 from autoswe.vcs import ship
 from autoswe.vcs import worktree as worktree_mod
 
@@ -594,6 +595,29 @@ def _run_retry(
     # When the last dispatch was a plain /plan / /fix / /review (no intervening
     # retry), last_replayed_command is None and we fall back to the dispatch watermark.
     last_cmd = world.task.last_replayed_command or world.task.last_dispatched_command
+    # A /pr refused by the preflight gate (issue #277) leaves the task at its
+    # COMPLETED resting state (typically `fixed`) with last_dispatched_command
+    # "/pr". Replaying /pr re-attempts the ship (re-running the gate), so a
+    # user who posts /retry once the branch/CI is green actually opens the PR.
+    # Falling back to /fix here would be wrong: on a still-red gate the fixer
+    # makes no changes and the #276 no-change guard re-lands test_failed, which
+    # demotes fixed->test_failed, consumes gate budget, and hard-blocks /pr.
+    # A /pr is only replayable when the task has completed work to ship — the
+    # COMPLETED_STATUSES gate; any other status (e.g. a failed task with a stale
+    # /pr watermark) still falls through to /fix below.
+    if last_cmd == "/pr" and world.task.status in COMPLETED_STATUSES:
+        done = ship.open_pr(task, cfg, repo_cfg, progress_callback=progress_callback)
+        if done.startswith("DONE"):
+            # open_pr cached the PR identity on the task dict (issue #193);
+            # lift it into the result so emit() persists it on the shipped
+            # queue entry (same as the direct kind="ship_pr" path).
+            return DispatchResult(
+                done_content=done,
+                pr_number=task.get("pr_number"),
+                pr_url=task.get("pr_url"),
+                replayed_command="/pr",
+            )
+        return DispatchResult(done_content=done, replayed_command="/pr")
     if last_cmd in _NON_REPLAYABLE_COMMANDS:
         last_cmd = "/fix"
     # A /review watermark on a failed/error task must replay as /fix, not a

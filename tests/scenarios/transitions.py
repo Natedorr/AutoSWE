@@ -1129,6 +1129,168 @@ TRANSITIONS: list[dict[str, Any]] = [
             "comment_contains": ["PR not opened", "CI failing"],
         },
     },
+    # ---- /retry after a red-CI /pr refusal re-attempts /pr (issue #277 review) ----
+    {
+        "name": "retry_after_pr_refusal_replays_pr",
+        "description": (
+            "Fixed task whose /pr was refused by the red CI gate "
+            "(last_dispatched_command=\"/pr\"). /retry must REPLAY /pr (re-run "
+            "the gate + ship) and hold `fixed` — NOT fall back to /fix, which "
+            "would re-run the fixer, make no changes, and the #276 no-change "
+            "guard would demote fixed->test_failed. No fixer run, gate re-checked, "
+            "resting state held (issue #277 / MEDIUM finding 1)."
+        ),
+        "skip_providers": ["azure"],
+        "start": {
+            "issue": {"body": "Fix.\n\n/fix"},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "failure",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "🚫 **PR not opened** — CI failing: 1 check(s) failing: ci\n\nPost `/retry` to continue.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T03:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "last_dispatched_command": "/pr",
+                "last_dispatched_command_id": 2,
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "no_claude_calls": True,
+            "comment_contains": ["PR not opened", "CI failing"],
+        },
+    },
+    # ---- /retry after /pr refusal when the gate went green ships (issue #277) ----
+    {
+        "name": "retry_after_pr_refusal_ships_when_ci_green",
+        "description": (
+            "Fixed task whose /pr was refused (last_dispatched_command=\"/pr\") "
+            "and the gate has since gone green. /retry REPLAYS /pr and the PR "
+            "opens -> shipped, no fixer re-run. This is the user-visible recovery "
+            "path the refusal copy \"Post /retry to continue\" promises "
+            "(issue #277 / MEDIUM finding 1)."
+        ),
+        "skip_providers": ["azure"],
+        "start": {
+            "issue": {"body": "Fix.\n\n/fix"},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "success",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "🚫 **PR not opened** — CI failing: 1 check(s) failing: ci\n\nPost `/retry` to continue.\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T03:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "last_dispatched_command": "/pr",
+                "last_dispatched_command_id": 2,
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:shipped",
+            "autoswe_status": "shipped",
+            "no_claude_calls": True,
+        },
+    },
+    # ---- PR preflight gate: sync failure blocks (issue #277) ----
+    {
+        "name": "pr_blocked_by_sync_gate",
+        "description": (
+            "Fixed task; /pr from user with a clean CI but a branch that fails "
+            "to sync to base -> the sync preflight gate refuses and the task "
+            "HOLDS its resting state (`fixed`) with the sync reason, not "
+            "`failed` (issue #277: a preflight block is not a handler error)."
+        ),
+        "skip_providers": ["azure"],
+        "meta": {"script_sync_fail": True},
+        "start": {
+            "issue": {"body": "Fix.\n\n/fix"},
+            "labels": ["autoswe:fixed"],
+            "ci_status": "success",
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "fixed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:fixed",
+            "autoswe_status": "fixed",
+            "comment_contains": ["PR not opened", "sync"],
+        },
+    },
     # ---- PR preflight gate: clean sync + CI success ships ----
     {
         "name": "pr_ships_when_ci_success",
