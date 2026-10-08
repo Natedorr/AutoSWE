@@ -57,6 +57,47 @@ def _get_row(name: str) -> dict:
     raise ValueError(f"Unknown transition: {name!r}")
 
 
+def _labels_written(fake, issue_num: int) -> list[str]:
+    """Every autoswe:* label that appeared in ANY label-write during the turn.
+
+    Scans the API fake's recorded_calls: GitHub is a ``PUT /issues/N/labels``
+    body; Azure is a JSON-Patch ``op: replace`` on ``/fields/System.Tags``
+    (the tracker's single-op write). Mirrors the E2E corpus's "must never
+    appear" assertions (e.g. E2E-13) at the transition-matrix level (issue #279).
+    """
+    written = []
+    for call in fake.recorded_calls:
+        body = call.get("body")
+        if not body:
+            continue
+        if call["method"] == "PUT" and f"/issues/{issue_num}/labels" in call.get("path", ""):
+            for lb in body.get("labels", []):
+                name = lb.get("name") if isinstance(lb, dict) else lb
+                if isinstance(name, str) and name.startswith("autoswe:"):
+                    written.append(name)
+        elif call["method"] == "PATCH" and isinstance(body, list):
+            for op in body:
+                if op.get("path") == "/fields/System.Tags" and op.get("value"):
+                    for tag in op["value"].split(";"):
+                        tag = tag.strip()
+                        if tag.startswith("autoswe:"):
+                            written.append(tag)
+    return written
+
+
+def _assert_labels_never(fake, issue_num: int, expect: dict) -> None:
+    """Assert no label from ``expect["labels_never"]`` ever appeared in a write."""
+    never = expect.get("labels_never")
+    if not never:
+        return
+    written = _labels_written(fake, issue_num)
+    bad = [lb for lb in written if lb in never]
+    assert not bad, (
+        f"Labels that must never appear were written: {sorted(set(bad))}. "
+        f"All label writes this turn: {written}"
+    )
+
+
 @pytest.mark.transition
 @pytest.mark.parametrize("provider", ["github", "azure"])
 @pytest.mark.parametrize("transition_name", transition_names)
@@ -114,6 +155,9 @@ def test_transition(
             assert_label_is(hw.fake, issue_num, expect["label_after"])
         else:
             _assert_azure_tag(hw.fake, issue_num, expect["label_after"])
+
+    # Issue #279: labels that must never appear at ANY point this turn
+    _assert_labels_never(hw.fake, issue_num, expect)
 
     # Queue task assertions
     queue_fields = {}
@@ -230,6 +274,9 @@ def test_transition_codex(
     # Label assertion
     if "label_after" in expect:
         assert_label_is(hw.fake, issue_num, expect["label_after"])
+
+    # Issue #279: labels that must never appear at ANY point this turn
+    _assert_labels_never(hw.fake, issue_num, expect)
 
     # Queue task assertions
     queue_fields = {}
@@ -349,6 +396,9 @@ def test_transition_pi(
 
     if "label_after" in expect:
         assert_label_is(hw.fake, issue_num, expect["label_after"])
+
+    # Issue #279: labels that must never appear at ANY point this turn
+    _assert_labels_never(hw.fake, issue_num, expect)
 
     queue_fields = {}
     for key in ("autoswe_status", "session_id", "pending_command", "attempt_count",

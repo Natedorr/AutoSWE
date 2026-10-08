@@ -560,11 +560,13 @@ def emit(
         # CI could not be consulted (API error) — a one-time notice, never a
         # status change: an error is never treated as a pass or a fail.
         # _dispatch_task flips the label to a transient "running" status
-        # before this runs (there is no Claude call to gate it on), so the
-        # set_status effect below is required to restore it — not optional
-        # bookkeeping — and the queue_patch must restore autoswe_status too,
-        # since the same transient flip already landed directly on the live
-        # queue entry.
+        # before this runs (there is no Claude call to gate it on) — unless
+        # the flip was skipped (issue #279: no real status to fall back to
+        # yet, or same-value). Either way the set_status effect below is
+        # required: it restores the real status (or is an idempotent
+        # same-value write) — not optional bookkeeping — and the queue_patch
+        # must restore autoswe_status too, since the transient flip (when it
+        # happens) already landed directly on the live queue entry.
         ci = world.ci
         summary = (ci.summary if ci else "") or "the CI API could not be consulted"
         body = (

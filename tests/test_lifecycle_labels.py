@@ -262,3 +262,26 @@ def test_running_status_for_known_kinds_ignore_current_status():
     """Kinds with a dedicated RUNNING verb use it regardless of current_status."""
     assert running_status_for("fix", current_status="planned") == "fixing"
     assert running_status_for("plan", current_status="fixed") == "planning"
+
+
+def test_running_status_for_none_default_no_transient_status():
+    """With default=None (issue #279), a pure bookkeeping kind on a task with
+    no real status yet returns None — the caller must not set any transient
+    running label (there is no run in flight; the corrective effect sets the
+    real state)."""
+    assert running_status_for("skip", current_status=None, default=None) is None
+    assert running_status_for("abort", current_status=None, default=None) is None
+    assert running_status_for("ci_error_warn", current_status=None, default=None) is None
+
+
+def test_running_status_for_none_default_keeps_current_status():
+    """default=None still falls back to the task's real status when one exists,
+    so corrective effects can restore/hold the truthful label."""
+    assert running_status_for("skip", current_status="planned", default=None) == "planned"
+    assert running_status_for("ci_error_warn", current_status="fixed", default=None) == "fixed"
+
+
+def test_running_status_for_none_default_ignores_real_verbs():
+    """Kinds with a dedicated RUNNING verb use it regardless of default."""
+    assert running_status_for("fix", current_status=None, default=None) == "fixing"
+    assert running_status_for("retry", last_phase="plan", current_status=None, default=None) == "planning"

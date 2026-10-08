@@ -310,17 +310,24 @@ def _dispatch_task(
         issue_handler = init_issue_logger(LOGS_DIR, slug)
 
         # --- Set running status ---
+        # default=None (issue #279): a pure bookkeeping action (skip/abort/
+        # CI watch/etc.) on a task with no real status yet has no run in
+        # flight — there is no running label to set, and the corrective
+        # effect below sets the real state. A same-value rewrite (e.g.
+        # planned→planned) is skipped too: terminal/intermediate states are
+        # set exclusively by emit() effects.
         running = running_status_for(
             action.kind,
             task_entry.get("resume_phase") or task_entry.get("last_phase"),
             task_entry.get("autoswe_status"),
+            default=None,
         )
-        try:
-            tracker.set_status(issue_num, f"autoswe:{running}")
-        except RuntimeError as e:
-            log(f"[WARN] could not set running label: {e}")
-
-        task_entry["autoswe_status"] = running
+        if running is not None and running != task_entry.get("autoswe_status"):
+            try:
+                tracker.set_status(issue_num, f"autoswe:{running}")
+            except RuntimeError as e:
+                log(f"[WARN] could not set running label: {e}")
+            task_entry["autoswe_status"] = running
         if task_entry.get("first_dispatched_at") is None:
             task_entry["first_dispatched_at"] = now_iso
 
