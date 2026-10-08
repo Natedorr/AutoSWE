@@ -101,8 +101,11 @@ _CMD_TO_KIND = {
 
 
 def running_status_for(
-    kind: str, last_phase: str | None = None, current_status: str | None = None
-) -> str:
+    kind: str,
+    last_phase: str | None = None,
+    current_status: str | None = None,
+    default: str | None = "fixing",
+) -> str | None:
     """Return the RUNNING status for an action kind.
 
     For ``retry`` the status depends on ``last_phase`` (plan→planning, fix→fixing).
@@ -111,10 +114,16 @@ def running_status_for(
     back to ``current_status`` (the task isn't visibly changing state) instead
     of the misleading hardcoded "fixing", so a failed corrective effect leaves
     the label at the task's real status rather than stuck mid-transition.
+
+    When ``default is None`` (issue #279) and ``current_status`` is also
+    ``None`` — a pure bookkeeping action on a task with no real status yet —
+    the function returns ``None`` to mean "no transient running status":
+    the caller must not set any running label at all, since there is no run
+    in flight to gate and the corrective effect below sets the real state.
     """
     if kind == "retry" and last_phase == "plan":
         return "planning"
-    return _KIND_TO_RUNNING.get(kind, current_status or "fixing")
+    return _KIND_TO_RUNNING.get(kind, current_status or default)
 
 
 def completed_status_for(kind: str) -> str:

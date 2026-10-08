@@ -239,6 +239,10 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "label_after": "autoswe:skipped",
             "autoswe_status": "skipped",
+            # Issue #279 (E2E-13 must-never): a pure bookkeeping /skip on a
+            # fresh task must not flash any transient running label on the way
+            # to skipped.
+            "labels_never": ["autoswe:planning", "autoswe:fixing", "autoswe:failed", "autoswe:error"],
             "no_claude_calls": True,
         },
     },
@@ -256,6 +260,7 @@ TRANSITIONS: list[dict[str, Any]] = [
             # The _map_done_to_status maps ABORTED → "aborted".
             "label_after": "autoswe:aborted",
             "autoswe_status": "aborted",
+            "labels_never": ["autoswe:planning", "autoswe:fixing", "autoswe:failed", "autoswe:error"],
             "comment_contains": ["Task aborted"],
         },
     },
@@ -1372,6 +1377,9 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "label_after": "autoswe:skipped",
             "autoswe_status": "skipped",
+            # Issue #279: a /skip from a real status must not rewrite the
+            # label with a transient verb (planned→planned is a no-op now).
+            "labels_never": ["autoswe:fixing", "autoswe:failed", "autoswe:error"],
             "no_claude_calls": True,
         },
     },
@@ -2794,6 +2802,7 @@ TRANSITIONS: list[dict[str, Any]] = [
         "expect": {
             "label_after": "autoswe:fixed",
             "autoswe_status": "fixed",
+            "labels_never": ["autoswe:planning", "autoswe:fixing", "autoswe:failed", "autoswe:error"],
             "comment_contains": ["CI status unknown"],
             "no_claude_calls": True,
             "no_git_calls": True,
