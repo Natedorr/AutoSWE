@@ -193,6 +193,19 @@ class TestNaming:
         assert n2 != n1
         assert n2.startswith("data-")
 
+    def test_pick_trailing_dot_name_kept_without_dot(self):
+        """F-2: a trusted name ending in ``.`` (e.g. ``data.csv.``) is kept with
+        the trailing dot stripped, rather than discarded to sniffed naming
+        (Requirement 3: prefer the provider name when trustworthy)."""
+        from autoswe.attachments.naming import pick_filename
+
+        name = pick_filename("data.csv.", b"x", set(), 1)
+        assert name == "data.csv"
+        # A plain trailing dot with no extension still resolves to the base.
+        assert pick_filename("notes.", b"x", set(), 1) == "notes"
+        # An extensionless trusted name (no dot at all) is kept verbatim.
+        assert pick_filename("README", b"x", set(), 1) == "README"
+
 
 # ============================================================================
 # Downloads: cap + error classification (no network)
@@ -1087,6 +1100,151 @@ class TestDispatchAttachmentLifecycle:
         # No new temp dir was created for a non-agent action.
         assert seen["during"] == []
 
+    # ------------------------------------------------------------------
+    # F-1: comment-embedded attachments are still discovered when the poll
+    # adapter skipped the comment fetch (``comments == []``) — the ingest
+    # wrapper falls back to ``tracker.fetch_comments``.
+    # ------------------------------------------------------------------
+
+    class _Comment:
+        """Minimal comment shape: the ingest reads ``.body`` via getattr."""
+        def __init__(self, body):
+            self.id = 1
+            self.body = body
+
+    def test_ingest_falls_back_to_fetch_comments_when_empty(self, monkeypatch):
+        """GitHub provider + empty comment list -> the ingest wrapper falls
+        back to ``tracker.fetch_comments`` so comment-embedded attachments are
+        still discovered (Requirement 1)."""
+        import autoswe.orch.loop as loop_mod
+        from autoswe.attachments import github as gh
+
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        # The asset lives in a *comment*, not the body.
+        monkeypatch.setattr(gh.downloads, "download_bytes", lambda url, **k: png)
+
+        class _Tracker:
+            def __init__(self):
+                self.fetch_comments_calls = []
+
+            def fetch_comments(self, issue_number):
+                self.fetch_comments_calls.append(issue_number)
+                return [self._comment]
+
+        tracker = _Tracker()
+        tracker._comment = self._Comment(f"see {_ASSET_URL}")
+
+        # comments_fetched=False models the steady-state poll that skipped
+        # the comment fetch (the gap F-1 closes).
+        result = loop_mod._ingest_task_attachments(
+            tracker, {"provider": "github", "owner": "o", "repo": "r",
+                      "pat": "t"}, 1, "no assets in body", [],
+            {"ATTACHMENTS_ENABLED": True},
+            comments_fetched=False,
+        )
+        # Fallback was invoked and the comment-embedded asset was ingested.
+        assert tracker.fetch_comments_calls == [1]
+        assert result is not None
+        assert len(result.items) == 1
+        if result is not None:
+            result.remove()
+
+    def test_ingest_no_fallback_when_comments_fetched_empty(self, monkeypatch):
+        """When the poll *did* fetch comments and the list is genuinely empty
+        (``comments_fetched=True``), no redundant ``fetch_comments`` fallback
+        is issued — the empty list is authoritative."""
+        import autoswe.orch.loop as loop_mod
+
+        class _Tracker:
+            def fetch_comments(self, issue_number):
+                raise AssertionError("fallback should not run when comments already fetched")
+
+        tracker = _Tracker()
+        result = loop_mod._ingest_task_attachments(
+            tracker, {"provider": "github", "owner": "o", "repo": "r",
+                      "pat": "t"}, 1, "no assets", [],
+            {"ATTACHMENTS_ENABLED": True},
+            comments_fetched=True,
+        )
+        assert result is None  # no asset anywhere, and no fallback attempted
+
+    def test_ingest_no_fallback_when_comments_present(self, monkeypatch):
+        """When the poll already fetched comments (non-empty list), no
+        redundant ``fetch_comments`` fallback is issued."""
+        import autoswe.orch.loop as loop_mod
+        from autoswe.attachments import github as gh
+
+        monkeypatch.setattr(gh.downloads, "download_bytes",
+                            lambda url, **k: b"x" * 8)
+
+        class _Tracker:
+            def fetch_comments(self, issue_number):
+                raise AssertionError("fallback should not run when comments present")
+
+        tracker = _Tracker()
+        result = loop_mod._ingest_task_attachments(
+            tracker, {"provider": "github", "owner": "o", "repo": "r",
+                      "pat": "t"}, 1, f"see {_ASSET_URL}",
+            [self._Comment("no asset here")],
+            {"ATTACHMENTS_ENABLED": True},
+            comments_fetched=True,
+        )
+        # Body-embedded asset ingested without touching fetch_comments.
+        assert result is not None
+        assert len(result.items) == 1
+        if result is not None:
+            result.remove()
+
+    def test_ingest_fallback_failure_is_best_effort(self, monkeypatch):
+        """A ``fetch_comments`` failure in the fallback is swallowed (best
+        effort) — ingestion continues on the body alone and returns without
+        raising."""
+        import autoswe.orch.loop as loop_mod
+
+        class _Tracker:
+            def fetch_comments(self, issue_number):
+                raise RuntimeError("network down")
+
+        tracker = _Tracker()
+        # No asset anywhere -> None; the key is that it does not raise.
+        result = loop_mod._ingest_task_attachments(
+            tracker, {"provider": "github", "owner": "o", "repo": "r",
+                      "pat": "t"}, 1, "no assets", [],
+            {"ATTACHMENTS_ENABLED": True},
+        )
+        assert result is None
+
+    def test_ingest_no_fallback_for_azure(self, monkeypatch):
+        """The comment fallback is GitHub-only: Azure discovery reads the
+        relations cache, not comments, so an empty comment list is left
+        alone (no ``fetch_comments`` call)."""
+        import autoswe.orch.loop as loop_mod
+        from autoswe.attachments import azure as az
+
+        csv = b"a,b\n1,2\n"
+        monkeypatch.setattr(az.downloads, "download_bytes",
+                            lambda url, **k: csv)
+
+        class _Tracker:
+            def fetch_comments(self, issue_number):
+                raise AssertionError("Azure should not fall back to fetch_comments")
+
+            def list_workitem_attachments(self, issue_number):
+                return [{"url": "https://x/att", "name": "data.csv",
+                         "resource_size": 7}]
+
+        tracker = _Tracker()
+        result = loop_mod._ingest_task_attachments(
+            tracker, {"provider": "azure", "owner": "o", "repo": "r",
+                      "pat": "t"}, 1, "body", [],
+            {"ATTACHMENTS_ENABLED": True},
+        )
+        # Azure attachment discovered from the relations seam, not comments.
+        assert result is not None
+        assert len(result.items) == 1
+        if result is not None:
+            result.remove()
+
 
 # ============================================================================
 # Config resolution
@@ -1251,3 +1409,43 @@ class TestProviderSeam:
         tracker = AzureTracker({"provider": "azure", "org": "o",
                                 "project": "p", "repo": "r", "pat": "pat"})
         assert tracker.list_workitem_attachments(1) == []
+
+    def test_azure_tracker_relations_cache_evicts_stale(self, monkeypatch):
+        """F-3: the ``_relations_cache`` is bounded by age — entries older
+        than ``_RELATIONS_CACHE_TTL`` are evicted on the next capture, so a
+        long-running poller does not accumulate raw relations payloads.
+        """
+        from autoswe.providers.azure import tracker as az_tracker
+        from autoswe.providers.azure.tracker import AzureTracker
+
+        tracker = AzureTracker({"provider": "azure", "org": "o",
+                                "project": "p", "repo": "r", "pat": "pat"})
+        # Seed the cache with a fresh and a stale entry (bypassing the
+        # timestamp that a real capture would set).
+        now = time.time()
+        tracker._relations_cache[100] = (now, [{"rel": "AttachedFile", "url": "u"}])
+        tracker._relations_cache[200] = (
+            now - (az_tracker._RELATIONS_CACHE_TTL + 1),
+            [{"rel": "AttachedFile", "url": "u2"}],
+        )
+
+        # A fresh capture (via the shared _to_normalized path) evicts the
+        # stale entry while keeping the fresh one.
+        tracker._to_normalized({"id": 300, "fields": {}, "relations": []})
+
+        assert 100 in tracker._relations_cache, "fresh entry kept"
+        assert 200 not in tracker._relations_cache, "stale entry evicted"
+        assert 300 in tracker._relations_cache, "new capture stored"
+
+    def test_azure_tracker_relations_cache_evicts_all(self):
+        """When every entry is stale, the eviction empties the cache."""
+        from autoswe.providers.azure import tracker as az_tracker
+        from autoswe.providers.azure.tracker import AzureTracker
+
+        tracker = AzureTracker({"provider": "azure", "org": "o",
+                                "project": "p", "repo": "r", "pat": "pat"})
+        now = time.time()
+        tracker._relations_cache[1] = (now - (az_tracker._RELATIONS_CACHE_TTL + 5), [])
+        tracker._relations_cache[2] = (now - (az_tracker._RELATIONS_CACHE_TTL + 5), [])
+        tracker._to_normalized({"id": 3, "fields": {}, "relations": []})
+        assert tracker._relations_cache.keys() == {3}

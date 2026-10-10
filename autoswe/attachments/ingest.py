@@ -108,6 +108,10 @@ def _store(
     from autoswe.attachments.naming import guess_content_type
 
     name = pick_filename(preferred_name, data, used, index)
+    # Guard against a trailing dot leaking in ("data.csv.") — prefer the
+    # provider name without it so the extension map / content-type fallback
+    # resolves on the real extension (Requirement 3).
+    name = name.rstrip(".") or name
     ext = name.rsplit(".", 1)[-1] if "." in name else ""
     ext_ct = guess_content_type(ext) if ext else ""
     sniff_ext, sniff_ct = sniff_content(data)
@@ -262,16 +266,30 @@ def _normalize_azure_refs(raw_refs: list) -> list:
     "resource_size"}``) or raw ADO relations (``{"rel", "url", "attributes"}
     with ``rel == "AttachedFile"``), so the ingest layer works whether the
     tracker pre-normalized the refs or handed us the raw ``relations[]``.
+    Each item is shape-checked individually — a mixed list (a normalized ref
+    next to a raw relation) is handled per item rather than dispatched on the
+    first element's shape.
     """
     if not raw_refs:
         return []
-    first = raw_refs[0]
-    if isinstance(first, dict) and "attributes" in first:
-        return az.discover_azure_attachments(raw_refs)
-    refs = []
-    for r in raw_refs:
-        if not isinstance(r, dict) or not r.get("url"):
-            continue
+
+    def _is_raw(r) -> bool:
+        # A raw ADO relation carries ``rel``/``attributes``; the tracker's
+        # normalized shape (``{url, name, resource_size}``) carries neither.
+        return isinstance(r, dict) and ("rel" in r or "attributes" in r)
+
+    raw_relations = [r for r in raw_refs if _is_raw(r)]
+    normalized = [
+        r for r in raw_refs
+        if not _is_raw(r) and isinstance(r, dict) and r.get("url")
+    ]
+    refs: list = []
+    if raw_relations:
+        # ``discover_azure_attachments`` filters to ``AttachedFile`` with a
+        # ``url`` internally, so non-attachment relations (e.g. ArtifactLink)
+        # are dropped here.
+        refs.extend(az.discover_azure_attachments(raw_relations))
+    for r in normalized:
         refs.append(az.AzureAttachmentRef(
             url=r["url"],
             name=r.get("name"),
@@ -318,7 +336,11 @@ def sweep_stale_dirs(
         if _is_stale(child, now, stale_seconds):
             try:
                 shutil.rmtree(child, ignore_errors=True)
-                removed += 1
+                # ``ignore_errors=True`` swallows per-file failures; count a
+                # dir only when it is actually gone, so the return value
+                # never overcounts.
+                if not child.exists():
+                    removed += 1
             except Exception as e:
                 dbg.debug("attachments: sweep failed for %s: %s", child, e)
     return removed

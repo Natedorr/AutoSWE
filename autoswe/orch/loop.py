@@ -281,6 +281,8 @@ def _ingest_task_attachments(
     body: str,
     comments: list,
     cfg: dict,
+    *,
+    comments_fetched: bool = False,
 ):
     """Ingest issue/work-item attachments at task setup (issue #290).
 
@@ -288,10 +290,37 @@ def _ingest_task_attachments(
     the caller in a ``finally`` on task teardown. Best-effort: any failure
     returns ``None`` — a missing/unreachable attachment is never a task
     failure.
+
+    ``comments_fetched`` is the adapter's ``world.api.comments_fetched`` flag:
+    False when the poll skipped the comment fetch (unchanged ``last_updated``).
     """
     from autoswe.attachments import ingest as attach_ingest
 
     try:
+        # Design Requirement 1: discovery must run over the issue body *and*
+        # all comment bodies. On a steady-state poll the adapter skips the
+        # comment fetch when the issue's last_updated is unchanged, leaving
+        # ``comments == []`` with ``comments_fetched == False`` — so GitHub
+        # comment-embedded attachments would be silently missed. Fall back to
+        # a best-effort ``fetch_comments`` only when the poll skipped the
+        # fetch (not when it already fetched an authoritative empty list).
+        # The reviewer uses the same fallback pattern.
+        # GitHub only: Azure discovery reads the work item's relations cache,
+        # not comments.
+        provider = (repo_cfg or {}).get("provider", "github").lower()
+        if (
+            provider == "github"
+            and not comments
+            and not comments_fetched
+            and hasattr(tracker, "fetch_comments")
+        ):
+            try:
+                comments = list(tracker.fetch_comments(issue_num) or ())
+            except Exception as e:
+                get_debug_logger().debug(
+                    "attachments: fetch_comments fallback failed: %s: %s",
+                    type(e).__name__, e,
+                )
         return attach_ingest.ingest_task_attachments(
             tracker, issue_num, body, comments, cfg, repo_cfg,
         )
@@ -396,6 +425,7 @@ def _dispatch_task(
                 world.task.body or "",
                 list(world.api.comments or ()),
                 cfg,
+                comments_fetched=getattr(world.api, "comments_fetched", False),
             )
 
         # --- Run the action (Layer B) ---

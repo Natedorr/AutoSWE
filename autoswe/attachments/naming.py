@@ -11,7 +11,7 @@ from __future__ import annotations
 import mimetypes
 import re
 
-# ``alt`` text is only used as a filename when it *looks* like one: a single
+# ``alt`` text is only used as a filename when it *looks* like one: a flat,
 # path-free token ending in an extension. Everything else (empty alt, prose
 # like "the failing input") falls through to magic-byte sniffing.
 _FILENAME_LIKE_RE = re.compile(r"^[\w.\-][\w.\- ]{0,150}$")
@@ -67,8 +67,10 @@ def is_trusted_name(name: str | None) -> bool:
 def looks_like_filename(alt: str | None) -> bool:
     """Heuristic: does a GitHub markdown ``alt`` look like a filename?
 
-    Only a single token (spaces are tolerated inside, e.g. "my data.csv")
-    that carries an extension counts. ``"the failing input"`` does not;
+    Only a flat, path-free token that carries an extension counts. Internal
+    spaces are tolerated (``"my data.csv"``); the resulting name is still
+    flat and traversal-safe because ``pick_filename`` / ``is_trusted_name``
+    reject any ``/`` or ``..``. ``"the failing input"`` does not;
     ``"failing-input.csv"`` does.
     """
     if not alt or not is_trusted_name(alt):
@@ -133,7 +135,11 @@ def pick_filename(
             base = stem
             ext = maybe_ext
         else:
-            base = candidate
+            # A trailing "." ("data.csv.") is trusted but has no extension;
+            # keep the base without it rather than the literal trailing dot,
+            # which would leave the name ending in "." (Requirement 3 says
+            # prefer the provider name when trustworthy).
+            base = candidate.rstrip(".") or None
     else:
         ext = sniff_content(data)[0]
 
