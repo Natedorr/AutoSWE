@@ -301,7 +301,6 @@ class AzureTracker:
             relations = raw.get("relations") or []
             self._relations_cache[issue_number] = (time.time(), relations)
         return self._normalize_relations(relations)
-        return self._normalize_relations(relations)
 
     def _normalize_relations(self, relations: list) -> list[dict]:
         """Extract ``AttachedFile`` attachment refs from raw ADO ``relations[]``.

@@ -780,6 +780,32 @@ class TestIngestAzure:
         assert set_.items[0].content_type == "image/png"
         set_.remove()
 
+        # Same name, unknown binary bytes: the extension map must NOT override
+        # the "bin" sniff — a binary blob named data.csv is octet-stream, not
+        # text/csv (round-4 MEDIUM).
+        unknown_bin = b"\x00\x01\x02\xff\xfe\x00\x89\x99"
+        monkeypatch.setattr(az.downloads, "download_bytes", lambda url, **k: unknown_bin)
+        set_ = ingest.ingest_task_attachments(
+            _StubTracker(refs=refs), 1, "", [],
+            {"ATTACHMENTS_ENABLED": True},
+            {"provider": "azure", "pat": "p"},
+        )
+        assert set_.items[0].name == "data.csv"
+        assert set_.items[0].content_type == "application/octet-stream"
+        set_.remove()
+
+        # Extensionless text: no extension to trust, so the ``txt`` sniff
+        # (text/plain) is reported rather than an empty content type.
+        monkeypatch.setattr(az.downloads, "download_bytes", lambda url, **k: b"readme")
+        set_ = ingest.ingest_task_attachments(
+            _StubTracker(refs=[{"url": "https://x/bbb", "name": "README",
+                                "resource_size": 6}]), 1, "", [],
+            {"ATTACHMENTS_ENABLED": True},
+            {"provider": "azure", "pat": "p"},
+        )
+        assert set_.items[0].content_type == "text/plain"
+        set_.remove()
+
 
 # ============================================================================
 # Manifest + prompt injection

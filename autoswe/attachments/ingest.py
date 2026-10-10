@@ -101,9 +101,11 @@ def _store(
     The magic-byte sniff is the robust content source (design doc §1.6 —
     never trust the URL extension or the served Content-Type). The manifest
     content type prefers the sniff; it falls back to the on-disk name's
-    extension map (``guess_content_type``) only when the sniff is generic
-    (``txt``/``bin``) — so a genuinely-text ``data.csv`` reports ``text/csv``
-    while a ``data.csv`` that actually holds PNG bytes reports ``image/png``.
+    extension map (``guess_content_type``) **only when the sniff is
+    ``txt``** — so a genuinely-text ``data.csv`` reports ``text/csv``, a
+    ``data.csv`` holding PNG bytes reports ``image/png``, and an unknown
+    binary blob named ``data.csv`` keeps ``application/octet-stream`` rather
+    than the misleading ``text/csv``.
     """
     from autoswe.attachments.naming import guess_content_type
 
@@ -115,7 +117,12 @@ def _store(
     ext = name.rsplit(".", 1)[-1] if "." in name else ""
     ext_ct = guess_content_type(ext) if ext else ""
     sniff_ext, sniff_ct = sniff_content(data)
-    if sniff_ext in ("txt", "bin") and ext_ct != "application/octet-stream":
+    # Only text is ambiguous enough to trust the extension for. A binary
+    # sniff (png/jpg/zip/… *or* unknown ``bin``) is authoritative: an
+    # unknown binary named ``.csv`` must not be reported as ``text/csv``.
+    # ``ext_ct`` is "" when the on-disk name has no extension — in that case
+    # keep the sniff so the manifest never shows an empty content type.
+    if sniff_ext == "txt" and ext_ct != "application/octet-stream" and ext_ct:
         content_type = ext_ct
     else:
         content_type = sniff_ct
