@@ -1,10 +1,21 @@
 # Issue / Work-Item Attachment Ingestion
 
-**Status: design doc + API investigation (2026-10-09).** Not implemented yet.
-This doc records *how* attachments on issues and comments can be discovered and
-downloaded per provider, with **live-tested examples** from this host
-(`Natedorr/openclaw-config` issue #13 as the probe issue, public repo
-`Beenda1/Hanzala-Sarfraz` #3 as the external sample).
+**Status: design doc + live-verified API investigation (2026-10-09).** Not
+implemented yet.
+
+This doc records *how* attachments on issues (GitHub) and work items (Azure
+DevOps) can be discovered and downloaded per provider, with **live-tested
+examples** run from this host on 2026-10-09. Probe artifacts:
+
+- GitHub: `Natedorr/openclaw-config#13` (private repo, probe issue) —
+  "close me".
+- Azure: org `Natedorr`, project `testProject`, **work item #218** —
+  "close me".
+- Public-repo sample for the redirect mechanism: `Beenda1/Hanzala-Sarfraz#3`.
+
+Everything below that says **verified** was executed, not read from docs.
+Where the docs and reality disagree, reality wins and the discrepancy is
+called out.
 
 ## Problem Statement
 
@@ -14,283 +25,313 @@ Today autoSWE pulls only **text** from issues:
   verbatim into planner/coder/reviewer prompts.
 - `fetch_comments()` (both providers) grabs `body` strings only.
 
-If a user attaches a file to an issue or a comment, autoSWE's model sees a URL
-it cannot read or fetch. This doc defines how to close that gap.
+If a user attaches a file (CSV, image, log) to an issue or a comment,
+autoSWE's model sees a URL it cannot read or fetch. This doc closes that gap
+and documents the per-provider mechanics that make it possible.
+
+---
 
 ## Provider 1: GitHub
 
 ### 1.1 There is no documented REST endpoint for attachments
 
-GitHub's REST API has **no `GET .../attachments` endpoint** and no way to list
-an issue's attachments programmatically. Community confirmation (cli/cli
-discussion #11832, 2025): "there is still no stable, supported API to download
-issue attachments in CI the way you can fetch release assets."
+GitHub's REST API has **no `GET .../attachments` endpoint** and no way to
+list an issue's attachments programmatically. Community confirmation
+(cli/cli discussion #11832, 2025): "there is still no stable, supported API
+to download issue attachments in CI the way you can fetch release assets."
 
 So the design must **discover attachment URLs from the markdown body**, then
-download via the URL itself.
+download via the URL itself. There is no way around this.
 
 ### 1.2 Where attachment URLs appear
 
 When a user attaches a file in the web UI, GitHub stores it under
-`https://github.com/user-attachments/assets/<uuid>` and embeds that URL in the
-issue body / comment markdown, e.g.:
+`https://github.com/user-attachments/assets/<uuid>` and embeds that URL in
+the issue body / comment markdown.
 
-```markdown
-![probe](https://github.com/user-attachments/assets/8a05e9fb-1ff3-411c-8990-ccd27f39cc05)
-```
-
-Fetching the issue with the default media type returns this raw markdown in
-`body`. So discovery is a regex over `body` + all comment bodies:
+**Discovery = regex over `body` + every comment `body`:**
 
 ```
 https?://github\.com/user-attachments/assets/[0-9a-f-]{36}
 ```
 
-**Live example** (probe issue, `Natedorr/openclaw-config#13`):
+The *raw* markdown `body` (default media type) always contains the plain
+`github.com/user-attachments/assets/<uuid>` URL, whether the file is
+referenced as an embedded image or a bare link. That is what we regex.
 
-```
-$ gh api repos/Natedorr/openclaw-config/issues/13 --jq .body
-Testing how AutoSWE can ingest issue attachments.
+> **Live note (2026-10-09):** the *plain* `github.com/user-attachments/...`
+> URL itself is only downloadable for **public** repos. For **private**
+> repos that plain URL 404s — see §1.3, Mechanism B. So discovery (finding
+> the UUID) is cheap; *downloading* is the part that differs by visibility.
 
-![probe](https://github.com/user-attachments/assets/8a05e9fb-1ff3-411c-8990-ccd27f39cc05)
-```
+### 1.3 Downloading the URL — two mechanisms
 
-Comment body likewise contains the embedded URL:
+**Mechanism A — redirect-follow. Works for PUBLIC repos. Verified.**
 
-```
-$ gh api repos/Natedorr/openclaw-config/issues/13/comments --jq '.[] | .body'
-Follow-up image (comment attachment, different asset):
-
-![followup](https://github.com/user-attachments/assets/20419ebc-dcf3-4db7-9239-ad14ab971dec)
-
-Also a raw link: https://github.com/user-attachments/assets/46adc667-1d23-4c1e-876a-5d4c289fe09f
-```
-
-### 1.3 Downloading the URL — two mechanisms that work
-
-**Mechanism A — redirect-follow (works for public repos).**
-A `GET` on the attachment URL with `-L` (follow redirects) returns a 302 to a
-pre-signed S3 URL. No auth header needed at the redirect step; the S3 URL
-carries its own `X-Amz-Signature`.
+A `GET` with `-L` (follow redirects) on the plain attachment URL returns a
+302 to a pre-signed S3 URL; the S3 URL carries its own `X-Amz-Signature`, so
+the second hop needs no auth. Anonymous.
 
 ```
 $ curl -sS -L -o file.png \
     "https://github.com/user-attachments/assets/b45006e0-fabd-43a6-8d81-789330c687d7"
-# -> 302 to:
-#    https://github-production-user-asset-6210df.s3.amazonaws.com/
-#      327327092/664608870-b45006e0-...png
-#      ?X-Amz-Algorithm=AWS4-HMAC-SHA256
-#      &X-Amz-Credential=AKIAVC...%2F20261010%2Fus-east-1%2Fs3%2Faws4_request
-#      &X-Amz-Date=20261010T041559Z
-#      &X-Amz-Expires=300
-#      &X-Amz-Signature=***
-#      &X-Amz-SignedHeaders=host
-#      &response-content-type=image/png
+# -> 302 to github-production-user-asset-*.s3.amazonaws.com/...
+#       ?X-Amz-Signature=***&X-Amz-Expires=300&response-content-type=image/png
 # HTTP 200, content-type image/png, 62433 bytes
 ```
 
-Caveats observed live:
-- **Private repos:** the same `GET` returns **404** even with a valid PAT
-  (`Authorization: Bearer`, `Basic`, `?token=` all failed) when the
-  attachment belongs to a *private* repo (`Natedorr/openclaw-config`).
-  `user-attachments` URLs are served for the repo's visibility; private
-  assets are not reachable via the plain redirect. (Probe repo is private;
-  public sample worked anonymously.)
-- The pre-signed S3 URL is **time-limited** (~300s). Fine for a one-shot
+Observed caveats:
+- **Private repos: this mechanism is dead.** The same `GET` returns **404**
+  even with a valid PAT (`Authorization: Bearer <PAT>` and
+  `?token=<PAT>` both tried, both 404) when the asset belongs to a private
+  repo. `user-attachments` URLs are served for the repo's visibility.
+  *Verified on `Natedorr/openclaw-config` (private): 404 with and without
+  token.*
+- The pre-signed S3 URL is **time-limited (~300s)**. Fine for a one-shot
   download at task setup; not a durable link to cache.
-- Filenames are **not in the URL** — the S3 key ends with a `.png`/`.jpg`
-  suffix derived from the uploaded content type. If the real filename matters
-  (e.g. `data.csv`), it is only recoverable from the markdown `alt` text or
-  the surrounding issue text, not the URL itself.
+- **Filenames are not in the URL.** The S3 key ends in a `.png`/`.jpg`/etc.
+  suffix derived from the *stored* content type, not the original name.
 
-**Mechanism B — signed JWT from `body_html` (works for private repos).**
-Fetching the issue/comment with the `html+json` media type renders the body
-to HTML. For attachments, GitHub renders an `<img src=...>` whose URL is a
-`private-user-images.githubusercontent.com` link with a **`jwt` query param**.
-That signed URL downloads the file directly (200), works anonymously, and is
-the same mechanism GitHub uses to serve private-repo user content.
+**Mechanism B — signed JWT from `body_html`. Works for PRIVATE repos,
+BUT only for embedded images. Verified (with a critical limitation).**
+
+Fetch the issue/comment with the `html+json` media type. GitHub renders the
+body to HTML; for **embedded image** references it emits an
+`<img src="https://private-user-images.githubusercontent.com/...?jwt=***">`
+whose `?jwt=*** the file directly, anonymously.
 
 ```
-$ gh api repos/Natedorr/openclaw-config/issues/13 \
+$ gh api repos/Natedorr/openclaw-config/issues/13/comments/6093838659 \
     -H "Accept: application/vnd.github.html+json" --jq .body_html
-<p dir="auto">Testing how AutoSWE can ingest issue attachments.</p>
-<p dir="auto"><a target="_blank" ...
-  href="https://private-user-images.githubusercontent.com/185386482/
-        670243970-8a05e9fb-1ff3-411c-8990-ccd27f39cc05.png
-        ?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJnaXRodWIuY29t...">
-  <img src="https://private-user-images.githubusercontent.com/185386482/
-        670243970-8a05e9fb-1ff3-411c-8990-ccd27f39cc05.png?jwt=eyJ0eXAi..."
-       alt="probe" style="max-width: 100%;"></a></p>
+...
+<img src="https://private-user-images.githubusercontent.com/185386482/
+         670243970-...png?jwt=***
+...
+$ curl -sS -o out.png "<that signed url>"
+# HTTP 200, content-type image/png, 74 bytes, SHA-256 == source
 ```
 
-```
-$ curl -sS -L -o file.png \
-    "https://private-user-images.githubusercontent.com/185386482/
-     670243970-8a05e9fb-1ff3-411c-8990-ccd27f39cc05.png?jwt=eyJ0eXAi..."
-# HTTP 200, 74 bytes
-$ file file.png
-file.png: PNG image data, 8 x 8, 8-bit/color RGB, non-interlaid
-```
-
-Decoding the `jwt` (base64url of the payload segment) shows it is a signed
-token wrapping a pre-signed S3 request:
-
-```json
-{
- "iss": "github.com",
- "aud": "raw.githubusercontent.com",
- "key": "key5",
- "exp": 1791606018,
- "nbf": 1791605718,
- "path": "/185386482/670243970-8a05e9fb-....png?X-Amz-Algorithm=...&X-Amz-Expires=300&..."
-}
-```
-
-The `path` suffix (`response-content-type=image/png`) reveals the stored
-content type. Note the JWT also has an `exp` — these signed URLs are
-short-lived (~300s), so **fetch and download in the same operation**; do not
+The `jwt` is a signed token wrapping a pre-signed S3 request; its payload
+(`exp - nbf`) is ~300s. **Fetch and download in the same operation**; never
 persist the signed URL.
 
-### 1.4 Which mechanism to use (recommendation)
+> **CRITICAL LIMITATION (verified 2026-10-09): GitHub only issues a signed
+> JWT for *embedded image* references (`![alt](<url>)`).**
+>
+> - A comment that references the same asset as a **plain markdown link**
+>   (`[x](<url>)`) produces **zero** signed URLs in `body_html` — GitHub
+>   renders it as a plain `<a href="https://github.com/user-attachments/...">`
+>   with no JWT.
+> - Therefore, on a **private repo**, a file that is only *linked* in prose —
+>   which is exactly how GitHub renders **non-image** files (CSV, PDF, log)
+>   in the web UI — is **unreachable** through both Mechanism A (404) and
+>   Mechanism B (no signed URL).
+>
+> A CSV's bytes *can* get through a private repo only if it is (a) uploaded
+> under an image content type and (b) referenced as an embedded image
+> `![]()`. Verified: CSV bytes uploaded as `probe-data.csv.png`
+> (`content_type=image/png`), embedded, signed URL issued, downloaded back
+> anonymously, SHA-256 byte-exact (served as `image/png`). This is a hack,
+> not a supported path — see §1.6.
+
+### 1.4 Which mechanism to use
 
 | Scenario | Mechanism |
 |----------|-----------|
-| Public repo, attachment in issue/comment body | **A** (redirect-follow) — simplest, no extra API call |
-| Private repo (e.g. any internal autoSWE target) | **B** (body_html signed JWT) |
-| Need the filename | Neither gives it from the URL; use markdown `alt` text or issue prose |
+| Public repo, attachment in body/comment | **A** (redirect-follow) — simplest |
+| Private repo, attachment **embedded as image** | **B** (body_html signed JWT) — verified byte-exact |
+| Private repo, attachment only **linked** in prose | **Dead end** — no signed URL; treat as unavailable |
 
 Recommended implementation: try **A** first (`GET -L`); if it returns 404,
-fall back to **B** (re-fetch the containing body with `html+json`, extract the
-`private-user-images...?jwt=` URL, download). Both are best-effort and must
-never hard-fail the task — a missing attachment is a warning, not an error.
+fall back to **B** (re-fetch the containing body with `html+json`, extract
+the `private-user-images...?jwt=*** URL, download). Both are best-effort and
+must never hard-fail the task — a missing attachment is a warning, not an
+error.
 
 ### 1.5 Uploading (out of scope for autoSWE, but documented)
 
 There is **no documented REST API to upload** an attachment to an issue. The
-only working path found (community-documented) is an **undocumented**
-`uploads.github.com` endpoint, which accepts **images only** (jpg/png/gif/webp
-tested OK; csv/pdf/zip/txt all rejected with "content_type not allowed"):
+only working path is an **undocumented** `uploads.github.com` endpoint, which
+is **image-only**. Live-tested behavior (2026-10-09):
 
 ```
 # repo_id from: gh api repos/OWNER/REPO --jq .id
 $ curl -sS \
-  "https://uploads.github.com/user-attachments/assets?name=probe.png&content_type=image/png&repository_id=1192331190" \
-  -X POST -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" \
-  --data-binary @probe.png
-# -> {"url":"https://github.com/user-attachments/assets/8a05e9fb-..."}
+  "https://uploads.github.com/user-attachments/assets?name=probe-image.png&content_type=image/png&repository_id=1192331190" \
+  -X POST -H "Authorization: Bearer ***" -H "Accept: application/json" \
+  --data-binary @probe-image.png
+# -> {"url":"https://github.com/user-attachments/assets/802b4410-..."}
 ```
 
-The returned URL is then embedded in the issue/comment markdown. Because this
-endpoint is undocumented and **image-only**, autoSWE should **not** rely on it
-for uploading. The ingestion design (above) assumes attachments were created
-in the web UI.
+Accepted content types: `image/png`, `image/jpeg`, `image/gif`,
+`image/webp`. Rejected: `text/csv`, `text/plain`, `application/zip`,
+`application/pdf`, `image/svg+xml`.
+
+**Name must match content type.** `name=probe-data.csv` with
+`content_type=image/png` →
+`"name has a file extension that does not match the content type:
+.csv != image/png"`. A disguised name works: `name=probe-data.csv.png` +
+`content_type=image/png` with CSV bytes → `200`, bytes stored intact.
+
+Because this endpoint is undocumented and **image-only**, autoSWE should
+**not** rely on it for uploading. The ingestion design assumes attachments
+were created in the web UI.
 
 ### 1.6 Non-image files (CSV, PDF, log, etc.)
 
-GitHub's attachment system accepts any file type *from the web UI* (the
-image-only restriction is only on the undocumented upload endpoint). So a CSV
-or PDF attached in the web UI produces the same
-`github.com/user-attachments/assets/<uuid>` URL and is downloadable via
-Mechanism A/B. The only wrinkle: the S3 key's file extension reflects the
-*stored* content type, so for a `.csv` the redirect target may end in a
-non-CSV extension. The ingester should therefore **not trust the URL
-extension** for the on-disk filename; it should use the markdown context
-(alt text / nearby filename mention) or fall back to a generic
-`attachment-<n>.<guessed-ext>`.
+The web UI accepts any file type, so a CSV/PDF attached there produces the
+same `github.com/user-attachments/assets/<uuid>` URL. Downloadability:
 
-**Content-type detection** is the robust approach: download the bytes, sniff
-the magic bytes (`image/png`, `image/jpeg`, `text/csv` vs binary), and name
-the file accordingly.
+- **Public repo:** Mechanism A works for any embedded/linked file — the
+  redirect is visibility-gated, not type-gated. (Verified for images; the
+  redirect is the same endpoint regardless of type.)
+- **Private repo:** only *embedded image* references get a signed URL
+  (§1.3). A genuine CSV is linked, not embedded → **currently unreachable**
+  via the API. The only confirmed workaround is the disguise hack
+  (upload under an image content type + reference as `![]()`), which returns
+  the bytes but labels them `image/png`. This is an **open gap** (see
+  §Open Questions, item 1).
+
+**Content-type detection is the robust approach** regardless of provider:
+download the bytes, sniff the magic bytes, and name the file accordingly. Do
+not trust the URL extension or the served `Content-Type` for the on-disk
+name.
+
+---
 
 ## Provider 2: Azure DevOps
 
-Azure has a **first-class, documented** attachments API — this is easier than
-GitHub.
+Azure has a **first-class, documented** attachments API — easier than GitHub.
+All of the following was **verified live** against `Natedorr/testProject`,
+work item #218.
 
 ### 2.1 Discovering attachments on a work item
 
-A work item's attachments are exposed as **relations** when fetched with
-`$expand=all` (which autoSWE's Azure tracker already does —
-`autoswe/providers/azure/tracker.py:223-224`). Each attachment appears as a
-relation of type `attachment`:
+Attachments are exposed as **relations**, but **only when fetched with
+`$expand=all`.**
 
 ```
-GET https://dev.azure.com/{org}/{project}/_apis/wit/workitems/{id}?expand=all
+GET https://dev.azure.com/{org}/{project}/_apis/wit/workitems/{id}?$expand=all
+Authorization: Basic ***})
 ```
 
-Response (excerpt):
+> **Verified (2026-10-09): `$expand=all` is required.** A fetch *without* it
+> returns **zero** relations on the same work item; with `$expand=all` the
+> `AttachedFile` relations appear. autoSWE's Azure tracker already fetches
+> with `$expand=all` (`autoswe/providers/azure/tracker.py`), so the data is
+> present in its payload today and being discarded.
+
+Observed relation shape (live, WI 218):
 
 ```json
 {
-  "id": 434,
-  "relations": [
-    {
-      "rel": "AttachedFile",
-      "url": "https://dev.azure.com/{org}/{project}/_apis/wit/attachments/{id}",
-      "attributes": {
-        "name": "failing-input.csv",
-        "size": 1234
-      }
-    }
-  ]
+  "rel": "AttachedFile",
+  "url": "https://dev.azure.com/natedorr/5f5c4aeb-.../_apis/wit/attachments/daf53c9a-9f7e-4af0-ab70-4152fdb2fca0",
+  "attributes": {
+    "id": 1292279,
+    "resourceSize": 74,
+    "authorizedDate": "2026-10-10T04:29:42.83Z",
+    "resourceCreatedDate": "2026-10-10T04:29:42.83Z",
+    "resourceModifiedDate": "2026-10-10T04:29:42.83Z",
+    "revisedDate": "9999-01-01T00:00:00Z"
+  }
 }
 ```
 
-So discovery = parse `relations[]` where `rel == "AttachedFile"`; the
-`url` is the download URL and `attributes.name` is the **real filename**
-(unlike GitHub, where the name is not in the URL).
+So discovery = parse `relations[]` where `rel == "AttachedFile"`; the `url`
+is the download URL and `attributes.resourceSize` gives the byte size.
+
+> **Discrepancy with docs (verified):** the MSDN sample shows
+> `attributes.name` (the real filename), but in the live response **`name`
+> was absent** — even though the work item was created with
+> `attributes: {"name": ...}` on the relation, and the download response's
+> `Content-Disposition` was bare `attachment` (no `filename=`). Treat
+> `attributes.name` as **optional**: use it when present, otherwise fall
+> back to content sniffing / `attachment-<n>` (same policy as GitHub).
 
 ### 2.2 Downloading
 
 ```
-GET https://dev.azure.com/{org}/{project}/_apis/wit/attachments/{id}?api-version=7.1
-Authorization: Basic base64(:{PAT})
+GET https://dev.azure.com/{org}/{project}/_apis/wit/attachments/{id}
+Authorization: Basic ***})
+# -> raw file bytes, Content-Type: application/octet-stream,
+#    Content-Disposition: attachment
 ```
 
-Returns the raw file bytes. Reference:
-`learn.microsoft.com/en-us/rest/api/azure/devops/wit/attachments/get`
+Reference: `learn.microsoft.com/en-us/rest/api/azure/devops/wit/attachments/get`
 (view `azure-devops-rest-7.1`).
 
-Concrete curl (PAT auth, matching autoSWE's existing Basic-auth header in
-`autoswe/providers/azure/api.py:81`):
+Concrete curl (matching autoSWE's existing Basic-auth in
+`autoswe/providers/azure/api.py`):
 
 ```
-$ curl -sS -o failing-input.csv \
-  "https://dev.azure.com/{org}/{project}/_apis/wit/attachments/{id}?api-version=7.1" \
-  -H "Authorization: Basic $(echo -n ':PAT' | base64)"
-# -> raw bytes of the attachment
+$ curl -sS -o out.bin \
+  "https://dev.azure.com/{org}/{project}/_apis/wit/attachments/{id}" \
+  -H "Authorization: Basic *** -n ':PAT' | base64)"
 ```
+
+Verified: both probe attachments (CSV 74 B, PNG 74 B) downloaded with
+SHA-256 byte-exact match to the source files.
 
 ### 2.3 Uploading (for completeness)
 
 ```
-POST https://dev.azure.com/{org}/{project}/_apis/wit/attachments?fileName=data.csv&uploadType=attachment&api-version=7.1
-Authorization: Basic base64(:{PAT})
+POST https://dev.azure.com/{org}/{project}/_apis/wit/attachments?fileName=data.csv&api-version=7.1
+Authorization: Basic ***})
 Content-Type: application/octet-stream
 # body: raw file bytes
-# -> 201, Location header is the attachment URL
+# -> 201, JSON body: {"id": "<guid>", "fileName": "data.csv"}
+# download URL: .../_apis/wit/attachments/<id>
 ```
 
-Reference:
-`learn.microsoft.com/en-us/rest/api/azure/devops/wit/attachments/create`.
+Reference: `learn.microsoft.com/en-us/rest/api/azure/devops/wit/attachments/create`.
+
+> **Verified (2026-10-09): do NOT pass `uploadType` on the POST.** Both
+> `uploadType=attachment` and `uploadType=temporary` are rejected with
+> `400 "This uploadType ... is not supported with the POST operation."`
+> Omit it entirely. The `Location` response header is **empty**; the
+> attachment id comes from the **JSON body's `id`** field, not the
+> `Location` header.
+
+Linking to a work item (verified): JSON-Patch on work-item create/update:
+
+```json
+{"op":"add","path":"/relations/-",
+ "value":{"rel":"AttachedFile","url":".../_apis/wit/attachments/<id>",
+          "attributes":{"name":"data.csv"}}}
+```
+
+Note: work-item create requires `Content-Type: application/json-patch+json`
+(not `application/json`).
+
+---
 
 ## Proposed autoSWE Design (cross-provider)
 
 A small, provider-agnostic attachment layer that runs at **task setup**
 (before the planner/coder runs), in the worktree:
 
-1. **Discover** — GitHub: regex `user-attachments/assets/<uuid>` over issue
-   body + all comment bodies (also scan `body_html` for the signed
-   `private-user-images` URL as the private-repo fallback). Azure: parse
-   `relations[]` with `rel == "AttachedFile"`.
-2. **Download** — GitHub: try redirect-follow (Mechanism A), fall back to
-   signed JWT (Mechanism B). Azure: `GET _apis/wit/attachments/{id}`.
-   All best-effort: a failure logs a warning and continues.
-3. **Name & store** — prefer the provider-supplied filename (Azure
-   `attributes.name`); otherwise sniff content-type / use markdown alt text /
-   fall back to `attachment-<n>.<ext>`. Store under
-   `<worktree>/data/attachments/<issue>#/<filename>` (ephemeral, gitignored —
-   **not** committed by default).
+1. **Discover** —
+   - GitHub: regex `user-attachments/assets/<uuid>` over issue body + all
+     comment bodies. (Raw markdown always carries the plain URL for both
+     embedded and linked references.)
+   - Azure: parse `relations[]` with `rel == "AttachedFile"` from the
+     `$expand=all` fetch (already performed by the tracker).
+2. **Download** —
+   - GitHub: try Mechanism A (`GET -L`); on 404 fall back to Mechanism B
+     (re-fetch containing body with `html+json`, extract the
+     `private-user-images...?jwt=*** URL, download). Only embedded images
+     yield a signed URL on private repos — if none is found, warn and skip.
+   - Azure: `GET _apis/wit/attachments/{id}`.
+   - All best-effort: a failure logs a warning and continues. Never
+     hard-fail the task on a missing/unreachable attachment.
+3. **Name & store** — Prefer a provider-supplied filename (Azure
+   `attributes.name` when present; GitHub markdown `alt` text when it looks
+   like a filename). Otherwise **sniff content** and fall back to
+   `attachment-<n>.<guessed-ext>`. Store under
+   `<worktree>/data/attachments/<issue>#/<filename>` (ephemeral,
+   gitignored — **not** committed by default). Path-traversal guard on any
+   provider-supplied name (attacker-influenced on both providers).
 4. **Manifest** — append to the planner/coder/reviewer prompt a block:
 
    ```
@@ -300,30 +341,75 @@ A small, provider-agnostic attachment layer that runs at **task setup**
    ```
 
    so the model knows the files are on disk and can `read`/`process` them.
-   CSV/text are fully ingested by the backend; images are viewable by
-   claude_code-style backends.
-5. **Config flag** — `attachments.enabled` (default `true`), plus optional
+   CSV/text are fully ingested; images are viewable by backends that support
+   image input (claude_code does).
+5. **Config flags** — `attachments.enabled` (default `true`);
    `attachments.commit` (default `false`) to commit them into the branch if a
-   fix references them.
+   fix references them; `attachments.max_size_bytes` (default e.g. 10 MiB)
+   and `attachments.max_total_bytes` per issue.
 
 ## Open Questions
 
-1. **Private-repo GitHub uploads:** Mechanism B (body_html JWT) is the only
-   confirmed path for private repos. Needs a live test on a private repo with
-   a *web-UI-attached* file (this host's probe used the upload endpoint, which
-   is image-only; confirm a private CSV attached in the UI is reachable).
-2. **Filename for GitHub attachments:** no reliable source in the URL. Decide
-   the fallback strategy (alt text vs content-type sniff vs `attachment-N`).
+1. **Private-repo GitHub, non-image attachments:** a genuine CSV/PDF linked
+   in prose is currently unreachable (no signed URL, plain URL 404s).
+   Options: (a) accept + warn; (b) document that users must *embed* files
+   as images on private repos; (c) investigate whether a web-UI-attached
+   non-image ever gets a signed URL (all private-repo probes so far used
+   embedded-image markdown — a web-UI-attached private CSV test is still
+   owed before closing this out). This is the single biggest real-world
+   limitation and the reason the feature is "best-effort, warn on miss".
+2. **Filename:** no reliable source on either provider in the live probes
+   (Azure `name` absent; GitHub name not in URL). Content sniffing is the
+   default; decide whether markdown `alt` text is trusted enough to prefer.
 3. **Security:** attachments are untrusted user input. The ingester must
-   sandbox them (never execute, size cap, path-traversal guard on the
-   provider-supplied filename — Azure `attributes.name` is attacker-influenced).
-4. **Size cap:** cap each attachment (e.g. 10 MB) and total per issue to
-   avoid blowing up the worktree / prompt context.
+   sandbox them — never execute, enforce the size caps, and path-traversal-
+   guard every provider-supplied filename.
+4. **Size cap defaults:** pick `max_size_bytes` / `max_total_bytes` that
+   protect the worktree and prompt context without rejecting legitimate
+   failing-input CSVs.
+
+## Live Verification Log (2026-10-09)
+
+Executed from this host; results cited inline above.
+
+**GitHub** — `Natedorr/openclaw-config` (private, repo id `1192331190`,
+probe issue `#13`):
+- Upload via `uploads.github.com`: `probe-image.png` (74 B) → 200; CSV bytes
+  as `probe-data.csv.png` (`content_type=image/png`) → 200; CSV named
+  `probe-data.csv` + `content_type=image/png` → **400** (name/extension
+  mismatch).
+- Direct `github.com/user-attachments/assets/<uuid>` GET on private-repo
+  assets: **404** (anonymous and with PAT) — Mechanism A confirmed dead for
+  private.
+- Plain-markdown-link comment: **0** signed URLs in `body_html` — confirms
+  only embedded images get signed.
+- Embedded-`![]()` comment: signed URLs present; both downloads → **200
+  anonymous**, SHA-256 byte-exact vs source (CSV-disguised-as-PNG and real
+  PNG) — **PASS**.
+
+**Azure DevOps** — `Natedorr/testProject`, probe work item **#218**
+("TEST: AutoSWE attachment ingestion probe (close me)"):
+- Upload `probe-data.csv` + `probe-image.png` via
+  `POST _apis/wit/attachments?fileName=...` (no `uploadType`) → **201**
+  each; JSON body carried the attachment `id`.
+- `uploadType=attachment` / `uploadType=temporary` on POST → **400**.
+- Created WI 218 with JSON-Patch `AttachedFile` relations (work-item create
+  used `Content-Type: application/json-patch+json`).
+- `GET workitems/218` (no expand): **0** relations; `?$expand=all`: **2**.
+- Downloaded both via `_apis/wit/attachments/{id}` with PAT Basic auth →
+  **200**, SHA-256 byte-exact vs source files — **PASS**.
+- Observed relation `attributes` **lacked `name`** (docs show it) — recorded
+  in §2.1.
+
+Both probe artifacts are marked "close me" and should be closed once the
+implementation lands.
 
 ## Probe Artifacts (this investigation)
 
 - Probe issue: `Natedorr/openclaw-config#13` — "TEST: attachment ingestion
   probe (close me)". Close after implementation.
-- Sample public asset used for Mechanism A:
+- Probe work item: Azure `Natedorr/testProject` **WI 218** — "TEST: AutoSWE
+  attachment ingestion probe (close me)". Close after implementation.
+- Public sample asset used for Mechanism A:
   `github.com/user-attachments/assets/b45006e0-fabd-43a6-8d81-789330c687d7`
   (from `Beenda1/Hanzala-Sarfraz#3`).
