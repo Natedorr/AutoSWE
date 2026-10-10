@@ -1,11 +1,12 @@
 # Issue / Work-Item Attachment Ingestion
 
-**Status: design doc + live-verified API investigation (2026-10-09).** Not
-implemented yet.
-
-This doc records *how* attachments on issues (GitHub) and work items (Azure
-DevOps) can be discovered and downloaded per provider, with **live-tested
-examples** run from this host on 2026-10-09. Probe artifacts:
+**Status: implemented.** The design below is live in
+[`autoswe/attachments/`](../../autoswe/attachments/) — discovery, download,
+temp-dir storage, naming, size caps, manifest injection, and cleanup — wired
+into the dispatch loop (issue #290, PR for `autoswe/issue-290`). This doc
+records *how* attachments on issues (GitHub) and work items (Azure DevOps) are
+discovered and downloaded per provider, with **live-tested examples** run
+from this host on 2026-10-09. Probe artifacts:
 
 - GitHub: `Natedorr/openclaw-config#13` (private repo, probe issue) —
   "close me".
@@ -219,7 +220,16 @@ Authorization: Basic ***})
 > returns **zero** relations on the same work item; with `$expand=all` the
 > `AttachedFile` relations appear. autoSWE's Azure tracker already fetches
 > with `$expand=all` (`autoswe/providers/azure/tracker.py`), so the data is
-> present in its payload today and being discarded.
+> present in that payload.
+
+> **Implementation (issue #290):** rather than re-fetching the whole work
+> item at dispatch time, `AzureTracker._to_normalized` (shared by both the
+> `list_open_issues` batch and `fetch_issue`) captures the raw `relations[]`
+> into `self._relations_cache` as it normalizes each item, and
+> `list_workitem_attachments()` serves the `AttachedFile` refs from that
+> cache — zero extra API calls in the normal poll→dispatch flow. A fresh
+> `$expand=all` GET is issued only as a **cold-start fallback** when the issue
+> was never fetched this process (cache miss); that result is cached too.
 
 Observed relation shape (live, WI 218):
 

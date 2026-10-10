@@ -129,6 +129,14 @@ class AzureTracker:
         # avoids re-querying workitemtypes/{type}/states on every close_issue.
         self._completed_state_cache: dict[str, str] = {}
         self._removed_state_cache: dict[str, str] = {}
+        # Raw work-item relations captured from the ``$expand=all`` fetch
+        # (issue #290): keyed by work-item id. Populated by ``_to_normalized``
+        # on every fetch (list_open_issues batch + fetch_issue), so
+        # ``list_workitem_attachments`` can serve the ``AttachedFile`` refs it
+        # needs without a second full work-item GET in the same poll/dispatch
+        # cycle. The re-fetch in that method is only a cold-start fallback for
+        # an issue never fetched this process (docs/autoswe/attachments.md §2.1).
+        self._relations_cache: dict[int, list] = {}
 
     # ---- Repo ID resolution ----
 
@@ -231,24 +239,46 @@ class AzureTracker:
 
         Attachments appear in the work item's ``relations[]`` **only when
         fetched with ``$expand=all``** (docs/autoswe/attachments.md §2.1, live
-        verified 2026-10-09) — the tracker's own ``fetch_issue`` already uses
-        that expand, so this re-fetches with it and normalizes the refs:
-        ``{"url": ..., "name": ...|None, "resource_size": int|None}``. ``name``
+        verified 2026-10-09). The tracker's own ``$expand=all`` fetches
+        (``list_open_issues`` batch and ``fetch_issue``) already carry those
+        relations, so this method reuses them from ``self._relations_cache``
+        — populated by ``_to_normalized`` on every fetch — **without any
+        extra API call**. The refs are normalized to
+        ``{"url": ..., "name": ...|None, "resource_size": int|None}``; ``name``
         is optional in the live API (it was absent in the probes), so it is
-        passed through as ``None`` when missing. Best-effort: any fetch
-        failure returns ``[]`` — a missing attachment is never a task failure.
+        passed through as ``None`` when missing.
+
+        A fresh ``$expand=all`` GET is issued **only as a cold-start fallback**
+        — when the issue was never fetched this process (cache miss, e.g. a
+        dispatch reached without a prior ``list_open_issues``). That result is
+        stored in the cache so the same work item is not re-fetched twice.
+        Best-effort: any fetch failure returns ``[]`` — a missing attachment is
+        never a task failure.
         """
-        path = _ado_api_version(
-            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
-            "?$expand=all"
-        )
-        try:
-            raw = ado_get(path, self._pat)
-        except Exception as e:
-            dbg.warning("attachments: Azure relations fetch failed for WI %d: %s", issue_number, e)
-            return []
+        relations = self._relations_cache.get(issue_number)
+        if relations is None:
+            path = _ado_api_version(
+                f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
+                "?$expand=all"
+            )
+            try:
+                raw = ado_get(path, self._pat)
+            except Exception as e:
+                dbg.warning("attachments: Azure relations fetch failed for WI %d: %s", issue_number, e)
+                return []
+            relations = raw.get("relations") or []
+            self._relations_cache[issue_number] = relations
+        return self._normalize_relations(relations)
+
+    def _normalize_relations(self, relations: list) -> list[dict]:
+        """Extract ``AttachedFile`` attachment refs from raw ADO ``relations[]``.
+
+        Shared by ``list_workitem_attachments`` so the reuse (cache) and
+        cold-start (re-fetch) paths normalize identically. Returns
+        ``{"url", "name", "resource_size"}`` dicts in document order.
+        """
         refs: list[dict] = []
-        for rel in raw.get("relations", []) or []:
+        for rel in relations or []:
             if not isinstance(rel, dict) or rel.get("rel") != "AttachedFile":
                 continue
             url = rel.get("url")
@@ -689,6 +719,11 @@ class AzureTracker:
         labels = [t.strip() for t in tags_raw.split(";") if t.strip()] if tags_raw else []
         raw_state = fields.get("System.State", "New")
         state = "closed" if raw_state in self._resolve_done_states() else "open"
+        # Capture raw relations from this ``$expand=all`` fetch so the attachment
+        # layer can serve ``AttachedFile`` refs without a second GET (issue #290,
+        # docs/autoswe/attachments.md §2.1). Shared by list_open_issues +
+        # fetch_issue, both of which call _to_normalized.
+        self._relations_cache[raw["id"]] = raw.get("relations") or []
         return NormalizedIssue(
             number=raw["id"],
             title=title,

@@ -519,6 +519,37 @@ class TestIngestGithub:
         # skips it. Result: nothing ingested.
         assert set_ is None
 
+    def test_ingest_total_cap_enforced(self, monkeypatch):
+        """Two attachments each under the per-file cap, but whose combined
+        size exceeds ``attachment_max_total_bytes`` — the first lands, the
+        second is skipped (issue #290 verification)."""
+        from autoswe.attachments import github as gh
+        from autoswe.attachments import ingest
+
+        # Distinct payloads so dedupe / sniffing can't confuse the two.
+        a1 = b"a1" * 100   # 200 B
+        a2 = b"b2" * 100   # 200 B
+
+        def fake_download(url, **k):
+            return a2 if url == _ASSET_URL2 else a1
+
+        monkeypatch.setattr(gh.downloads, "download_bytes", fake_download)
+        body = f"{_ASSET_URL} and {_ASSET_URL2}"
+        # per-file cap is generous (400 B); total cap 300 B -> the second
+        # (total would hit 400) is skipped, only the first is stored.
+        set_ = ingest.ingest_task_attachments(
+            _StubTracker(), 1, body, [],
+            {"ATTACHMENTS_ENABLED": True,
+             "ATTACHMENT_MAX_SIZE_BYTES": 400,
+             "ATTACHMENT_MAX_TOTAL_BYTES": 300},
+            {"provider": "github", "owner": "o", "repo": "r", "pat": "t"},
+        )
+        assert set_ is not None
+        assert len(set_.items) == 1
+        assert set_.items[0].path.read_bytes() == a1
+        assert set_.total_bytes == 200
+        set_.remove()
+
 
 class TestIngestAzure:
     def test_ingest_azure_stores(self, monkeypatch):
@@ -650,14 +681,12 @@ class TestManifest:
         assert str(f) in block
         assert "(text/csv, 6 bytes)" in block
 
-    def test_plan_prompt_includes_manifest(self, monkeypatch):
-        from pathlib import Path
-
+    def test_plan_prompt_includes_manifest(self, tmp_path):
         from autoswe.attachments.models import Attachment, AttachmentSet
         from autoswe.harness.prompts import build_plan_prompt
 
-        p = Path("/tmp/autoswe-attach-test")
-        p.mkdir(parents=True, exist_ok=True)
+        p = tmp_path / "autoswe-attach-test"
+        p.mkdir()
         f = p / "failing-input.csv"
         f.write_bytes(b"a,b\n1,2\n")
         att = AttachmentSet(dir=p, items=[Attachment(
@@ -676,14 +705,12 @@ class TestManifest:
         assert str(f) in prompt
         assert "(text/csv, 6 bytes)" in prompt
 
-    def test_fix_prompt_includes_manifest(self, monkeypatch):
-        from pathlib import Path
-
+    def test_fix_prompt_includes_manifest(self, tmp_path):
         from autoswe.attachments.models import Attachment, AttachmentSet
         from autoswe.harness.prompts import build_fix_prompt
 
-        p = Path("/tmp/autoswe-attach-test2")
-        p.mkdir(parents=True, exist_ok=True)
+        p = tmp_path / "autoswe-attach-test2"
+        p.mkdir()
         f = p / "log.txt"
         f.write_bytes(b"line1\n")
         att = AttachmentSet(dir=p, items=[Attachment(
@@ -700,14 +727,12 @@ class TestManifest:
         assert "Attached files available locally" in prompt
         assert str(f) in prompt
 
-    def test_review_prompt_includes_manifest(self, monkeypatch):
-        from pathlib import Path
-
+    def test_review_prompt_includes_manifest(self, tmp_path):
         from autoswe.attachments.models import Attachment, AttachmentSet
         from autoswe.harness.prompts import build_review_prompt
 
-        p = Path("/tmp/autoswe-attach-test3")
-        p.mkdir(parents=True, exist_ok=True)
+        p = tmp_path / "autoswe-attach-test3"
+        p.mkdir()
         f = p / "crash.log"
         f.write_bytes(b"boom\n")
         att = AttachmentSet(dir=p, items=[Attachment(
@@ -781,6 +806,176 @@ class TestStaleSweep:
 
 
 # ============================================================================
+# Dispatch wiring: temp dir created during the handler run, removed in the
+# _dispatch_task finally (issue #290 cleanup lifecycle through the loop seam)
+# ============================================================================
+
+class _FakeProgress:
+    """ProgressComment stand-in: no comment posted; callables no-op."""
+
+    comment_id = None
+
+    def __init__(self, *a, **k):
+        pass
+
+    def __call__(self, body):
+        pass
+
+    def create(self, body):
+        return None
+
+    def adopt(self, cid, body):
+        pass
+
+    def update(self, body):
+        pass
+
+    def finalize(self, body):
+        pass
+
+    def drain(self):
+        pass
+
+    def freeze(self):
+        pass
+
+
+class TestDispatchAttachmentLifecycle:
+    def _stub_dispatch_env(self, monkeypatch, tmp_path, tracker, seen):
+        """Stub everything _dispatch_task touches except the attachment seam.
+
+        *seen* records, during the handler run, the temp dirs matching the
+        autoswe-attach-* prefix present in the OS temp dir.
+        """
+        import tempfile
+        from pathlib import Path
+
+        import autoswe.orch.loop as loop_mod
+
+        monkeypatch.setattr(loop_mod, "RUNNING_DIR", tmp_path / "running")
+        monkeypatch.setattr(loop_mod, "LOGS_DIR", tmp_path / "logs")
+        monkeypatch.setattr(loop_mod, "init_issue_logger", lambda *a, **k: None)
+        monkeypatch.setattr(loop_mod, "remove_issue_logger", lambda *a, **k: None)
+        monkeypatch.setattr(loop_mod, "ProgressComment", _FakeProgress)
+        monkeypatch.setattr(loop_mod, "emit", lambda *a, **k: ())
+        monkeypatch.setattr(loop_mod, "apply_effect", lambda *a, **k: None)
+        monkeypatch.setattr(loop_mod, "record_bot_comment_id", lambda *a, **k: None)
+
+        def fake_run(action, world, progress_callback=None, attachments=None):
+            d = Path(tempfile.gettempdir())
+            now = {p for p in d.iterdir()
+                   if p.name.startswith("autoswe-attach-") and p.is_dir()}
+            before = set(seen.get("before", ()))
+            seen["during"] = [p for p in now if p not in before]
+            seen["attachments_arg"] = attachments
+            return None
+
+        monkeypatch.setattr(loop_mod, "run", fake_run)
+        return loop_mod
+
+    def test_dispatch_ingests_and_removes_temp_dir_on_success(self, monkeypatch, tmp_path):
+        """Agent-phase dispatch creates the autoswe-attach-* temp dir during the
+        handler run and the loop's finally removes it after dispatch returns."""
+        import tempfile
+        from pathlib import Path
+
+        from autoswe.attachments import github as gh
+        from autoswe.orch.types import Action, ApiState, TaskState, World
+        from autoswe.providers.base import NormalizedIssue
+
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        # A single asset in the issue body -> exactly one attachment.
+        monkeypatch.setattr(gh.downloads, "download_bytes", lambda url, **k: png)
+
+        issue = NormalizedIssue(number=1, title="t", body=f"see {_ASSET_URL}",
+                                owner="o", repo="r")
+        api = ApiState(issue=issue, comments=())
+        task = TaskState(
+            slug="gh:o_r_1", owner="o", repo="r", issue_number=1, title="t",
+            body=f"see {_ASSET_URL}", status="pending", plan_branch=None,
+            base_branch="main", attempt_count=0, first_dispatched_at=None,
+            last_dispatched_command=None, last_dispatched_command_id=None,
+            last_consumed_reply_id=None, session_id=None, pr_number=None,
+            guard_blocked=False, gh_closed=False, pending_command=None,
+            pending_guidance=None, pending_user_reply=None, provider="github",
+        )
+        world = World(api=api, task=task, cfg={"ATTACHMENTS_ENABLED": True},
+                      repo_cfg={"provider": "github", "owner": "o", "repo": "r",
+                                "pat": "t"})
+
+        class _Tracker:
+            def set_status(self, num, status): pass
+            def post_comment(self, num, body): return None
+
+        seen = {}
+        loop_mod = self._stub_dispatch_env(monkeypatch, tmp_path, _Tracker(), seen)
+
+        pt = loop_mod.PollTask(slug="gh:o_r_1", task_state=task, world=world)
+        queue = {"gh:o_r_1": {"autoswe_status": "pending"}}
+        action = Action(kind="fix", slug="gh:o_r_1")
+
+        # Baseline: dirs already present before this dispatch (never ours).
+        d = Path(tempfile.gettempdir())
+        seen["before"] = {p for p in d.iterdir()
+                          if p.name.startswith("autoswe-attach-") and p.is_dir()}
+
+        loop_mod._dispatch_task(pt, action, _Tracker(),
+                                world.repo_cfg, "github", world.cfg, queue,
+                                "2026-01-01T00:00:00Z")
+
+        assert seen["during"], "expected the temp dir to exist during the handler run"
+        for p in seen["during"]:
+            assert not p.exists(), f"temp dir not removed by finally: {p}"
+
+    def test_dispatch_no_ingest_for_non_agent_action(self, monkeypatch, tmp_path):
+        """Non-agent actions (e.g. skip) do not ingest attachments at all."""
+        import tempfile
+        from pathlib import Path
+
+        from autoswe.orch.types import Action, ApiState, TaskState, World
+        from autoswe.providers.base import NormalizedIssue
+
+        issue = NormalizedIssue(number=1, title="t", body=f"see {_ASSET_URL}",
+                                owner="o", repo="r")
+        api = ApiState(issue=issue, comments=())
+        task = TaskState(
+            slug="gh:o_r_1", owner="o", repo="r", issue_number=1, title="t",
+            body=f"see {_ASSET_URL}", status="pending", plan_branch=None,
+            base_branch="main", attempt_count=0, first_dispatched_at=None,
+            last_dispatched_command=None, last_dispatched_command_id=None,
+            last_consumed_reply_id=None, session_id=None, pr_number=None,
+            guard_blocked=False, gh_closed=False, pending_command=None,
+            pending_guidance=None, pending_user_reply=None, provider="github",
+        )
+        world = World(api=api, task=task, cfg={"ATTACHMENTS_ENABLED": True},
+                      repo_cfg={"provider": "github", "owner": "o", "repo": "r",
+                                "pat": "t"})
+
+        class _Tracker:
+            def set_status(self, num, status): pass
+            def post_comment(self, num, body): return None
+
+        seen = {}
+        loop_mod = self._stub_dispatch_env(monkeypatch, tmp_path, _Tracker(), seen)
+
+        pt = loop_mod.PollTask(slug="gh:o_r_1", task_state=task, world=world)
+        queue = {"gh:o_r_1": {"autoswe_status": "pending"}}
+        action = Action(kind="skip", slug="gh:o_r_1")
+
+        d = Path(tempfile.gettempdir())
+        seen["before"] = {p for p in d.iterdir()
+                          if p.name.startswith("autoswe-attach-") and p.is_dir()}
+
+        loop_mod._dispatch_task(pt, action, _Tracker(),
+                                world.repo_cfg, "github", world.cfg, queue,
+                                "2026-01-01T00:00:00Z")
+
+        assert seen["attachments_arg"] is None
+        # No new temp dir was created for a non-agent action.
+        assert seen["during"] == []
+
+
+# ============================================================================
 # Config resolution
 # ============================================================================
 
@@ -847,8 +1042,10 @@ class TestProviderSeam:
                 {"rel": "ArtifactLink", "url": "https://x"},
             ],
         }
+        calls = []
 
         def fake_ado_get(path, pat, max_retries=3):
+            calls.append(path)
             return raw
 
         monkeypatch.setattr(az_tracker, "ado_get", fake_ado_get)
@@ -859,6 +1056,67 @@ class TestProviderSeam:
         assert refs[0]["name"] == "data.csv"
         assert refs[0]["resource_size"] == 74
         assert refs[0]["url"].endswith("/aaa")
+        # Cold start: exactly one $expand=all GET (the fallback path).
+        assert len(calls) == 1
+
+    def test_azure_tracker_reuses_relations_from_existing_fetch(self, monkeypatch):
+        """MEDIUM #1: the tracker's existing $expand=all fetch (list_open_issues
+        batch / fetch_issue) captures relations into the cache, so
+        list_workitem_attachments serves them WITHOUT an extra API call."""
+        from autoswe.providers.azure import tracker as az_tracker
+        from autoswe.providers.azure.tracker import AzureTracker
+
+        raw = {
+            "id": 218,
+            "fields": {"System.Title": "t", "System.State": "New"},
+            "relations": [
+                {"rel": "AttachedFile",
+                 "url": "https://dev.azure.com/o/p/_apis/wit/attachments/aaa",
+                 "attributes": {"name": "data.csv", "resourceSize": 74}},
+                {"rel": "ArtifactLink", "url": "https://x"},
+            ],
+        }
+        calls = []
+
+        def fake_ado_get(path, pat, max_retries=3):
+            calls.append(path)
+            return raw
+
+        monkeypatch.setattr(az_tracker, "ado_get", fake_ado_get)
+        tracker = AzureTracker({"provider": "azure", "org": "o",
+                                "project": "p", "repo": "r", "pat": "pat"})
+
+        # Simulate the poll-time $expand=all fetch (fetch_issue) populating the
+        # relations cache via the shared _to_normalized.
+        tracker.fetch_issue(218)
+        assert len(calls) == 1  # the one fetch during poll
+
+        # list_workitem_attachments must reuse the cached relations — no
+        # second GET.
+        refs = tracker.list_workitem_attachments(218)
+        assert len(refs) == 1
+        assert refs[0]["name"] == "data.csv"
+        assert refs[0]["url"].endswith("/aaa")
+        assert len(calls) == 1, "expected zero extra API calls on cache hit"
+
+    def test_azure_tracker_cache_hit_serves_empty_without_refetch(self, monkeypatch):
+        """A fetched work item with no relations is served as [] from cache —
+        not re-fetched (a cache hit on an empty list is still a hit)."""
+        from autoswe.providers.azure import tracker as az_tracker
+        from autoswe.providers.azure.tracker import AzureTracker
+
+        calls = []
+
+        def fake_ado_get(path, pat, max_retries=3):
+            calls.append(path)
+            return {"id": 5, "fields": {"System.Title": "t"}, "relations": []}
+
+        monkeypatch.setattr(az_tracker, "ado_get", fake_ado_get)
+        tracker = AzureTracker({"provider": "azure", "org": "o",
+                                "project": "p", "repo": "r", "pat": "pat"})
+        tracker.fetch_issue(5)      # one GET, populates cache with []
+        assert tracker.list_workitem_attachments(5) == []
+        assert len(calls) == 1      # no re-fetch on a hit
 
     def test_azure_tracker_no_relations(self, monkeypatch):
         from autoswe.providers.azure import tracker as az_tracker
