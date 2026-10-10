@@ -309,7 +309,8 @@ Note: work-item create requires `Content-Type: application/json-patch+json`
 ## Proposed autoSWE Design (cross-provider)
 
 A small, provider-agnostic attachment layer that runs at **task setup**
-(before the planner/coder runs), in the worktree:
+(before the planner/coder runs), downloading into a **temp folder**
+(never the worktree, never the repo):
 
 1. **Discover** —
    - GitHub: regex `user-attachments/assets/<uuid>` over issue body + all
@@ -325,28 +326,42 @@ A small, provider-agnostic attachment layer that runs at **task setup**
    - Azure: `GET _apis/wit/attachments/{id}`.
    - All best-effort: a failure logs a warning and continues. Never
      hard-fail the task on a missing/unreachable attachment.
-3. **Name & store** — Prefer a provider-supplied filename (Azure
-   `attributes.name` when present; GitHub markdown `alt` text when it looks
-   like a filename). Otherwise **sniff content** and fall back to
-   `attachment-<n>.<guessed-ext>`. Store under
-   `<worktree>/data/attachments/<issue>#/<filename>` (ephemeral,
-   gitignored — **not** committed by default). Path-traversal guard on any
-   provider-supplied name (attacker-influenced on both providers).
-4. **Manifest** — append to the planner/coder/reviewer prompt a block:
+3. **Name & store** — **Decision (2026-10-10, Nate): attachments go into a
+   temp folder, never the worktree and never the repo.**
+
+   - One directory per task under the OS temp dir:
+     `tempfile.mkdtemp(prefix="autoswe-attach-")`
+     (e.g. `/tmp/autoswe-attach-13-a1b2c3/`), created at task setup.
+   - Filename: prefer a provider-supplied name (Azure `attributes.name`
+     when present; GitHub markdown `alt` text when it looks like a
+     filename); otherwise **sniff content**, else `attachment-<n>.<ext>`.
+   - Because the folder sits outside the worktree, committing an attachment
+     is impossible by construction — no `attachments.commit` flag needed.
+   - Path-traversal guard on any provider-supplied name
+     (attacker-influenced on both providers): reject names containing
+     `/`, `..`, or absolute paths; keep files flat in the temp dir.
+   - **Cleanup:** the dispatch loop removes the temp dir in a `finally`
+     block on task teardown (success, failure, or cancel). A stale-dir
+     sweeper (mtime > 24h) runs at poller start for crash leftovers.
+4. **Manifest** — append to the planner/coder/reviewer prompt a block with
+   **absolute** paths (the temp dir is outside the worktree, so relative
+   paths would mislead the model):
 
    ```
-   Attached files available locally (relative to worktree):
-   - data/attachments/123/failing-input.csv  (text/csv, 1234 bytes)
-   - data/attachments/123/screenshot.png     (image/png, 62433 bytes)
+   Attached files available locally (temp dir, read-only):
+   - /tmp/autoswe-attach-13-a1b2c3/failing-input.csv  (text/csv, 1234 bytes)
+   - /tmp/autoswe-attach-13-a1b2c3/screenshot.png     (image/png, 62433 bytes)
    ```
 
    so the model knows the files are on disk and can `read`/`process` them.
    CSV/text are fully ingested; images are viewable by backends that support
    image input (claude_code does).
 5. **Config flags** — `attachments.enabled` (default `true`);
-   `attachments.commit` (default `false`) to commit them into the branch if a
-   fix references them; `attachments.max_size_bytes` (default e.g. 10 MiB)
-   and `attachments.max_total_bytes` per issue.
+   `attachments.max_size_bytes` (default e.g. 10 MiB per file) and
+   `attachments.max_total_bytes` (default e.g. 25 MiB per issue).
+   `attachments.commit` is **not a thing** — temp-folder storage makes it
+   impossible; if a fix needs a fixture in the repo, the model copies it in
+   as a normal tracked file as part of the fix.
 
 ## Open Questions
 
