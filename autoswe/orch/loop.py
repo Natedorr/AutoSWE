@@ -274,6 +274,34 @@ def _is_repo_locked(owner: str, repo: str, provider: str) -> str | None:
 # Dispatch: run + emit + apply for a single action
 # ---------------------------------------------------------------------------
 
+def _ingest_task_attachments(
+    tracker,
+    repo_cfg: dict,
+    issue_num: int,
+    body: str,
+    comments: list,
+    cfg: dict,
+):
+    """Ingest issue/work-item attachments at task setup (issue #290).
+
+    One temp dir per task (``autoswe-attach-*``), created here and removed by
+    the caller in a ``finally`` on task teardown. Best-effort: any failure
+    returns ``None`` — a missing/unreachable attachment is never a task
+    failure.
+    """
+    from autoswe.attachments import ingest as attach_ingest
+
+    try:
+        return attach_ingest.ingest_task_attachments(
+            tracker, issue_num, body, comments, cfg, repo_cfg,
+        )
+    except Exception as e:
+        get_debug_logger().warning(
+            "attachments: ingestion failed: %s: %s", type(e).__name__, e,
+        )
+        return None
+
+
 def _dispatch_task(
     pt: PollTask,
     action,
@@ -306,6 +334,11 @@ def _dispatch_task(
         return
 
     issue_handler = None
+    # Per-task attachment temp dir (issue #290): ingested at task setup below
+    # (agent phases only) and removed in this finally on EVERY teardown path
+    # (success, failure, cancel, exception) — attachments are never carried
+    # between dispatches.
+    attachment_set = None
     try:
         issue_handler = init_issue_logger(LOGS_DIR, slug)
 
@@ -357,12 +390,20 @@ def _dispatch_task(
             # untracked progress comment must never read back as a user reply.
             record_bot_comment_id(task_entry, progress.comment_id)
 
+        if action.kind in ("plan", "fix", "review", "retry"):
+            attachment_set = _ingest_task_attachments(
+                tracker, repo_cfg, issue_num,
+                world.task.body or "",
+                list(world.api.comments or ()),
+                cfg,
+            )
+
         # --- Run the action (Layer B) ---
         # Pass the ProgressComment object (not just its .update bound method):
         # it is callable (see __call__) for plain progress updates, and the
         # AskUserQuestion callback can additionally freeze() it on a posted
         # question so no later tool event clobbers it (issue #184).
-        result = run(action, world, progress_callback=progress)
+        result = run(action, world, progress_callback=progress, attachments=attachment_set)
 
         # --- Emit effects (Layer C) ---
         effects = emit(action, result, world)
@@ -387,6 +428,8 @@ def _dispatch_task(
                               repo_cfg, issue_num, provider, cfg, progress)
 
     finally:
+        if attachment_set is not None:
+            attachment_set.remove()
         remove_issue_logger(issue_handler)
         try:
             pid_path.unlink()
@@ -762,6 +805,17 @@ def _single_poll(cfg: dict, *, run_actions: bool = True, repo_filter: str | None
 
     Returns the number of tasks processed (actions that weren't noop).
     """
+    # Stale attachment temp-dir sweep (issue #290): a crashed dispatch can
+    # leave its per-task ``autoswe-attach-*`` dir behind; the dispatch
+    # ``finally`` normally removes it, so anything older than 24 h here is a
+    # leftover. Best-effort and prefix/mtime-gated — never touches other temp
+    # files.
+    try:
+        from autoswe.attachments import ingest as _attach_ingest
+        _attach_ingest.sweep_stale_dirs()
+    except Exception as e:
+        get_debug_logger().warning("attachments: stale sweep failed: %s", e)
+
     repos_cfg = load_repos_config(cfg)
     repo_keys = [k for k in repos_cfg if not k.startswith("_")]
 

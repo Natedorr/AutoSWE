@@ -130,6 +130,30 @@ def _format_comments(comments: list[NormalizedComment]) -> str:
     return "\n\n---\n\n".join(lines)
 
 
+def _attachment_block(task: dict | None) -> str:
+    """Return the attachment manifest block for a prompt, or ``""``.
+
+    The dispatch loop ingests issue/work-item attachments into a per-task
+    temp dir at task setup (issue #290) and stashes the resulting
+    ``AttachmentSet`` on the handler task dict as ``_attachment_set``. The
+    manifest lists **absolute** paths — the temp dir sits outside the
+    worktree, so relative paths would mislead the model. Empty string when
+    no attachments were ingested (disabled, none found, or a non-agent
+    action) so callers append unconditionally.
+    """
+    if not task:
+        return ""
+    att = task.get("_attachment_set")
+    if att is None:
+        return ""
+    try:
+        from autoswe.attachments.models import render_manifest
+
+        return render_manifest(att)
+    except Exception:
+        return ""
+
+
 def load_plan_prompt(repo_cfg: dict | None = None) -> str:
     prompt_file = _resolve_prompt_path(repo_cfg, "plan_prompt")
     if prompt_file.exists():
@@ -216,13 +240,16 @@ def build_plan_prompt(
     review_block = f"Latest code review findings (address in your plan):\n{review_text}\n" if review_text else ""
 
     body = _sanitize_paths(task.get("body", "") or "(no description)", repo_root)
+    # Attachment manifest (issue #290): absolute temp-dir paths, appended to
+    # the body so the model sees the files alongside the issue text.
+    body_block = (body + "\n\n" + _attachment_block(task)).strip()
     comments_text = _sanitize_paths(_format_comments(comments), repo_root)
     replacements = {
         "{{OWNER}}": owner,
         "{{REPO}}": repo,
         "{{ISSUE_NUMBER}}": str(issue_num),
         "{{TITLE}}": task.get("title", f"Issue #{issue_num}"),
-        "{{BODY}}": body,
+        "{{BODY}}": body_block,
         "{{COMMENTS}}": comments_text,
         "{{GUIDANCE_BLOCK}}": guidance_block,
         "{{BASE_BRANCH}}": base_branch,
@@ -309,13 +336,16 @@ def build_fix_prompt(
 
     template = load_fix_prompt(repo_cfg=repo_cfg)
     body = _sanitize_paths(task.get("body", "") or "(no description)", repo_root)
+    # Attachment manifest (issue #290): absolute temp-dir paths, appended to
+    # the body so the model sees the files alongside the issue text.
+    body_block = (body + "\n\n" + _attachment_block(task)).strip()
     comments_text = _sanitize_paths(_format_comments(comments), repo_root)
     replacements = {
         "{{OWNER}}": owner,
         "{{REPO}}": repo,
         "{{ISSUE_NUMBER}}": str(issue_num),
         "{{TITLE}}": task.get("title", f"Issue #{issue_num}"),
-        "{{BODY}}": body,
+        "{{BODY}}": body_block,
         "{{COMMENTS}}": comments_text,
         "{{GUIDANCE_BLOCK}}": guidance_block,
         "{{PLAN}}": plan_block,
@@ -480,6 +510,9 @@ def build_review_prompt(
 
     guidance_block = f"Reviewer guidance: {guidance}\n" if guidance else ""
     body = _sanitize_paths(task.get("body", "") or "(no description)", repo_root)
+    # Attachment manifest (issue #290): absolute temp-dir paths, appended to
+    # the body so the reviewer can inspect referenced files.
+    body_block = (body + "\n\n" + _attachment_block(task)).strip()
     plan = plan_text or "(no plan posted)"
 
     replacements = {
@@ -487,7 +520,7 @@ def build_review_prompt(
         "{{REPO}}": repo,
         "{{ISSUE_NUMBER}}": str(issue_num),
         "{{TITLE}}": task.get("title", f"Issue #{issue_num}"),
-        "{{BODY}}": body,
+        "{{BODY}}": body_block,
         "{{PLAN}}": plan,
         "{{DIFF_STAT}}": diff_stat or "(empty)",
         "{{DIFF}}": diff_text or "(empty)",

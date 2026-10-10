@@ -129,6 +129,16 @@ class GitHubTracker:
             )
         return results
 
+    def list_workitem_attachments(self, issue_number: int) -> list[dict]:
+        """Return attachment refs for the issue (issue #290 seam).
+
+        GitHub has no API to *list* issue attachments — the attachment layer
+        discovers ``user-attachments/assets`` URLs from the raw markdown
+        body + comment bodies instead (docs/autoswe/attachments.md §1.2) —
+        so this returns an empty list.
+        """
+        return []
+
     def set_issue_author(self, login: str | None) -> None:
         """Set the issue author login for author normalization in fetch_comments.
 

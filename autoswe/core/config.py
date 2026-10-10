@@ -170,6 +170,9 @@ def load_config() -> dict:
         "LINK_COMMIT_TRAILER": _as_bool(os.environ.get("LINK_COMMIT_TRAILER"), "true"),
         "AUTO_CLOSE_ON_MERGE": _as_bool(os.environ.get("AUTO_CLOSE_ON_MERGE"), "true"),
         "CI_WATCH": _as_bool(os.environ.get("CI_WATCH"), "true"),
+        "ATTACHMENTS_ENABLED": _as_bool(os.environ.get("ATTACHMENTS_ENABLED"), "true"),
+        "ATTACHMENT_MAX_SIZE_BYTES": int(os.environ.get("ATTACHMENT_MAX_SIZE_BYTES", 10 * 1024 * 1024)),
+        "ATTACHMENT_MAX_TOTAL_BYTES": int(os.environ.get("ATTACHMENT_MAX_TOTAL_BYTES", 25 * 1024 * 1024)),
         "CI_POLL_INTERVAL_SEC": int(os.environ.get("CI_POLL_INTERVAL_SEC", 120)),
         # Shared recoverable-gate policy (issue #245 §2.5): one switch/budget
         # drives auto-fix for BOTH the local post-fix test gate (test_failed)
@@ -193,6 +196,7 @@ def load_config() -> dict:
                 "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES",
                 "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS",
                 "CI_POLL_INTERVAL_SEC", "GATE_MAX_FIX_ATTEMPTS", "CI_LOG_MAX_CHARS",
+                "ATTACHMENT_MAX_SIZE_BYTES", "ATTACHMENT_MAX_TOTAL_BYTES",
             )
         }
         for line in CONFIG_FILE.read_text().splitlines():
@@ -204,7 +208,7 @@ def load_config() -> dict:
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
                     v = v[1:-1]
                 cfg[k.strip()] = v
-        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS", "CI_POLL_INTERVAL_SEC", "GATE_MAX_FIX_ATTEMPTS", "CI_LOG_MAX_CHARS"):
+        for int_key in ("AGENT_TIMEOUT", "AGENT_RETRY_ON_FAILURE", "MAX_ATTEMPTS", "MAX_TOTAL_HOURS", "MAX_CONCURRENT", "MAX_DRAIN_CYCLES", "TEST_GATE_TIMEOUT", "MAX_TURNS", "REVIEW_MAX_TURNS", "CI_POLL_INTERVAL_SEC", "GATE_MAX_FIX_ATTEMPTS", "CI_LOG_MAX_CHARS", "ATTACHMENT_MAX_SIZE_BYTES", "ATTACHMENT_MAX_TOTAL_BYTES"):
             raw = cfg.get(int_key)
             if raw is None:
                 continue
@@ -231,6 +235,7 @@ def load_config() -> dict:
         cfg["LINK_COMMIT_TRAILER"] = _as_bool(cfg.get("LINK_COMMIT_TRAILER"), "true")
         cfg["AUTO_CLOSE_ON_MERGE"] = _as_bool(cfg.get("AUTO_CLOSE_ON_MERGE"), "true")
         cfg["CI_WATCH"] = _as_bool(cfg.get("CI_WATCH"), "true")
+        cfg["ATTACHMENTS_ENABLED"] = _as_bool(cfg.get("ATTACHMENTS_ENABLED"), "true")
         cfg["AUTO_FIX_ON_GATE_FAILURE"] = _as_bool(cfg.get("AUTO_FIX_ON_GATE_FAILURE"), "true")
     # Parse ALLOWED_AUTHORS as a set for O(1) lookup
     _raw = str(cfg.get("ALLOWED_AUTHORS", "")).strip()

@@ -91,11 +91,17 @@ def run(
     action: Action,
     world: World,
     progress_callback: Callable[[str], None] | None = None,
+    attachments=None,
 ) -> DispatchResult | None:
     """Run the Claude handler for this action.
 
     Returns None for pure actions (skip, abort, noop, post_welcome, etc)
     that don't invoke Claude. Returns DispatchResult for all Claude actions.
+
+    *attachments* (issue #290) is the :class:`AttachmentSet` the dispatch
+    loop ingested at task setup (temp dir + downloaded files). It is stashed
+    on the handler task dict as ``_attachment_set`` so the prompt builders
+    can append the manifest; the loop's ``finally`` removes the temp dir.
     """
     kind = action.kind
 
@@ -112,6 +118,13 @@ def run(
     cfg = world.cfg
     rc = world.repo_cfg
     guidance = action.guidance
+
+    # Attachments ingested at task setup by the dispatch loop (issue #290).
+    # Stashed on the handler task dict so the plan/fix/review prompt builders
+    # append the manifest. The temp dir is removed by loop._dispatch_task's
+    # finally, not here — run() returns before teardown.
+    if attachments is not None:
+        task["_attachment_set"] = attachments
 
     # Re-inject the dispatch-time sticky progress comment onto the handler
     # task dict (issue #226). TaskState.to_handler_dict() deliberately excludes

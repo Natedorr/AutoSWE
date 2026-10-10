@@ -226,6 +226,42 @@ class AzureTracker:
         raw = ado_get(path, self._pat)
         return self._to_normalized(raw)
 
+    def list_workitem_attachments(self, issue_number: int) -> list[dict]:
+        """Return ``AttachedFile`` attachment refs for the work item (issue #290).
+
+        Attachments appear in the work item's ``relations[]`` **only when
+        fetched with ``$expand=all``** (docs/autoswe/attachments.md §2.1, live
+        verified 2026-10-09) — the tracker's own ``fetch_issue`` already uses
+        that expand, so this re-fetches with it and normalizes the refs:
+        ``{"url": ..., "name": ...|None, "resource_size": int|None}``. ``name``
+        is optional in the live API (it was absent in the probes), so it is
+        passed through as ``None`` when missing. Best-effort: any fetch
+        failure returns ``[]`` — a missing attachment is never a task failure.
+        """
+        path = _ado_api_version(
+            f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
+            "?$expand=all"
+        )
+        try:
+            raw = ado_get(path, self._pat)
+        except Exception as e:
+            dbg.warning("attachments: Azure relations fetch failed for WI %d: %s", issue_number, e)
+            return []
+        refs: list[dict] = []
+        for rel in raw.get("relations", []) or []:
+            if not isinstance(rel, dict) or rel.get("rel") != "AttachedFile":
+                continue
+            url = rel.get("url")
+            if not url:
+                continue
+            attrs = rel.get("attributes") or {}
+            refs.append({
+                "url": url,
+                "name": attrs.get("name") or None,
+                "resource_size": attrs.get("resourceSize"),
+            })
+        return refs
+
     def fetch_comments(self, issue_number: int) -> list[NormalizedComment]:
         """Fetch all comments on a work item.
 

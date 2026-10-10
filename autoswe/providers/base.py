@@ -190,6 +190,20 @@ class IssueTracker(Protocol):
     def fetch_comments(self, issue_number: int) -> list[NormalizedComment]:
         """Fetch all comments on an issue."""
 
+    def list_workitem_attachments(self, issue_number: int) -> list[dict]:
+        """Return raw attachment refs for the issue/work item, or [].
+
+        Provider-agnostic discovery seam (issue #290): GitHub has no API to
+        *list* attachments (the layer discovers them from body/comment
+        markdown instead), so GitHub returns ``[]``. Azure returns its
+        ``AttachedFile`` relations (from the ``$expand=all`` fetch) — dicts
+        shaped ``{"url": ..., "name": ...|None, "resource_size": int|None}``.
+
+        This method is *optional* on the protocol: consumers must use
+        ``getattr(tracker, "list_workitem_attachments", None)`` and tolerate a
+        missing implementation (a pre-#290 provider has no attachment source).
+        """
+
     def post_comment(self, issue_number: int, body: str) -> int | None:
         """Post a comment on an issue. Returns the comment ID, or None if unavailable."""
 
