@@ -428,3 +428,14 @@ implementation lands.
 - Public sample asset used for Mechanism A:
   `github.com/user-attachments/assets/b45006e0-fabd-43a6-8d81-789330c687d7`
   (from `Beenda1/Hanzala-Sarfraz#3`).
+
+### 1.7 Re-verification (2026-10-10)
+
+Same-process fetch + download re-run against `openclaw-config#13`:
+`html+json` comments list (0.4s) → 6 signed URLs → **all 6 downloaded 200
+within 0.96s total**; the CSV-as-PNG asset came back byte-exact
+(magic bytes `id,name,expected`, served as `image/png`). Confirms the
+"fetch and download in the same operation" rule in §1.3 is sufficient —
+no timing hazard at task-setup latency. Plain-link comment
+(6093798908) again produced zero signed URLs, reconfirming the §1.3
+critical limitation.
