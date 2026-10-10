@@ -550,6 +550,119 @@ class TestIngestGithub:
         assert set_.total_bytes == 200
         set_.remove()
 
+    def test_ingest_unexpected_error_removes_temp_dir(self, monkeypatch, tmp_path):
+        """A disk-full / permission error while writing an attachment must not
+        leak the temp dir: the failed asset is skipped, the (now empty) temp
+        dir is removed, and the function returns ``None``. Regression for the
+        re-review finding that a ``write_bytes`` failure mid-ingest used to
+        propagate to the dispatch wrapper's blanket ``except`` — which returned
+        ``None`` with no ``AttachmentSet`` — leaving ``dest_dir`` behind until
+        the 24 h stale sweep.
+        """
+        import tempfile
+
+        from autoswe.attachments import github as gh
+        from autoswe.attachments import ingest
+
+        # Capture the temp dir the ingest layer creates so we can assert on it.
+        created: dict = {}
+
+        def fake_mkdtemp(*a, **k):
+            d = tmp_path / "autoswe-attach-fail"
+            d.mkdir()
+            created["dir"] = d
+            return str(d)
+
+        monkeypatch.setattr(tempfile, "mkdtemp", fake_mkdtemp)
+        monkeypatch.setattr(
+            gh.downloads, "download_bytes",
+            lambda url, **k: b"a1" * 100,
+        )
+        # The write inside ``_store`` fails with an OSError (ENOSPC model):
+        # the first ``write_bytes`` succeeds, the second raises. The per-asset
+        # ``except OSError`` guard skips the failed asset and keeps going.
+        real_store = ingest._store
+        calls = {"n": 0}
+
+        def fake_store(data, dest_dir, *a, **k):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                # Simulate a disk-full write failure inside the store step.
+                raise OSError("No space left on device")
+            return real_store(data, dest_dir, *a, **k)
+
+        monkeypatch.setattr(ingest, "_store", fake_store)
+
+        body = f"{_ASSET_URL} and {_ASSET_URL2}"
+        set_ = ingest.ingest_task_attachments(
+            _StubTracker(), 1, body, [],
+            {"ATTACHMENTS_ENABLED": True,
+             "ATTACHMENT_MAX_SIZE_BYTES": 400,
+             "ATTACHMENT_MAX_TOTAL_BYTES": 100000},
+            {"provider": "github", "owner": "o", "repo": "r", "pat": "t"},
+        )
+        # One asset stored, the disk-full one skipped — still best-effort.
+        assert set_ is not None
+        assert len(set_.items) == 1
+        assert set_.items[0].path.read_bytes() == b"a1" * 100
+        # No leaked temp dir beyond the surviving set's dir.
+        assert created["dir"].exists()
+        set_.remove()
+        assert not created["dir"].exists()
+
+    def test_ingest_write_failure_aborts_and_removes_temp_dir(self, monkeypatch, tmp_path):
+        """A failure that escapes the per-attachment guards (a non-OSError
+        raised mid-ingest) must not leak the temp dir either: the outer
+        cleanup removes ``dest_dir`` and returns ``None``. This is the exact
+        path the re-review flagged — before the fix, the temp dir was left
+        behind until the 24 h stale sweep.
+        """
+        import tempfile
+
+        from autoswe.attachments import github as gh
+        from autoswe.attachments import ingest
+
+        created: dict = {}
+
+        def fake_mkdtemp(*a, **k):
+            d = tmp_path / "autoswe-attach-abort"
+            d.mkdir()
+            created["dir"] = d
+            return str(d)
+
+        monkeypatch.setattr(tempfile, "mkdtemp", fake_mkdtemp)
+        monkeypatch.setattr(
+            gh.downloads, "download_bytes",
+            lambda url, **k: b"a1" * 100,
+        )
+        # The first ``_store`` succeeds; the second raises a *non-OSError*, so
+        # it is not caught by the per-asset ``except OSError`` guard and
+        # reaches the outer cleanup path.
+        real_store = ingest._store
+        calls = {"n": 0}
+
+        def fake_store(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("unexpected mid-ingest failure")
+            return real_store(*a, **k)
+
+        monkeypatch.setattr(ingest, "_store", fake_store)
+
+        body = f"{_ASSET_URL} and {_ASSET_URL2}"
+        set_ = ingest.ingest_task_attachments(
+            _StubTracker(), 1, body, [],
+            {"ATTACHMENTS_ENABLED": True,
+             "ATTACHMENT_MAX_SIZE_BYTES": 400,
+             "ATTACHMENT_MAX_TOTAL_BYTES": 100000},
+            {"provider": "github", "owner": "o", "repo": "r", "pat": "t"},
+        )
+        # Best-effort: the escaped failure returns ``None`` (never raises).
+        assert set_ is None
+        # The temp dir was created and is gone after the call returns.
+        assert created["dir"] is not None
+        assert not created["dir"].exists()
+
 
 class TestIngestAzure:
     def test_ingest_azure_stores(self, monkeypatch):

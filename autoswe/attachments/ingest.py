@@ -155,66 +155,96 @@ def ingest_task_attachments(
     items: list[Attachment] = []
     index = 1
 
-    if provider == "github":
-        token = (repo_cfg or {}).get("pat") or (repo_cfg or {}).get("token", "")
-        raw_comments = [
-            {"id": getattr(c, "id", None), "body": getattr(c, "body", "") or ""}
-            for c in (comments or [])
-        ]
-        for ctx in gh.discover_github_assets(body or "", raw_comments):
-            try:
-                data = gh.download_github_asset(
-                    ctx.url,
-                    owner=(repo_cfg or {}).get("owner", ""),
-                    repo=(repo_cfg or {}).get("repo", ""),
-                    issue_num=issue_number,
-                    token=token,
-                    max_bytes=acfg["max_size_bytes"],
-                    context=ctx,
-                    opener=opener,
-                )
-            except Exception as e:
-                dbg.warning("attachments: GitHub asset %s failed: %s", ctx.url, e)
-                continue
-            if len(data) > acfg["max_size_bytes"]:
-                dbg.warning("attachments: GitHub asset exceeds cap: %s", ctx.url)
-                continue
-            if total_state["total"] + len(data) > acfg["max_total_bytes"]:
-                dbg.warning("attachments: total cap reached; skipping %s", ctx.url)
-                break
-            total_state["total"] += len(data)
-            # A markdown ``alt`` is free text the issue author chose — it is a
-            # filename only when it *looks* like one (design doc §Design item
-            # 3); prose alts fall through to magic-byte sniffing.
-            alt = ctx.alt if looks_like_filename(ctx.alt) else None
-            items.append(_store(data, dest_dir, alt, used, index, "github", ctx.url))
-            index += 1
-    elif provider == "azure":
-        pat = (repo_cfg or {}).get("pat") or (repo_cfg or {}).get("token", "")
-        list_refs = getattr(tracker, "list_workitem_attachments", None)
-        raw_refs = list_refs(issue_number) if callable(list_refs) else []
-        refs = _normalize_azure_refs(raw_refs)
-        for ref in refs:
-            try:
-                data = az.download_azure_attachment(
-                    ref.url, pat, max_bytes=acfg["max_size_bytes"], opener=opener,
-                )
-            except Exception as e:
-                dbg.warning("attachments: Azure asset %s failed: %s", ref.url, e)
-                continue
-            if len(data) > acfg["max_size_bytes"]:
-                dbg.warning("attachments: Azure asset exceeds cap: %s", ref.url)
-                continue
-            if total_state["total"] + len(data) > acfg["max_total_bytes"]:
-                dbg.warning("attachments: total cap reached; skipping %s", ref.url)
-                break
-            total_state["total"] += len(data)
-            items.append(_store(data, dest_dir, ref.name, used, index, "azure", ref.url))
-            index += 1
-    else:
-        # Unknown provider — no known attachment source.
-        dbg.debug("attachments: provider %r has no attachment source", provider)
-
+    try:
+        if provider == "github":
+            token = (repo_cfg or {}).get("pat") or (repo_cfg or {}).get("token", "")
+            raw_comments = [
+                {"id": getattr(c, "id", None), "body": getattr(c, "body", "") or ""}
+                for c in (comments or [])
+            ]
+            for ctx in gh.discover_github_assets(body or "", raw_comments):
+                try:
+                    data = gh.download_github_asset(
+                        ctx.url,
+                        owner=(repo_cfg or {}).get("owner", ""),
+                        repo=(repo_cfg or {}).get("repo", ""),
+                        issue_num=issue_number,
+                        token=token,
+                        max_bytes=acfg["max_size_bytes"],
+                        context=ctx,
+                        opener=opener,
+                    )
+                except Exception as e:
+                    dbg.warning("attachments: GitHub asset %s failed: %s", ctx.url, e)
+                    continue
+                if len(data) > acfg["max_size_bytes"]:
+                    dbg.warning("attachments: GitHub asset exceeds cap: %s", ctx.url)
+                    continue
+                if total_state["total"] + len(data) > acfg["max_total_bytes"]:
+                    dbg.warning("attachments: total cap reached; skipping %s", ctx.url)
+                    break
+                total_state["total"] += len(data)
+                # A markdown ``alt`` is free text the issue author chose — it
+                # is a filename only when it *looks* like one (design doc
+                # §Design item 3); prose alts fall through to magic-byte
+                # sniffing.
+                alt = ctx.alt if looks_like_filename(ctx.alt) else None
+                try:
+                    items.append(_store(data, dest_dir, alt, used, index, "github", ctx.url))
+                except OSError as e:
+                    # Disk full / permission error while writing this file —
+                    # best-effort: skip just this asset and keep going.
+                    dbg.warning("attachments: could not store %s: %s", ctx.url, e)
+                    continue
+                index += 1
+        elif provider == "azure":
+            pat = (repo_cfg or {}).get("pat") or (repo_cfg or {}).get("token", "")
+            list_refs = getattr(tracker, "list_workitem_attachments", None)
+            raw_refs = list_refs(issue_number) if callable(list_refs) else []
+            refs = _normalize_azure_refs(raw_refs)
+            for ref in refs:
+                try:
+                    data = az.download_azure_attachment(
+                        ref.url, pat, max_bytes=acfg["max_size_bytes"], opener=opener,
+                    )
+                except Exception as e:
+                    dbg.warning("attachments: Azure asset %s failed: %s", ref.url, e)
+                    continue
+                if len(data) > acfg["max_size_bytes"]:
+                    dbg.warning("attachments: Azure asset exceeds cap: %s", ref.url)
+                    continue
+                if total_state["total"] + len(data) > acfg["max_total_bytes"]:
+                    dbg.warning("attachments: total cap reached; skipping %s", ref.url)
+                    break
+                total_state["total"] += len(data)
+                try:
+                    items.append(_store(data, dest_dir, ref.name, used, index, "azure", ref.url))
+                except OSError as e:
+                    # Disk full / permission error while writing this file —
+                    # best-effort: skip just this asset and keep going.
+                    dbg.warning("attachments: could not store %s: %s", ref.url, e)
+                    continue
+                index += 1
+        else:
+            # Unknown provider — no known attachment source.
+            dbg.debug("attachments: provider %r has no attachment source", provider)
+    except Exception as e:
+        # A failure that escaped the per-attachment guards (e.g. the write
+        # inside ``_store``) would otherwise propagate to the dispatch
+        # wrapper's blanket ``except`` — which returns ``None`` with no
+        # AttachmentSet — leaving *dest_dir* (possibly with partial bytes)
+        # behind until the 24h stale sweep. Remove it here so the temp dir
+        # never leaks regardless of where the failure lands. Best-effort per
+        # spec: never a task failure.
+        dbg.warning(
+            "attachments: ingest failed; removing temp dir: %s: %s",
+            type(e).__name__, e,
+        )
+        try:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return None
     if not items:
         # Nothing to show — don't leave an empty dir behind.
         try:
