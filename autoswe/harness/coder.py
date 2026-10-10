@@ -310,6 +310,26 @@ def _run_fix_session(
             session_id=run_result.session_id,
         )
 
+    # MCP post_question (issue #275 — mirror planner's MCP branch): backends
+    # without a can_use_tool interception (e.g. pi) have no AskUserQuestion
+    # path; their questions arrive through the MCP comment server and land in
+    # RunResult.question_posted. The comment is already on the thread, so no
+    # fallback post is needed — just pause, exactly like the planner. Gated on
+    # the "mcp" capability so backends that can't post via MCP (e.g. Codex,
+    # whose parser always sets question_posted=False) keep the straight-
+    # through behavior documented in E2E-03b. Checked BEFORE the ok check on
+    # purpose, matching the planner: once a question is on the thread the
+    # run's authoritative outcome is "waiting on the user" even if the session
+    # then hit its turn cap — the session is resumable.
+    if runner.backend_has_capability(harness, "mcp") and run_result.question_posted:
+        log(f"[FIX] {task['id']} question posted via MCP — pausing (WAITING: questions)")
+        return HandlerResult(
+            "WAITING: questions",
+            cost_usd=run_result.cost_usd,
+            duration_seconds=run_result.duration_seconds,
+            session_id=run_result.session_id,
+        )
+
     if not run_result.ok:
         # Graceful commit-on-cap (issue #222): a run that spent its whole turn
         # budget can still hold a complete, uncommitted diff (the #216 failure
@@ -526,10 +546,25 @@ def resume_fix(task: dict, user_text: str, repo_cfg: dict, cfg: dict, *, progres
     ).branch_name(issue_num)
     fast_forward_worktree(wt, ff_branch)
 
+    # Name the question tool the way this backend's adapter exposes it
+    # (Phase 3 pattern, mirroring planner.resume_plan): pi/codex have no
+    # native AskUserQuestion tool — only the MCP comment server does — so the
+    # resume prompt must reference the resolved backend's tool name.
+    resume_harness = resolve_harness("fix", repo_cfg or {}, cfg or {})
+    question_tool = runner.comment_tool_names(resume_harness).get(
+        "post_question", "mcp__autoswe_comment__post_question"
+    )
+    has_mcp = runner.backend_has_capability(resume_harness, "mcp")
+    question_clause = (
+        f"the `{question_tool}` tool" if has_mcp else "`AskUserQuestion`"
+    )
+
     resume_prompt = (
         f"The user replied to your question(s):\n\n{user_text}\n\n"
-        "Continue implementing the fix. You may call AskUserQuestion again "
-        "if needed, or proceed to make the code changes.\n\n"
+        f"Continue implementing the fix. If you need further clarification "
+        f"before proceeding, call {question_clause} again and then STOP and "
+        f"end your turn — do not keep coding and do not answer your own "
+        f"question.\n\n"
         "When done, summarize what you changed."
     )
 
@@ -579,7 +614,12 @@ def _finalize_fix(
     *run_gate* (issue #222): when a caller has already run the post-fix test
     gate before committing (the ``error_max_turns`` rescue path), pass
     ``run_gate=False`` so the suite is not executed twice. The commit/push
-    flow itself is identical either way.
+    flow itself is identical either way. The gate also guards the
+    no-changes outcome (issue #276): when the session committed nothing but
+    the branch head carries work whose suite is red, the task must re-land
+    ``test_failed`` (via ``TESTS_FAILED``) instead of being promoted to the
+    terminal ``fixed`` — a no-change ``DONE`` on a red branch would silently
+    clear the gate verdict.
 
     *before_sha*: the branch head captured BEFORE the coding session ran,
     handed to ``commit_and_push`` so it can still detect work the agent
@@ -612,12 +652,36 @@ def _finalize_fix(
     log(f"[FIX] {task['id']} committing subject={subject!r}")
     dbg.debug("FIX: committing with subject=%r", subject)
     try:
-        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider, before_sha=before_sha)
+        commit_result = commit_and_push(wt, owner, repo, issue_num, commit_msg, base_branch, provider, before_sha=before_sha, cfg=cfg)
     except Exception as e:  # Commit/push boundary — any provider or git error surfaces to the task result.
         dbg.error("_finalize_fix: commit/push failed: %s", e, exc_info=True)
         return HandlerResult(f"FAILED: commit/push error: {e}")
 
     if not commit_result["committed"]:
+        # No-changes outcome (issue #276): the session left the worktree
+        # unmodified, but the branch head may still carry work whose suite is
+        # red (e.g. a gate auto-fix that correctly declined to change an
+        # already-committed fix). The gate must guard the no-changes path too
+        # — a no-change DONE on a red branch would otherwise promote the task
+        # out of test_failed to terminal `fixed`. run_gate=False (the rescue
+        # path) already pre-validated the gate green, so skip the re-run.
+        if run_gate:
+            gate = run_test_gate(wt, cfg, repo_cfg, progress_callback=progress_callback)
+            if not gate.ok:
+                log(f"[FIX] {task['id']} no changes, but test gate RED: {gate.reason} "
+                    "— refusing terminal `fixed`")
+                head = _get_branch_head_sha(
+                    wt, get_vcs({"owner": owner, "repo": repo, "token": "", "provider": provider}).branch_name(issue_num)
+                )
+                detail = gate.reason + (f"\n{gate.output}" if gate.output else "")
+                return HandlerResult(
+                    f"TESTS_FAILED\t{detail}\t{head or ''}",
+                    cost_usd=run_result.cost_usd,
+                    duration_seconds=run_result.duration_seconds,
+                    session_id=session_id,
+                )
+            if not gate.ran:
+                log(f"[FIX] {task['id']} no changes, test gate skipped: {gate.reason}")
         log(f"[FIX] {task['id']} NO CHANGES DETECTED — worktree unmodified by session")
         return HandlerResult(
             "DONE: no changes detected",

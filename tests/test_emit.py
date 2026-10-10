@@ -29,7 +29,7 @@ from autoswe.orch.types import (
     TaskState,
     World,
 )
-from autoswe.providers.base import NormalizedComment, NormalizedIssue
+from autoswe.providers.base import CIStatus, NormalizedComment, NormalizedIssue
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "emit"
 
@@ -107,16 +107,30 @@ def _load_world(data: dict) -> World:
         last_synced=task_data.get("last_synced", ""),
         provider=task_data.get("provider", "github"),
         fix_summary=task_data.get("fix_summary", ""),
+        ci_failed_from_status=task_data.get("ci_failed_from_status"),
+        ci_last_notified_sha=task_data.get("ci_last_notified_sha"),
+        ci_error_notified=task_data.get("ci_error_notified", False),
+        ci_error_notified_sha=task_data.get("ci_error_notified_sha"),
+        gate_attempt_count=task_data.get("gate_attempt_count", task_data.get("ci_attempt_count", 0)),
+        gate_last_fixed_sha=task_data.get("gate_last_fixed_sha", task_data.get("ci_last_fixed_sha")),
+        test_failed_sha=task_data.get("test_failed_sha"),
+        test_failure_detail=task_data.get("test_failure_detail"),
+        test_gate_limit_notified=task_data.get("test_gate_limit_notified", False),
+        pr_deferred=task_data.get("pr_deferred", False),
     )
 
     cfg = _default_cfg()
     cfg.update(data.get("cfg", {}))
+
+    ci_data = data.get("ci")
+    ci = CIStatus(**ci_data) if ci_data is not None else None
 
     return World(
         api=api,
         task=task,
         cfg=cfg,
         repo_cfg=data.get("repo_cfg", {}),
+        ci=ci,
     )
 
 
@@ -133,6 +147,7 @@ def _load_action(data: dict) -> Action:
         user_reply_text=data.get("user_reply_text"),
         limit_reason=data.get("limit_reason"),
         refused_command=data.get("refused_command"),
+        trigger=data.get("trigger"),
     )
 
 
@@ -235,10 +250,10 @@ def _discover_fixtures() -> list[Path]:
 @pytest.mark.parametrize("scenario", _discover_fixtures(), ids=lambda p: p.name)
 def test_emit(scenario: Path):
     """Parametrized emit test: world + action + result -> expected effects."""
-    world = _load_world(json.loads((scenario / "world.json").read_text()))
-    action = _load_action(json.loads((scenario / "action.json").read_text()))
+    world = _load_world(json.loads((scenario / "world.json").read_text(encoding="utf-8")))
+    action = _load_action(json.loads((scenario / "action.json").read_text(encoding="utf-8")))
     result = _load_result(scenario / "result.json")
-    expected_list = json.loads((scenario / "expected_effects.json").read_text())
+    expected_list = json.loads((scenario / "expected_effects.json").read_text(encoding="utf-8"))
 
     effects = emit(action, result, world)
     expected = [dict(e) for e in expected_list]
@@ -634,6 +649,49 @@ def test_review_success_does_not_set_last_good_session_id():
     assert patch.get("session_id") is None
 
 
+def test_review_failed_renders_explicit_failure_not_blank_review():
+    """A FAILED review result (reviewer.py raised/timed out) must render as an
+    explicit failure comment, not a near-blank '## Review' section.
+
+    Before the fix, the `kind == "review"` branch in emit() ran unconditionally
+    and only knew how to format REVIEW_READY text — a `FAILED: ...` done_content
+    fell through to an empty review_text/gate_note, producing a content-less
+    '## Review' comment that hid the actual error from the user."""
+    world = _load_world(json.loads(
+        (FIXTURE_DIR / "plan_action_success" / "world.json").read_text()
+    ))
+    action = Action(
+        kind="review",
+        slug=world.task.slug,
+        plan_branch=world.task.plan_branch,
+        attempt_count=1,
+        triggering_comment_id=1,
+    )
+    result = DispatchResult(
+        done_content="FAILED: review error: codex executable not found on PATH",
+        cost_usd=None,
+        duration_seconds=5.0,
+        session_id=None,
+    )
+
+    effects = emit(action, result, world)
+
+    comments = [e for e in effects if e.kind == "post_comment"]
+    assert comments, "a failed review must post a comment"
+    body = comments[0].body
+    assert "## Review" not in body
+    assert "Failed:" in body
+    assert "codex executable not found on PATH" in body
+
+    statuses = [e for e in effects if e.kind == "set_status"]
+    assert statuses and statuses[0].status == "failed"
+
+    patches = [e for e in effects if e.kind == "patch_queue"]
+    assert patches, "a failed review must emit a patch_queue effect"
+    patch = patches[0].queue_patch or {}
+    assert patch.get("session_id") is None
+
+
 def test_sync_branch_does_not_clobber_checkpoint_backend():
     """A non-failed sync run that carries a session_id must NOT touch the
     last-known-good checkpoint. Before the fix, sync_branch (phase unresolvable)
@@ -756,6 +814,124 @@ def test_ship_pr_failure_does_not_persist_pr_fields():
             assert "pr_number" not in e.queue_patch
             assert "pr_url" not in e.queue_patch
 
+
+def test_ship_pr_preflight_refusal_holds_resting_state():
+    """Issue #277: /pr refused by the preflight gate (CI red) must NOT emit
+    ``failed`` — the work is done and the branch is fine, only the gate is red.
+
+    The pre-command resting state (``fixed`` here) is held in BOTH the
+    set_status effect and the queue patch, the refusal comment carries the
+    gate reason, and the fix session is NOT cleared (no agent run broke).
+    A genuine VCS error (``FAILED:``) still emits ``failed``.
+    """
+    world = _review_emit_world(
+        status="fixed",
+        last_dispatched_command="/fix",
+    )
+    action = Action(
+        kind="ship_pr",
+        slug="gh:owner_repo_42",
+        triggering_comment_id=9,
+    )
+    result = DispatchResult(
+        done_content="PR_BLOCKED: CI failing: 1 check(s) failing: ci",
+    )
+
+    effects = emit(action, result, world)
+    set_status = next(e for e in effects if e.kind == "set_status")
+    assert set_status.status == "fixed", (
+        "a preflight /pr refusal must hold the pre-command resting state, "
+        "not emit failed"
+    )
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["autoswe_status"] == "fixed", (
+        "the queue row must stay at the resting state — 'pr_blocked' is an "
+        "emit-internal status string, never persistable"
+    )
+    # No agent run broke on a preflight refusal — the fix session checkpoint
+    # must survive (not be cleared to None) for the eventual /fix or /retry.
+    assert patch.get("session_id", "fix-session") is not None, (
+        "a preflight refusal must not clear the fix session checkpoint"
+    )
+    post = next(e for e in effects if e.kind == "post_comment")
+    assert "PR not opened" in post.body
+    assert "CI failing: 1 check(s) failing: ci" in post.body
+    assert "`/retry`" in post.body
+    # The dispatch watermark still advances so decide() dedups the re-refusal.
+    assert patch["last_dispatched_command"] == "/pr"
+    assert patch["last_dispatched_command_id"] == 9
+
+    # A real VCS/provider error still emits failed (and clears the session).
+    result_failed = DispatchResult(done_content="FAILED: could not create PR: API error")
+    effects_failed = emit(action, result_failed, world)
+    set_status_failed = next(e for e in effects_failed if e.kind == "set_status")
+    assert set_status_failed.status == "failed"
+
+
+def test_retry_replayed_pr_refusal_holds_resting_state():
+    """Issue #277 review: a /retry that REPLAYS a refused /pr (kind='retry',
+    replayed_command='/pr') must emit like a preflight /pr refusal — hold the
+    pre-command resting state in both effects, record last_replayed_command='/pr'
+    so the next /retry re-replays /pr, keep last_dispatched_command='/retry' for
+    decide() dedup, and NOT clear the fix session checkpoint."""
+    world = _review_emit_world(status="fixed", last_dispatched_command="/retry")
+    action = Action(kind="retry", slug="gh:owner_repo_42", triggering_comment_id=9)
+    result = DispatchResult(
+        done_content="PR_BLOCKED: CI failing: 1 check(s) failing: ci",
+        replayed_command="/pr",
+    )
+
+    effects = emit(action, result, world)
+    set_status = next(e for e in effects if e.kind == "set_status")
+    assert set_status.status == "fixed"
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["autoswe_status"] == "fixed"
+    # Watermark bookkeeping: /retry is the triggering command, /pr is the
+    # replayed one a subsequent /retry follows.
+    assert patch["last_dispatched_command"] == "/retry"
+    assert patch["last_replayed_command"] == "/pr"
+    assert patch["last_dispatched_command_id"] == 9
+    # No agent run broke — the checkpoint must not be cleared/overwritten.
+    assert patch.get("session_id", "fix-session") is not None
+    assert "last_good_session_id" not in patch, (
+        "a replayed /pr is a ship — it must not clobber the fix session checkpoint"
+    )
+    post = next(e for e in effects if e.kind == "post_comment")
+    assert "PR not opened" in post.body
+
+
+def test_retry_replayed_pr_success_emits_shipped():
+    """Issue #277 review: once the gate is green, a /retry that REPLAYS /pr
+    actually opens the PR — emit must treat it as a ship (status `shipped`,
+    persist the PR identity) and NOT as a retry completion (which would land
+    `fixed`), and must NOT fire a second auto-create_pr."""
+    world = _review_emit_world(status="fixed", last_dispatched_command="/retry")
+    action = Action(kind="retry", slug="gh:owner_repo_42", triggering_comment_id=9)
+    result = DispatchResult(
+        done_content="DONE: PR #12",
+        pr_number=12,
+        pr_url="https://github.com/owner/repo/pull/12",
+        replayed_command="/pr",
+    )
+
+    effects = emit(action, result, world)
+    set_status = next(e for e in effects if e.kind == "set_status")
+    assert set_status.status == "shipped", (
+        "a replayed /pr that opens the PR must emit shipped, not the retry "
+        "default 'fixed'"
+    )
+    patch = next(e.queue_patch for e in effects if e.kind == "patch_queue")
+    assert patch["autoswe_status"] == "shipped"
+    assert patch["pr_number"] == 12
+    assert patch["pr_url"] == "https://github.com/owner/repo/pull/12"
+    assert patch["last_replayed_command"] == "/pr"
+    # A ship does not fire an auto-create_pr.
+    assert not any(e.kind == "create_pr" for e in effects)
+
+
+# ---------------------------------------------------------------------------
+# Review emit — status transition + queue patch (issue #173 F-18)
+# ---------------------------------------------------------------------------
 
 def test_review_preserves_status_only_emits_queue_patch():
     """A review action transitions to 'reviewed' status and emits

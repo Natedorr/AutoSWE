@@ -35,6 +35,19 @@ def test_map_tests_failed():
     assert _map_done_to_label(f"TESTS_FAILED\t{detail}\tabc1234") == "autoswe:test_failed"
 
 
+def test_map_pr_blocked():
+    """Issue #277: /pr preflight refusal is not a handler failure.
+
+    ``PR_BLOCKED:`` must map to the emit-internal ``pr_blocked`` status (which
+    holds the pre-command resting state) and NOT to ``failed`` — ``failed`` is
+    reserved for handler errors and guard trips.
+    """
+    assert _map_done_to_status("PR_BLOCKED: CI failing: 1 check(s) failing: ci") == "pr_blocked"
+    assert _map_done_to_label("PR_BLOCKED: CI still running (1 pending) — retry /pr when green") == "autoswe:pr_blocked"
+    # A real VCS/provider error still maps to failed.
+    assert _map_done_to_status("FAILED: could not create PR: API error") == "failed"
+
+
 def test_map_done_bare():
     assert _map_done_to_label("DONE") == "autoswe:fixed"
 

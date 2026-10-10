@@ -1,0 +1,8 @@
+{
+  "kind": "fix",
+  "slug": "gh__o_r_5",
+  "plan_branch": "issue-5",
+  "guidance": "Please look into the login bug.",
+  "attempt_count": 2,
+  "triggering_comment_id": 99
+}

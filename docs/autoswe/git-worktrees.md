@@ -23,12 +23,12 @@ Path helpers (`vcs/worktree.py`):
 
 ## Lifecycle
 
-### `ensure_clone(owner, repo, token, cfg, base_branch, provider)`
+### `ensure_clone(owner, repo, token, cfg, base_branch, provider, default_branch=None)`
 
 1. If `_main/` doesn't exist → `git clone` via VCS `clone_url()` (token embedded), then the shared verify/checkout/reset (step 3)
 2. If `_main/` exists → `git remote set-url origin <url>` (keeps token current), then `fetch` and the shared verify/checkout/reset (step 3)
-3. **Shared** (both paths, via `_checkout_main_branch`): resolve the `_main` checkout branch as `branch_for_main = default_branch or _get_default_branch(_main, base_branch)` — **never** the raw `--branch` value, which may not exist on origin yet (a user-supplied `/plan --branch strategy/X` where `strategy/X` is new; issue #260). Verify `origin/{branch_for_main}` — raising `RuntimeError("… has no commits on '…'")` when the repo has no usable branch (empty repos) — then `checkout branch_for_main` + `reset --hard origin/{branch_for_main}`. A missing base branch is forked from the default by `create_worktree`, not by `ensure_clone`.
-3. `_ensure_repo_exclude(_main)` — idempotently seeds the shared repo-local git exclude (see below)
+3. **Shared** (both paths, via `_checkout_main_branch`): resolve the `_main` checkout branch as `branch_for_main = default_branch or _get_default_branch(_main, base_branch)` — **never** the raw `--branch` value, which may not exist on origin yet (a user-supplied `/plan --branch strategy/X` where `strategy/X` is new; issue #260). Auto-detection queries the local `origin/HEAD` ref (with a `rev-parse --symbolic-full-name` fallback for indirect refs on recent git), then `ls-remote --symref origin HEAD`, then `base_branch`, then a main/master ls-remote probe. Verify `origin/{branch_for_main}` — raising `RuntimeError("… has no commits on '…'")` when the repo has no usable branch (empty repos) — then `checkout branch_for_main` + `reset --hard origin/{branch_for_main}`. A missing base branch is forked from the default by `create_worktree`, not by `ensure_clone`.
+4. `_ensure_repo_exclude(_main)` — idempotently seeds the shared repo-local git exclude (see below)
 
 ### Repo-local git exclude (`_ensure_repo_exclude`)
 
@@ -47,9 +47,9 @@ file out of the per-issue branch (finding C2):
   (`ensure_worktree_unchanged`) without re-dirtying the branch every cycle.
 
 The exclude is written in **two places** so it is always present: at the end of
-`ensure_clone` (fresh clone), and — because the dispatch **reuses** the pre-synced
-worktree and never re-runs `ensure_clone` — at the top of `ensure_claude_md`, which runs on
-every plan/fix/review phase.
+`ensure_clone` (both the fresh-clone and reuse paths), and — because the dispatch
+**reuses** the pre-synced worktree and never re-runs `ensure_clone` — at the top of
+`ensure_claude_md`, which runs on every plan/fix/review phase.
 
 ### `create_worktree(owner, repo, issue_num, base_branch, token, cfg, provider)`
 
@@ -95,6 +95,14 @@ Strategy is controlled by `cfg["SYNC_STRATEGY"]` (default: `"merge"`).
 5. `git rebase origin/{base_branch}`
 6. On success → `git push --force-with-lease origin <branch>`, return `{"synced": True, "conflict": False, "branch": ..., "ahead": N}`
 7. On conflict → leave worktree in rebase-in-progress state, return `{"synced": False, "conflict": True, "branch": ..., "conflict_files": [...], "rebase": True}`
+
+## Remote Ref Checks
+
+### `remote_branch_exists(main, branch)` / `remote_branch_exists_on(wt, branch)` / `remote_default_branch(wt)`
+
+- `remote_branch_exists(main, branch)` — **local** check: `origin/<branch>` present in the main clone's remote-tracking refs (call `fetch_prune()` first so they reflect the remote). Used by `purge_gone_branches`.
+- `remote_branch_exists_on(wt, branch)` — **live** `git ls-remote origin refs/heads/<branch>` check; does not trust stale tracking refs. Fails closed (False) on any error. Used by `ship.open_pr` to guard the PR base (issue #260).
+- `remote_default_branch(wt)` — the repo's actual default branch per origin (`git ls-remote --symref origin HEAD`), or None. Fallback target when the configured PR base does not exist on origin.
 
 ## Branch Naming
 

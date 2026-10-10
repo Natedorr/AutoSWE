@@ -3,10 +3,11 @@ import pytest
 
 from autoswe.providers.azure.tracker import (
     BOT_MARKER,
+    DEFAULT_DONE_STATES,
     AzureTracker,
     _strip_html,
 )
-from autoswe.providers.base import NormalizedIssue
+from autoswe.providers.base import Capability, NormalizedIssue
 from tests.conftest import load_ado_fixture
 
 # ---------------------------------------------------------------------------
@@ -1077,3 +1078,113 @@ def test_fetch_comments_mixed_html_and_markdown(tracker, mock_ado_request, ado_r
     assert comments[1].author_login == "BOT"
     assert "<p>" not in comments[1].body  # HTML tags stripped
 
+
+
+# ---------------------------------------------------------------------------
+# capabilities() (issue #245)
+# ---------------------------------------------------------------------------
+
+def test_azure_tracker_declares_no_capabilities(tracker):
+    assert tracker.capabilities() == frozenset()
+    assert Capability.AUTO_CLOSE_ON_MERGE not in tracker.capabilities()
+
+
+# ---------------------------------------------------------------------------
+# close_issue — done-state resolution (issue #245 §1.5, edge E5)
+# ---------------------------------------------------------------------------
+
+def _wi_route(state="Active", wi_type="Bug"):
+    return {"id": 1, "fields": {"System.WorkItemType": wi_type, "System.State": state}}
+
+
+def test_close_issue_already_terminal_is_a_no_op(tracker, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = _wi_route(state="Closed")
+
+    tracker.close_issue(1, reason="completed")
+
+    assert not any(c["method"] == "PATCH" for c in mock_ado_request.calls)
+
+
+def test_close_issue_uses_repo_override_done_state(ado_route_table, mock_ado_request):
+    rcfg = {"provider": "azure", "org": "my-org", "project": "my-project",
+            "pat": "fake_pat_123", "done_state": "Resolved"}
+    t = AzureTracker(rcfg)
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = _wi_route()
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = {}
+
+    t.close_issue(1, reason="completed")
+
+    patch_call = next(c for c in mock_ado_request.calls if c["method"] == "PATCH")
+    assert patch_call["body"] == [
+        {"op": "add", "path": "/fields/System.State", "value": "Resolved"},
+    ]
+
+
+def test_close_issue_discovers_completed_state(tracker, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = _wi_route(wi_type="Bug")
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitemtypes/Bug/states")] = {
+        "value": [
+            {"name": "New", "category": "Proposed"},
+            {"name": "Active", "category": "InProgress"},
+            {"name": "Resolved", "category": "Resolved"},
+            {"name": "Closed", "category": "Completed"},
+        ],
+    }
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = {}
+
+    tracker.close_issue(1, reason="completed")
+
+    patch_call = next(c for c in mock_ado_request.calls if c["method"] == "PATCH")
+    assert patch_call["body"][0]["value"] == "Closed"
+
+
+def test_close_issue_fallback_closed_when_discovery_fails(tracker, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = _wi_route()
+
+    def _raise(method, path, pat, body):
+        raise RuntimeError("Azure API ... -> HTTP 503")
+
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitemtypes")] = _raise
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = {}
+
+    tracker.close_issue(1, reason="completed")
+
+    patch_call = next(c for c in mock_ado_request.calls if c["method"] == "PATCH")
+    assert patch_call["body"][0]["value"] == "Closed"
+
+
+def test_close_issue_not_planned_prefers_removed_category(tracker, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = _wi_route(wi_type="Bug")
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitemtypes/Bug/states")] = {
+        "value": [
+            {"name": "Closed", "category": "Completed"},
+            {"name": "Removed", "category": "Removed"},
+        ],
+    }
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = {}
+
+    tracker.close_issue(1, reason="not_planned")
+
+    patch_call = next(c for c in mock_ado_request.calls if c["method"] == "PATCH")
+    assert patch_call["body"][0]["value"] == "Removed"
+
+
+def test_close_issue_400_posts_comment_instead_of_raising(tracker, mock_ado_request, ado_route_table):
+    ado_route_table[("GET", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = _wi_route()
+
+    calls = {"n": 0}
+
+    def _route(method, path, pat, body):
+        calls["n"] += 1
+        if method == "PATCH" and "/comments" not in path:
+            raise RuntimeError("Azure API ... -> HTTP 400: VS402625 invalid state")
+        return {"id": 999}
+
+    ado_route_table[("PATCH", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1")] = _route
+    ado_route_table[("POST", "https://dev.azure.com/my-org/my-project/_apis/wit/workitems/1/comments")] = _route
+
+    tracker.close_issue(1, reason="completed")  # must not raise
+
+
+def test_default_done_states_constant():
+    assert DEFAULT_DONE_STATES == ("Closed", "Done", "Removed")

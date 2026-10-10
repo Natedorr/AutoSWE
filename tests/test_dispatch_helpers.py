@@ -1861,6 +1861,102 @@ def test_dispatch_error_preserves_progress_comment_id(
 
 
 # ---------------------------------------------------------------------------
+# Issue #279: pure bookkeeping actions must not flash a transient running label
+#
+# _dispatch_task used to write `autoswe:fixing` (the running_status_for
+# fallback) for a /skip on a fresh, status-less task before the emit effect
+# set `skipped` — a ~2s label flash that contradicted the E2E-13
+# must-never list. With default=None the flip is skipped entirely when the
+# task has no real status yet (and on same-value rewrites).
+# ---------------------------------------------------------------------------
+
+
+class _SetStatusCapturingTracker(_CapturingTracker):
+    """_CapturingTracker that also records set_status calls."""
+
+    def __init__(self):
+        super().__init__()
+        self.statuses = []
+
+    def set_status(self, issue_num, label):
+        self.statuses.append(label)
+
+
+def test_dispatch_skip_fresh_task_sets_no_running_label(running_dir, monkeypatch):
+    """A /skip on a status-less task must not write ANY transient label:
+    no tracker.set_status call and no in-memory autoswe_status flip.
+    (emit is stubbed, so this isolates the dispatch-time write.)"""
+    import autoswe.orch.loop as loop_mod
+    from autoswe.orch.types import Action
+
+    _patch_dispatch_internals(monkeypatch)
+
+    slug = "gh:owner_repo_1"
+    pt, entry = _make_poll_task(slug, None)
+    queue = {slug: entry}
+    tracker = _SetStatusCapturingTracker()
+    action = Action(kind="skip", slug=slug)
+
+    loop_mod._dispatch_task(
+        pt, action, tracker, {"provider": "github"}, "github", {}, queue, "2026-01-01T00:00:00Z",
+    )
+
+    assert tracker.statuses == [], (
+        f"fresh /skip must not set any running label, got {tracker.statuses!r}"
+    )
+    assert queue[slug].get("autoswe_status") is None, (
+        "fresh /skip must not flip the in-memory status to a transient verb"
+    )
+
+
+def test_dispatch_skip_same_status_skips_redundant_write(running_dir, monkeypatch):
+    """A /skip from a real status (planned) must not re-write the same label:
+    running_status_for falls back to current_status, so the flip is a
+    same-value no-op and is skipped."""
+    import autoswe.orch.loop as loop_mod
+    from autoswe.orch.types import Action
+
+    _patch_dispatch_internals(monkeypatch)
+
+    slug = "gh:owner_repo_1"
+    pt, entry = _make_poll_task(slug, "planned")
+    queue = {slug: entry}
+    tracker = _SetStatusCapturingTracker()
+    action = Action(kind="skip", slug=slug)
+
+    loop_mod._dispatch_task(
+        pt, action, tracker, {"provider": "github"}, "github", {}, queue, "2026-01-01T00:00:00Z",
+    )
+
+    assert tracker.statuses == [], (
+        f"same-status flip must be skipped, got {tracker.statuses!r}"
+    )
+    assert queue[slug]["autoswe_status"] == "planned"
+
+
+def test_dispatch_fix_still_sets_running_label(running_dir, monkeypatch):
+    """Regression guard: kinds with a real RUNNING verb still flip the label
+    and the in-memory status (fix from pending → fixing)."""
+    import autoswe.orch.loop as loop_mod
+    from autoswe.orch.types import Action
+
+    _patch_dispatch_internals(monkeypatch)
+
+    slug = "gh:owner_repo_1"
+    pt, entry = _make_poll_task(slug, "pending")
+    queue = {slug: entry}
+    tracker = _SetStatusCapturingTracker()
+    action = Action(kind="fix", slug=slug)
+
+    loop_mod._dispatch_task(
+        pt, action, tracker, {"provider": "github"}, "github", {}, queue, "2026-01-01T00:00:00Z",
+    )
+
+    assert tracker.statuses == ["autoswe:fixing"]
+    assert queue[slug]["autoswe_status"] == "fixing"
+
+
+# ---------------------------------------------------------------------------
 # F-22: credential-bearing URLs must not appear in posted comments
 # ---------------------------------------------------------------------------
 

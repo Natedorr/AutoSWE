@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import re
+from urllib.parse import unquote
 
 from tests.fakes import templates as T
 
@@ -66,6 +67,10 @@ class AzureFake:
         self._repo = ""
         self._ci_state = "none"  # "success" | "pending" | "failure" | "none"
         self._ci_name = "CI"
+        # workitemtypes/{type}/states responses, keyed by work item type name.
+        # Defaults to an Agile-process-shaped set so close_issue's runtime
+        # discovery has something to find without per-test setup.
+        self._workitem_states: dict[str, list[dict]] = {}
 
     # ------------------------------------------------------------------
     # Loading initial state from scenario fixtures
@@ -107,11 +112,19 @@ class AzureFake:
     def set_ci_status(self, state: str, name: str = "CI") -> None:
         """Configure the CI status served by the build/builds route.
 
-        *state* is one of ``"success"``, ``"pending"``, ``"failure"``, ``"none"``
-        (no builds found — the default).
+        *state* is one of ``"success"``, ``"pending"``, ``"failure"``,
+        ``"none"`` (no builds found — the default), or ``"error"`` (the
+        builds endpoint raises so the provider returns state="error").
         """
         self._ci_state = state
         self._ci_name = name
+
+    def set_workitem_states(self, work_item_type: str, states: list[dict]) -> None:
+        """Configure the ``workitemtypes/{type}/states`` response used by the
+        tracker's done-state runtime discovery. Each entry is
+        ``{"name": ..., "category": ...}`` (category one of ``Proposed``,
+        ``InProgress``, ``Resolved``, ``Completed``, ``Removed``)."""
+        self._workitem_states[work_item_type] = states
 
     # ------------------------------------------------------------------
     # Patchable _ado_request replacement
@@ -194,6 +207,19 @@ class AzureFake:
                     }
                 },
             }
+
+        # ---- GET workitemtypes/{type}/states (done-state discovery) ----
+        wit_states_match = re.search(r"/wit/workitemtypes/([^/]+)/states", path)
+        if wit_states_match and method == "GET":
+            wi_type = unquote(wit_states_match.group(1))
+            states = self._workitem_states.get(wi_type) or [
+                {"name": "New", "category": "Proposed"},
+                {"name": "Active", "category": "InProgress"},
+                {"name": "Resolved", "category": "Resolved"},
+                {"name": "Closed", "category": "Completed"},
+                {"name": "Removed", "category": "Removed"},
+            ]
+            return {"count": len(states), "value": copy.deepcopy(states)}
 
         # ---- GET single work item ----
         if wi_num is not None and method == "GET":
@@ -323,6 +349,21 @@ class AzureFake:
             self.pulls[pr_number] = pr
             return pr
 
+        # ---- PATCH single PR (workItemRefs, status, etc.) ----
+        pr_id_match = re.search(r"/pullrequests/(\d+)", path)
+        if pr_id_match and method == "PATCH":
+            pr_num = int(pr_id_match.group(1))
+            pr = self.pulls.get(pr_num)
+            if pr is not None and body:
+                pr.update(body)
+            return copy.deepcopy(pr) if pr is not None else {}
+
+        # ---- GET single PR ----
+        if pr_id_match and method == "GET":
+            pr_num = int(pr_id_match.group(1))
+            pr = self.pulls.get(pr_num)
+            return copy.deepcopy(pr) if pr is not None else {}
+
         # ---- GET PRs ----
         if "/pullrequests" in path and method == "GET":
             return {"count": len(self.pulls),
@@ -330,6 +371,8 @@ class AzureFake:
 
         # ---- GET build/builds (CI status query) ----
         if "build/builds" in path and method == "GET":
+            if self._ci_state == "error":
+                raise RuntimeError(f"ADO API {path} -> HTTP 503: unavailable")
             if self._ci_state == "none":
                 return {"count": 0, "value": []}
             template = copy.deepcopy(T.azure_list_builds())

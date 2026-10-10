@@ -1,0 +1,8 @@
+{
+  "kind": "fix",
+  "slug": "gh__o_r_5",
+  "plan_branch": "issue-5",
+  "guidance": "🧪 Test gate failed on the pushed branch.\n\n```\nsuite failing (exit 1)\n```",
+  "attempt_count": 1,
+  "trigger": "gate"
+}

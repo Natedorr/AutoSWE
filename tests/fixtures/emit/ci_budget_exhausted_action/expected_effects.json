@@ -1,0 +1,25 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "budget",
+      "2",
+      "/fix",
+      "<!-- autoswe-bot -->"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "ci_failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "ci_failed",
+      "ci_failed_from_status": "fixed",
+      "ci_last_notified_sha": "abc1234",
+      "first_dispatched_at": null,
+      "pending_command": null
+    }
+  }
+]

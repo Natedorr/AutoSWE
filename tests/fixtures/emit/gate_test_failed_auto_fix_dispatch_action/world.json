@@ -1,0 +1,39 @@
+{
+  "api": {
+    "issue": {
+      "number": 5,
+      "title": "Test gate issue",
+      "body": "",
+      "owner": "o",
+      "repo": "r",
+      "state": "open"
+    },
+    "comments": []
+  },
+  "task": {
+    "slug": "gh__o_r_5",
+    "owner": "o",
+    "repo": "r",
+    "issue_number": 5,
+    "title": "Test gate issue",
+    "status": "test_failed",
+    "plan_branch": "issue-5",
+    "base_branch": "main",
+    "attempt_count": 1,
+    "session_id": null,
+    "provider": "github",
+    "guard_blocked": false,
+    "last_dispatched_command": "/fix",
+    "last_dispatched_command_id": 42,
+    "last_consumed_reply_id": 42,
+    "welcome_comment_id": null,
+    "bot_comment_ids": [],
+    "gate_attempt_count": 0,
+    "gate_last_fixed_sha": null,
+    "test_failed_sha": "deadbeef",
+    "test_failure_detail": "suite failing (exit 1)"
+  },
+  "ci": null,
+  "cfg": {},
+  "repo_cfg": {}
+}

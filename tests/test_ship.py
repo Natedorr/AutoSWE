@@ -296,6 +296,123 @@ def test_open_pr_uses_base_branch_not_plan_branch(mock_gh_post_comment):
     assert call_kwargs[1]["branch"] == "autoswe/issue-1"
 
 
+# ---------------------------------------------------------------------------
+# open_pr — PR base existence guard (issue #260)
+# ---------------------------------------------------------------------------
+
+def _stub_wt_guard(monkeypatch, tmp_path, *, wt_exists: bool,
+                   branch_exists: bool, default: str | None):
+    """Point ship's worktree lookup at *tmp_path* and stub the live checks."""
+    wt = tmp_path / "wt"
+    if wt_exists:
+        wt.mkdir(exist_ok=True)
+    else:
+        wt = tmp_path / "no-such-wt"
+    monkeypatch.setattr(
+        "autoswe.vcs.ship.worktree_mod.worktree_path",
+        lambda *a, **kw: wt,
+    )
+    monkeypatch.setattr(
+        "autoswe.vcs.ship.worktree_mod.remote_branch_exists_on",
+        lambda wt_path, branch: branch_exists,
+    )
+    monkeypatch.setattr(
+        "autoswe.vcs.ship.worktree_mod.remote_default_branch",
+        lambda wt_path: default,
+    )
+    return wt
+
+
+def test_open_pr_base_missing_falls_back_to_repo_default(mock_gh_post_comment, monkeypatch, tmp_path):
+    """Configured base missing on origin → PR targets the repo's actual default.
+
+    Regression for issue #260 / the /pr HTTP 422 'base invalid': repos whose
+    real default is 'master' but whose queue entry says 'main' (guessed
+    default) must not fail PR creation — the base falls back to the actual
+    default branch reported by origin.
+    """
+    task = make_task()
+    task["base_branch"] = "main"  # does not exist on origin
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=True,
+                   branch_exists=False, default="master")
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")
+    # PR targeted the actual default, not the missing configured base.
+    assert mock_vcs.open_pull_request.call_args[1]["base"] == "master"
+    # The fallback is announced on the issue, not just in the log.
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
+    assert "base fell back to repo default master" in comment_body
+
+
+def test_open_pr_base_exists_keeps_configured_base(mock_gh_post_comment, monkeypatch, tmp_path):
+    """Configured base exists on origin → no fallback, no note."""
+    task = make_task()
+    task["base_branch"] = "main"
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=True,
+                   branch_exists=True, default="master")
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert mock_vcs.open_pull_request.call_args[1]["base"] == "main"
+    comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
+    assert "fell back" not in comment_body
+
+
+def test_open_pr_no_worktree_skips_base_guard(mock_gh_post_comment, monkeypatch, tmp_path):
+    """No worktree → guard is skipped; behavior is exactly as before."""
+    task = make_task()
+    task["base_branch"] = "main"
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=False,
+                   branch_exists=False, default=None)
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert mock_vcs.open_pull_request.call_args[1]["base"] == "main"
+
+
+def test_open_pr_base_missing_default_unknown_proceeds(mock_gh_post_comment, monkeypatch, tmp_path):
+    """Base missing but default unresolvable → proceed with the configured
+    base so the provider's own error surfaces (no silent guess)."""
+    task = make_task()
+    task["base_branch"] = "main"
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=True,
+                   branch_exists=False, default=None)
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert mock_vcs.open_pull_request.call_args[1]["base"] == "main"
+
+
 def test_open_pr_comment_includes_footer(mock_gh_post_comment):
     """Completion comment should end with autoswe-bot footer."""
     task = make_task()
@@ -590,8 +707,13 @@ def test_open_pr_body_minimal_when_no_issue_body(mock_gh_post_comment):
 class TestOpenPrPreflightGate:
     """open_pr() must consult preflight_pr() before creating/finding a PR."""
 
-    def test_blocked_by_preflight_returns_failed(self, monkeypatch, mock_gh_post_comment):
-        """preflight_pr() returning not-ok short-circuits with FAILED, no PR lookup."""
+    def test_blocked_by_preflight_returns_pr_blocked(self, monkeypatch, mock_gh_post_comment):
+        """preflight_pr() returning not-ok short-circuits with PR_BLOCKED, no PR lookup.
+
+        Issue #277: a preflight block is not a handler error, so open_pr must
+        NOT return ``FAILED:`` (which would park the task at ``failed``) — it
+        returns ``PR_BLOCKED:`` and emit() holds the pre-command resting state.
+        """
         monkeypatch.setattr(
             "autoswe.vcs.ship.preflight_pr",
             lambda *a, **kw: (False, "CI failing: 1 check(s) failing: build"),
@@ -607,10 +729,31 @@ class TestOpenPrPreflightGate:
             from autoswe.vcs.ship import open_pr
             result = open_pr(task, {"GITHUB_TOKEN": "tok"})
 
-        assert result == "FAILED: CI failing: 1 check(s) failing: build"
+        assert result == "PR_BLOCKED: CI failing: 1 check(s) failing: build"
         mock_vcs.find_existing_pr.assert_not_called()
         mock_vcs.open_pull_request.assert_not_called()
         mock_get_tracker.return_value.post_comment.assert_not_called()
+
+    def test_blocked_by_sync_gate_returns_pr_blocked(self, monkeypatch, mock_gh_post_comment):
+        """The sync gate refuses with the same PR_BLOCKED marker as the CI gate."""
+        monkeypatch.setattr(
+            "autoswe.vcs.ship.preflight_pr",
+            lambda *a, **kw: (False, "branch behind base and sync failed: stale remote"),
+        )
+        task = make_task()
+
+        with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+             patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+            mock_vcs = _mock_vcs()
+            mock_get_vcs.return_value = mock_vcs
+            mock_get_tracker.return_value = _mock_tracker()
+
+            from autoswe.vcs.ship import open_pr
+            result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+        assert result == "PR_BLOCKED: branch behind base and sync failed: stale remote"
+        mock_vcs.find_existing_pr.assert_not_called()
+        mock_vcs.open_pull_request.assert_not_called()
 
     def test_passing_preflight_proceeds_to_create_pr(self, monkeypatch, mock_gh_post_comment):
         """preflight_pr() returning ok lets open_pr proceed as normal."""
@@ -749,3 +892,40 @@ def test_open_pr_github_still_posts_url(mock_gh_post_comment):
     assert result == "DONE: PR https://github.com/o/r/pull/42"
     comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
     assert "https://github.com/o/r/pull/42" in comment_body
+
+
+# ---------------------------------------------------------------------------
+# open_pr calls ensure_links (issue #245 §1.4, edge E3)
+# ---------------------------------------------------------------------------
+
+def test_open_pr_new_pr_calls_ensure_links(mock_gh_post_comment):
+    task = make_task()
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship.ensure_links") as mock_ensure_links:
+        mock_get_vcs.return_value = _mock_vcs(pr_url="https://github.com/o/r/pull/42", pr_num=42)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    mock_ensure_links.assert_called_once()
+    _, kwargs = mock_ensure_links.call_args
+    assert kwargs["phase"] == "pr_open"
+
+
+def test_open_pr_existing_pr_calls_ensure_links(mock_gh_post_comment):
+    task = make_task()
+    existing = PRResult(url="https://github.com/o/r/pull/15", number=15)
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker, \
+         patch("autoswe.vcs.ship.ensure_links") as mock_ensure_links:
+        mock_get_vcs.return_value = _mock_vcs(existing_pr=existing)
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    mock_ensure_links.assert_called_once()

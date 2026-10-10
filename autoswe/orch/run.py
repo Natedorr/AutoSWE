@@ -18,6 +18,7 @@ from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.harness import coder, planner
 from autoswe.harness.runner import HandlerResult, backend_has_capability
 from autoswe.orch.types import Action, World
+from autoswe.tracking.labels import COMPLETED_STATUSES
 from autoswe.vcs import ship
 from autoswe.vcs import worktree as worktree_mod
 
@@ -102,6 +103,8 @@ def run(
     if kind in (
         "noop", "skip", "abort", "post_welcome",
         "advance_watermark", "mark_failed_limit", "refused",
+        "ci_failed", "ci_recovered", "ci_error_warn",
+        "retry_deferred_pr",
     ):
         return None
 
@@ -134,6 +137,14 @@ def run(
         return _to_dispatch(hr, task)
 
     if kind == "fix":
+        if action.trigger == "ci":
+            # Failure text is fetched lazily here — only once a CI-triggered
+            # fix is actually dispatched (issue #245 plan §2.2) — so a red
+            # build that's still being throttled/parked never costs a log
+            # download. Best-effort: get_ci_failures() degrades to an empty
+            # list on any read failure, leaving the CIStatus summary already
+            # in `guidance` (built in decide()) as the fallback text.
+            guidance = _append_ci_failures(guidance, world, cfg, rc)
         if action.user_reply_text is not None:
             hr = coder.resume_fix(
                 task, action.user_reply_text, rc, cfg,
@@ -184,6 +195,40 @@ def run(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _append_ci_failures(guidance: str, world: World, cfg: dict, repo_cfg: dict) -> str:
+    """Append real CI failure text to a CI-triggered fix's guidance.
+
+    Calls ``VCSProvider.get_ci_failures`` (issue #245 plan §2.1/§2.2) — the
+    one I/O call the CI auto-fix path makes outside the read cycle, deferred
+    to here so it only happens for a fix that is actually being dispatched.
+    Best-effort: any failure (including a backend without the capability)
+    leaves *guidance* unchanged; the CIStatus summary already in it is a
+    usable, if less detailed, fallback.
+    """
+    ci = world.ci
+    if ci is None or not ci.head_sha:
+        return guidance
+    try:
+        from autoswe.providers.factory import get_vcs
+        vcs = get_vcs(repo_cfg)
+        branch = world.task.plan_branch or vcs.branch_name(world.task.issue_number)
+        max_chars = cfg.get("CI_LOG_MAX_CHARS", 4000)
+        failures = vcs.get_ci_failures(branch, ci.head_sha, max_chars=max_chars)
+    except Exception as e:
+        get_debug_logger().warning(
+            "CI auto-fix: get_ci_failures failed for %s: %s: %s",
+            world.task.slug, type(e).__name__, e,
+        )
+        return guidance
+    if not failures:
+        return guidance
+    lines = [guidance, "", "Failure details:"]
+    for f in failures:
+        lines.append(f"\n**{f.check}**" + (f" ([run]({f.url}))" if f.url else ""))
+        if f.excerpt:
+            lines.append(f"```\n{f.excerpt}\n```")
+    return "\n".join(lines)
 
 def _to_dispatch(
     hr: HandlerResult,
@@ -251,6 +296,19 @@ def _run_sync(
                 )
             else:
                 summary = f"Already up to date with `origin/{sync_base}`."
+            # Issue #245 §1.4: surface the cross-linkage checklist (if any
+            # observation has been persisted) so an operator sees which edges
+            # exist without a separate `queue status` lookup.
+            from autoswe.vcs.linkage import render_linkage_checklist
+            checklist = render_linkage_checklist(task)
+            if checklist:
+                summary = f"{summary}\n\n{checklist}"
+            # Issue #245 §2.2: surface the last CI observation (report-only —
+            # no decision is taken here) alongside the linkage checklist.
+            from autoswe.providers.adapter import render_ci_status
+            ci_summary = render_ci_status(task)
+            if ci_summary:
+                summary = f"{summary}\n\n{ci_summary}"
             return DispatchResult(
                 done_content=f"DONE_SUMMARY\t{summary}\t{commit_sha}",
             )
@@ -537,6 +595,29 @@ def _run_retry(
     # When the last dispatch was a plain /plan / /fix / /review (no intervening
     # retry), last_replayed_command is None and we fall back to the dispatch watermark.
     last_cmd = world.task.last_replayed_command or world.task.last_dispatched_command
+    # A /pr refused by the preflight gate (issue #277) leaves the task at its
+    # COMPLETED resting state (typically `fixed`) with last_dispatched_command
+    # "/pr". Replaying /pr re-attempts the ship (re-running the gate), so a
+    # user who posts /retry once the branch/CI is green actually opens the PR.
+    # Falling back to /fix here would be wrong: on a still-red gate the fixer
+    # makes no changes and the #276 no-change guard re-lands test_failed, which
+    # demotes fixed->test_failed, consumes gate budget, and hard-blocks /pr.
+    # A /pr is only replayable when the task has completed work to ship — the
+    # COMPLETED_STATUSES gate; any other status (e.g. a failed task with a stale
+    # /pr watermark) still falls through to /fix below.
+    if last_cmd == "/pr" and world.task.status in COMPLETED_STATUSES:
+        done = ship.open_pr(task, cfg, repo_cfg, progress_callback=progress_callback)
+        if done.startswith("DONE"):
+            # open_pr cached the PR identity on the task dict (issue #193);
+            # lift it into the result so emit() persists it on the shipped
+            # queue entry (same as the direct kind="ship_pr" path).
+            return DispatchResult(
+                done_content=done,
+                pr_number=task.get("pr_number"),
+                pr_url=task.get("pr_url"),
+                replayed_command="/pr",
+            )
+        return DispatchResult(done_content=done, replayed_command="/pr")
     if last_cmd in _NON_REPLAYABLE_COMMANDS:
         last_cmd = "/fix"
     # A /review watermark on a failed/error task must replay as /fix, not a

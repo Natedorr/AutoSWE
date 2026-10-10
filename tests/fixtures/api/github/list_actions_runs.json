@@ -1,0 +1,18 @@
+{
+  "__meta": {
+    "endpoint": "GET /repos/{o}/{r}/actions/runs",
+    "method": "GET",
+    "doc_ref": "docs/github-api/list-actions-runs.md"
+  },
+  "total_count": 1,
+  "workflow_runs": [
+    {
+      "id": 1,
+      "name": "CI",
+      "status": "completed",
+      "conclusion": "success",
+      "head_sha": "abc1234def5678abc1234def5678abc1234def5",
+      "html_url": "https://github.com/natedorr/autoswe/actions/runs/1"
+    }
+  ]
+}

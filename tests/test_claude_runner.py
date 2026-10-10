@@ -654,6 +654,50 @@ def test_post_plan_empty_body_does_not_set_plan_posted_body():
     assert result.plan_posted_body is None
 
 
+def test_large_prompt_passed_through_sdk_not_cli_arg():
+    """A review-sized prompt (>40k chars, well past Windows' ~32k CreateProcess
+    argv limit that bit the Codex backend) must flow through the Claude Agent
+    SDK's ``query(prompt=...)`` unchanged.
+
+    ClaudeCodeBackend never shells out via ``asyncio.create_subprocess_exec``
+    or builds a CLI argv itself (unlike Codex/pi) — the SDK owns getting the
+    prompt to its own CLI subprocess internally, so there is no argv-length
+    concern here. This test guards against a future regression that
+    reintroduces a subprocess/CLI path for this backend that bypasses the SDK.
+    """
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    from autoswe.harness.runner import RunResult, _run_async
+
+    big_prompt = "A" * 45_000
+    captured = {}
+
+    async def fake_query_large_prompt(prompt, options):
+        captured["prompt"] = prompt
+        yield AssistantMessage(content=[TextBlock(text="ok")], model="test")
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=100,
+            duration_api_ms=100,
+            is_error=False,
+            num_turns=1,
+            session_id="sess-big-prompt",
+            total_cost_usd=0.0,
+        )
+
+    async def run_it():
+        sdk = sys.modules["claude_agent_sdk"]
+        with patch.object(sdk, "query", fake_query_large_prompt):
+            return await _run_async(big_prompt, cwd="/tmp", permission_mode="default")
+
+    result = asyncio.run(run_it())
+    assert isinstance(result, RunResult)
+    assert result.subtype == "success"
+    # The full prompt reached the SDK call verbatim — no truncation, no
+    # subprocess/argv boundary to hit a length limit against.
+    assert captured["prompt"] == big_prompt
+
+
 def test_async_generator_crash_returns_partial_results_no_can_use_tool():
     """When the query generator raises RuntimeError with 'async generator' or
     'aclose' in the message, _run_async should return partial results instead

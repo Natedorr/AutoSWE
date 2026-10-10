@@ -314,7 +314,8 @@ def test_run_review_writes_file(tmp_path, mock_gh_post_comment):
 
 
 def test_run_review_timeout_returns_failed(tmp_path, mock_gh_post_comment):
-    """run_review returns FAILED on asyncio.TimeoutError."""
+    """run_review returns FAILED on asyncio.TimeoutError, and logs it (the
+    only trace of a review failure once emit() renders a generic comment)."""
     import asyncio
 
     task = make_task()
@@ -323,26 +324,37 @@ def test_run_review_timeout_returns_failed(tmp_path, mock_gh_post_comment):
         with patch("autoswe.harness.reviewer._run_git", return_value="stat"):
             with FETCH_COMMENTS_PATCH:
                 with patch("autoswe.harness.runner.run", side_effect=asyncio.TimeoutError()):
-                    from autoswe.harness.reviewer import run_review
-                    result = run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+                    with patch("autoswe.harness.reviewer.log") as mock_log:
+                        from autoswe.harness.reviewer import run_review
+                        result = run_review(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content.startswith("FAILED:")
     assert "timeout" in result.done_content.lower()
+    assert mock_log.called
+    logged = " ".join(str(c.args[0]) for c in mock_log.call_args_list)
+    assert task["id"] in logged
+    assert "timed out" in logged.lower() or "timeout" in logged.lower()
 
 
 def test_run_review_sdk_error_returns_failed(tmp_path, mock_gh_post_comment):
-    """run_review returns FAILED on SDK exception."""
+    """run_review returns FAILED on SDK exception, and logs it (the only
+    trace of a review failure once emit() renders a generic comment)."""
     task = make_task()
 
     with _patch_worktree(tmp_path):
         with patch("autoswe.harness.reviewer._run_git", return_value="stat"):
             with FETCH_COMMENTS_PATCH:
                 with patch("autoswe.harness.runner.run", side_effect=RuntimeError("SDK crash")):
-                    from autoswe.harness.reviewer import run_review
-                    result = run_review(task, {}, {"GITHUB_TOKEN": "tok"})
+                    with patch("autoswe.harness.reviewer.log") as mock_log:
+                        from autoswe.harness.reviewer import run_review
+                        result = run_review(task, {}, {"GITHUB_TOKEN": "tok"})
 
     assert result.done_content.startswith("FAILED:")
     assert "SDK crash" in result.done_content
+    assert mock_log.called
+    logged = " ".join(str(c.args[0]) for c in mock_log.call_args_list)
+    assert task["id"] in logged
+    assert "SDK crash" in logged
 
 
 # ---------------------------------------------------------------------------

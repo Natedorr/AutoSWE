@@ -113,6 +113,7 @@ def ensure_claude_md(
                 "Add CLAUDE.md (autoswe init)",
                 base_branch,
                 provider,
+                cfg=cfg,
             )
             dbg.debug("CLAUDE.md committed and pushed to %s/%s#%s", owner, repo, issue_num)
         else:

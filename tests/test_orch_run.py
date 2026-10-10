@@ -23,6 +23,7 @@ from autoswe.orch.types import (
     TaskState,
     World,
 )
+from autoswe.providers.base import CIStatus
 
 
 def _make_world(
@@ -31,9 +32,11 @@ def _make_world(
     session_id=None,
     last_phase="plan",
     last_dispatched_command=None,
+    last_replayed_command=None,
     base_branch="main",
     provider="github",
     plan_file_path=None,
+    ci=None,
 ):
     """Build a minimal World for testing."""
     return World(
@@ -61,6 +64,7 @@ def _make_world(
             attempt_count=1,
             first_dispatched_at=None,
             last_dispatched_command=last_dispatched_command,
+            last_replayed_command=last_replayed_command,
             last_dispatched_command_id=1,
             last_consumed_reply_id=1,
             session_id=session_id,
@@ -76,6 +80,7 @@ def _make_world(
         ),
         cfg={"ANTHROPIC_API_KEY": "sk-fake"},
         repo_cfg={"pat": "ghp_fake", "provider": provider},
+        ci=ci,
     )
 
 
@@ -214,6 +219,115 @@ def test_run_fix_resume_on_user_reply():
     mock_resume.assert_called_once()
 
 
+# ------ CI-triggered fix (issue #245 plan §2.2/§2.4, P4) ------
+# get_ci_failures() is fetched lazily here — only once a CI-triggered fix is
+# actually dispatched — so these tests verify the guidance-text plumbing
+# rather than duplicate the provider-level get_ci_failures tests.
+
+
+def test_run_fix_ci_trigger_appends_ci_failures():
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha="abc123", failing=["build"]),
+    )
+    action = Action(
+        kind="fix", slug=world.task.slug, trigger="ci",
+        guidance="CI failed on the pushed branch.",
+    )
+
+    fake_vcs = MagicMock()
+    fake_vcs.get_ci_failures.return_value = [
+        MagicMock(check="build", url="https://x/run/1", excerpt="AssertionError: boom"),
+    ]
+
+    with patch("autoswe.providers.factory.get_vcs", return_value=fake_vcs), \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    fake_vcs.get_ci_failures.assert_called_once_with(
+        "autoswe/issue-42", "abc123", max_chars=4000,
+    )
+    guidance_arg = mock_fix.call_args[0][1]
+    assert "AssertionError: boom" in guidance_arg
+    assert "build" in guidance_arg
+    assert "CI failed on the pushed branch." in guidance_arg
+
+
+def test_run_fix_ci_trigger_no_failures_leaves_guidance_unchanged():
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha="abc123", failing=["build"]),
+    )
+    action = Action(
+        kind="fix", slug=world.task.slug, trigger="ci",
+        guidance="CI failed on the pushed branch.",
+    )
+
+    fake_vcs = MagicMock()
+    fake_vcs.get_ci_failures.return_value = []
+
+    with patch("autoswe.providers.factory.get_vcs", return_value=fake_vcs), \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    guidance_arg = mock_fix.call_args[0][1]
+    assert guidance_arg == "CI failed on the pushed branch."
+
+
+def test_run_fix_ci_trigger_no_head_sha_skips_fetch():
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha=None),
+    )
+    action = Action(kind="fix", slug=world.task.slug, trigger="ci", guidance="g")
+
+    with patch("autoswe.providers.factory.get_vcs") as mock_get_vcs, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    mock_get_vcs.assert_not_called()
+    assert mock_fix.call_args[0][1] == "g"
+
+
+def test_run_fix_ci_trigger_get_ci_failures_exception_swallowed():
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha="abc123"),
+    )
+    action = Action(kind="fix", slug=world.task.slug, trigger="ci", guidance="g")
+
+    fake_vcs = MagicMock()
+    fake_vcs.get_ci_failures.side_effect = RuntimeError("boom")
+
+    with patch("autoswe.providers.factory.get_vcs", return_value=fake_vcs), \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    assert mock_fix.call_args[0][1] == "g"
+
+
+def test_run_fix_human_trigger_never_fetches_ci_failures():
+    """trigger=None (a plain human /fix) must not call get_ci_failures at all —
+    even when World.ci happens to carry a failure from an unrelated watch."""
+    world = _make_world(
+        plan_branch="autoswe/issue-42",
+        ci=CIStatus(state="failure", head_sha="abc123"),
+    )
+    action = Action(kind="fix", slug=world.task.slug, guidance="please fix it")
+
+    with patch("autoswe.providers.factory.get_vcs") as mock_get_vcs, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_fix.return_value = HandlerResult("DONE_SUMMARY\tfixed\tabc123")
+        run(action, world)
+
+    mock_get_vcs.assert_not_called()
+    assert mock_fix.call_args[0][1] == "please fix it"
+
+
 # ------ Ship PR action ------
 
 
@@ -331,20 +445,105 @@ def test_run_retry_replays_plan():
 
 
 def test_run_retry_after_pr_falls_back_to_fix():
-    """When /pr was last dispatched, retry should fall back to /fix instead
-    of replaying /pr (which would create a duplicate PR)."""
+    """When /pr was last dispatched on a task with NO completed work to ship
+    (status not in COMPLETED_STATUSES), retry falls back to /fix instead of
+    replaying /pr (which would create a duplicate PR or ship nothing)."""
     world = _make_world(last_dispatched_command="/pr")
     action = Action(kind="retry", slug=world.task.slug)
 
-    with patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship:
+        with patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+            mock_fix.return_value = HandlerResult("DONE_SUMMARY\tretried\tzzy")
+            result = run(action, world)
+
+    assert isinstance(result, DispatchResult)
+    mock_fix.assert_called_once()
+    assert not mock_ship.called
+
+
+def test_run_retry_replays_pr_on_completed_task():
+    """A /pr refused by the preflight gate (issue #277) leaves the task at its
+    COMPLETED resting state with last_dispatched_command "/pr". A subsequent
+    /retry must REPLAY /pr (re-run the gate + ship) instead of falling back to
+    /fix — falling back would re-run the fixer, make no changes, and the #276
+    no-change guard would demote fixed->test_failed + consume gate budget."""
+    world = _make_world(status="fixed", last_dispatched_command="/pr")
+    action = Action(kind="retry", slug=world.task.slug)
+
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_ship.return_value = "PR_BLOCKED: CI failing: 1 check(s) failing: ci"
+        result = run(action, world)
+
+    # open_pr is re-attempted; the fixer is NOT re-run.
+    assert isinstance(result, DispatchResult)
+    mock_ship.assert_called_once()
+    assert not mock_fix.called
+    # The replayed command is threaded so emit records it (not "/retry"), and a
+    # still-red gate re-landed pr_blocked holds the resting state.
+    assert result.done_content == "PR_BLOCKED: CI failing: 1 check(s) failing: ci"
+    assert result.replayed_command == "/pr"
+    # A PR_BLOCKED refusal carries no PR identity.
+    assert result.pr_number is None
+    assert result.pr_url is None
+
+
+def test_run_retry_replays_pr_success_carries_identity():
+    """Once the gate is green, a /retry that replays /pr actually opens the PR:
+    open_pr returns DONE and the cached PR identity is lifted into the result so
+    emit() persists it on the shipped queue entry (like the direct ship_pr
+    path)."""
+    world = _make_world(status="fixed", last_dispatched_command="/pr")
+    action = Action(kind="retry", slug=world.task.slug)
+
+    def _fake_open_pr(task, *a, **kw):
+        task["pr_number"] = 12
+        task["pr_url"] = "https://github.com/owner/repo/pull/12"
+        return "DONE: PR #12"
+
+    with patch("autoswe.orch.run.ship.open_pr", side_effect=_fake_open_pr) as mock_ship:
+        result = run(action, world)
+
+    assert isinstance(result, DispatchResult)
+    mock_ship.assert_called_once()
+    assert result.done_content == "DONE: PR #12"
+    assert result.replayed_command == "/pr"
+    assert result.pr_number == 12
+    assert result.pr_url == "https://github.com/owner/repo/pull/12"
+
+
+def test_run_retry_replayed_pr_command_takes_precedence():
+    """last_replayed_command ("/pr", recorded by a prior /retry that replayed
+    /pr) takes precedence over last_dispatched_command ("/retry"), so a
+    repeat /retry re-replays /pr instead of promoting to /fix."""
+    world = _make_world(status="fixed", last_dispatched_command="/retry",
+                        last_replayed_command="/pr")
+    action = Action(kind="retry", slug=world.task.slug)
+
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_ship.return_value = "PR_BLOCKED: CI still running (1 pending)"
+        result = run(action, world)
+
+    mock_ship.assert_called_once()
+    assert not mock_fix.called
+    assert result.replayed_command == "/pr"
+
+
+def test_run_retry_replays_pr_only_when_completed():
+    """The /pr replay is gated on COMPLETED_STATUSES: a `failed` task with a
+    stale /pr watermark still falls back to /fix (a failed task has no work
+    to ship)."""
+    world = _make_world(status="failed", last_dispatched_command="/pr")
+    action = Action(kind="retry", slug=world.task.slug)
+
+    with patch("autoswe.orch.run.ship.open_pr") as mock_ship, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
         mock_fix.return_value = HandlerResult("DONE_SUMMARY\tretried\tzzy")
         result = run(action, world)
 
     assert isinstance(result, DispatchResult)
     mock_fix.assert_called_once()
-    # ship.open_pr must NOT be called
-    with patch("autoswe.orch.run.ship.open_pr") as mock_ship:
-        pass  # just verify it wasn't called above
     assert not mock_ship.called
 
 

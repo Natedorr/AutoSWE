@@ -2,19 +2,26 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger
 from autoswe.core.redact import redact_outbound
-from autoswe.providers.base import CIStatus, PRResult
-from autoswe.tracking.api import gh_get, gh_post
+from autoswe.providers.base import Capability, CIFailure, CIStatus, LinkageState, PRResult
+from autoswe.tracking.api import gh_get, gh_patch, gh_post
 
 dbg = get_debug_logger()
 
 # check-run/status conclusions that block a PR vs. that count as a pass
 _FAILURE_CONCLUSIONS = {"failure", "cancelled", "timed_out", "action_required"}
 _SUCCESS_CONCLUSIONS = {"success", "neutral", "skipped"}
+
+# GitHub closing keywords (case-insensitive) that link a PR to an issue and
+# auto-close it on merge. Mirrors the subset GitHub itself recognizes.
+_CLOSING_KEYWORD_RE_TEMPLATE = (
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{issue}\b"
+)
 
 
 class MissingScopeError(RuntimeError):
@@ -243,6 +250,12 @@ class GitHubVCS:
 
         Priority: any failure -> failure; else any queued/in_progress/pending
         -> pending; else >=1 completed-success -> success; else none.
+
+        Fail-safe: when the CI API could not be consulted (unresolvable
+        branch head, or both check-runs and legacy status errored with no
+        fallback data), the result is ``state="error"`` — never a vacuous
+        "none" pass. A check-runs 403 (the documented classic-PAT-on-private
+        repo case) falls back to ``GET /actions/runs?head_sha=``.
         """
         sha = ref_sha
         if not sha:
@@ -253,15 +266,22 @@ class GitHubVCS:
                 )
                 sha = commit.get("sha")
             except Exception:
-                return CIStatus(state="none", summary="could not resolve branch head")
+                return CIStatus(state="error", summary="could not resolve branch head")
         if not sha:
-            return CIStatus(state="none", summary="could not resolve branch head")
+            return CIStatus(state="error", summary="could not resolve branch head")
 
         failing: list[str] = []
         pending_count = 0
         success_count = 0
+        neutral = 0
         total = 0
+        url: str | None = None
 
+        # Both sources are best-effort; ``check_runs_ok`` / ``legacy_ok``
+        # track whether the *API* was consulted successfully. Only when
+        # neither source answers do we report state="error" (fail-safe:
+        # absence of data is not the same as absence of CI).
+        check_runs_ok = False
         try:
             check_runs = gh_get(
                 f"/repos/{self._owner}/{self._repo}/commits/{sha}/check-runs",
@@ -274,10 +294,40 @@ class GitHubVCS:
                     pending_count += 1
                 elif run.get("conclusion") in _FAILURE_CONCLUSIONS:
                     failing.append(name)
+                elif run.get("conclusion") in ("neutral", "skipped"):
+                    neutral += 1
                 elif run.get("conclusion") in _SUCCESS_CONCLUSIONS:
                     success_count += 1
-        except Exception:
-            pass  # best-effort — treat as no check-runs available
+            check_runs_ok = True
+        except Exception as exc:
+            if "HTTP 403" in str(exc):
+                # Classic PAT on private repos: the Checks API answers 403
+                # ("Resource not accessible by personal access token"), but
+                # the Actions API is still reachable. Use the documented
+                # PAT-friendly fallback.
+                try:
+                    runs = gh_get(
+                        f"/repos/{self._owner}/{self._repo}/actions/runs"
+                        f"?head_sha={sha}&per_page=100",
+                        self._token, max_retries=1,
+                    )
+                    for run in runs.get("workflow_runs", []):
+                        total += 1
+                        name = run.get("name", "workflow")
+                        conclusion = run.get("conclusion")
+                        if conclusion is None:
+                            pending_count += 1
+                        elif conclusion in _FAILURE_CONCLUSIONS:
+                            failing.append(name)
+                        elif conclusion in ("neutral", "skipped"):
+                            neutral += 1
+                        elif conclusion in _SUCCESS_CONCLUSIONS:
+                            success_count += 1
+                        if run.get("html_url"):
+                            url = run.get("html_url")
+                    check_runs_ok = True
+                except Exception:
+                    pass  # fallback also failed — error below if legacy fails too
 
         try:
             status = gh_get(
@@ -289,27 +339,193 @@ class GitHubVCS:
                 context = s.get("context", "status")
                 state = s.get("state")
                 if state in ("failure", "error"):
+                    # Both "failure" and "error" blocked the gate pre-hardening —
+                    # a legacy status of "error" means the check itself errored,
+                    # i.e. it verified nothing, so it must keep blocking rather
+                    # than read as a neutral pass.
                     failing.append(context)
                 elif state == "pending":
                     pending_count += 1
                 elif state == "success":
                     success_count += 1
         except Exception:
-            pass  # best-effort — treat as no legacy status available
+            pass  # legacy status is supplementary — a failure here alone is
+                  # not fatal if check-runs produced data
+
+        # Fail-safe terminal rule: the check-runs source (direct or the
+        # actions/runs fallback) is the authoritative "does CI exist" signal.
+        # If it could NOT be consulted AND no checks of any kind surfaced
+        # (total == 0), we cannot distinguish "no CI" from "couldn't read
+        # CI" — report error rather than a vacuous "none" pass. When legacy
+        # combined-status *did* surface checks (total > 0) that alone is a
+        # real CI signal, so a verdict is returned from legacy even with
+        # check_runs_ok False. An empty legacy read alone, however, is not
+        # proof of no CI (Actions-only repos have none), hence the
+        # ``total == 0`` guard.
+        if not check_runs_ok and total == 0:
+            return CIStatus(
+                state="error", head_sha=sha, url=self.commit_url(sha),
+                summary="could not read CI status (check endpoints unavailable)",
+            )
 
         if failing:
             return CIStatus(
-                state="failure", total=total, failing=failing, pending_count=pending_count,
+                state="failure", head_sha=sha, url=url or self.commit_url(sha),
+                total=total, failing=failing, neutral=neutral,
+                pending_count=pending_count,
                 summary=f"{len(failing)} check(s) failing: {', '.join(failing)}",
             )
         if pending_count:
             return CIStatus(
-                state="pending", total=total, pending_count=pending_count,
+                state="pending", head_sha=sha, url=url or self.commit_url(sha),
+                total=total, neutral=neutral, pending_count=pending_count,
                 summary=f"{pending_count} check(s) pending",
             )
-        if success_count:
-            return CIStatus(state="success", total=total, summary=f"{success_count} check(s) passed")
-        return CIStatus(state="none", total=total, summary="no checks found")
+        if success_count or neutral:
+            # A check-run/action that concluded neutral/skipped verified nothing
+            # but is not a failure — the commit still passes. Pre-hardening these
+            # were folded into the success count; the only change is that they are
+            # now reported separately in the summary. (Legacy-status "error" is
+            # deliberately NOT counted here — it is a blocking failure, see above.)
+            # Read naturally for a neutral-only commit (no "0 check(s) passed"):
+            # lead with the passed count, and add the skipped/neutral count only
+            # when there is one.
+            parts = []
+            if success_count:
+                parts.append(f"{success_count} check(s) passed")
+            if neutral:
+                parts.append(f"{neutral} skipped/neutral")
+            summary = ", ".join(parts)
+            return CIStatus(
+                state="success", head_sha=sha, url=url or self.commit_url(sha),
+                total=total, neutral=neutral, summary=summary,
+            )
+        return CIStatus(
+            state="none", head_sha=sha, url=self.commit_url(sha),
+            total=total, neutral=neutral, summary="no checks found",
+        )
+
+    def get_ci_failures(
+        self, branch: str, ref_sha: str | None = None, *, limit: int = 3, max_chars: int = 4000,
+    ) -> list[CIFailure]:
+        """Feedback text for up to *limit* failing checks (issue #245 §2.1).
+
+        Primary source: check-run ``output.annotations`` (JSON, no log
+        download) for each failing check-run on the resolved sha. When the
+        check-runs source is unavailable (e.g. the classic-PAT 403 case),
+        falls back to the ``actions/runs`` workflow list, reporting each
+        failed job's failing step names via ``actions/runs/{id}/jobs``.
+        Best-effort throughout: any read failure is swallowed and simply
+        yields fewer (possibly zero) failures rather than raising.
+        """
+        sha = ref_sha
+        if not sha:
+            try:
+                commit = gh_get(
+                    f"/repos/{self._owner}/{self._repo}/commits/{branch}",
+                    self._token, max_retries=1,
+                )
+                sha = commit.get("sha")
+            except Exception:
+                return []
+        if not sha:
+            return []
+
+        failures: list[CIFailure] = []
+
+        check_runs_ok = False
+        try:
+            check_runs = gh_get(
+                f"/repos/{self._owner}/{self._repo}/commits/{sha}/check-runs",
+                self._token, max_retries=1,
+            )
+            check_runs_ok = True
+            for run in check_runs.get("check_runs", []):
+                if len(failures) >= limit:
+                    break
+                if run.get("status") != "completed" or run.get("conclusion") not in _FAILURE_CONCLUSIONS:
+                    continue
+                failures.append(CIFailure(
+                    check=run.get("name", "check"),
+                    url=run.get("html_url"),
+                    excerpt=self._check_run_excerpt(run.get("id"), max_chars),
+                ))
+        except Exception as exc:
+            check_runs_ok = "HTTP 403" not in str(exc)
+
+        if not check_runs_ok and len(failures) < limit:
+            try:
+                runs = gh_get(
+                    f"/repos/{self._owner}/{self._repo}/actions/runs"
+                    f"?head_sha={sha}&per_page=20",
+                    self._token, max_retries=1,
+                )
+                for run in runs.get("workflow_runs", []):
+                    if len(failures) >= limit:
+                        break
+                    if run.get("conclusion") not in _FAILURE_CONCLUSIONS:
+                        continue
+                    failures.extend(self._workflow_run_job_failures(
+                        run.get("id"), limit - len(failures), max_chars,
+                    ))
+            except Exception:
+                pass
+
+        return failures[:limit]
+
+    def _check_run_excerpt(self, check_run_id, max_chars: int) -> str:
+        """Return a truncated excerpt from a check-run's annotations, if any."""
+        if not check_run_id:
+            return ""
+        try:
+            annotations = gh_get(
+                f"/repos/{self._owner}/{self._repo}/check-runs/{check_run_id}/annotations",
+                self._token, max_retries=1,
+            )
+        except Exception:
+            return ""
+        lines = []
+        for a in annotations if isinstance(annotations, list) else []:
+            title = a.get("title") or ""
+            message = a.get("message") or ""
+            text = f"{title}: {message}" if title else message
+            if text:
+                lines.append(text)
+        return "\n".join(lines)[:max_chars]
+
+    def _workflow_run_job_failures(
+        self, run_id, limit: int, max_chars: int,
+    ) -> list[CIFailure]:
+        """Return CIFailures for each failed job in a workflow run (403-fallback path)."""
+        if not run_id or limit <= 0:
+            return []
+        try:
+            jobs = gh_get(
+                f"/repos/{self._owner}/{self._repo}/actions/runs/{run_id}/jobs",
+                self._token, max_retries=1,
+            )
+        except Exception:
+            return []
+        out: list[CIFailure] = []
+        for job in jobs.get("jobs", []):
+            if len(out) >= limit:
+                break
+            if job.get("conclusion") not in _FAILURE_CONCLUSIONS:
+                continue
+            failed_steps = [
+                s.get("name", "step") for s in job.get("steps", [])
+                if s.get("conclusion") in _FAILURE_CONCLUSIONS
+            ]
+            excerpt = (
+                f"Failed step(s): {', '.join(failed_steps)}" if failed_steps
+                else "job failed (no per-step detail available)"
+            )
+            out.append(CIFailure(
+                check=job.get("name", "job"),
+                url=job.get("html_url"),
+                excerpt=excerpt[:max_chars],
+            ))
+        return out
 
     def commit_url(self, commit_sha: str) -> str | None:
         """Clickable GitHub commit URL, or None when owner/repo are unset."""
@@ -335,4 +551,163 @@ class GitHubVCS:
 
     def pid_prefix(self) -> str:
         return "gh_"
+
+    def capabilities(self) -> frozenset[Capability]:
+        """GitHub is the fully-connected platform: every edge is supported."""
+        return frozenset(Capability)
+
+    def link_pr_to_issue(self, issue_number: int, pr_number: int) -> None:
+        """Self-heal the closing-keyword link if it is missing (edge E3).
+
+        ``open_pull_request`` writes ``Fixes #N`` at creation time, but that
+        is the *only* place the keyword gets written — a hand-edited PR body
+        (or a PR opened outside autoSWE) can lose it. This is only called by
+        ``ensure_links`` when ``get_linkage`` has already determined the
+        keyword is absent, so it must actually add it: a no-op here would let
+        the caller mark the edge linked without anything having been written
+        (issue #245 review — "never fabricate a pass").
+        """
+        try:
+            pr = gh_get(
+                f"/repos/{self._owner}/{self._repo}/pulls/{pr_number}",
+                self._token, max_retries=1,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"link_pr_to_issue: could not fetch PR {pr_number}: {e}"
+            ) from e
+
+        body = pr.get("body", "") or ""
+        pattern = re.compile(
+            _CLOSING_KEYWORD_RE_TEMPLATE.format(issue=issue_number), re.IGNORECASE,
+        )
+        if pattern.search(body):
+            return  # another writer already restored it — nothing to do
+
+        new_body = f"{body.rstrip()}\n\nFixes #{issue_number}".strip()
+        gh_patch(
+            f"/repos/{self._owner}/{self._repo}/pulls/{pr_number}",
+            self._token,
+            body={"body": redact_outbound(new_body)},
+        )
+
+    def commit_trailer(self, issue_number: int) -> str:
+        """Return the GitHub commit-message trailer (issue #245 E2).
+
+        ``Refs #N`` associates the commit with the issue (visible in the
+        issue's Development timeline) without closing it — closing is left to
+        the PR body's ``Fixes #N`` keyword.
+        """
+        return f"Refs #{issue_number}"
+
+    def _linked_branch_names(self, issue_number: int) -> list[str] | None:
+        """Return the issue's linked-branch names via GraphQL, or ``None`` on failure.
+
+        Backs ``get_linkage``'s E1 read: ``createLinkedBranch`` (write side,
+        ``link_branch_to_issue``) has a query-side counterpart —
+        ``issue.linkedBranches`` — so the checklist can report a real verdict
+        instead of assuming failure just because the write happened in an
+        earlier phase / cycle (issue #245 review: a permanently-``✗`` E1 on a
+        GitHub task that actually linked cleanly is a checklist bug, not a
+        capability limit).
+        """
+        query = (
+            "query($owner: String!, $repo: String!, $number: Int!) {"
+            "  repository(owner: $owner, name: $repo) {"
+            "    issue(number: $number) {"
+            "      linkedBranches(first: 25) { nodes { ref { name } } }"
+            "    }"
+            "  }"
+            "}"
+        )
+        variables = {"owner": self._owner, "repo": self._repo, "number": issue_number}
+        try:
+            result = gh_post(
+                "/graphql", self._token,
+                {"query": query, "variables": variables},
+                max_retries=1, timeout=10,
+            )
+        except Exception as e:
+            dbg.warning("get_linkage: linkedBranches query failed for issue %d: %s: %s",
+                        issue_number, type(e).__name__, e)
+            return None
+        if result.get("errors"):
+            dbg.warning("get_linkage: linkedBranches GraphQL error for issue %d: %s",
+                        issue_number, result["errors"])
+            return None
+        nodes = (
+            (result.get("data") or {}).get("repository") or {}
+        ).get("issue", {}) or {}
+        nodes = (nodes.get("linkedBranches") or {}).get("nodes") or []
+        return [
+            (n.get("ref") or {}).get("name") for n in nodes if (n.get("ref") or {}).get("name")
+        ]
+
+    def get_linkage(
+        self, issue_number: int, branch: str, pr_number: int | None,
+    ) -> LinkageState:
+        """Read the current linkage state for *issue_number* / *pr_number*.
+
+        Best-effort: any read failure reports the affected edge(s) as missing
+        rather than raising, so ``ensure_links`` can proceed with self-heal
+        writes instead of aborting. A query failure for the branch-link check
+        (rather than a confirmed absence) reports it as missing too — a
+        conservative read never claims a link exists that wasn't verified.
+        """
+        missing: list[str] = []
+        linked_branches = self._linked_branch_names(issue_number)
+        branch_linked = bool(linked_branches) and branch in linked_branches
+        if not branch_linked:
+            missing.append("branch")
+
+        if pr_number is None:
+            missing.append("pr_link")
+            return LinkageState(branch_linked=branch_linked, missing=tuple(missing))
+
+        try:
+            pr = gh_get(
+                f"/repos/{self._owner}/{self._repo}/pulls/{pr_number}",
+                self._token, max_retries=1,
+            )
+        except Exception as e:
+            dbg.warning("get_linkage: could not fetch PR %s: %s: %s",
+                        pr_number, type(e).__name__, e)
+            missing.append("pr_link")
+            return LinkageState(branch_linked=branch_linked, pr_number=pr_number,
+                                 missing=tuple(missing))
+
+        body = pr.get("body", "") or ""
+        pattern = re.compile(
+            _CLOSING_KEYWORD_RE_TEMPLATE.format(issue=issue_number), re.IGNORECASE,
+        )
+        closes = bool(pattern.search(body))
+        merged = bool(pr.get("merged"))
+        head_sha = pr.get("head", {}).get("sha")
+        mergeable_state = pr.get("mergeable_state")
+        # "blocked" means a required review/check is outstanding, not a git
+        # conflict — map it alongside "unknown" to "pending" rather than
+        # "conflicts" so the checklist doesn't tell an operator to resolve a
+        # merge conflict that doesn't exist.
+        merge_state = {
+            "clean": "clean", "unstable": "clean", "has_hooks": "clean",
+            "dirty": "conflicts",
+            "blocked": "pending", "unknown": "pending",
+        }.get(mergeable_state, "unknown")
+
+        # GitHub's closing keyword IS the machine-readable link — declare
+        # pr_linked True whenever it is present.
+        pr_linked = closes
+        if not pr_linked:
+            missing.append("pr_link")
+
+        return LinkageState(
+            branch_linked=branch_linked,
+            pr_linked=pr_linked,
+            closes_on_merge=closes,
+            merged=merged,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            merge_state=merge_state,
+            missing=tuple(missing),
+        )
 

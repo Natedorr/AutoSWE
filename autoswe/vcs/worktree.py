@@ -7,7 +7,7 @@ from autoswe.core.config import AUTOSWE_DIR
 from autoswe.core.constants import GIT_TEXT_ARGS
 from autoswe.core.logging_utils import get_debug_logger, log
 from autoswe.providers.factory import get_vcs
-from autoswe.providers.github.vcs import MissingScopeError
+from autoswe.vcs.linkage import ensure_links
 
 dbg = get_debug_logger()
 
@@ -133,11 +133,14 @@ def _get_default_branch(main: Path, base_branch: str) -> str:
     """Determine the repo's actual default branch for _main checkout.
 
     Fallback chain:
-    1. The local ``origin/HEAD`` symbolic ref. Must be queried by FULL
-       refname (``refs/remotes/origin/HEAD``) — the short ``origin/HEAD``
-       spelling fails to resolve as a symbolic ref on recent git even though
-       the ref exists, so the short form silently skips this step on every
-       fresh clone (the auto-detection gap behind issue #260).
+    1. The local ``origin/HEAD`` ref. Must be queried by FULL refname
+       (``refs/remotes/origin/HEAD``) — the short ``origin/HEAD`` spelling
+       fails to resolve as a symbolic ref on recent git even though the ref
+       exists, so the short form silently skips this step on every fresh
+       clone (the auto-detection gap behind issue #260). On older git
+       clones the ref is symbolic; on recent ones (observed on git 2.43) it
+       is an *indirect* ref that ``git symbolic-ref`` refuses, so fall back
+       to ``rev-parse --symbolic-full-name``, which reads both ref types.
     2. ``ls-remote --symref origin HEAD`` — the authoritative remote default;
        covers clones where the local origin/HEAD ref is absent. It must
        precede base_branch, which may be a user-supplied ``--branch`` value
@@ -156,6 +159,14 @@ def _get_default_branch(main: Path, base_branch: str) -> str:
         ["git", "-C", str(main), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
         check=False,
     )
+    if head.returncode != 0:
+        # git >= 2.33 clones store origin/HEAD as an indirect ref (observed on
+        # git 2.43) — `symbolic-ref` refuses it, but rev-parse still resolves it.
+        head = _run(
+            ["git", "-C", str(main), "rev-parse", "--symbolic-full-name",
+             "origin/HEAD"],
+            check=False,
+        )
     if head.returncode == 0:
         ref = head.stdout.strip()
         for prefix in ("refs/remotes/origin/", "refs/remotes/", "refs/heads/", "origin/"):
@@ -241,8 +252,6 @@ def ensure_clone(
         # Update the remote URL so token stays current
         _run(["git", "-C", str(main), "remote", "set-url", "origin", clone_url])
         # Hard pull so _main is always current for new worktrees.
-        # Use default_branch for _main checkout; fall back to auto-detection.
-        # base_branch may be a custom --branch value that doesn't exist on _main.
         _run(["git", "-C", str(main), "fetch", "origin"])
         branch_for_main = default_branch or _get_default_branch(main, base_branch)
         _checkout_main_branch(main, owner, repo, branch_for_main)
@@ -257,6 +266,21 @@ def is_dirty(wt: Path) -> bool:
     """Return True if the worktree has uncommitted changes or untracked files."""
     result = _run(["git", "-C", str(wt), "status", "--porcelain"], check=False)
     return bool(result.stdout.strip())
+
+
+def resolve_branch_head(wt: Path) -> str | None:
+    """Return the worktree's ``HEAD`` sha, or ``None`` if it cannot be resolved.
+
+    Used to correlate a provider CI verdict against the commit the branch is
+    actually at (Azure ``sourceVersion`` staleness, e.g.). Best-effort: a
+    missing/corrupt worktree or a ``rev-parse`` failure simply yields ``None``
+    so the caller falls back to a staleness-agnostic CI read.
+    """
+    if not wt.exists():
+        return None
+    result = _run(["git", "-C", str(wt), "rev-parse", "HEAD"], check=False)
+    sha = result.stdout.strip() if result.returncode == 0 else ""
+    return sha or None
 
 
 def fetch_prune(main: Path) -> None:
@@ -281,6 +305,41 @@ def remote_branch_exists(main: Path, branch: str) -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+def remote_branch_exists_on(wt: Path, branch: str) -> bool:
+    """Live check (``git ls-remote``) that ``refs/heads/<branch>`` exists on origin.
+
+    Unlike :func:`remote_branch_exists` this does not trust local
+    remote-tracking refs — the worktree may never have fetched the branch in
+    question. A failed ``ls-remote`` (network, no origin, no git dir) yields
+    False, so callers must treat this as best-effort.
+    """
+    result = _run(
+        ["git", "-C", str(wt), "ls-remote", "origin", f"refs/heads/{branch}"],
+        check=False,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def remote_default_branch(wt: Path) -> str | None:
+    """The repo's actual default branch per origin, or None.
+
+    Uses ``git ls-remote --symref origin HEAD`` so the answer comes from the
+    remote (works even when local tracking refs are stale or absent).
+    """
+    result = _run(
+        ["git", "-C", str(wt), "ls-remote", "--symref", "origin", "HEAD"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("ref:"):
+            ref = line[len("ref:"):].split("\t", 1)[0].strip()
+            if ref.startswith("refs/heads/"):
+                return ref[len("refs/heads/"):]
+    return None
 
 
 def remove_worktree(main: Path, wt: Path, branch: str) -> bool:
@@ -590,24 +649,20 @@ def create_worktree(
         # Best-effort: link branch to issue in platform UI (Development sidebar).
         # Runs BEFORE the remote branch is pushed, so the GraphQL createLinkedBranch
         # mutation can create the ref. Reused branches (branch_exists=True) skip this.
+        # Routed through ensure_links (issue #245 E1) so the capability model and
+        # missing-edge bookkeeping apply uniformly across call sites; failures are
+        # swallowed inside ensure_links itself (best-effort, never blocks the push).
         if cfg.get("LINK_BRANCH_TO_ISSUE", True):
-            try:
-                full_sha_result = _run(
-                    ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],
-                    check=False,
+            full_sha_result = _run(
+                ["git", "-C", str(main), "rev-parse", f"origin/{base_branch}"],
+                check=False,
+            )
+            full_base_sha = full_sha_result.stdout.strip()
+            if full_base_sha:
+                ensure_links(
+                    {"issue_number": issue_num}, repo_cfg, cfg,
+                    phase="branch", vcs=get_vcs(repo_cfg), base_sha=full_base_sha,
                 )
-                full_base_sha = full_sha_result.stdout.strip()
-                if full_base_sha:
-                    get_vcs(repo_cfg).link_branch_to_issue(
-                        issue_num, full_base_sha, branch,
-                    )
-            except MissingScopeError:
-                dbg.warning(
-                    "WORKTREE: link_branch_to_issue skipped — "
-                    "PAT missing permission to create linked branch"
-                )
-            except Exception as e:  # Best-effort; log and continue.
-                dbg.warning("WORKTREE: link_branch_to_issue failed: %s", e, exc_info=True)
 
     if new_branch and push_new:
         _run(["git", "-C", str(main), "push", "-u", "origin", branch])
@@ -617,8 +672,13 @@ def create_worktree(
     return wt
 
 
-def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, base_branch: str = "main", provider: str = "github", *, before_sha: str | None = None) -> dict:
+def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, base_branch: str = "main", provider: str = "github", *, before_sha: str | None = None, cfg: dict | None = None) -> dict:
     """Stage, commit (if changes), and push.
+
+    When ``LINK_COMMIT_TRAILER`` is enabled (default) *msg* gets the
+    provider's ``commit_trailer()`` appended (edge E2, issue #245) — e.g.
+    GitHub's ``"Refs #12"`` or Azure's ``"#12"`` — so the commit shows up in
+    the issue's Development/links timeline without closing it.
 
     Preserves Claude auto-commits as a commit trail rather than squashing:
     - If the coding agent auto-committed during the session, the last commit is
@@ -644,7 +704,12 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
       - branch: str      (branch name, e.g. "autoswe/issue-42")
     """
     repo_cfg = {"owner": owner, "repo": repo, "token": "", "provider": provider}
-    branch = get_vcs(repo_cfg).branch_name(issue_num)
+    vcs = get_vcs(repo_cfg)
+    branch = vcs.branch_name(issue_num)
+    if (cfg or {}).get("LINK_COMMIT_TRAILER", True):
+        trailer = vcs.commit_trailer(issue_num)
+        if trailer and trailer not in msg:
+            msg = f"{msg}\n\n{trailer}"
     dbg.debug("WORKTREE: commit_and_push msg=%s", msg)
 
     # Check for in-progress merge/rebase operations

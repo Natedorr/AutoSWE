@@ -1,0 +1,8 @@
+{
+  "kind": "sync_branch",
+  "slug": "gh:owner_repo_11",
+  "plan_branch": "issue-11",
+  "attempt_count": 1,
+  "triggering_comment_id": 2,
+  "resume_session_id": null
+}

@@ -18,6 +18,11 @@ from autoswe.harness.test_gate import (
     resolve_test_command,
     run_test_gate,
 )
+from autoswe.orch.gate_policy import (
+    auto_fix_on_gate_failure,
+    build_gate_guidance,
+    gate_max_fix_attempts,
+)
 
 PY = sys.executable
 
@@ -228,3 +233,88 @@ def test_gate_timeout_bad_values_fall_back(tmp_path, bad):
     # Must not raise; must use the default (or 1s) timeout.
     r = run_test_gate(tmp_path, {}, {"test_command": f"{PY} -c \"pass\"", "test_gate_timeout": bad})
     assert r.ok is True
+
+
+# ---------------------------------------------------------------------------
+# Shared recoverable-gate policy (issue #245 §2.5) — gate unification.
+#
+# test_failed (this module's gate) and ci_failed (the remote CI watch) share
+# one policy: the counter, the config switch, the budget, and the
+# prompt-assembly helper below. These live in orch/gate_policy.py so both
+# decide()'s CI branch and its local test-gate branch can reuse them without
+# duplicating the failure-section logic.
+# ---------------------------------------------------------------------------
+
+
+def test_gate_max_fix_attempts_defaults_2():
+    assert gate_max_fix_attempts({}, {}) == 2
+
+
+def test_gate_max_fix_attempts_cfg_override():
+    assert gate_max_fix_attempts({"GATE_MAX_FIX_ATTEMPTS": 5}, {}) == 5
+
+
+def test_gate_max_fix_attempts_repo_override_beats_cfg():
+    assert gate_max_fix_attempts(
+        {"GATE_MAX_FIX_ATTEMPTS": 5}, {"gate_max_fix_attempts": 1},
+    ) == 1
+
+
+def test_gate_max_fix_attempts_bad_value_falls_back():
+    assert gate_max_fix_attempts({"GATE_MAX_FIX_ATTEMPTS": "not-an-int"}, {}) == 2
+
+
+def test_auto_fix_on_gate_failure_defaults_true():
+    assert auto_fix_on_gate_failure({}, {}) is True
+
+
+def test_auto_fix_on_gate_failure_cfg_override():
+    assert auto_fix_on_gate_failure({"AUTO_FIX_ON_GATE_FAILURE": False}, {}) is False
+
+
+def test_auto_fix_on_gate_failure_repo_override_beats_cfg():
+    assert auto_fix_on_gate_failure(
+        {"AUTO_FIX_ON_GATE_FAILURE": True}, {"auto_fix_on_gate_failure": False},
+    ) is False
+
+
+def test_build_gate_guidance_header_only():
+    assert build_gate_guidance("CI failed on the pushed branch.") == "CI failed on the pushed branch."
+
+
+def test_build_gate_guidance_with_failing_checks():
+    guidance = build_gate_guidance("CI failed.", failing=["build", "lint"])
+    assert guidance == "CI failed.\n\nFailing checks:\n- build\n- lint"
+
+
+def test_build_gate_guidance_with_summary():
+    guidance = build_gate_guidance("CI failed.", summary="1 check(s) failing: build")
+    assert guidance == "CI failed.\n\n1 check(s) failing: build"
+
+
+def test_build_gate_guidance_with_excerpt():
+    guidance = build_gate_guidance("Test gate failed.", excerpt="assert 5.0 == 6.0")
+    assert guidance == "Test gate failed.\n\n```\nassert 5.0 == 6.0\n```"
+
+
+def test_build_gate_guidance_combines_all_sections():
+    guidance = build_gate_guidance(
+        "CI failed.", failing=["build"], summary="1 failing", excerpt="log tail",
+    )
+    assert guidance == (
+        "CI failed.\n\nFailing checks:\n- build\n\n1 failing\n\n```\nlog tail\n```"
+    )
+
+
+def test_build_gate_guidance_local_and_remote_share_shape():
+    """The same helper produces both a CI-style and a local-test-gate-style
+    guidance block — one prompt-assembly helper, two signals (issue #245 §2.5)."""
+    ci_guidance = build_gate_guidance(
+        "CI failed on the pushed branch.", failing=["build"], summary="1 check(s) failing: build",
+    )
+    local_guidance = build_gate_guidance(
+        "🧪 Test gate failed on the pushed branch.", excerpt="test_x FAILED",
+    )
+    assert ci_guidance.startswith("CI failed on the pushed branch.")
+    assert local_guidance.startswith("🧪 Test gate failed on the pushed branch.")
+    assert "test_x FAILED" in local_guidance

@@ -1,0 +1,5 @@
+{
+  "kind": "mark_failed_limit",
+  "slug": "gh:owner_repo_11",
+  "limit_reason": "ci"
+}

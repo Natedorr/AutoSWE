@@ -72,6 +72,50 @@ def test_sync_single_repo_filters():
     mock_poll.assert_called_once_with(cfg, mode="sync", repo_filter="owner/repo")
 
 
+def test_sync_passes_cfg_to_load_repos_config():
+    """_cmd_sync must pass cfg through so an Azure done_state mismatch is a
+    startup error here too (issue #245 §1.5), not only from the poller."""
+    cfg = {"done_state": "Resolved"}
+    args = Namespace(repo="owner/repo")
+
+    with patch("autoswe.cli.orch_poll"), \
+         patch("autoswe.cli.load_repos_config",
+               return_value={"owner/repo": {"provider": "github", "pat": "x"}}) as mock_load:
+        from autoswe.cli import _cmd_sync
+        _cmd_sync(args, cfg)
+
+    mock_load.assert_called_once_with(cfg)
+
+
+def test_queue_list_passes_cfg_to_load_repos_config():
+    """_cmd_queue_list must pass cfg through to load_repos_config (issue #245 §1.5)."""
+    cfg = {"done_state": "Resolved"}
+    args = Namespace(status=None)
+    queue = {"o/r/1": {"id": "o/r/1", "owner": "o", "repo": "r", "issue_number": 1,
+                        "created_at": "", "pr_number": None}}
+
+    with patch("autoswe.cli._load_json", return_value=queue), \
+         patch("autoswe.cli.load_repos_config", return_value={}) as mock_load:
+        from autoswe.cli import _cmd_queue_list
+        _cmd_queue_list(args, cfg)
+
+    mock_load.assert_called_once_with(cfg)
+
+
+def test_queue_status_passes_cfg_to_load_repos_config():
+    """_cmd_queue_status must pass cfg through to load_repos_config (issue #245 §1.5)."""
+    cfg = {"done_state": "Resolved"}
+    args = Namespace(repo="o/r", issue=1, provider="github")
+    queue = {"gh:o_r_1": {"id": "gh:o_r_1", "owner": "o", "repo": "r", "issue_number": 1}}
+
+    with patch("autoswe.cli._load_json", return_value=queue), \
+         patch("autoswe.cli.load_repos_config", return_value={}) as mock_load:
+        from autoswe.cli import _cmd_queue_status
+        _cmd_queue_status(args, cfg)
+
+    mock_load.assert_called_once_with(cfg)
+
+
 def test_dispatch_calls_poll_full_mode():
     """The dispatch command calls orch_poll in full mode."""
     cfg = {}
