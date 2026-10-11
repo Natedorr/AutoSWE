@@ -219,6 +219,72 @@ class TestDownloads:
         assert not downloads.is_http_error_code("http_500", 404)
         assert not downloads.is_http_error_code("transport", 404)
 
+    def test_download_error_str_redacts_signed_url_jwt(self, monkeypatch):
+        """A failed Mechanism-B signed-URL download must not leak the short-lived
+        JWT (``?jwt=*** query segment) into the error string — it is a
+        credential and ends up in warning logs (round-5 MEDIUM)."""
+        from autoswe.attachments import downloads
+
+        signed = (
+            "https://private-user-images.githubusercontent.com/repo/abc/"
+            "?jwt=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.SECRET-PAYLOAD&cmk=foo"
+        )
+        err = downloads.DownloadError(signed, "http_500", "server error")
+        text = str(err)
+        # The path (for correlation) survives; the query string does not.
+        assert "private-user-images.githubusercontent.com/repo/abc" in text
+        assert "jwt=" not in text
+        assert "SECRET-PAYLOAD" not in text
+        assert "cmk=" not in text
+        assert "?" not in text
+
+        # _safe_url is the single sink used by __str__.
+        assert downloads._safe_url(signed) == "https://private-user-images.githubusercontent.com/repo/abc/"
+        assert downloads._safe_url("https://x/y") == "https://x/y"  # idempotent, query-free
+
+    def test_ingest_log_message_has_no_jwt(self, monkeypatch):
+        """End-to-end: a failed GitHub download's ingest warning carries the
+        asset path but no signed ``?jwt=`` segment."""
+        import logging
+
+        from autoswe.attachments import downloads as dl
+        from autoswe.attachments import github as gh
+        from autoswe.attachments import ingest
+
+        def fake_download(url, **k):
+            raise dl.DownloadError(url, "http_500", "boom")
+
+        monkeypatch.setattr(gh.downloads, "download_bytes", fake_download)
+        monkeypatch.setattr(gh, "fetch_html_body", lambda *a, **k: "")  # force B to fail
+
+        captured = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                captured.append(record.getMessage())
+
+        # Route the attachment warning into our capture.
+        cap = _Capture()
+        ingest_dbg = ingest.dbg
+        ingest_dbg.addHandler(cap)
+        try:
+            ingest.ingest_task_attachments(
+                _StubTracker(), 1, f"see {_ASSET_URL}", [],
+                {"ATTACHMENTS_ENABLED": True},
+                {"provider": "github", "owner": "o", "repo": "r", "pat": "t"},
+            )
+        finally:
+            ingest_dbg.removeHandler(cap)
+
+        # A warning was emitted for the failed asset.
+        warnings = [m for m in captured if "failed" in m]
+        assert warnings, "expected a failure warning"
+        for m in warnings:
+            assert "jwt=" not in m
+            assert "SECRET" not in m
+            # The plain asset URL (the log's first %s) is a github.com path, not a signed URL.
+            assert _ASSET_URL in m
+
     def test_download_too_large(self, monkeypatch):
         from autoswe.attachments import downloads
 
@@ -376,6 +442,72 @@ class TestGithubFallback:
         # The extraction must survive a ``s`` and a ``/`` inside the JWT.
         assert "s" in jwt and "/" in jwt
         assert len(find_signed_url(html, _ASSET_URL)) == len(signed)
+
+    def test_fetch_html_body_builds_request(self, monkeypatch):
+        """Drive the real ``fetch_html_body`` request construction via an
+        injected opener (round-5 MEDIUM): the correct html+json media-type
+        header, the per-issue vs per-comment path, and the ``body_html`` JSON
+        parse — without hitting the network."""
+        import json as _json
+
+        from autoswe.attachments import github as gh
+
+        captured = {}
+
+        def fake_open(req, timeout):
+            class Resp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def read(self, _=None):
+                    return _json.dumps({"body_html": "<img src='x'>", "id": 7}).encode()
+
+            captured["req"] = req
+            captured["timeout"] = timeout
+            return Resp()
+
+        out = gh.fetch_html_body("o", "r", 13, None, "tok123", opener=fake_open)
+        assert out == "<img src='x'>"
+        req = captured["req"]
+        assert req.full_url == "https://api.github.com/repos/o/r/issues/13"
+        # Mechanism B's custom media type + Bearer auth.
+        assert req.get_header("Accept") == "application/vnd.github.html+json"
+        assert req.get_header("Authorization") == "Bearer tok123"
+        assert captured["timeout"] == 30
+
+        # Comment path (Mechanism B on a comment-hosted asset).
+        gh.fetch_html_body("o", "r", 13, 999, "tok123", opener=fake_open)
+        assert captured["req"].full_url == "https://api.github.com/repos/o/r/issues/comments/999"
+
+    def test_fetch_html_body_best_effort_empty_on_failure(self, monkeypatch):
+        """A failing html+json re-fetch degrades to ``""`` (best-effort) — the
+        caller then warns + skips; it never raises."""
+        import urllib.error
+
+        from autoswe.attachments import github as gh
+
+        def fake_open(req, timeout):
+            raise urllib.error.URLError("connection reset")
+
+        assert gh.fetch_html_body("o", "r", 13, None, "tok", opener=fake_open) == ""
+        # A 200 with an empty body_html also yields "".
+        def ok_open(req, timeout):
+            class Resp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def read(self, _=None):
+                    return b"{}"
+
+            return Resp()
+
+        assert gh.fetch_html_body("o", "r", 13, None, "tok", opener=ok_open) == ""
 
 
 # ============================================================================

@@ -29,8 +29,25 @@ class DownloadError(Exception):
     code: str
     message: str = ""
 
-    def __str__(self) -> str:  # pragma: no cover - trivial
-        return f"{type(self).__name__}({self.code}): {self.url}: {self.message}"
+    def __str__(self) -> str:
+        # The url may be a Mechanism-B signed private-image URL carrying a
+        # short-lived JWT in the query string — a credential. Strip the query
+        # so the signed segment never reaches a log line (the path is not
+        # secret and is kept for correlation).
+        return (
+            f"{type(self).__name__}({self.code}): "
+            f"{_safe_url(self.url)}: {self.message}"
+        )
+
+
+def _safe_url(url: str) -> str:
+    """Return *url* with its query string removed, for safe logging.
+
+    Signed ``private-user-images`` URLs carry a scoped, ~300s-TTL JWT in the
+    query string; it is a credential and must never appear in logs. Only the
+    non-secret path is retained. Idempotent on query-free URLs.
+    """
+    return (url or "").split("?", 1)[0]
 
 
 def _build_opener() -> request.OpenerDirector:

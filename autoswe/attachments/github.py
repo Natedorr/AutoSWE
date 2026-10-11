@@ -98,13 +98,19 @@ def discover_github_assets(issue_body: str, comments: list[dict]) -> list[AssetC
 def fetch_html_body(
     owner: str, repo: str, issue_num: int,
     comment_id: int | None, token: str,
+    *,
+    opener=None,
 ) -> str:
     """Re-fetch the containing body with the html+json media type.
 
-    Returns the rendered ``body_html`` (empty when unavailable). Uses
-    ``request.urlopen`` directly because the ``_gh_request`` seam is JSON-only
-    (fixed ``Accept`` header); Mechanism B needs a custom media type.
-    Best-effort: any failure degrades to ``""`` so the caller warns + skips.
+    Returns the rendered ``body_html`` (empty when unavailable). Uses an
+    injectable *opener* (defaulting to ``request.urlopen``) because the
+    ``_gh_request`` seam is JSON-only (fixed ``Accept`` header); Mechanism B
+    needs a custom media type. Tests drive the real request construction
+    (media-type header, ``body_html`` parse, best-effort ``""`` on failure)
+    by injecting a fake opener, matching how ``download_bytes`` is tested via
+    ``OpenerDirector.open``. Best-effort: any failure degrades to ``""`` so
+    the caller warns + skips.
     """
     if comment_id is not None:
         path = f"/repos/{owner}/{repo}/issues/comments/{comment_id}"
@@ -115,8 +121,9 @@ def fetch_html_body(
         "Authorization": f"Bearer {token}",
         "Accept": _HTML_ACCEPT,
     }, method="GET")
+    open_url = opener if opener is not None else request.urlopen
     try:
-        with request.urlopen(req, timeout=30) as resp:
+        with open_url(req, timeout=30) as resp:
             return json.loads(resp.read() or b"{}").get("body_html", "") or ""
     except Exception as e:
         dbg.debug("attachments: html re-fetch failed for %s: %s", path, e)
