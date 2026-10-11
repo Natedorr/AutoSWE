@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import html
 import re
+import time
 from html.parser import HTMLParser
 
 from autoswe.core.logging_utils import get_debug_logger
@@ -39,6 +40,28 @@ DEFAULT_DONE_STATES: tuple[str, ...] = ("Closed", "Done", "Removed")
 # Keep well under that cap — docs/azure-devops-api/list-work-items.md,
 # Common Pitfalls #3 ("split into multiple requests").
 _BATCH_CHUNK_SIZE = 100
+
+# How long a captured relations entry stays usable (issue #290). The cache only
+# needs to survive the poll→dispatch window of the same cycle; evict after
+# ~24 h so a long-running poller never accumulates raw relations payloads for
+# issues that never dispatch.
+_RELATIONS_CACHE_TTL = 24 * 60 * 60
+
+
+def _evict_stale_relations(cache: dict[int, tuple[float, list]]) -> None:
+    """Drop ``_relations_cache`` entries older than ``_RELATIONS_CACHE_TTL``.
+
+    Called on every capture (``_to_normalized``) so the cache is bounded by
+    its age, not its size. Only touches the ``autoswe``-owned dict; a
+    ``ValueError`` on a malformed timestamp simply skips that entry.
+    """
+    now = time.time()
+    stale = [
+        k for k, (ts, _rels) in cache.items()
+        if (now - ts) > _RELATIONS_CACHE_TTL
+    ]
+    for k in stale:
+        cache.pop(k, None)
 
 
 def _is_bot_comment(body: str) -> bool:
@@ -129,6 +152,19 @@ class AzureTracker:
         # avoids re-querying workitemtypes/{type}/states on every close_issue.
         self._completed_state_cache: dict[str, str] = {}
         self._removed_state_cache: dict[str, str] = {}
+        # Raw work-item relations captured from the ``$expand=all`` fetch
+        # (issue #290): keyed by work-item id -> (epoch_seconds, relations).
+        # Populated by ``_to_normalized`` on every fetch (list_open_issues
+        # batch + fetch_issue), so ``list_workitem_attachments`` can serve the
+        # ``AttachedFile`` refs it needs without a second full work-item GET in
+        # the same poll/dispatch cycle. The re-fetch in that method is only a
+        # cold-start fallback for an issue never fetched this process
+        # (docs/autoswe/attachments.md §2.1). Entries are evicted after
+        # ``_RELATIONS_CACHE_TTL`` seconds — a long-running poller must not
+        # accumulate raw relations payloads (URLs, dates, attribute dicts) for
+        # issues that never dispatch; they only need to survive poll→dispatch
+        # of the same cycle.
+        self._relations_cache: dict[int, tuple[float, list]] = {}
 
     # ---- Repo ID resolution ----
 
@@ -225,6 +261,68 @@ class AzureTracker:
         )
         raw = ado_get(path, self._pat)
         return self._to_normalized(raw)
+
+    def list_workitem_attachments(self, issue_number: int) -> list[dict]:
+        """Return ``AttachedFile`` attachment refs for the work item (issue #290).
+
+        Attachments appear in the work item's ``relations[]`` **only when
+        fetched with ``$expand=all``** (docs/autoswe/attachments.md §2.1, live
+        verified 2026-10-09). The tracker's own ``$expand=all`` fetches
+        (``list_open_issues`` batch and ``fetch_issue``) already carry those
+        relations, so this method reuses them from ``self._relations_cache``
+        — populated by ``_to_normalized`` on every fetch — **without any
+        extra API call**. The refs are normalized to
+        ``{"url": ..., "name": ...|None, "resource_size": int|None}``; ``name``
+        is optional in the live API (it was absent in the probes), so it is
+        passed through as ``None`` when missing.
+
+        A fresh ``$expand=all`` GET is issued **only as a cold-start fallback**
+        — when the issue was never fetched this process (cache miss, e.g. a
+        dispatch reached without a prior ``list_open_issues``). That result is
+        stored in the cache so the same work item is not re-fetched twice.
+        Best-effort: any fetch failure returns ``[]`` — a missing attachment is
+        never a task failure.
+        """
+        relations = self._relations_cache.get(issue_number)
+        if relations is not None:
+            # ``_relations_cache`` holds (epoch, relations); the fetch that
+            # populated it is fresh (within the poll→dispatch window).
+            relations = relations[1]
+        if relations is None:
+            path = _ado_api_version(
+                f"https://dev.azure.com/{self._org_enc}/{self._project_enc}/_apis/wit/workitems/{issue_number}"
+                "?$expand=all"
+            )
+            try:
+                raw = ado_get(path, self._pat)
+            except Exception as e:
+                dbg.warning("attachments: Azure relations fetch failed for WI %d: %s", issue_number, e)
+                return []
+            relations = raw.get("relations") or []
+            self._relations_cache[issue_number] = (time.time(), relations)
+        return self._normalize_relations(relations)
+
+    def _normalize_relations(self, relations: list) -> list[dict]:
+        """Extract ``AttachedFile`` attachment refs from raw ADO ``relations[]``.
+
+        Shared by ``list_workitem_attachments`` so the reuse (cache) and
+        cold-start (re-fetch) paths normalize identically. Returns
+        ``{"url", "name", "resource_size"}`` dicts in document order.
+        """
+        refs: list[dict] = []
+        for rel in relations or []:
+            if not isinstance(rel, dict) or rel.get("rel") != "AttachedFile":
+                continue
+            url = rel.get("url")
+            if not url:
+                continue
+            attrs = rel.get("attributes") or {}
+            refs.append({
+                "url": url,
+                "name": attrs.get("name") or None,
+                "resource_size": attrs.get("resourceSize"),
+            })
+        return refs
 
     def fetch_comments(self, issue_number: int) -> list[NormalizedComment]:
         """Fetch all comments on a work item.
@@ -653,6 +751,14 @@ class AzureTracker:
         labels = [t.strip() for t in tags_raw.split(";") if t.strip()] if tags_raw else []
         raw_state = fields.get("System.State", "New")
         state = "closed" if raw_state in self._resolve_done_states() else "open"
+        # Capture raw relations from this ``$expand=all`` fetch so the attachment
+        # layer can serve ``AttachedFile`` refs without a second GET (issue #290,
+        # docs/autoswe/attachments.md §2.1). Shared by list_open_issues +
+        # fetch_issue, both of which call _to_normalized. Tagged with a
+        # timestamp so ``list_workitem_attachments`` can evict stale entries
+        # (the cache must not grow unbounded in a long-running poller).
+        _evict_stale_relations(self._relations_cache)
+        self._relations_cache[raw["id"]] = (time.time(), raw.get("relations") or [])
         return NormalizedIssue(
             number=raw["id"],
             title=title,
