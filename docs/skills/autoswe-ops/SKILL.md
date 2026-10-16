@@ -20,7 +20,7 @@ You are running on the **same machine** as autoSWE. Use these quick-reference co
 
 | Goal | Command |
 |------|---------|
-| **Run poller once** | `cd /home/megibot/.openclaw/workspace/claudius-dev && python3 autoswe.py poller` |
+| **Run poller once** | `python3 autoswe.py poller` |
 | **Run poller (drain mode)** | `python3 autoswe.py poller --drain` |
 | **Sync only (no dispatch)** | `python3 autoswe.py sync` |
 | **Dispatch only (no sync)** | `python3 autoswe.py dispatch` |
@@ -31,8 +31,6 @@ You are running on the **same machine** as autoSWE. Use these quick-reference co
 | **Prune old tasks** | `python3 autoswe.py queue prune --older-than-days 30` |
 | **Prune (dry run)** | `python3 autoswe.py queue prune --older-than-days 30 --dry-run` |
 
-**Always `cd` to the repo first.** Default path: `/home/megibot/.openclaw/workspace/claudius-dev`
-
 ---
 
 ## Is Something Running? (PID Lock Check)
@@ -41,17 +39,35 @@ autoSWE uses a PID file to prevent concurrent tasks on the same repo. If the pol
 
 ```bash
 # Check if a Claude Code session is actively running
-ls -la /home/megibot/.openclaw/workspace/claudius-dev/running/
+ls -la /running/
 
 # PID file blocks new dispatches for that repo
-cat /home/megibot/.openclaw/workspace/claudius-dev/running/<repo-slug>.pid
+cat /running/<repo-slug>.pid
 
 # If the process is dead but PID file remains, stale lock:
-kill -0 $(cat /home/megibot/.openclaw/workspace/claudius-dev/running/<repo-slug>.pid) 2>/dev/null && echo "ALIVE" || echo "STALE"
+kill -0 $(cat /running/<repo-slug>.pid) 2>/dev/null && echo "ALIVE" || echo "STALE"
 
 # Remove stale PID file (ONLY if the process is actually dead):
-rm /home/megibot/.openclaw/workspace/claudius-dev/running/<repo-slug>.pid
+rm /running/<repo-slug>.pid
 ```
+
+---
+
+## Catch-up Tasks (`/catchup`)
+
+A control issue's queue entry records the pair its last `/catchup` ran with:
+
+```bash
+python3 autoswe.py queue status --repo OWNER/REPO --issue 123 | python3 -m json.tool
+
+# - "sync_from" / "sync_into": the upstream and downstream of the last /catchup
+# - "autoswe_status": "catching_up" while running; "caught_up" when the PR is open or updated, or the branch was already up to date
+# - "pr_number" / "pr_url": the catch-up PR (absent when already up to date)
+```
+
+**A catch-up stuck in `catching_up`** is a running status like any other. Use the zombie-task recovery in `debugging.md` (delete the `.pid`, then re-sync). While it is stuck it also blocks other control issues from catching up the same `sync_into` branch.
+
+**A catch-up whose conflict resolution failed** leaves the issue's worktree mid-merge. To inspect it, run `git -C <worktree> status`. Then either resolve and commit the merge by hand, push, and post `/retry`, or run `git merge --abort` and post `/retry` to replay the catch-up from scratch.
 
 ---
 
@@ -84,15 +100,15 @@ python3 autoswe.py queue status --repo OWNER/REPO --issue 123
 
 # 2. Edit queue.json directly to reset fields
 #    (Back up first!)
-cp /home/megibot/.openclaw/workspace/claudius-dev/data/queue.json \
-   /home/megibot/.openclaw/workspace/claudius-dev/data/queue.json.bak
+cp /data/queue.json \
+   /data/queue.json.bak
 
 # 3. Use python to patch the task:
 python3 -c "
 import json
-with open('/home/megibot/.openclaw/workspace/claudius-dev/data/queue.json') as f:
+with open('/data/queue.json') as f:
     q = json.load(f)
-slug = 'github/OWNER/REPO/123'  # adjust
+slug = 'gh:owner_repo_123'  # adjust: gh:<owner>_<repo>_<issue>; Azure is ado:<org>_<project>_<repo>_<issue>
 if slug in q:
     q[slug]['guard_blocked'] = False
     q[slug]['autoswe_status'] = None
@@ -102,7 +118,7 @@ if slug in q:
     q[slug]['last_dispatched_command_id'] = None
     q[slug]['session_id'] = None
     print('Reset', slug)
-with open('/home/megibot/.openclaw/workspace/claudius-dev/data/queue.json', 'w') as f:
+with open('/data/queue.json', 'w') as f:
     json.dump(q, f, indent=2)
 "
 
@@ -118,16 +134,16 @@ python3 autoswe.py sync
 
 ```bash
 # Main logs directory
-ls -lt /home/megibot/.openclaw/workspace/claudius-dev/logs/
+ls -lt /logs/
 
 # Latest log file
-tail -200 /home/megibot/.openclaw/workspace/claudius-dev/logs/autoswe.log
+tail -200 /logs/autoswe.log
 
 # Search for specific errors
-grep -i "error\|failed\|timeout" /home/megibot/.openclaw/workspace/claudius-dev/logs/autoswe.log | tail -50
+grep -i "error\|failed\|timeout" /logs/autoswe.log | tail -50
 
 # Search for a specific issue
-grep "OWNER/REPO.*123" /home/megibot/.openclaw/workspace/claudius-dev/logs/autoswe.log | tail -30
+grep "OWNER/REPO.*123" /logs/autoswe.log | tail -30
 
 # Claude Code session logs
 ls -lt ~/.claude/sessions/
@@ -136,7 +152,7 @@ ls -lt ~/.claude/sessions/
 ls -lt ~/.claude/plans/
 
 # Review files (backend-neutral: $AUTOSWE_DIR/artifacts/reviews, defaults to <repo-root>/artifacts/reviews)
-ls -lt "${AUTOSWE_DIR:-/home/megibot/.openclaw/workspace/claudius-dev}"/artifacts/reviews/
+ls -lt "${AUTOSWE_DIR:-}"/artifacts/reviews/
 ```
 
 **Key log patterns:**
@@ -147,6 +163,7 @@ ls -lt "${AUTOSWE_DIR:-/home/megibot/.openclaw/workspace/claudius-dev}"/artifact
 - `[CLAUDE]` — Claude Code session info (cost, duration, session ID)
 - `[LIMIT]` — Guard/limit firings (max attempts, time limit)
 - `[LABEL]` — Label changes
+- `[CATCHUP]` — `/catchup` pre-check, sync, conflict resolution and PR outcome
 
 ---
 
@@ -154,22 +171,25 @@ ls -lt "${AUTOSWE_DIR:-/home/megibot/.openclaw/workspace/claudius-dev}"/artifact
 
 ```bash
 # Runtime config
-cat /home/megibot/.openclaw/workspace/claudius-dev/config/autoswe.env
+cat /config/autoswe.env
 
 # Repo configuration (PATs, branch overrides, auto-dispatch)
-cat /home/megibot/.openclaw/workspace/claudius-dev/config/repos.json
+cat /config/repos.json
 
 # Plan prompt
-cat /home/megibot/.openclaw/workspace/claudius-dev/config/prompts/plan.txt
+cat /config/prompts/plan.txt
 
 # Fix prompt
-cat /home/megibot/.openclaw/workspace/claudius-dev/config/prompts/fix.txt
+cat /config/prompts/fix.txt
 
 # Review prompt
-cat /home/megibot/.openclaw/workspace/claudius-dev/config/prompts/review.txt
+cat /config/prompts/review.txt
+
+# Conflict-resolution prompt (used by /sync and /catchup)
+cat /config/prompts/conflict_resolution.txt
 
 # Welcome comment
-cat /home/megibot/.openclaw/workspace/claudius-dev/config/welcome_comment.txt
+cat /config/welcome_comment.txt
 ```
 
 ---
@@ -187,7 +207,7 @@ claude --version
 echo $ANTHROPIC_API_KEY | head -c 10
 
 # Check if custom base URL is configured
-grep ANTHROPIC_BASE_URL /home/megibot/.openclaw/workspace/claudius-dev/config/autoswe.env
+grep ANTHROPIC_BASE_URL /config/autoswe.env
 
 # Test API connectivity
 curl -s -o /dev/null -w "%{http_code}" https://api.anthropic.com/v1/messages \
@@ -206,7 +226,7 @@ ps aux | grep -i "claude" | grep -v grep
 kill -9 <PID>
 
 # Clean up stale PID file
-rm /home/megibot/.openclaw/workspace/claudius-dev/running/<repo-slug>.pid
+rm /running/<repo-slug>.pid
 ```
 
 ### Poller Not Picking Up New Issues
@@ -225,7 +245,7 @@ python3 autoswe.py sync
 # 4. Check repos.json — is the repo configured?
 python3 -c "
 import json
-with open('/home/megibot/.openclaw/workspace/claudius-dev/config/repos.json') as f:
+with open('/config/repos.json') as f:
     r = json.load(f)
 for k, v in r.items():
     if k.startswith('_'): continue
@@ -247,7 +267,7 @@ ps aux --sort=-rss | head -20
 pkill -f "claude.*agent" || true
 
 # Clean worktrees to free disk
-du -sh /home/megibot/.openclaw/workspace/claudius-dev/worktrees/*/
+du -sh /worktrees/*/
 ```
 
 ---
@@ -258,13 +278,13 @@ Each dispatched task gets a git worktree:
 
 ```bash
 # List active worktrees
-cd /home/megibot/.openclaw/workspace/claudius-dev && git worktree list
+cd  && git worktree list
 
 # Remove stale worktree (if task is done but worktree remains)
-git worktree remove /home/megibot/.openclaw/workspace/claudius-dev/worktrees/<branch> --force
+git worktree remove /worktrees/<branch> --force
 
 # Inspect a worktree
-ls -la /home/megibot/.openclaw/workspace/claudius-dev/worktrees/autoswe/issue-123/
+ls -la /worktrees/autoswe/issue-123/
 ```
 
 ---
@@ -276,14 +296,14 @@ ls -la /home/megibot/.openclaw/workspace/claudius-dev/worktrees/autoswe/issue-12
 pkill -f "claude.*agent" || true
 
 # 2. Clean stale PID files
-find /home/megibot/.openclaw/workspace/claudius-dev/running/ -name "*.pid" -exec rm {} \;
+find /running/ -name "*.pid" -exec rm {} \;
 
 # 3. Reset queue (optional — only if queue is corrupted)
-cp /home/megibot/.openclaw/workspace/claudius-dev/data/queue.json.bak \
-   /home/megibot/.openclaw/workspace/claudius-dev/data/queue.json
+cp /data/queue.json.bak \
+   /data/queue.json
 
 # 4. Full sync + dispatch
-cd /home/megibot/.openclaw/workspace/claudius-dev
+cd 
 python3 autoswe.py poller --drain
 ```
 
@@ -294,15 +314,6 @@ python3 autoswe.py poller --drain
 If autoSWE is set up with a cron job, check it:
 
 ```bash
-# OpenClaw cron jobs
-openclaw cron list
-
-# Check the poller cron
-openclaw cron get <job-id>
-
-# Manually trigger the job-runner
-openclaw cron run job-runner
-
 # System crontab (fallback)
 crontab -l 2>/dev/null | grep autoswe
 ```
@@ -310,7 +321,6 @@ crontab -l 2>/dev/null | grep autoswe
 If autoSWE isn't running on a schedule, set up a recurring cron:
 
 ```bash
-# Via OpenClaw cron tool (preferred)
 # Schedule: every 10 minutes
 # Payload: python3 autoswe.py poller
 ```

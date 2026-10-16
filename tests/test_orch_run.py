@@ -3,6 +3,8 @@
 Each test verifies that run() routes Action.kind to the correct handler
 and returns the right DispatchResult shape.
 """
+import dataclasses
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1504,3 +1506,220 @@ def test_run_retry_replays_review():
     with patch("autoswe.harness.reviewer.run_review") as mock_direct:
         pass  # verify it wasn't called above
     assert not mock_direct.called
+
+
+# ------ /catchup: _run_catchup and its retry replay ------
+
+
+def _catchup_world(strategy: str | None = None, *, sync: tuple[str, str] | None = None):
+    """A control-issue World with the /catchup pair stored on the task."""
+    world = _make_world(base_branch="master")
+    cfg = {"SYNC_STRATEGY": strategy} if strategy else {}
+    task = dataclasses.replace(world.task, sync_from=sync[0], sync_into=sync[1]) if sync else world.task
+    return dataclasses.replace(world, cfg=cfg, task=task)
+
+
+def _catchup_action(upstream="master", downstream="develop"):
+    return Action(kind="catchup", slug="owner/repo_42", attempt_count=1,
+                  sync_from=upstream, sync_into=downstream)
+
+
+def _stub_catchup_git(stack: ExitStack, tmp_path: Path, *, behind=3, branches_exist=True,
+                      sync=None, wt_exists=False):
+    """Stub every git/VCS seam _run_catchup touches; return the mocks by name."""
+    wt = tmp_path / "wt"
+    if wt_exists:
+        wt.mkdir(exist_ok=True)
+    mocks = {
+        "ensure_clone": stack.enter_context(patch("autoswe.orch.run.worktree_mod.ensure_clone")),
+        "fetch_prune": stack.enter_context(patch("autoswe.orch.run.worktree_mod.fetch_prune")),
+        "main_clone_path": stack.enter_context(patch(
+            "autoswe.orch.run.worktree_mod.main_clone_path", return_value=tmp_path / "main")),
+        "remote_branch_exists": stack.enter_context(patch(
+            "autoswe.orch.run.worktree_mod.remote_branch_exists", return_value=branches_exist)),
+        "branch_divergence": stack.enter_context(patch(
+            "autoswe.orch.run.worktree_mod.branch_divergence", return_value=(2, behind))),
+        "worktree_path": stack.enter_context(patch(
+            "autoswe.orch.run.worktree_mod.worktree_path", return_value=wt)),
+        "create_worktree": stack.enter_context(patch(
+            "autoswe.orch.run.worktree_mod.create_worktree", return_value=wt)),
+        "sync_branch": stack.enter_context(patch(
+            "autoswe.orch.run.worktree_mod.sync_branch",
+            return_value=sync or {"synced": True, "conflict": False})),
+        "resolve_branch_head": stack.enter_context(patch(
+            "autoswe.orch.run.worktree_mod.resolve_branch_head", return_value="abc1234")),
+        "get_vcs": stack.enter_context(patch("autoswe.orch.run.worktree_mod.get_vcs")),
+    }
+    mocks["get_vcs"].return_value.branch_name.side_effect = lambda n: f"autoswe/issue-{n}"
+    return mocks
+
+
+def _fake_open_pr(task, cfg, repo_cfg, progress_callback=None, *, target_branch=None):
+    """Stand-in for ship.open_pr: caches a PR identity on the task, as the real one does."""
+    task["pr_number"] = 7
+    task["pr_url"] = "https://github.com/owner/repo/pull/7"
+    return "DONE: PR #7"
+
+
+def test_run_routes_catchup_kind_to_run_catchup(tmp_path):
+    with patch("autoswe.orch.run._run_catchup") as mock_catchup:
+        mock_catchup.return_value = DispatchResult(done_content="DONE_SUMMARY\tx\t")
+        run(_catchup_action(), _catchup_world())
+
+    assert mock_catchup.call_args[0][1:3] == ("master", "develop")
+
+
+def test_run_catchup_clean_merge_opens_pr_into_downstream(tmp_path):
+    with ExitStack() as stack:
+        mocks = _stub_catchup_git(stack, tmp_path, behind=3)
+        open_pr = stack.enter_context(patch("autoswe.orch.run.ship.open_pr", side_effect=_fake_open_pr))
+        resolve = stack.enter_context(patch("autoswe.orch.run.coder.resolve_sync_conflicts"))
+        result = run(_catchup_action(), _catchup_world())
+
+    assert result.done_content.startswith("DONE_SUMMARY\tCaught up `develop` with `master`")
+    assert "3 upstream commit(s) merged in" in result.done_content
+    assert "conflict file(s) resolved" not in result.done_content
+    assert result.done_content.endswith("\tabc1234")
+    assert result.pr_number == 7
+    assert result.pr_url == "https://github.com/owner/repo/pull/7"
+    mocks["create_worktree"].assert_called_once()
+    assert mocks["create_worktree"].call_args[0][3] == "develop"  # cut from downstream
+    assert open_pr.call_args.kwargs["target_branch"] == "develop"
+    resolve.assert_not_called()
+
+
+def test_run_catchup_always_merges_even_when_rebase_configured(tmp_path):
+    with ExitStack() as stack:
+        mocks = _stub_catchup_git(stack, tmp_path, behind=1)
+        stack.enter_context(patch("autoswe.orch.run.ship.open_pr", side_effect=_fake_open_pr))
+        run(_catchup_action(), _catchup_world(strategy="rebase"))
+
+    sync_args = mocks["sync_branch"].call_args[0]
+    assert sync_args[4] == "master"  # merged in from upstream
+    assert sync_args[6]["SYNC_STRATEGY"] == "merge"
+
+
+def test_run_catchup_up_to_date_creates_no_worktree_and_no_pr(tmp_path):
+    with ExitStack() as stack:
+        mocks = _stub_catchup_git(stack, tmp_path, behind=0)
+        open_pr = stack.enter_context(patch("autoswe.orch.run.ship.open_pr"))
+        result = run(_catchup_action(), _catchup_world())
+
+    assert result.done_content.startswith("DONE_SUMMARY\tAlready up to date")
+    assert "No PR needed" in result.done_content
+    mocks["create_worktree"].assert_not_called()
+    mocks["sync_branch"].assert_not_called()
+    open_pr.assert_not_called()
+
+
+def test_run_catchup_missing_branch_fails_before_any_worktree(tmp_path):
+    with ExitStack() as stack:
+        mocks = _stub_catchup_git(stack, tmp_path, branches_exist=False)
+        result = run(_catchup_action(), _catchup_world())
+
+    assert result.done_content == "FAILED: `master` does not exist on origin"
+    mocks["create_worktree"].assert_not_called()
+
+
+def test_run_catchup_without_pair_fails_cleanly(tmp_path):
+    result = run(_catchup_action(upstream=None), _catchup_world())
+    assert result.done_content.startswith("FAILED: /catchup needs")
+
+
+def test_run_catchup_rejects_same_upstream_and_downstream(tmp_path):
+    result = run(_catchup_action("develop", "develop"), _catchup_world())
+    assert result.done_content.startswith("FAILED: /catchup --from and --into are both `develop`")
+
+
+def test_run_catchup_reuses_existing_worktree(tmp_path):
+    with ExitStack() as stack:
+        mocks = _stub_catchup_git(stack, tmp_path, wt_exists=True)
+        stack.enter_context(patch("autoswe.orch.run.ship.open_pr", side_effect=_fake_open_pr))
+        result = run(_catchup_action(), _catchup_world())
+
+    assert result.done_content.startswith("DONE_SUMMARY")
+    mocks["create_worktree"].assert_not_called()
+
+
+def test_run_catchup_conflict_resolved_with_catchup_prompt(tmp_path):
+    with ExitStack() as stack:
+        _stub_catchup_git(stack, tmp_path, sync={
+            "synced": False, "conflict": True, "conflict_files": ["a.py", "b.py"],
+        })
+        stack.enter_context(patch("autoswe.orch.run.ship.open_pr", side_effect=_fake_open_pr))
+        resolve = stack.enter_context(patch(
+            "autoswe.orch.run.coder.resolve_sync_conflicts",
+            return_value=HandlerResult("DONE_SUMMARY\tresolved\tabc1234")))
+        result = run(_catchup_action(), _catchup_world())
+
+    assert result.done_content.startswith("DONE_SUMMARY")
+    assert "2 conflict file(s) resolved" in result.done_content
+    kwargs = resolve.call_args.kwargs
+    assert kwargs["sync_base"] == "master"
+    assert kwargs["catchup"] is True
+
+
+def test_run_catchup_resolution_failure_fails_and_skips_pr(tmp_path):
+    with ExitStack() as stack:
+        _stub_catchup_git(stack, tmp_path, sync={
+            "synced": False, "conflict": True, "conflict_files": ["a.py"],
+        })
+        open_pr = stack.enter_context(patch("autoswe.orch.run.ship.open_pr"))
+        stack.enter_context(patch(
+            "autoswe.orch.run.coder.resolve_sync_conflicts",
+            return_value=HandlerResult("FAILED: agent could not resolve a.py")))
+        result = run(_catchup_action(), _catchup_world())
+
+    assert result.done_content == "FAILED: agent could not resolve a.py"
+    open_pr.assert_not_called()
+
+
+def test_run_catchup_pr_failure_is_reported_as_failed(tmp_path):
+    with ExitStack() as stack:
+        _stub_catchup_git(stack, tmp_path)
+        stack.enter_context(patch(
+            "autoswe.orch.run.ship.open_pr", return_value="FAILED: could not create PR: boom"))
+        result = run(_catchup_action(), _catchup_world())
+
+    assert result.done_content == "FAILED: could not create PR: boom"
+
+
+def test_run_catchup_sync_exception_becomes_failed(tmp_path):
+    with ExitStack() as stack:
+        _stub_catchup_git(stack, tmp_path)
+        stack.enter_context(patch(
+            "autoswe.orch.run.worktree_mod.sync_branch", side_effect=RuntimeError("boom")))
+        result = run(_catchup_action(), _catchup_world())
+
+    assert result.done_content == "FAILED: boom"
+
+
+def test_run_catchup_persists_pair_on_task_for_later_runs(tmp_path):
+    seen = {}
+
+    def capture(task, cfg, repo_cfg, progress_callback=None, *, target_branch=None):
+        seen.update(sync_from=task.get("sync_from"), sync_into=task.get("sync_into"))
+        return _fake_open_pr(task, cfg, repo_cfg, target_branch=target_branch)
+
+    with ExitStack() as stack:
+        _stub_catchup_git(stack, tmp_path)
+        stack.enter_context(patch("autoswe.orch.run.ship.open_pr", side_effect=capture))
+        run(_catchup_action(), _catchup_world())
+
+    assert seen == {"sync_from": "master", "sync_into": "develop"}
+
+
+def test_run_retry_replays_catchup_with_stored_pair_never_fix(tmp_path):
+    world = _catchup_world(sync=("master", "develop"))
+    world = dataclasses.replace(world, task=dataclasses.replace(
+        world.task, last_dispatched_command="/catchup"))
+    action = Action(kind="retry", slug=world.task.slug)
+
+    with patch("autoswe.orch.run._run_catchup") as mock_catchup, \
+         patch("autoswe.orch.run._run_fix_with_sync") as mock_fix:
+        mock_catchup.return_value = DispatchResult(done_content="DONE_SUMMARY\tx\t")
+        result = run(action, world)
+
+    mock_fix.assert_not_called()
+    assert mock_catchup.call_args[0][1:3] == ("master", "develop")
+    assert result.replayed_command == "/catchup"

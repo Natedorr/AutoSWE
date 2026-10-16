@@ -104,6 +104,10 @@ TASK_FIELDS: tuple[TaskField, ...] = (
     # failing/unreachable CI sets this instead of asking the user to re-post
     # /pr; the next green CI observation re-emits create_pr and clears it.
     TaskField("pr_deferred", "pr_deferred", False),
+    # /catchup sticky pair (control issues): the upstream the downstream
+    # branch merges from, and the downstream it is caught up into.
+    TaskField("sync_from", "sync_from", None),
+    TaskField("sync_into", "sync_into", None),
 )
 
 
@@ -262,6 +266,9 @@ class TaskState:
     # pending/failing/unreachable CI sets this instead of asking the user to
     # re-post /pr; the next green CI observation re-emits create_pr.
     pr_deferred: bool = False
+    # /catchup sticky pair — see TASK_FIELDS.
+    sync_from: str | None = None
+    sync_into: str | None = None
 
     @classmethod
     def from_queue(cls, slug: str, entry: dict) -> TaskState:
@@ -318,6 +325,11 @@ class World:
     # ``comments_fetched`` idiom. decide() does not consume this yet (P2 is
     # report-only); it is plumbed through for /sync + queue status.
     ci: CIStatus | None = None
+    # (sync_into, issue_number) for every *other* task in this repo whose
+    # /catchup is running right now. decide() refuses a catch-up whose
+    # downstream is already being caught up by another issue. Plumbed in by
+    # loop.py from the queue so decide() stays I/O-free.
+    catchup_in_progress: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -339,6 +351,7 @@ class Action:
         "ci_recovered",
         "ci_error_warn",
         "retry_deferred_pr",
+        "catchup",
     ]
     slug: str
     plan_branch: str | None = None
@@ -361,6 +374,17 @@ class Action:
     # test gate (guidance is already fully assembled by decide()). None for
     # every human dispatch.
     trigger: Literal["ci", "gate"] | None = None
+    # For kind="catchup": the upstream branch merged in (``sync_from``) and the
+    # downstream branch the work branch is cut from and PR'd into
+    # (``sync_into``). ``direct`` is the phase-3 --direct flag (not yet
+    # honoured). Resolved by decide() from flags-over-stored.
+    sync_from: str | None = None
+    sync_into: str | None = None
+    direct: bool = False
+    # For kind="refused" with refused_command="/catchup": "syntax" (missing
+    # --from/--into) or "busy" (downstream busy; see busy_issue).
+    refusal_detail: str | None = None
+    busy_issue: int | None = None
 
 
 @dataclass(frozen=True)

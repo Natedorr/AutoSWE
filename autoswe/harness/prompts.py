@@ -360,14 +360,31 @@ def build_conflict_resolution_prompt(
     plan_text: str | None = None,
     base_branch: str = "main",
     repo_cfg: dict | None = None,
+    catchup: bool = False,
 ) -> str:
-    """Build the conflict-resolution prompt from template + task data."""
+    """Build the conflict-resolution prompt from template + task data.
+
+    *catchup* swaps the plan/issue framing for a /catchup one: this is a
+    branch-to-branch merge (``base_branch`` upstream into the task's
+    ``sync_into`` downstream), so there is no plan and no issue to preserve.
+    """
     owner, repo = task["owner"], task["repo"]
     issue_num = task["issue_number"]
     template = load_conflict_resolution_prompt(repo_cfg=repo_cfg)
 
     plan_block = ""
-    if plan_text:
+    title = task.get("title", f"Issue #{issue_num}")
+    body = task.get("body", "") or "(no description)"
+    if catchup:
+        downstream = task.get("sync_into") or "downstream"
+        plan_block = (
+            f"This is a catch-up, not a feature: merging upstream `{base_branch}` "
+            f"into downstream `{downstream}`. Preserve the downstream-only changes, "
+            "take the upstream fixes, and do not invent features.\n"
+        )
+        title = f"Catch up `{downstream}` with `{base_branch}`"
+        body = "(catch-up run: no issue description)"
+    elif plan_text:
         plan_block = (
             "This is the active plan for this branch. "
             "The merge must preserve its intent.\n\n"
@@ -380,8 +397,8 @@ def build_conflict_resolution_prompt(
         "{{OWNER}}": owner,
         "{{REPO}}": repo,
         "{{ISSUE_NUMBER}}": str(issue_num),
-        "{{TITLE}}": task.get("title", f"Issue #{issue_num}"),
-        "{{BODY}}": task.get("body", "") or "(no description)",
+        "{{TITLE}}": title,
+        "{{BODY}}": body,
         "{{PLAN}}": plan_block,
         "{{CONFLICT_FILES}}": conflict_files_text,
         "{{BASE_BRANCH}}": base_branch,

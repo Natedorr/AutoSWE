@@ -14,11 +14,13 @@ AUTOSWE_LABELS = {
     "autoswe:planning":   {"color": "d93f0b", "description": "Planning in progress"},
     "autoswe:fixing":     {"color": "d93f0b", "description": "Fix in progress"},
     "autoswe:syncing":    {"color": "d93f0b", "description": "Sync in progress"},
+    "autoswe:catching_up": {"color": "d93f0b", "description": "Catch-up merge in progress"},
     "autoswe:reviewing":  {"color": "d93f0b", "description": "Review in progress"},
     "autoswe:shipping":   {"color": "d93f0b", "description": "PR creation in progress"},
     "autoswe:planned":    {"color": "0e8a16", "description": "Plan ready, waiting for /fix"},
     "autoswe:fixed":      {"color": "ededed", "description": "Fix completed"},
     "autoswe:synced":     {"color": "ededed", "description": "Sync completed"},
+    "autoswe:caught_up":  {"color": "ededed", "description": "Catch-up PR opened or updated"},
     "autoswe:shipped":    {"color": "ededed", "description": "PR created"},
     "autoswe:reviewed":   {"color": "ededed", "description": "Review approved (LGTM)"},
     "autoswe:review_failed":  {"color": "fbca04", "description": "Review found issues — needs /fix"},
@@ -37,15 +39,15 @@ _PREFIX = "autoswe:"
 # The canonical set of autoswe_status values (no prefix).
 # Used to validate every status write — catches typos before they drift.
 VALID_STATUSES = frozenset(
-    {"pending", "planning", "fixing", "syncing", "reviewing", "shipping",
-     "planned", "fixed", "synced", "shipped", "reviewed",
+    {"pending", "planning", "fixing", "syncing", "catching_up", "reviewing", "shipping",
+     "planned", "fixed", "synced", "caught_up", "shipped", "reviewed",
      "review_failed", "review_blocked", "test_failed", "ci_failed",
      "waiting", "failed", "skipped", "aborted", "error"}
 )
 
 # Status groupings — imported by decide/emit/loop instead of re-declaring sets.
-RUNNING_STATUSES = frozenset({"planning", "fixing", "syncing", "reviewing", "shipping"})
-COMPLETED_STATUSES = frozenset({"fixed", "synced", "shipped", "reviewed"})
+RUNNING_STATUSES = frozenset({"planning", "fixing", "syncing", "catching_up", "reviewing", "shipping"})
+COMPLETED_STATUSES = frozenset({"fixed", "synced", "caught_up", "shipped", "reviewed"})
 TERMINAL_STATUSES = COMPLETED_STATUSES | frozenset({"failed", "skipped", "aborted", "error"})
 # Non-terminal resting states a /review lands in when it found problems. The
 # task is NOT done: /pr is blocked until the user posts /fix (which re-reviews).
@@ -78,6 +80,7 @@ _KIND_TO_RUNNING = {
     "fix": "fixing",
     "retry": "fixing",  # default: retry replays fix
     "sync_branch": "syncing",
+    "catchup": "catching_up",
     "ship_pr": "shipping",
     "review": "reviewing",
 }
@@ -86,6 +89,7 @@ _KIND_TO_COMPLETED = {
     "fix": "fixed",
     "retry": "fixed",  # retry replays fix phase
     "sync_branch": "synced",
+    "catchup": "caught_up",
     "ship_pr": "shipped",
     "review": "reviewed",
 }
@@ -95,6 +99,7 @@ _CMD_TO_KIND = {
     "/fix": "fix",
     "/pr": "ship_pr",
     "/sync": "sync_branch",
+    "/catchup": "catchup",
     "/retry": "retry",
     "/review": "review",
 }

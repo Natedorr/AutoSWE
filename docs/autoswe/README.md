@@ -6,7 +6,7 @@ This folder is the **authoritative source of truth** for how autoSWE works. Edit
 
 autoSWE is **queue-driven**, not label-driven:
 
-- **Issue/work-item comments are the input.** Slash commands in comments (`/plan`, `/fix`, `/pr`, `/sync`, `/retry`, `/skip`, `/abort`) are how a user steers a task without touching a terminal.
+- **Issue/work-item comments are the input.** Slash commands in comments (`/plan`, `/fix`, `/pr`, `/sync`, `/catchup`, `/retry`, `/skip`, `/abort`) are how a user steers a task without touching a terminal.
 - **`data/queue.json` is the run state.** Each task carries an `autoswe_status` enum (`null → pending → RUNNING (planning|fixing|syncing|reviewing|shipping) → COMPLETED (planned|fixed|synced|shipped|reviewed) | waiting | failed | skipped | aborted`) and, when a fresh command is detected, a `pending_command`. The dispatch loop reads this — nothing else — to decide what to run next.
 - **`autoswe:*` labels are a one-way mirror for humans.** autoSWE writes them so a user can see state at a glance. autoSWE never *reads* a label to decide what to do. Adding or removing a label by hand changes nothing — steer with a comment.
 - **The queue can go stale.** It is a snapshot from the last sync. Before autoSWE actually runs a task it re-fetches the issue (state + comments) and reconciles: closed → skip, new/edited/deleted comments → re-derive the command.

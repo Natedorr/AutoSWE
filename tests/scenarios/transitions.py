@@ -3089,6 +3089,154 @@ TRANSITIONS: list[dict[str, Any]] = [
             "pr_number": 1,
         },
     },
+    # ---- /catchup on a control issue (sync_from/sync_into, merge into a
+    # downstream branch, PR into it). The control issue has no queue task on
+    # the first run; repeats and retries start from a stored pair. ----
+    {
+        "name": "catchup_clean_merge",
+        "description": "Control issue: /catchup --from master --into develop merges cleanly → caught_up with a PR into develop",
+        "start": {
+            "issue": {"body": "Keep develop caught up with master.\n\n/catchup --from master --into develop"},
+            "queue_task": None,
+        },
+        "git_calls": ["ensure_clone", "fetch_prune", "branch_divergence", "create_worktree", "sync_branch"],
+        "expect": {
+            "label_after": "autoswe:caught_up",
+            "autoswe_status": "caught_up",
+            "no_claude_calls": True,
+            "pr_number": 1,
+            "comment_contains": ["Completed with command", "Caught up"],
+        },
+    },
+    {
+        "name": "catchup_up_to_date",
+        "description": "/catchup when develop already contains master → caught_up with no PR and no Claude",
+        "meta": {"script_catchup": {"divergence": {"ahead": 3, "behind": 0}}},
+        "start": {
+            "issue": {"body": "Keep develop caught up with master.\n\n/catchup --from master --into develop"},
+            "queue_task": None,
+        },
+        "git_calls": ["ensure_clone", "fetch_prune", "branch_divergence"],
+        "expect": {
+            "label_after": "autoswe:caught_up",
+            "autoswe_status": "caught_up",
+            "no_claude_calls": True,
+            "comment_contains": ["Completed with command", "Already up to date"],
+        },
+    },
+    {
+        "name": "catchup_missing_branch_fails",
+        "description": "/catchup whose --from branch is absent on origin → failed, nothing created",
+        "meta": {"script_catchup": {"missing_branches": ["master"]}},
+        "start": {
+            "issue": {"body": "Keep develop caught up with master.\n\n/catchup --from master --into develop"},
+            "queue_task": None,
+        },
+        "git_calls": ["ensure_clone", "fetch_prune"],
+        "expect": {
+            "label_after": "autoswe:failed",
+            "autoswe_status": "failed",
+            "no_claude_calls": True,
+            "comment_contains": ["does not exist on origin"],
+        },
+    },
+    {
+        "name": "catchup_bare_without_pair_refused",
+        "description": "Bare /catchup on a fresh control issue (no --from/--into, nothing stored) → refused, status untouched",
+        "start": {
+            "issue": {"body": "Keep develop caught up with master."},
+            "comments": [
+                {
+                    "body": "/catchup",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": None,
+        },
+        "expect": {
+            "labels_never": ["autoswe:caught_up", "autoswe:catching_up", "autoswe:failed"],
+            "no_claude_calls": True,
+            "no_git_calls": True,
+            "comment_contains": ["needs both branches"],
+        },
+    },
+    {
+        "name": "catchup_conflict_resolved",
+        "description": "/catchup merge conflicts; Claude resolves with the catch-up prompt → caught_up with PR",
+        "meta": {"script_sync_conflict": True},
+        "start": {
+            "issue": {"body": "Keep develop caught up with master.\n\n/catchup --from master --into develop"},
+            "queue_task": None,
+        },
+        "claude_responses": [
+            {"text": "Resolved conflicts.", "session_id": "s-catchup-42", "subtype": "success"},
+        ],
+        "git_calls": ["sync_branch", "get_merge_conflict_files"],
+        "expect": {
+            "label_after": "autoswe:caught_up",
+            "autoswe_status": "caught_up",
+            "pr_number": 1,
+            "comment_contains": ["Completed with command", "Caught up"],
+            "claude_permission": "bypassPermissions",
+        },
+    },
+    {
+        "name": "catchup_conflict_unresolved",
+        "description": "/catchup conflict that Claude cannot resolve → failed, worktree left conflicted, no PR",
+        "meta": {"script_sync_conflict": True},
+        "start": {
+            "issue": {"body": "Keep develop caught up with master.\n\n/catchup --from master --into develop"},
+            "queue_task": None,
+        },
+        "claude_responses": [
+            {"text": "error", "session_id": "s-catchup-42", "subtype": "error_max_turns"},
+        ],
+        "git_calls": ["sync_branch"],
+        "expect": {
+            "label_after": "autoswe:failed",
+            "autoswe_status": "failed",
+            "comment_contains": ["Failed:", "/retry"],
+            "claude_permission": "bypassPermissions",
+        },
+    },
+    {
+        "name": "catchup_retry_replays_failed_catchup",
+        "description": "A failed /catchup is replayed by /retry with the stored pair (never /fix) → caught_up",
+        "start": {
+            "issue": {"body": "Keep develop caught up with master.\n\n/catchup --from master --into develop"},
+            "comments": [
+                {
+                    "body": "/retry",
+                    "created_at": "2026-01-01T03:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Keep develop caught up with master.",
+                "autoswe_status": "failed",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "last_dispatched_command": "/catchup",
+                "sync_from": "master",
+                "sync_into": "develop",
+                "provider": "github",
+            },
+        },
+        "git_calls": ["ensure_clone", "fetch_prune", "branch_divergence", "create_worktree", "sync_branch"],
+        "expect": {
+            "label_after": "autoswe:caught_up",
+            "autoswe_status": "caught_up",
+            "no_claude_calls": True,
+            "pr_number": 1,
+            "comment_contains": ["Completed with command", "Caught up"],
+        },
+    },
 ]
 
 
@@ -3117,6 +3265,8 @@ CODEX_TRANSITIONS: list[str] = [
     "failed_then_fix_restarts",            # /fix on a failed task re-dispatches (issue #192)
     "fix_red_suite_marks_test_failed",     # Post-fix test gate red → test_failed (backend-agnostic gate in _finalize_fix)
     "test_gate_no_changes_stays_test_failed",  # No-changes fix on a red branch re-lands test_failed, not fixed (issue #276)
+    "catchup_conflict_resolved",     # /catchup conflict resolved by the backend → caught_up with PR
+    "catchup_conflict_unresolved",   # /catchup conflict the backend cannot resolve → failed
 ]
 
 

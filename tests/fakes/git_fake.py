@@ -27,6 +27,18 @@ class GitFake:
         self._scripted_commits: list[dict] = []
         self._commit_index = 0
         self._fail_creations: set[str] = set()
+        # /catchup pre-check state: what origin looks like and how far the
+        # downstream branch is from the upstream (ahead, behind).
+        self._divergence: tuple[int, int] = (1, 1)
+        self._missing_remote_branches: set[str] = set()
+
+    def script_divergence(self, *, ahead: int = 1, behind: int = 1) -> None:
+        """Set the ``(ahead, behind)`` result for the next branch_divergence calls."""
+        self._divergence = (ahead, behind)
+
+    def script_missing_remote_branch(self, branch: str) -> None:
+        """Make ``remote_branch_exists`` report *branch* as absent on origin."""
+        self._missing_remote_branches.add(branch)
 
     def script_sync(self, result: dict) -> None:
         """Add a scripted result for the next sync_branch call."""
@@ -119,12 +131,31 @@ class GitFake:
         self.calls.append({"func": "get_merge_conflict_files", "wt": str(wt)})
         return []
 
+    def fetch_prune(self, main: Path) -> None:
+        self.calls.append({"func": "fetch_prune", "main": str(main)})
+
+    def remote_branch_exists(self, main: Path, branch: str) -> bool:
+        self.calls.append({"func": "remote_branch_exists", "main": str(main), "branch": branch})
+        return branch not in self._missing_remote_branches
+
+    def branch_divergence(self, main: Path, into: str, from_: str) -> tuple[int, int]:
+        self.calls.append({"func": "branch_divergence", "main": str(main),
+                           "into": into, "from_": from_})
+        return self._divergence
+
+    def resolve_branch_head(self, wt: Path) -> str | None:
+        # Mirrors the real function on the fake's nonexistent worktree path:
+        # no head sha. Not recorded, so pr_gate's call pattern is unchanged.
+        return None
+
     # ----- Patching -----
 
     _real_worktree_funcs = None  # Class-level cache of real worktree functions
     _WORKTREE_FUNC_NAMES = (
         "worktree_path", "main_clone_path", "ensure_clone",
         "create_worktree", "commit_and_push", "sync_branch",
+        "fetch_prune", "remote_branch_exists", "branch_divergence",
+        "resolve_branch_head",
     )
 
     @classmethod
@@ -156,6 +187,10 @@ class GitFake:
         wt_mod.create_worktree = self.create_worktree
         wt_mod.commit_and_push = self.commit_and_push
         wt_mod.sync_branch = self.sync_branch
+        wt_mod.fetch_prune = self.fetch_prune
+        wt_mod.remote_branch_exists = self.remote_branch_exists
+        wt_mod.branch_divergence = self.branch_divergence
+        wt_mod.resolve_branch_head = self.resolve_branch_head
 
         # Patch into modules that import worktree
         import sys as _sys

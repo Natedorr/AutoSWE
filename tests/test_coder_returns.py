@@ -972,3 +972,66 @@ def test_resume_fix_prompt_names_backend_question_tool(tmp_path):
     assert "autoswe_comment" in prompt
     # The stop rule must be in the resume prompt too.
     assert "STOP" in prompt
+
+
+# ------ /catchup: resolve_sync_conflicts with an explicit base + catch-up prompt ------
+
+
+def _run_resolve_capture(tmp_path, task, **kwargs):
+    """Run resolve_sync_conflicts once; return (prompt, runner kwargs)."""
+    captured = {}
+
+    def fake_run(prompt, **run_kwargs):
+        captured["prompt"] = prompt
+        captured["kwargs"] = run_kwargs
+        return _r("Resolved.", "s-new", "success")
+
+    with _patch_resolve(tmp_path):
+        with patch("autoswe.harness.runner.run", side_effect=fake_run):
+            with patch("autoswe.harness.coder.subprocess.run") as mock_run:
+                mock_run.returncode = 0
+                mock_run.stdout = "abc1234"
+                from autoswe.harness.coder import resolve_sync_conflicts
+                resolve_sync_conflicts(
+                    task, ["a.py"], repo_cfg={"provider": "github"}, cfg={}, **kwargs,
+                )
+    return captured["prompt"], captured["kwargs"]
+
+
+def test_resolve_sync_conflicts_explicit_base_overrides_plan_branch(tmp_path):
+    """A catch-up names its upstream explicitly; the task's plan_branch is not the merge base."""
+    task = make_task()
+    task["plan_branch"] = "feature-x"
+
+    prompt, _ = _run_resolve_capture(tmp_path, task, sync_base="master")
+
+    assert "origin/master" in prompt
+    assert "feature-x" not in prompt
+
+
+def test_resolve_sync_conflicts_catchup_ignores_session_and_plan(tmp_path):
+    """A catch-up is a branch merge, not a continuation of the fix session or its plan."""
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("SECRET PLAN", encoding="utf-8")
+    task = make_task(session_id="sess-fix-prev")
+    task["plan_file_path"] = str(plan_file)
+    task["sync_into"] = "develop"
+
+    prompt, kwargs = _run_resolve_capture(
+        tmp_path, task, sync_base="master", catchup=True,
+    )
+
+    assert kwargs.get("resume") is None  # never resumes the task's fix session
+    assert "SECRET PLAN" not in prompt
+    assert "catch-up" in prompt
+    assert "`develop`" in prompt and "`master`" in prompt
+    assert plan_file.read_text(encoding="utf-8") == "SECRET PLAN"  # plan left untouched
+
+
+def test_resolve_sync_conflicts_default_path_still_resumes_session(tmp_path):
+    """Without catchup=True the existing /sync behaviour is unchanged."""
+    task = make_task(session_id="sess-fix-prev")
+
+    _, kwargs = _run_resolve_capture(tmp_path, task)
+
+    assert kwargs.get("resume") == "sess-fix-prev"

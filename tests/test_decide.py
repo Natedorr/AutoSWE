@@ -85,6 +85,8 @@ def _load_world(data: dict) -> World:
         last_consumed_reply_id=task_data.get("last_consumed_reply_id"),
         session_id=task_data.get("session_id"),
         pr_number=task_data.get("pr_number"),
+        sync_from=task_data.get("sync_from"),
+        sync_into=task_data.get("sync_into"),
         guard_blocked=task_data.get("guard_blocked", False),
         gh_closed=task_data.get("gh_closed", False),
         pending_command=task_data.get("pending_command"),
@@ -126,6 +128,7 @@ def _load_world(data: dict) -> World:
         cfg=cfg,
         repo_cfg=data.get("repo_cfg", {}),
         ci=ci,
+        catchup_in_progress=tuple(tuple(x) for x in data.get("catchup_in_progress", [])),
     )
 
 
@@ -143,6 +146,11 @@ def _load_action(data: dict) -> Action:
         limit_reason=data.get("limit_reason"),
         refused_command=data.get("refused_command"),
         trigger=data.get("trigger"),
+        sync_from=data.get("sync_from"),
+        sync_into=data.get("sync_into"),
+        direct=data.get("direct", False),
+        refusal_detail=data.get("refusal_detail"),
+        busy_issue=data.get("busy_issue"),
     )
 
 
@@ -192,6 +200,10 @@ def test_decide(scenario: Path):
     assert actual.limit_reason == expected.limit_reason, f"limit_reason: expected={expected.limit_reason!r} actual={actual.limit_reason!r}"
     assert actual.refused_command == expected.refused_command, f"refused_command: expected={expected.refused_command!r} actual={actual.refused_command!r}"
     assert actual.trigger == expected.trigger, f"trigger: expected={expected.trigger!r} actual={actual.trigger!r}"
+    assert actual.sync_from == expected.sync_from
+    assert actual.sync_into == expected.sync_into
+    assert actual.refusal_detail == expected.refusal_detail
+    assert actual.busy_issue == expected.busy_issue
 
 
 # ---------------------------------------------------------------------------

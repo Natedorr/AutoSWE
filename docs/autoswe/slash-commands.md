@@ -10,6 +10,7 @@ Comments are the only steering input. A slash command at the start of a comment 
 | `/fix` | `/fix [--branch <name>] [with <guidance>]` | any | `fixed` or `failed` | Yes (write access) | OWNER/AUTHOR |
 | `/pr` | `/pr` | `fixed` (with commits) | `shipped` | No | OWNER/AUTHOR |
 | `/sync` | `/sync` | any (with worktree) | `synced` or `failed` | Only on conflict | OWNER/AUTHOR |
+| `/catchup` | `/catchup --from <upstream> --into <downstream>` | any (control issue; no prior work needed) | `caught_up` or `failed` | Always: merges upstream into a branch cut from downstream, opens/updates a PR into downstream | OWNER/AUTHOR |
 | `/retry` | `/retry` | `failed`/`error` | `pending` → handler → final state | Yes (replayed) | OWNER/AUTHOR |
 | `/skip` | `/skip` | any | `skipped` | No | OWNER/AUTHOR |
 | `/abort` | `/abort` | any | `aborted` | No | OWNER/AUTHOR |
@@ -28,11 +29,25 @@ Returns `(command, guidance, branch)` or `None`.
 | `--branch <name>` | `/plan --branch develop` | Sets `plan_branch` on task (the fork base). Only `/plan` (re)pins it: on any *other* command (`/fix`, `/sync`, …) the flag is ignored once `plan_branch` is already set — a later `--branch` can't move which branch the task works on (issue #196). The token is the full whitespace-delimited word and is validated against git's ref-name rules (approximation of `git check-ref-format --branch`); the trailing-period typo is repaired (`docs.` → `docs`). An invalid token that can't be repaired is ignored (default branch) — issue #184 |
 | `with <guidance>` | `/fix with performance focus` | Appends guidance to fix prompt via `{{GUIDANCE_BLOCK}}` |
 | Both | `/fix --branch main with hotfix` | Branch + guidance combined |
+| `--from <upstream> --into <downstream>` | `/catchup --from master --into develop` | `/catchup` only. `--from` is the branch merged in; `--into` is the branch the work branch is cut from and PR'd into. Both are stored on the task as `sync_from`/`sync_into`: flags override the stored pair, a bare `/catchup` reuses it, and flag order doesn't matter. Each name goes through the same validation as `--branch` |
+| `--direct` | `/catchup --from master --into develop --direct` | `/catchup` only. Reserved for a later phase (push the merge straight to `<downstream>` on a clean merge). Currently refused |
 
 ### Regex Patterns
 
-- Command: `r"/(?:fix|plan|pr|retry|skip|sync|abort|review)"` (case-insensitive, at line start)
+- Command: `r"/(?:fix|plan|pr|retry|skip|sync|catchup|abort|review)"` (case-insensitive, at line start)
 - Branch: `r"--branch\s+(\S+)"` followed by `_sanitize_branch_token()` validation (git ref-name rules, trailing-period repair)
+
+## `/catchup` Semantics
+
+`/catchup` (`decide.py:_decide_catchup()`, `run.py:_run_catchup()`) is for control issues, and it differs from the work commands:
+
+- **Pre-state:** any resting state; no prior plan or fix needed. Refused on `guard_blocked` like every other command, and a no-op while the task is `catching_up`.
+- **Pair:** flags win; otherwise the stored `sync_from`/`sync_into` is used. If either is missing, the bot posts the syntax and the status does not change.
+- **Body vs. comment:** a body `/catchup` triggers the first run only, because a body has no comment ID to dedup on.
+- **Busy downstream:** refused if another task in the same repo is `catching_up` into the same `--into`.
+- **Always merge:** `SYNC_STRATEGY` is ignored. A catch-up merges and never rebases.
+- **Outcome:** `caught_up` when the PR is opened or updated, or when the branch was already up to date (no PR). `failed` when conflict resolution fails; the worktree stays conflicted and `/retry` replays the catch-up.
+- **No issue linkage:** the PR has no `Fixes #N`, and the control issue is not closed on merge.
 
 ## Multi-Command-Last-Wins Rule
 
@@ -55,6 +70,8 @@ When `/retry` action is run (`orch/run.py:_run_retry()`):
 1. `decide()` sets `attempt_count = 1` (resets the counter)
 2. `run()` looks at `last_dispatched_command` for the last substantive command (not `/pr`, `/sync`, `/retry`, `/skip`, or `/abort`)
 3. Replays that command via the appropriate planner/coder/ship handler
+
+`/catchup` is replayable too: `_run_retry()` re-runs `_run_catchup` with the `sync_from`/`sync_into` pair stored on the task. It never falls back to `/fix`.
 
 A refusal advances the watermark (`last_dispatched_command`) so the same command isn't re-refused every tick (see [data-model.md](data-model.md)). That means a refused `/review` on a `failed`/`error` task leaves `last_dispatched_command = "/review"`. To keep `/retry` re-running the *work* — not a review that could flip the task to `reviewed` → shippable despite a failed fix — `_run_retry()` falls back to `/fix` when `last_dispatched_command` is `/review` and the task is still `failed`/`error` (issue #192). `/plan` is *not* subject to this fallback: a failed plan is retried as a plan.
 

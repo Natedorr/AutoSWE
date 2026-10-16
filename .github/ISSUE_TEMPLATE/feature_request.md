@@ -21,7 +21,7 @@ assignees: []
 - [ ] Poll / sync (issue discovery, queue building) — see [pipeline.md](../../docs/autoswe/pipeline.md)
 - [ ] Dispatch / decide (state machine, watermark logic) — see [data-model.md](../../docs/autoswe/data-model.md)
 - [ ] Handlers (plan, fix, review, PR, sync) — see [handlers.md](../../docs/autoswe/handlers.md)
-- [ ] Slash commands (`/plan`, `/fix`, `/pr`, `/review`, `/sync`, `/retry`, `/skip`, `/abort`) — see [slash-commands.md](../../docs/autoswe/slash-commands.md)
+- [ ] Slash commands (`/plan`, `/fix`, `/pr`, `/review`, `/sync`, `/catchup`, `/retry`, `/skip`, `/abort`) — see [slash-commands.md](../../docs/autoswe/slash-commands.md)
 - [ ] Labels / status mirror — see [labels.md](../../docs/autoswe/labels.md)
 - [ ] Provider abstraction (GitHub, Azure DevOps, new provider) — see [providers.md](../../docs/autoswe/providers.md)
 - [ ] Git worktrees — see [git-worktrees.md](../../docs/autoswe/git-worktrees.md)

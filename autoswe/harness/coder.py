@@ -735,6 +735,8 @@ def resolve_sync_conflicts(
     repo_cfg: dict,
     cfg: dict,
     progress_callback=None,
+    sync_base: str | None = None,
+    catchup: bool = False,
 ) -> HandlerResult:
     """Resolve merge conflicts in an existing worktree using Claude.
 
@@ -742,6 +744,11 @@ def resolve_sync_conflicts(
     Uses a focused conflict-resolution prompt seeded with the plan.
     Resumes the prior session for continuity.
     After Claude commits the merge, pushes and returns DONE_SUMMARY.
+
+    *sync_base* is the branch that was merged in; the default is the task's
+    plan_branch, else the repo default. *catchup* selects the catch-up prompt
+    and never resumes a prior session: a catch-up is a branch-to-branch merge,
+    not a continuation of the task's fix session.
 
     Does NOT call create_worktree — resolves the existing path.
     Does NOT call fast_forward_worktree — would clobber conflicted state.
@@ -751,8 +758,8 @@ def resolve_sync_conflicts(
     base_branch = task.get("base_branch", "main")
     # The branch that was actually merged into this one (issue #187):
     # plan_branch when /plan --branch pinned it, else the repo default.
-    sync_base = task.get("plan_branch") or base_branch
-    session_id = task.get("session_id")
+    sync_base = sync_base or task.get("plan_branch") or base_branch
+    session_id = None if catchup else task.get("session_id")
     provider = (repo_cfg or {}).get("provider", "github")
     rc = repo_cfg or {}
 
@@ -765,7 +772,7 @@ def resolve_sync_conflicts(
 
     # Read plan file if available — do NOT pop it (persist for downstream /fix)
     plan_text = None
-    plan_file_path = task.get("plan_file_path")
+    plan_file_path = None if catchup else task.get("plan_file_path")
     if plan_file_path:
         try:
             plan_text = Path(plan_file_path).read_text(encoding="utf-8")
@@ -775,6 +782,7 @@ def resolve_sync_conflicts(
 
     prompt = build_conflict_resolution_prompt(
         task, conflict_files, plan_text=plan_text, base_branch=sync_base, repo_cfg=rc,
+        catchup=catchup,
     )
 
     # No genuinely-extra tools — the full read-write set comes from

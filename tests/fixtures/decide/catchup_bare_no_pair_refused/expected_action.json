@@ -1,0 +1,7 @@
+{
+  "kind": "refused",
+  "slug": "gh:owner_repo_42",
+  "triggering_comment_id": 10,
+  "refused_command": "/catchup",
+  "refusal_detail": "syntax"
+}

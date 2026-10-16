@@ -15,6 +15,7 @@ Effects are validated by kind + relevant fields (not exact equality):
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -91,6 +92,8 @@ def _load_world(data: dict) -> World:
         last_consumed_reply_id=task_data.get("last_consumed_reply_id"),
         session_id=task_data.get("session_id"),
         pr_number=task_data.get("pr_number"),
+        sync_from=task_data.get("sync_from"),
+        sync_into=task_data.get("sync_into"),
         guard_blocked=task_data.get("guard_blocked", False),
         gh_closed=task_data.get("gh_closed", False),
         pending_command=task_data.get("pending_command"),
@@ -131,6 +134,7 @@ def _load_world(data: dict) -> World:
         cfg=cfg,
         repo_cfg=data.get("repo_cfg", {}),
         ci=ci,
+        catchup_in_progress=tuple(tuple(x) for x in data.get("catchup_in_progress", [])),
     )
 
 
@@ -148,6 +152,11 @@ def _load_action(data: dict) -> Action:
         limit_reason=data.get("limit_reason"),
         refused_command=data.get("refused_command"),
         trigger=data.get("trigger"),
+        sync_from=data.get("sync_from"),
+        sync_into=data.get("sync_into"),
+        direct=data.get("direct", False),
+        refusal_detail=data.get("refusal_detail"),
+        busy_issue=data.get("busy_issue"),
     )
 
 
@@ -2177,3 +2186,24 @@ def test_plan_branch_not_used_for_auto_create_pr_base():
         f"create_pr must use base_branch (main) as pr_base, not plan_branch. "
         f"Got pr_base={pr_effect.pr_base!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# /catchup: a catch-up is not a coding kind, so it never writes a session
+# checkpoint, even when the run reports a session id.
+# ---------------------------------------------------------------------------
+
+
+def test_catchup_success_does_not_set_last_good_session_id():
+    base = FIXTURE_DIR / "catchup_success_persists_pair_and_pr"
+    world = _load_world(json.loads((base / "world.json").read_text(encoding="utf-8")))
+    action = _load_action(json.loads((base / "action.json").read_text(encoding="utf-8")))
+    result = dataclasses.replace(_load_result(base / "result.json"), session_id="sess-catchup-1")
+
+    patch: dict = {}
+    for effect in emit(action, result, world):
+        if effect.kind == "patch_queue":
+            patch.update(effect.queue_patch or {})
+
+    assert patch["autoswe_status"] == "caught_up"
+    assert "last_good_session_id" not in patch

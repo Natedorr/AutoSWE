@@ -10,7 +10,7 @@ Layer B at the right seam already.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from autoswe.core.config import resolve_harness
@@ -175,6 +175,11 @@ def run(
         dr = _run_sync(task, rc, cfg, progress_callback)
         return dr
 
+    if kind == "catchup":
+        return _run_catchup(
+            task, action.sync_from, action.sync_into, rc, cfg, progress_callback,
+        )
+
     if kind == "retry":
         dr = _run_retry(action, world, task, cfg, rc, progress_callback)
         return dr
@@ -334,6 +339,104 @@ def _run_sync(
                 done_content=f"FAILED: {result.get('error', 'sync failed')}",
             )
     except Exception as e:  # Poller resilience — any sync dispatch failure is caught and reported
+        return DispatchResult(done_content=f"FAILED: {e}")
+
+
+def _run_catchup(
+    task: dict,
+    upstream: str | None,
+    downstream: str | None,
+    repo_cfg: dict,
+    cfg: dict,
+    progress_callback: Callable[[str], None] | None,
+) -> DispatchResult:
+    """Merge ``upstream`` into a work branch cut from ``downstream`` and PR it.
+
+    Pre-check (both branches on origin; ``downstream`` already contains
+    ``upstream`` ⇒ DONE_SUMMARY with no worktree and no PR). Otherwise: cut
+    ``autoswe/issue-N`` from ``downstream``, always MERGE ``upstream`` in (never
+    rebase, whatever SYNC_STRATEGY says), let the agent resolve conflicts, push,
+    and open or update the PR into ``downstream``.
+    """
+    owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
+    provider = repo_cfg.get("provider", "github")
+    token = task["_token"]
+    if not upstream or not downstream:
+        return DispatchResult(done_content="FAILED: /catchup needs --from <upstream> and --into <downstream>")
+    if upstream == downstream:
+        return DispatchResult(done_content=f"FAILED: /catchup --from and --into are both `{upstream}`")
+    # Stored on the task so the PR linkage skip, the PR body and the conflict
+    # prompt all see the pair this run is working on.
+    task["sync_from"] = upstream
+    task["sync_into"] = downstream
+    base_branch = task.get("base_branch", "main")
+    try:
+        worktree_mod.ensure_clone(owner, repo, token, cfg, downstream, provider, default_branch=base_branch)
+        main = worktree_mod.main_clone_path(owner, repo, cfg, provider)
+        worktree_mod.fetch_prune(main)
+        for branch in (upstream, downstream):
+            if not worktree_mod.remote_branch_exists(main, branch):
+                return DispatchResult(done_content=f"FAILED: `{branch}` does not exist on origin")
+        ahead, behind = worktree_mod.branch_divergence(main, downstream, upstream)
+        if behind == 0:
+            log(f"[CATCHUP] {task['id']} {downstream} already contains {upstream} (ahead={ahead})")
+            return DispatchResult(
+                done_content=(
+                    f"DONE_SUMMARY\tAlready up to date: `{downstream}` already contains "
+                    f"`{upstream}` ({ahead} commit(s) ahead). No PR needed.\t"
+                ),
+            )
+
+        wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
+        if not wt.exists():
+            wt = worktree_mod.create_worktree(
+                owner, repo, issue_num, downstream, token, cfg, provider,
+                default_branch=base_branch, pull_strategy="reset", push_new=True,
+            )
+        if progress_callback:
+            progress_callback(f"Merging `origin/{upstream}` into `{downstream}`'s catch-up branch&hellip;")
+        # Catch-up is always a merge: a rebase would rewrite the downstream work
+        # branch and, once squash/rebase merged, break ancestry for the next run.
+        merge_cfg = {**cfg, "SYNC_STRATEGY": "merge"}
+        result = worktree_mod.sync_branch(wt, owner, repo, issue_num, upstream, provider, merge_cfg)
+        log(f"[CATCHUP] {task['id']} synced={result.get('synced')} conflict={result.get('conflict')} behind={behind}")
+
+        conflict_files: list[str] = []
+        if result.get("conflict"):
+            conflict_files = result.get("conflict_files", [])
+            if progress_callback:
+                progress_callback(f"Catch-up conflict in {len(conflict_files)} file(s) — invoking Claude to resolve...")
+            hr = coder.resolve_sync_conflicts(
+                task, conflict_files, repo_cfg=repo_cfg, cfg=cfg,
+                progress_callback=progress_callback, sync_base=upstream, catchup=True,
+            )
+            if not hr.done_content.startswith("DONE"):
+                return _to_dispatch(hr, task)
+        elif not result.get("synced"):
+            return DispatchResult(done_content=f"FAILED: {result.get('error', 'catch-up sync failed')}")
+
+        pr = ship.open_pr(task, cfg, repo_cfg, progress_callback=progress_callback, target_branch=downstream)
+        if not pr.startswith("DONE"):
+            return DispatchResult(done_content=pr)
+
+        branch = worktree_mod.get_vcs(repo_cfg).branch_name(issue_num)
+        sha = worktree_mod.resolve_branch_head(wt) or ""
+        conflict_note = f", {len(conflict_files)} conflict file(s) resolved" if conflict_files else ""
+        pr_url = task.get("pr_url") or ""
+        summary = (
+            f"Caught up `{downstream}` with `{upstream}` via `{branch}`: "
+            f"{behind} upstream commit(s) merged in{conflict_note}.\n\n"
+            f"PR into `{downstream}`: {pr_url}\n\n"
+            "Merge it with a **merge commit, not squash**. A squash leaves "
+            f"`{upstream}`'s commits out of `{downstream}`'s ancestry, so it stays "
+            "behind and the same conflicts recur."
+        )
+        return DispatchResult(
+            done_content=f"DONE_SUMMARY\t{summary}\t{sha}",
+            pr_number=task.get("pr_number"),
+            pr_url=task.get("pr_url"),
+        )
+    except Exception as e:  # Poller resilience — any catch-up failure is caught and reported
         return DispatchResult(done_content=f"FAILED: {e}")
 
 
@@ -636,6 +739,15 @@ def _run_retry(
     if last_cmd == "/review" and world.task.status in ("failed", "error"):
         last_cmd = "/fix"
     last_cmd = last_cmd or "/fix"
+
+    # A failed /catchup replays as a catch-up with the pair it was started
+    # with (persisted on the task by _run_catchup / emit), never as /fix.
+    if last_cmd == "/catchup":
+        dr = _run_catchup(
+            task, task.get("sync_from"), task.get("sync_into"),
+            repo_cfg, cfg, progress_callback,
+        )
+        return replace(dr, replayed_command="/catchup")
 
     # Fork-on-retry: branch from the last known-good session on backends that
     # support session forking (Claude), leaving the original intact for rollback.

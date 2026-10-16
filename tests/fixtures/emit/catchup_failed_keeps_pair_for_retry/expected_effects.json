@@ -1,0 +1,22 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "does not exist on origin",
+      "/retry"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "failed"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "failed",
+      "sync_from": "master",
+      "sync_into": "develop",
+      "last_dispatched_command": "/catchup"
+    }
+  }
+]

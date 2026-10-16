@@ -1,0 +1,44 @@
+{
+  "api": {
+    "issue": {
+      "number": 42,
+      "title": "Keep develop caught up with master",
+      "body": "Keep develop caught up.",
+      "owner": "owner",
+      "repo": "repo",
+      "state": "open",
+      "base_branch": "master"
+    },
+    "comments": [
+      {
+        "body": "/catchup --from master --into develop",
+        "created_at": "2026-01-01T01:00:00Z",
+        "author_login": "owner",
+        "id": 10,
+        "is_bot": false
+      }
+    ]
+  },
+  "task": {
+    "slug": "gh:owner_repo_42",
+    "owner": "owner",
+    "repo": "repo",
+    "issue_number": 42,
+    "title": "Keep develop caught up with master",
+    "body": "Keep develop caught up.",
+    "status": "catching_up",
+    "plan_branch": null,
+    "base_branch": "master",
+    "attempt_count": 1,
+    "first_dispatched_at": null,
+    "last_dispatched_command": "/catchup",
+    "last_dispatched_command_id": 10,
+    "last_consumed_reply_id": null,
+    "session_id": null,
+    "pr_number": null,
+    "guard_blocked": false,
+    "gh_closed": false,
+    "sync_from": null,
+    "sync_into": null
+  }
+}

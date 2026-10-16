@@ -33,7 +33,7 @@ assignees: []
 - Target repo: `owner/repo`
 - Issue / work-item number:
 - `autoswe_status` (from `autoswe:*` label):
-- Slash command that triggered it: `/plan` `/fix` `/pr` `/review` `/sync` `/retry` `/skip` `/abort`
+- Slash command that triggered it: `/plan` `/fix` `/pr` `/review` `/sync` `/catchup` `/retry` `/skip` `/abort`
 
 ---
 
