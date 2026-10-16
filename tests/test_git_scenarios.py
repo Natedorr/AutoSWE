@@ -13,11 +13,14 @@ from pathlib import Path
 
 import pytest
 
+from autoswe.orch import run as run_mod
 from autoswe.vcs.worktree import (
+    branch_divergence,
     commit_and_push,
     create_worktree,
     ensure_clone,
     fast_forward_worktree,
+    fetch_prune,
     sync_branch,
 )
 from tests.git_fixtures import GitWorld
@@ -1263,3 +1266,133 @@ class TestFailureInjection:
         finally:
             # Always restore permissions for cleanup
             git_dir.chmod(0o755)
+
+
+# ------------------------------------------------------------------
+# Group F: /catchup — downstream branch merges upstream (real git)
+# ------------------------------------------------------------------
+
+
+class TestCatchup:
+    """F1-F8: branch divergence counts and the merge-only catch-up sync."""
+
+    @staticmethod
+    def _seed(world: GitWorld) -> Path:
+        """Remote with main + develop; returns the main clone."""
+        world.init_remote(initial_files={"README.md": "# test", "shared.txt": "original"})
+        world.add_remote_branch("develop", from_branch="main")
+        main = world.make_main_clone()
+        return main
+
+    def test_F1_divergence_up_to_date(self, git_world: GitWorld):
+        """F1: develop already contains main → (ahead 0, behind 0)."""
+        main = self._seed(git_world)
+        fetch_prune(main)
+
+        assert branch_divergence(main, "develop", "main") == (0, 0)
+
+    def test_F2_divergence_fast_forwardable(self, git_world: GitWorld):
+        """F2: main has one commit develop lacks → (0, 1)."""
+        main = self._seed(git_world)
+        git_world.push_commit_to_remote("main", {"fix.txt": "fix"}, "upstream fix")
+        fetch_prune(main)
+
+        assert branch_divergence(main, "develop", "main") == (0, 1)
+
+    def test_F3_divergence_both_ways(self, git_world: GitWorld):
+        """F3: each side has a commit the other lacks → (1, 1)."""
+        main = self._seed(git_world)
+        git_world.push_commit_to_remote("main", {"fix.txt": "fix"}, "upstream fix")
+        git_world.push_commit_to_remote("develop", {"dev.txt": "dev"}, "downstream work")
+        fetch_prune(main)
+
+        assert branch_divergence(main, "develop", "main") == (1, 1)
+
+    def test_F4_clean_catchup_merge_keeps_downstream_and_upstream(self, git_world: GitWorld):
+        """F4: a clean catch-up merge keeps both sides and is a merge commit."""
+        self._seed(git_world)
+        git_world.push_commit_to_remote("main", {"upstream.txt": "fix"}, "upstream fix")
+        git_world.push_commit_to_remote("develop", {"downstream.txt": "dev"}, "downstream work")
+        wt = git_world.make_worktree(1, base_branch="develop")
+
+        result = sync_branch(wt, git_world.owner, git_world.repo, 1, "main", cfg=git_world.cfg("merge"))
+
+        assert result["synced"] is True
+        assert result["conflict"] is False
+        assert (wt / "upstream.txt").exists()
+        assert (wt / "downstream.txt").exists()
+        assert git_world.is_merge_commit(wt)
+        # The work branch on origin contains the upstream commit: merge ancestry is intact.
+        ancestor = subprocess.run(
+            ["git", "-C", str(git_world.remote_dir), "merge-base", "--is-ancestor",
+             "main", git_world.branch_name(1)],
+            capture_output=True,
+        )
+        assert ancestor.returncode == 0
+
+    def test_F5_conflicting_catchup_merge_reports_conflict_files(self, git_world: GitWorld):
+        """F5: the same file changed on both sides → conflict, left in place for the agent."""
+        self._seed(git_world)
+        git_world.push_commit_to_remote("main", {"shared.txt": "upstream"}, "upstream edit")
+        git_world.push_commit_to_remote("develop", {"shared.txt": "downstream"}, "downstream edit")
+        wt = git_world.make_worktree(1, base_branch="develop")
+
+        result = sync_branch(wt, git_world.owner, git_world.repo, 1, "main", cfg=git_world.cfg("merge"))
+
+        assert result["conflict"] is True
+        assert "shared.txt" in result["conflict_files"]
+        assert git_world.merge_state(wt)["in_merge"] is True
+
+    def test_F6_repeat_catchup_builds_on_existing_remote_work_branch(self, git_world: GitWorld):
+        """F6: a second catch-up merges new upstream work onto the first run's pushed branch."""
+        self._seed(git_world)
+        git_world.push_commit_to_remote("main", {"first.txt": "1"}, "first upstream")
+        git_world.push_commit_to_remote("develop", {"dev.txt": "d"}, "downstream work")
+        wt = git_world.make_worktree(1, base_branch="develop")
+        first = sync_branch(wt, git_world.owner, git_world.repo, 1, "main", cfg=git_world.cfg("merge"))
+        assert first["synced"] is True
+
+        git_world.push_commit_to_remote("main", {"second.txt": "2"}, "second upstream")
+        second = sync_branch(wt, git_world.owner, git_world.repo, 1, "main", cfg=git_world.cfg("merge"))
+
+        assert second["synced"] is True
+        assert second["conflict"] is False
+        assert (wt / "first.txt").exists()
+        assert (wt / "second.txt").exists()
+        assert (wt / "dev.txt").exists()
+
+    def test_F7_run_catchup_merges_for_real_even_when_rebase_configured(self, git_world: GitWorld, monkeypatch):
+        """F7: end to end through _run_catchup with SYNC_STRATEGY=rebase → still a merge commit."""
+        self._seed(git_world)
+        git_world.push_commit_to_remote("main", {"upstream.txt": "fix"}, "upstream fix")
+        git_world.push_commit_to_remote("develop", {"downstream.txt": "dev"}, "downstream work")
+        task = {
+            "id": "gh:test_testrepo_1", "owner": git_world.owner, "repo": git_world.repo,
+            "issue_number": 1, "title": "Keep develop caught up", "body": "",
+            "_token": "ghp_fake", "base_branch": "develop",
+        }
+        monkeypatch.setattr(run_mod.ship, "open_pr", lambda t, *a, **k: "DONE: PR #1")
+
+        result = run_mod._run_catchup(
+            task, "main", "develop", {"provider": "github"}, git_world.cfg("rebase"), None,
+        )
+
+        assert result.done_content.startswith("DONE_SUMMARY\tCaught up `develop` with `main`")
+        assert git_world.is_merge_commit(git_world.worktree_path_for(1))
+
+    def test_F8_run_catchup_up_to_date_makes_no_worktree(self, git_world: GitWorld, monkeypatch):
+        """F8: develop already contains main → no worktree is created on disk."""
+        self._seed(git_world)
+        task = {
+            "id": "gh:test_testrepo_1", "owner": git_world.owner, "repo": git_world.repo,
+            "issue_number": 1, "title": "Keep develop caught up", "body": "",
+            "_token": "ghp_fake", "base_branch": "develop",
+        }
+        monkeypatch.setattr(run_mod.ship, "open_pr", lambda *a, **k: pytest.fail("no PR when up to date"))
+
+        result = run_mod._run_catchup(
+            task, "main", "develop", {"provider": "github"}, git_world.cfg("merge"), None,
+        )
+
+        assert result.done_content.startswith("DONE_SUMMARY\tAlready up to date")
+        assert not git_world.worktree_path_for(1).exists()

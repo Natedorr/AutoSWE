@@ -17,11 +17,13 @@ This file is **the source of truth for what autoSWE runs**. The poll loop writes
 | `planning` | Planning in progress (agent run active) | No (protected) |
 | `fixing` | Fix in progress (agent run active) | No (protected) |
 | `syncing` | Sync in progress (agent run active) | No (protected) |
+| `catching_up` | Catch-up merge in progress (control issues; agent run active) | No (protected) |
 | `reviewing` | Review in progress (agent run active) | No (protected) |
 | `shipping` | PR creation in progress (agent run active) | No (protected) |
 | `planned` | Plan posted; waiting for `/fix` or a reply | No |
 | `fixed` | Fix completed | No |
 | `synced` | Sync completed | No |
+| `caught_up` | Catch-up PR opened or updated, or branch already up to date | No |
 | `shipped` | PR created | No |
 | `reviewed` | Review completed | No |
 | `test_failed` | Fix committed/pushed, but the post-fix test gate found the branch suite red — needs `/fix` | No |
@@ -52,6 +54,8 @@ A non-`pending` task only becomes dispatchable again when `decide()` flips it �
 | `review_prompt` | `str` | Custom review prompt path from `repos.json` (optional, resolved against AUTOSWE_DIR) |
 | `conflict_resolution_prompt` | `str` | Custom conflict resolution prompt path from `repos.json` (optional, resolved against AUTOSWE_DIR) |
 | `plan_branch` | `str` | The branch this task's work is cut from and kept in sync with — the fork base. Set once by `/plan --branch <name>`; a `--branch` on any *later* command (`/fix`, `/sync`, …) does not move it (issue #196). It drives worktree creation, `/sync`, review diffs, and the pre-PR sync. It is **not** the PR target: `/pr` and the auto-create-PR path always target `base_branch` (the repo's configured default), so a `develop` plan can't route the PR into `develop`. |
+| `sync_from` | `str \| None` | `/catchup` upstream: the branch merged in. Stored by `emit()` on every catch-up; a bare `/catchup` reuses it. Only control issues set it. |
+| `sync_into` | `str \| None` | `/catchup` downstream: the branch the work branch is cut from and PR'd into. Stored with `sync_from`. Its presence also makes the task skip PR-to-issue linkage and close-on-merge. |
 | `provider` | `str` | `"github"` or `"azure"` |
 | `autoswe_status` | `str \| None` | Run-state enum (see above). **Source of truth.** |
 | `session_id` | `str` | Agent session ID (Claude Code or Codex); used to resume the planner/coder session. **Cleared on `FAILED`** so the next dispatch does not resume a broken session |
@@ -191,7 +195,7 @@ class Action:
                   "retry", "skip", "abort", "noop",
                   "post_welcome", "advance_watermark",
                   "mark_failed_limit", "refused",
-                  "review"]
+                  "review", "catchup"]
     slug: str
     plan_branch: str | None = None
     guidance: str | None = None

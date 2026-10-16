@@ -1,0 +1,21 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "Completed with command `/catchup`",
+      "Already up to date"
+    ]
+  },
+  {
+    "kind": "set_status",
+    "status": "caught_up"
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "autoswe_status": "caught_up",
+      "sync_from": "master",
+      "sync_into": "develop"
+    }
+  }
+]

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from autoswe.commands.parser import parse_slash_command
+from autoswe.commands.parser import parse_catchup_args, parse_slash_command
 from autoswe.core.slug import make_slug, slug_to_filename
 from autoswe.tracking.comments import (
     _find_last_bot_comment_ts,
@@ -865,3 +865,41 @@ def test_parser_commands_all_in_welcome_template():
 
     for cmd in commands:
         assert cmd in template, f"Command {cmd!r} is in parser but missing from welcome_comment.txt"
+
+
+# ---------------------------------------------------------------------------
+# /catchup: the command line, its flags, and the word boundary
+# ---------------------------------------------------------------------------
+
+
+def test_parse_catchup_command_keeps_flags_as_guidance():
+    cmd, guidance, branch = parse_slash_command("/catchup --from master --into develop")
+    assert cmd == "/catchup"
+    assert parse_catchup_args(guidance) == ("master", "develop", False)
+    assert branch is None
+
+
+@pytest.mark.parametrize(
+    "guidance, expected",
+    [
+        ("--from master --into develop", ("master", "develop", False)),
+        ("--into develop --from master", ("master", "develop", False)),
+        ("--from master", ("master", None, False)),
+        (None, (None, None, False)),
+        ("--from bad..name --into develop", (None, "develop", False)),
+        ("--from master --into develop --direct", ("master", "develop", True)),
+        # A missing value must not swallow the next flag as a branch name.
+        ("--from --into develop", (None, "develop", False)),
+    ],
+)
+def test_parse_catchup_args_flag_order_and_validation(guidance, expected):
+    assert parse_catchup_args(guidance) == expected
+
+
+def test_catchup_regex_respects_word_boundary():
+    assert parse_slash_command("/catchupfoo --from a --into b") is None
+
+
+def test_catchup_matches_backtick_prefixed_line():
+    cmd, _, _ = parse_slash_command("`/catchup --from master --into develop")
+    assert cmd == "/catchup"

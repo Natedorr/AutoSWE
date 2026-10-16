@@ -1,0 +1,15 @@
+[
+  {
+    "kind": "post_comment",
+    "contains": [
+      "needs both branches",
+      "--from <upstream> --into <downstream>"
+    ]
+  },
+  {
+    "kind": "patch_queue",
+    "patch_contains": {
+      "last_dispatched_command": "/catchup"
+    }
+  }
+]

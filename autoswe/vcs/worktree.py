@@ -322,6 +322,22 @@ def remote_branch_exists_on(wt: Path, branch: str) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def branch_divergence(main: Path, into: str, from_: str) -> tuple[int, int]:
+    """Return ``(ahead, behind)`` of ``origin/<into>`` relative to ``origin/<from_>``.
+
+    *ahead* counts commits on ``<into>`` that ``<from_>`` lacks; *behind*
+    counts commits on ``<from_>`` that ``<into>`` lacks (what a catch-up must
+    merge in). Call :func:`fetch_prune` first. ``behind == 0`` means the
+    downstream already contains the upstream.
+    """
+    result = _run(
+        ["git", "-C", str(main), "rev-list", "--left-right", "--count",
+         f"origin/{into}...origin/{from_}"],
+    )
+    ahead, behind = result.stdout.split()
+    return int(ahead), int(behind)
+
+
 def remote_default_branch(wt: Path) -> str | None:
     """The repo's actual default branch per origin, or None.
 

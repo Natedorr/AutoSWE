@@ -29,6 +29,8 @@ Start at [`../README.md`](../README.md) for how these are driven.
 | [E2E-17b](E2E-17b.md) | the author allowlist | scoped, run alone |
 | [E2E-18](E2E-18.md) | a body command, and closing the issue | scoped, run alone |
 | [E2E-19](E2E-19.md) | `with <guidance>` reaching the prompt | soft assertions |
+| [E2E-20](E2E-20.md) | `/catchup` on a control issue: clean merge into `develop`, then a repeat | control issue; creates its own branch state |
+| [E2E-21](E2E-21.md) | `/catchup` with a conflict the agent resolves | control issue; soft assertion on the resolution |
 | [OOB](OOB.md) | crash → `error`, and the wall-clock guard | needs the operator |
 
 ## Writing a new case

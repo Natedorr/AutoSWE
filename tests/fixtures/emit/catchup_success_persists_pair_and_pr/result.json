@@ -1,0 +1,8 @@
+{
+  "done_content": "DONE_SUMMARY\tCaught up `develop` with `master`: 2 upstream commit(s) merged in.\tabc1234",
+  "cost_usd": 0.01,
+  "duration_seconds": 12.0,
+  "session_id": null,
+  "pr_number": 7,
+  "pr_url": "https://github.com/owner/repo/pull/7"
+}

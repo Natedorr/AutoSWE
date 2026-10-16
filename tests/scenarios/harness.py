@@ -212,9 +212,14 @@ class _PatchManager:
         orig = _subproc.run
 
         def fake_subprocess_run(*a, **kw):
+            # ``gh pr create`` must print the new PR's URL (the provider reads
+            # the PR number from it); every other command succeeds silently.
+            cmd = list(a[0]) if a and isinstance(a[0], (list, tuple)) else []
+            is_pr_create = cmd[:3] == ["gh", "pr", "create"]
+
             class FakeResult:
                 returncode = 0
-                stdout = ""
+                stdout = "https://github.com/owner/repo/pull/1\n" if is_pr_create else ""
                 stderr = ""
             return FakeResult()
 
@@ -522,6 +527,15 @@ def _script_git_ops(
             "commit_sha": "abc1234",
             "changed": True,
         })
+
+    # /catchup rows: origin state for the pre-check. ``script_catchup`` is
+    # ``{"divergence": {"ahead": N, "behind": N}, "missing_branches": [...]}``;
+    # the default (behind=1) is a catch-up with work to merge.
+    catchup = row_meta.get("script_catchup")
+    if catchup is not None:
+        gt_fake.script_divergence(**catchup.get("divergence", {"ahead": 1, "behind": 1}))
+        for missing in catchup.get("missing_branches", []):
+            gt_fake.script_missing_remote_branch(missing)
 
 
 # ---------------------------------------------------------------------------

@@ -66,6 +66,7 @@ reads the same — substitute "tag" for "label" throughout. See
 | **Failure & guards** | [12](cases/E2E-12.md) | scoped config, run alone |
 | **Steering** | [13](cases/E2E-13.md) [14](cases/E2E-14.md) [15](cases/E2E-15.md) | `/skip`, `/abort`, `--branch` |
 | **Parsing** | [17](cases/E2E-17.md) [17b](cases/E2E-17b.md) [18](cases/E2E-18.md) | 17b and 18 are scoped, run alone |
+| **Catch-up** | [20](cases/E2E-20.md) [21](cases/E2E-21.md) | control issues only: they need a `develop` branch set up first (see each case's setup) |
 | **Operator-assisted** | [OOB](cases/OOB.md) | needs a hand on the box; once per release |
 
 Cases within a group are independent — seed and drive them in parallel. The three scoped cases

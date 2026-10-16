@@ -1,0 +1,9 @@
+{
+  "kind": "catchup",
+  "slug": "gh:owner_repo_42",
+  "triggering_comment_id": 0,
+  "attempt_count": 1,
+  "sync_from": "master",
+  "sync_into": "develop",
+  "guidance": "--from master --into develop"
+}

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from autoswe.commands.parser import parse_slash_command
+from autoswe.commands.parser import parse_catchup_args, parse_slash_command
 from autoswe.core.logging_utils import log
 from autoswe.orch.gate_policy import (
     auto_fix_on_gate_failure,
@@ -796,6 +796,12 @@ def decide(world: World) -> Action:
                 resume_session_id=task.session_id,
             )
 
+    # ------ /catchup (control issues) ------
+    # Routed before the generic restart machinery: a catch-up is valid from any
+    # resting state (not just completed/failed), and its flags decide the pair.
+    if slash_cmd == "/catchup" and task.status not in RUNNING_STATUSES:
+        return _decide_catchup(world, guidance, cmd_author, cmd_id)
+
     # ------ No slash command ------
     if slash_cmd is None:
         status = task.status
@@ -984,6 +990,73 @@ def decide(world: World) -> Action:
         )
 
     return Action(kind="noop", slug=task.slug)
+
+
+def _decide_catchup(
+    world: World,
+    guidance: str | None,
+    cmd_author: str | None,
+    cmd_id: int | None,
+) -> Action:
+    """Decide a ``/catchup`` (merge ``--from`` into a branch cut from ``--into``).
+
+    Flags win over the sticky pair stored on the task. A bare ``/catchup``
+    with nothing stored is refused with the syntax; a downstream another
+    issue is already catching up is refused as busy. A body-sourced command
+    (``cmd_id == 0``) triggers only the first run, like every body command.
+    """
+    task = world.task
+    if task.guard_blocked:
+        action = _check_restart_or_guard(world, "/catchup", guidance, None, cmd_author, cmd_id)
+        return action or Action(kind="noop", slug=task.slug)
+
+    if cmd_id and cmd_id > 0:
+        # Comment-sourced: already dispatched at or after this comment.
+        if task.last_dispatched_command == "/catchup" and cmd_id <= (task.last_dispatched_command_id or 0):
+            return Action(kind="noop", slug=task.slug)
+    else:
+        # Body-sourced: only the first run. A body /catchup has no comment ID
+        # to dedup on, so once it has been acted on (dispatched, or refused
+        # and recorded as last_dispatched_command) it is stale; a new
+        # comment-sourced /catchup is the only way to run it again.
+        if task.status not in (None, "pending"):
+            return Action(kind="noop", slug=task.slug)
+        if task.last_dispatched_command == "/catchup":
+            return Action(kind="noop", slug=task.slug)
+
+    flag_from, flag_into, direct = parse_catchup_args(guidance)
+    upstream = flag_from or task.sync_from
+    downstream = flag_into or task.sync_into
+    if not upstream or not downstream:
+        log(f"[DECIDE] {task.slug} /catchup refused: missing --from/--into")
+        return Action(
+            kind="refused", slug=task.slug, triggering_comment_id=cmd_id,
+            refused_command="/catchup", refusal_detail="syntax",
+        )
+    if direct:
+        log(f"[DECIDE] {task.slug} /catchup refused: --direct is not supported yet")
+        return Action(
+            kind="refused", slug=task.slug, triggering_comment_id=cmd_id,
+            refused_command="/catchup", refusal_detail="direct",
+        )
+    for other_into, other_issue in world.catchup_in_progress:
+        if other_into == downstream and other_issue != task.issue_number:
+            log(f"[DECIDE] {task.slug} /catchup refused: {downstream} busy with #{other_issue}")
+            return Action(
+                kind="refused", slug=task.slug, triggering_comment_id=cmd_id,
+                refused_command="/catchup", refusal_detail="busy", busy_issue=other_issue,
+            )
+
+    log(f"[DECIDE] {task.slug} action=catchup {upstream} -> {downstream}")
+    return Action(
+        kind="catchup",
+        slug=task.slug,
+        guidance=guidance,
+        attempt_count=1,
+        triggering_comment_id=cmd_id,
+        sync_from=upstream,
+        sync_into=downstream,
+    )
 
 
 def _resume_kind(task: object) -> str:  # type: ignore[type-arg]

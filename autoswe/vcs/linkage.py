@@ -83,10 +83,14 @@ def ensure_links(
     state = vcs.get_linkage(issue_num, branch, pr_number)
     missing = list(state.missing)
 
-    if phase in ("pr_open", "merge_observation"):
+    # A /catchup control issue stays open: its PR merges a branch into a
+    # downstream, not the issue's work. Skip the PR link (it would carry a
+    # closing keyword) and the close-on-merge edge for catch-up tasks.
+    catchup = bool(task.get("sync_into"))
+    if phase in ("pr_open", "merge_observation") and not catchup:
         _establish_pr_link(vcs, caps, state, issue_num, pr_number, missing)
 
-    if phase == "merge_observation" and pr_number is not None:
+    if phase == "merge_observation" and pr_number is not None and not catchup:
         _maybe_close_on_merge(cfg, state, repo_cfg, issue_num, missing)
 
     state.missing = tuple(dict.fromkeys(missing))  # de-dup, preserve order

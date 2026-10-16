@@ -5,7 +5,7 @@ import re
 # `/plan`. The backtick alternative covers `` `/fix` ``-style lines where a
 # leading backtick was stripped but a trailing one remains.
 _SLASH_CMD_RE = re.compile(
-    r"/(?:fix|plan|pr|retry|skip|sync|abort|review)(?=\s|$|`)", re.IGNORECASE
+    r"/(?:fix|plan|pr|retry|skip|sync|catchup|abort|review)(?=\s|$|`)", re.IGNORECASE
 )
 _BRANCH_RE = re.compile(r"--branch\s+(\S+)")
 
@@ -62,6 +62,27 @@ def _sanitize_branch_token(raw: str) -> str | None:
     return None
 
 
+_CATCHUP_FROM_RE = re.compile(r"--from\s+(\S+)")
+_CATCHUP_INTO_RE = re.compile(r"--into\s+(\S+)")
+
+
+def parse_catchup_args(guidance: str | None) -> tuple[str | None, str | None, bool]:
+    """Parse ``/catchup`` flags from its guidance text.
+
+    Returns ``(from, into, direct)``. ``from`` and ``into`` are sanitised
+    branch names (None when the flag is absent or invalid); ``direct`` is
+    True when ``--direct`` is present. Flag order does not matter.
+    """
+    if not guidance:
+        return None, None, False
+    from_m = _CATCHUP_FROM_RE.search(guidance)
+    into_m = _CATCHUP_INTO_RE.search(guidance)
+    upstream = _sanitize_branch_token(from_m.group(1)) if from_m else None
+    downstream = _sanitize_branch_token(into_m.group(1)) if into_m else None
+    direct = re.search(r"(?:^|\s)--direct(?=\s|$)", guidance) is not None
+    return upstream, downstream, direct
+
+
 def _parse_mention(text: str, bot_name: str) -> tuple[str, str, str] | None:
     """Parse @<bot_name> <guidance> as an alias for /fix.
 
@@ -79,7 +100,7 @@ def _parse_mention(text: str, bot_name: str) -> tuple[str, str, str] | None:
 def parse_slash_command(text: str, bot_name: str = "autoswe"):
     """Return (command, guidance, branch) from the last slash command found in text, or None.
 
-    Recognized commands: /fix, /plan, /pr, /retry, /skip, /sync, /abort, /review
+    Recognized commands: /fix, /plan, /pr, /retry, /skip, /sync, /catchup, /abort, /review
     Supports ``--branch <name>`` (e.g. ``/plan --branch develop``).
     Guidance text after ``with`` keyword is captured as the second element.
 

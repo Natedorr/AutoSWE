@@ -2,8 +2,11 @@
 
 from autoswe.tracking.assignment import _auto_assign_issue
 from autoswe.tracking.labels import (
+    _CMD_TO_KIND,
     AUTOSWE_LABELS,
     CI_WATCH_STATUSES,
+    COMPLETED_STATUSES,
+    RUNNING_STATUSES,
     SHIPPING_BLOCKING_STATUSES,
     VALID_STATUSES,
     _ensure_repo_labels,
@@ -285,3 +288,20 @@ def test_running_status_for_none_default_ignores_real_verbs():
     """Kinds with a dedicated RUNNING verb use it regardless of default."""
     assert running_status_for("fix", current_status=None, default=None) == "fixing"
     assert running_status_for("retry", last_phase="plan", current_status=None, default=None) == "planning"
+
+
+# ---------------------------------------------------------------------------
+# /catchup: command kind, running/completed statuses, and label mirrors
+# ---------------------------------------------------------------------------
+
+
+def test_catchup_kind_and_statuses_are_registered():
+    assert _CMD_TO_KIND["/catchup"] == "catchup"
+    assert _kind_from_command("/catchup") == "catchup"
+    assert running_status_for("catchup") == "catching_up"
+    assert completed_status_for("catchup") == "caught_up"
+    assert "catching_up" in RUNNING_STATUSES
+    assert "caught_up" in COMPLETED_STATUSES
+    assert {"catching_up", "caught_up"} <= VALID_STATUSES
+    assert "autoswe:catching_up" in AUTOSWE_LABELS
+    assert "autoswe:caught_up" in AUTOSWE_LABELS

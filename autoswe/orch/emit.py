@@ -30,6 +30,7 @@ _KIND_TO_COMMAND = {
     "fix": "/fix",
     "ship_pr": "/pr",
     "sync_branch": "/sync",
+    "catchup": "/catchup",
     "retry": "/retry",
     "review": "/review",
 }
@@ -92,7 +93,7 @@ def _field_lifecycle_patch(
             patch["plan_file_path"] = result.plan_file_path
         elif new_status != "waiting":
             patch["plan_file_path"] = None
-    elif kind in ("fix", "retry", "sync_branch", "ship_pr"):
+    elif kind in ("fix", "retry", "sync_branch", "ship_pr", "catchup"):
         patch["plan_file_path"] = None
 
     # review_file_path lifecycle:
@@ -270,6 +271,10 @@ def emit(
     # `kind` for every other action.
     effective_kind = "ship_pr" if (kind == "retry" and result is not None
                                    and result.replayed_command == "/pr") else kind
+    # A /retry that REPLAYED a /catchup lands in caught_up with the catch-up's
+    # PR identity, not the retry default "fixed" (same reasoning as /pr above).
+    if kind == "retry" and result is not None and result.replayed_command == "/catchup":
+        effective_kind = "catchup"
 
     # --- No-Claude actions (result is None) ---
 
@@ -421,6 +426,29 @@ def emit(
                 f"This task is blocked after hitting its limits. Post `/retry` "
                 f"to restart it.{BOT_MARKER}"
             )
+        elif action.refused_command == "/catchup":
+            # A bare /catchup with nothing stored, a busy downstream, or the
+            # unsupported --direct flag. Status is untouched (see the return
+            # below): a catch-up refusal never moves the task.
+            if action.refusal_detail == "busy":
+                msg = (
+                    f"Your `/catchup` was not accepted — the downstream branch is "
+                    f"already being caught up by #{action.busy_issue}. Wait for that "
+                    f"run to finish, then post `/catchup` again.{BOT_MARKER}"
+                )
+            elif action.refusal_detail == "direct":
+                msg = (
+                    f"Your `/catchup` was not accepted — `--direct` is not supported "
+                    f"yet. Post `/catchup --from <upstream> --into <downstream>` "
+                    f"without it.{BOT_MARKER}"
+                )
+            else:
+                msg = (
+                    f"Your `/catchup` was not accepted — it needs both branches. "
+                    f"Post `/catchup --from <upstream> --into <downstream>` (for "
+                    f"example `--from master --into develop`). After the first run, "
+                    f"a bare `/catchup` reuses the same pair.{BOT_MARKER}"
+                )
         elif action.refused_command == "/pr":
             # /pr on a plain failed/error task (not limit-blocked): there is
             # nothing ready to ship; /fix restarts the work, /retry resets the
@@ -438,6 +466,22 @@ def emit(
                 f"Your `{cmd}` was not accepted — the task is in `{rest}` state "
                 f"and has no completed work to operate on. Post `/fix` to "
                 f"complete the work first.{BOT_MARKER}"
+            )
+        if action.refused_command == "/catchup" and task.status is None:
+            # A fresh control issue keeps its status (no pending/status
+            # change). The watermark is still advanced so decide() does not
+            # re-post the refusal for a body-sourced command every poll.
+            return (
+                Effect(kind="post_comment", body=msg),
+                Effect(
+                    kind="patch_queue",
+                    queue_patch={
+                        "last_dispatched_command": action.refused_command,
+                        "last_dispatched_command_id": action.triggering_comment_id,
+                        "last_consumed_reply_id": action.triggering_comment_id,
+                        "first_dispatched_at": None,
+                    },
+                ),
             )
         return (
             Effect(kind="post_comment", body=msg),
@@ -643,6 +687,12 @@ def emit(
     if action.plan_branch:
         queue_patch["plan_branch"] = action.plan_branch
 
+    # /catchup sticky pair: the run that just happened stored it, so a later
+    # bare /catchup (no flags) reuses the same upstream/downstream.
+    if kind == "catchup":
+        queue_patch["sync_from"] = action.sync_from
+        queue_patch["sync_into"] = action.sync_into
+
     # Shared recoverable-gate bookkeeping (issue #245 §2.5, brakes 1-3). A
     # gate-triggered fix (CI or the local test gate) bumps the shared counter
     # and per-commit watermark; every human-dispatched Claude action resets
@@ -791,7 +841,7 @@ def emit(
         # same write that marks the task shipped. Each field is guarded
         # independently — a provider can supply the URL without the number
         # and vice versa.
-        if effective_kind == "ship_pr":
+        if effective_kind in ("ship_pr", "catchup"):
             if result.pr_number is not None:
                 queue_patch["pr_number"] = result.pr_number
             if result.pr_url:

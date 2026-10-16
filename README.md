@@ -135,6 +135,7 @@ That's it. The issue tracker is your development workflow.
 | `/review` | Claude reviews the diff before shipping |
 | `/pr` | Opens a pull request for the completed fix |
 | `/sync` | Rebases worktree onto upstream, resolves conflicts with Claude |
+| `/catchup --from <upstream> --into <downstream>` | On a control issue: merges upstream into a branch cut from downstream, resolves conflicts with Claude, and opens a PR into downstream |
 | `/retry` | Retries a failed fix attempt |
 | `/skip` | Skip this issue |
 | `/abort` | Cancel the current run |

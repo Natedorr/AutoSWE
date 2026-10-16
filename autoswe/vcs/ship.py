@@ -92,11 +92,18 @@ def open_pr(
     cfg: dict,
     repo_cfg: dict | None = None,
     progress_callback: "Callable[[str], None] | None" = None,
+    *,
+    target_branch: str | None = None,
 ) -> str:
     """Open a PR from the worktree branch. Returns done-file content.
 
     On success, caches ``pr_number``/``pr_url`` on the ``task`` dict so the
     caller can persist them on the queue entry (issue #193).
+
+    *target_branch* is the /catchup downstream: the PR lands there instead of
+    the configured base. A catch-up skips the preflight gate (its branch sync
+    *is* the work, and a red CI on the downstream must not block it) and the
+    #260 base fallback, and uses a catch-up title/body with no closing keyword.
     """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     token = task["_token"]
@@ -109,6 +116,8 @@ def open_pr(
     # origin/plan_branch (the fork point) — that is a different concern from
     # where the PR lands.
     base_branch = task.get("base_branch", "main")
+    if target_branch:
+        base_branch = target_branch
     title = task.get("title", f"Fix issue #{issue_num}")
 
     rcfg = repo_cfg or {"owner": owner, "repo": repo, "token": token}
@@ -128,7 +137,9 @@ def open_pr(
 
     dbg.debug("SHIP: branch=%s base=%s", branch, base_branch)
 
-    ok, reason = preflight_pr(task, cfg, rcfg, progress_callback=progress_callback)
+    ok, reason = (True, "") if target_branch else preflight_pr(
+        task, cfg, rcfg, progress_callback=progress_callback,
+    )
     if not ok:
         dbg.debug("SHIP: preflight blocked PR: %s", reason)
         # A preflight block is NOT a handler error: the work is done and the
@@ -148,7 +159,7 @@ def open_pr(
     base_fallback_note = ""
     try:
         wt = worktree_mod.worktree_path(owner, repo, issue_num, cfg, provider)
-        if wt.exists() and not worktree_mod.remote_branch_exists_on(wt, base_branch):
+        if target_branch is None and wt.exists() and not worktree_mod.remote_branch_exists_on(wt, base_branch):
             actual_default = worktree_mod.remote_default_branch(wt)
             if actual_default and actual_default != base_branch:
                 log(f"[SHIP] base branch '{base_branch}' missing on origin — "
@@ -169,6 +180,19 @@ def open_pr(
         body_parts.append(f"**Fix Summary:**\n\n{fix_summary}")
     body_parts.append("\nOpened by autoSWE.")
     pr_body = "\n\n".join(body_parts)
+    pr_title = f"Fixes #{issue_num}: {title}"
+    if target_branch:
+        # No "Fixes #N" here: a closing keyword would close the control issue
+        # on merge, and the control issue is meant to stay open.
+        upstream = task.get("sync_from") or "upstream"
+        pr_title = f"Catch up `{target_branch}` with `{upstream}`"
+        pr_body = "\n\n".join([
+            f"Merges `{upstream}` into `{target_branch}` (catch-up for #{issue_num}).",
+            "**Merge with a merge commit, not squash.** A squash leaves "
+            f"`{upstream}`'s commits out of `{target_branch}`'s ancestry, so it "
+            "stays behind and the same conflicts recur.",
+            "Opened by autoSWE.",
+        ])
 
     # Idempotency: check if a PR already exists for this branch
     existing = vcs.find_existing_pr(branch)
@@ -190,7 +214,7 @@ def open_pr(
         pr_result: PRResult = vcs.open_pull_request(
             branch=branch,
             base=base_branch,
-            title=f"Fixes #{issue_num}: {title}",
+            title=pr_title,
             body=pr_body,
         )
         pr_url = pr_result.url

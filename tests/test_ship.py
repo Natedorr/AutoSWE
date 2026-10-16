@@ -929,3 +929,87 @@ def test_open_pr_existing_pr_calls_ensure_links(mock_gh_post_comment):
         open_pr(task, {"GITHUB_TOKEN": "tok"})
 
     mock_ensure_links.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# open_pr(target_branch=...) — the /catchup override (control issues)
+# ---------------------------------------------------------------------------
+
+
+def _open_with_target(task, *, target_branch=None, vcs=None):
+    """Run open_pr with mocked VCS/tracker; return (result, vcs mock, tracker mock)."""
+    vcs = vcs or _mock_vcs()
+    tracker = _mock_tracker()
+    with patch("autoswe.vcs.ship.get_vcs", return_value=vcs), \
+         patch("autoswe.vcs.ship.get_tracker", return_value=tracker):
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"}, target_branch=target_branch)
+    return result, vcs, tracker
+
+
+def _catchup_task():
+    task = make_task()
+    task["base_branch"] = "master"
+    task["sync_from"] = "master"
+    task["sync_into"] = "develop"
+    return task
+
+
+def test_open_pr_target_branch_overrides_base(mock_gh_post_comment):
+    """A catch-up PR lands in its downstream, not the configured base."""
+    result, vcs, _ = _open_with_target(_catchup_task(), target_branch="develop")
+
+    assert result.startswith("DONE: PR")
+    call = vcs.open_pull_request.call_args[1]
+    assert call["base"] == "develop"
+    assert call["branch"] == "autoswe/issue-1"
+
+
+def test_open_pr_target_branch_skips_base_fallback(mock_gh_post_comment, monkeypatch, tmp_path):
+    """The #260 fallback is for the default path only: a missing downstream stays put."""
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=True,
+                   branch_exists=False, default="master")
+
+    _, vcs, tracker = _open_with_target(_catchup_task(), target_branch="develop")
+
+    assert vcs.open_pull_request.call_args[1]["base"] == "develop"
+    comment_bodies = [c[0][1] for c in tracker.post_comment.call_args_list]
+    assert not any("base fell back" in body for body in comment_bodies)
+
+
+def test_open_pr_target_branch_bypasses_preflight(mock_gh_post_comment, monkeypatch):
+    """A red downstream CI must not block the catch-up PR the merge is for."""
+    monkeypatch.setattr("autoswe.vcs.ship.preflight_pr", lambda *a, **kw: (False, "CI red"))
+
+    result, vcs, _ = _open_with_target(_catchup_task(), target_branch="develop")
+
+    assert result.startswith("DONE: PR")
+    vcs.open_pull_request.assert_called_once()
+
+
+def test_open_pr_preflight_still_gates_the_default_path(mock_gh_post_comment, monkeypatch):
+    """Without target_branch the preflight gate still blocks the PR."""
+    monkeypatch.setattr("autoswe.vcs.ship.preflight_pr", lambda *a, **kw: (False, "CI red"))
+
+    result, vcs, _ = _open_with_target(make_task(), target_branch=None)
+
+    assert result.startswith("PR_BLOCKED")
+    vcs.open_pull_request.assert_not_called()
+
+
+def test_open_pr_catchup_title_and_body_have_no_closing_keyword(mock_gh_post_comment):
+    """A catch-up PR must not close the control issue on merge, and says to merge, not squash."""
+    _, vcs, _ = _open_with_target(_catchup_task(), target_branch="develop")
+
+    call = vcs.open_pull_request.call_args[1]
+    assert call["title"] == "Catch up `develop` with `master`"
+    assert "Fixes #" not in call["title"]
+    assert "Fixes #" not in call["body"]
+    assert "merge commit, not squash" in call["body"]
+
+
+def test_open_pr_default_path_keeps_fixes_title(mock_gh_post_comment):
+    """The default path still closes its issue: the title carries Fixes #N."""
+    _, vcs, _ = _open_with_target(make_task(), target_branch=None)
+
+    assert vcs.open_pull_request.call_args[1]["title"] == "Fixes #1: Test issue"

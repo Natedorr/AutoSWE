@@ -607,3 +607,30 @@ def test_build_completion_comment_azure_with_repo_id():
     )
     assert "d512de06-9118-4a61-97f1-34938c662c41" in msg
     assert "github.com" not in msg.split("**Summary:**")[0]
+
+
+# ---------------------------------------------------------------------------
+# /catchup: DONE_SUMMARY / FAILED mapping and the completion comment
+# ---------------------------------------------------------------------------
+
+
+def test_map_catchup_done_summary_is_caught_up():
+    assert _map_done_to_status("DONE_SUMMARY\tCaught up.\tabc123", kind="catchup") == "caught_up"
+
+
+def test_map_catchup_up_to_date_is_caught_up():
+    assert _map_done_to_status("DONE_SUMMARY\tAlready up to date.\t", kind="catchup") == "caught_up"
+
+
+def test_map_catchup_failed_is_failed():
+    assert _map_done_to_status("FAILED: `master` does not exist on origin", kind="catchup") == "failed"
+
+
+def test_catchup_completion_comment_names_the_command_and_summary():
+    body = _build_completion_comment(
+        "/catchup",
+        "DONE_SUMMARY\tCaught up `develop` with `master`.\tabc1234",
+        "owner", "repo", 42, None, "github", None, None, None,
+    )
+    assert "Completed with command `/catchup`" in body
+    assert "Caught up `develop` with `master`" in body

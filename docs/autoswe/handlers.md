@@ -1,6 +1,6 @@
 # Task Handlers
 
-`/plan`, `/fix`, and `/review` are the Claude-backed work — planning, coding, and code review. `/pr`, `/sync`, `/retry`, `/skip`, `/abort` are workflow plumbing borrowed from how you'd drive a branch by hand: a branch can be cut from a non-default parent, can drift from its base and need a sync, and a run can fail and need a retry. autoSWE just lets you do all of that from issue comments instead of a terminal.
+`/plan`, `/fix`, and `/review` are the Claude-backed work — planning, coding, and code review. `/pr`, `/sync`, `/catchup`, `/retry`, `/skip`, `/abort` are workflow plumbing borrowed from how you'd drive a branch by hand: a branch can be cut from a non-default parent, can drift from its base and need a sync, and a run can fail and need a retry. autoSWE just lets you do all of that from issue comments instead of a terminal.
 
 Each handler returns a `HandlerResult` (a done-content string plus cost/duration/session metadata); the dispatch loop maps `done_content` to an `autoswe_status` (and mirrors that to the `autoswe:*` label — see `pipeline.md` Stage 6).
 
@@ -84,6 +84,19 @@ MCP-dependent behavior (plan/question posting) is gated on `runner.backend_has_c
   - `"DONE_SUMMARY\t<summary>\t<sha>"` — clean merge or conflict resolved via Claude
   - `"FAILED: …"` — sync error, rebase conflict, or conflict-resolution failure
 - **Key design:** The resolver resumes the task's prior session (`session_id`) for continuity. It reads (but does not consume) `plan_file_path` so the plan persists for downstream `/fix`. No `AskUserQuestion` — Claude must make its best call or fail.
+
+## `/catchup` — `run._run_catchup(task, sync_from, sync_into, repo_cfg, cfg)`
+
+- **Why:** a downstream branch (typically `develop`) falls behind its upstream (typically `master`). `/sync` can't help: it merges into the issue's own work branch and is refused without completed work. `/catchup` is for a **control issue** (a blank issue whose only job is catch-ups) and opens a PR into the downstream branch.
+- **Flow:**
+  1. Ensure the main clone and `fetch_prune`. Both `origin/<sync_from>` and `origin/<sync_into>` must exist, otherwise it returns `FAILED` naming the missing branch.
+  2. `worktree.branch_divergence(main, sync_into, sync_from)` gives `behind`. If `behind == 0`, the downstream already contains the upstream: return `DONE_SUMMARY` ("already up to date") with no worktree and no PR.
+  3. Otherwise cut `autoswe/issue-N` from `sync_into` (or reset it, so a repeat run builds on the open PR's branch) and call `worktree.sync_branch()` with `SYNC_STRATEGY` forced to `merge`.
+  4. Clean merge: pushed by `sync_branch`. Conflict: `coder.resolve_sync_conflicts(..., sync_base=sync_from, catchup=True)` runs with the catch-up prompt (no plan text) and never resumes the task's fix session. Resolution failure returns `FAILED` and leaves the worktree conflicted.
+  5. `ship.open_pr(..., target_branch=sync_into)` opens or updates the PR into `sync_into`. The PR has no `Fixes #N`, and its body says to merge with a merge commit, not squash. The preflight gate and the #260 base fallback are skipped for catch-ups.
+- **Returns:** `"DONE_SUMMARY	<summary>	<sha>"` (empty sha when already up to date), or `"FAILED: …"`. PR number and URL pass through to the queue.
+- **Retry:** `_run_retry` replays `_run_catchup` with the stored `sync_from`/`sync_into`. It never falls back to `/fix`.
+- **Linkage:** tasks with `sync_into` set skip the PR-to-issue link and close-on-merge, so the control issue stays open.
 
 ## `/retry` — inline in dispatch loop
 

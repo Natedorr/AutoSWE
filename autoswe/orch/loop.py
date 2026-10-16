@@ -148,7 +148,19 @@ def _build_poll_task(
     # cycle (read_ci mutates ci_status/ci_last_checked on `t` in place) is
     # reflected in the same cycle's handler dict, not just the next one.
     ts = TaskState.from_queue(slug, t)
-    world = World(api=api, task=ts, cfg=cfg, repo_cfg=repo_cfg, ci=ci_status)
+    in_progress = tuple(
+        (e["sync_into"], e.get("issue_number", 0))
+        for other, e in queue.items()
+        if other != slug
+        and e.get("autoswe_status") == "catching_up"
+        and e.get("owner") == t.get("owner")
+        and e.get("repo") == t.get("repo")
+        and e.get("sync_into")
+    )
+    world = World(
+        api=api, task=ts, cfg=cfg, repo_cfg=repo_cfg, ci=ci_status,
+        catchup_in_progress=in_progress,
+    )
     return PollTask(slug=slug, task_state=ts, world=world)
 
 
@@ -176,6 +188,7 @@ def _build_welcome_comment(slash_cmd: str, guidance: str, slug: str, bot_name: s
             "- `@{bot_name} <guidance>` - Short form for /fix with guidance\n"
             "- `/pr` - Open a pull request from the current branch\n"
             "- `/sync` - Pull the branch from upstream to keep it up to date\n"
+            "- `/catchup --from <upstream> --into <downstream>` - Merge upstream into a branch cut from downstream and open a PR (for control issues)\n"
             "- `/retry` - Retry a failed task (resets attempt counter)\n"
             "- `/skip` - Skip this issue\n"
             "- `/abort` - Cancel the current task\n"
