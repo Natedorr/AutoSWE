@@ -115,6 +115,99 @@ def test_claude_md_absent_runs_session_and_commits(tmp_path, _sample_task, _allo
     assert args[4] == "Add CLAUDE.md (autoswe init)"
 
 
+def test_agents_md_only_native_backend_no_init(tmp_path, _sample_task):
+    """AGENTS.md present, backend reads it natively (pi) → no init session, no CLAUDE.md."""
+    from autoswe.harness.initializer import ensure_claude_md
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "AGENTS.md").write_text("committed project guide")
+
+    cfg = _make_cfg()
+    repo_cfg = {"provider": "github"}
+    progress_calls: list[str] = []
+
+    with patch("autoswe.harness.initializer.runner") as mock_runner, \
+         patch("autoswe.harness.initializer.resolve_harness") as mock_resolve, \
+         patch("autoswe.harness.initializer.commit_and_push") as mock_commit:
+        mock_resolve.return_value = {"backend": "pi", "model": "test-model"}
+
+        ensure_claude_md(
+            _sample_task, wt, repo_cfg, cfg, phase="plan",
+            progress_callback=lambda msg: progress_calls.append(msg),
+        )
+
+    # No init session, no commit, no CLAUDE.md written
+    assert not mock_runner.run.called
+    assert not mock_commit.called
+    assert not (wt / "CLAUDE.md").exists()
+    assert progress_calls == []
+
+
+def test_agents_md_only_claude_code_writes_import_stub(tmp_path, _sample_task, _allow_init_session):
+    """AGENTS.md present + claude_code backend → one-line @AGENTS.md import stub, no init session."""
+    from autoswe.harness.initializer import ensure_claude_md
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "AGENTS.md").write_text("committed project guide")
+
+    cfg = _make_cfg()
+    repo_cfg = {"provider": "github"}
+
+    with patch("autoswe.harness.initializer.runner") as mock_runner, \
+         patch("autoswe.harness.initializer.resolve_harness") as mock_resolve, \
+         patch("autoswe.harness.initializer.commit_and_push") as mock_commit:
+        mock_resolve.return_value = {"backend": "claude_code", "model": "test-model"}
+
+        ensure_claude_md(
+            _sample_task, wt, repo_cfg, cfg, phase="plan",
+            progress_callback=lambda msg: None,
+        )
+
+    # Import stub written; no init session; no commit (repo exclude keeps it out of the branch)
+    assert not mock_runner.run.called
+    assert not mock_commit.called
+    assert (wt / "CLAUDE.md").read_text() == "@AGENTS.md\n"
+
+
+def test_agents_md_stub_path_fails_falls_back_to_init(tmp_path, _sample_task, _allow_init_session):
+    """If the AGENTS.md import-stub path raises, the init session still runs (non-fatal)."""
+    from autoswe.harness.backends.base import RunResult
+    from autoswe.harness.initializer import ensure_claude_md
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "AGENTS.md").write_text("committed project guide")
+
+    cfg = _make_cfg()
+    repo_cfg = {"provider": "github"}
+
+    fake_result = RunResult(
+        text="Wrote CLAUDE.md",
+        session_id="init-session",
+        subtype="success",
+    )
+
+    def _fake_run_and_write(*args, **kwargs):
+        (wt / "CLAUDE.md").write_text("generated content")
+        return fake_result
+
+    with patch("autoswe.harness.initializer.runner") as mock_runner, \
+         patch("autoswe.harness.initializer.resolve_harness", side_effect=[RuntimeError("bad config"), {"backend": "claude_code", "model": "test-model"}]), \
+         patch("autoswe.harness.initializer.commit_and_push") as mock_commit:
+        mock_runner.run.side_effect = _fake_run_and_write
+
+        ensure_claude_md(
+            _sample_task, wt, repo_cfg, cfg, phase="plan",
+            progress_callback=lambda msg: None,
+        )
+
+    # Fallback init session ran and committed the generated CLAUDE.md
+    assert mock_runner.run.called
+    assert mock_commit.called
+
+
 def test_claude_md_session_raises_is_non_fatal(tmp_path, _sample_task, _allow_init_session):
     """When the init session raises, ensure_claude_md does not crash."""
     from autoswe.harness.initializer import ensure_claude_md

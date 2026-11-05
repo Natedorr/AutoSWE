@@ -41,10 +41,12 @@ file out of the per-issue branch (finding C2):
 - **Build artifacts** — any `pytest` run a coding session does leaves untracked
   `__pycache__/`/`.pytest_cache/`; without the exclude, `git add -A` (autoSWE's and the
   agent's) sweeps them into the branch and the reviewer rejects them.
-- **The auto-generated `CLAUDE.md`** — `ensure_claude_md` writes it for the coding agent's
+- **The auto-generated `CLAUDE.md`** — `ensure_claude_md` writes it (or a one-line `@AGENTS.md` import stub when the repo commits an `AGENTS.md` and the backend is `claude_code`) for the coding agent's
   benefit but must not commit it to the feature branch. Git-*ignoring* it (vs. merely
   leaving it untracked) is what lets it survive the review phase's `git clean -fd` backstop
-  (`ensure_worktree_unchanged`) without re-dirtying the branch every cycle.
+  (`ensure_worktree_unchanged`) without re-dirtying the branch every cycle. (A committed
+  `AGENTS.md` is detected as an existing project guide — the init session is skipped
+  for backends that read it natively, so no stub or generation is needed.)
 
 The exclude is written in **two places** so it is always present: at the end of
 `ensure_clone` (both the fresh-clone and reuse paths), and — because the dispatch

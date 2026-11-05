@@ -1,9 +1,14 @@
 """Auto-generate CLAUDE.md when missing.
 
 Before a plan/fix/review dispatch, this module checks whether the target
-worktree has a CLAUDE.md.  If not, it runs a short, backend-agnostic
-coding session to analyze the repo and write one, so the coding agent has
-a project guide for the session.
+worktree has a project guide: ``CLAUDE.md`` **or** ``AGENTS.md``.  A
+committed ``AGENTS.md`` is treated as a valid existing guide — backends
+that read it natively (pi, Codex) skip the init session entirely, and
+for ``claude_code`` (which reads ``CLAUDE.md`` only) a one-line
+``@AGENTS.md`` import stub is written instead of a from-scratch
+generation.  When neither file exists, a short, backend-agnostic coding
+session analyzes the repo and writes a CLAUDE.md, so the coding agent
+has a project guide for the session.
 
 The file is **git-excluded, not committed**: ``autoswe.vcs.worktree``
 writes ``CLAUDE.md`` into the shared repo-local git exclude (finding C2),
@@ -44,6 +49,11 @@ def ensure_claude_md(
 ) -> None:
     """Generate CLAUDE.md if missing, then commit & push to the issue branch.
 
+    A committed ``AGENTS.md`` counts as an existing project guide: for
+    backends that read it natively the init session is skipped entirely,
+    and for ``claude_code`` a one-line ``@AGENTS.md`` import stub is
+    written instead (kept out of the branch by the repo exclude).
+
     Args:
         task: Handler task dict (queue entry shape).
         wt: Worktree root path.
@@ -66,8 +76,9 @@ def ensure_claude_md(
     # Ensure the shared repo-local git exclude is in place BEFORE any session
     # runs. This is the reliable hook (runs on every phase, including reused
     # worktrees that never re-invoke ensure_clone): it keeps build artifacts and
-    # the CLAUDE.md we're about to generate off the per-issue branch so the
-    # reviewer never flags them (finding C2). No-op if the main clone is absent.
+    # the CLAUDE.md we're about to generate (or import-stub) off the per-issue
+    # branch so the reviewer never flags them (finding C2). No-op if the main
+    # clone is absent.
     from autoswe.vcs.worktree import _ensure_repo_exclude, main_clone_path
 
     main = main_clone_path(owner, repo, cfg, provider)
@@ -77,6 +88,35 @@ def ensure_claude_md(
     claude_md = wt / "CLAUDE.md"
     if claude_md.exists():
         return  # Already present — nothing to do
+
+    agents_md = wt / "AGENTS.md"
+    if agents_md.exists():
+        # The repo already ships a project guide. Backends that read AGENTS.md
+        # natively (pi: AGENTS.override.md > AGENTS.md > CLAUDE.md; Codex) need
+        # nothing from us; claude_code reads CLAUDE.md only, so give it a
+        # one-line import of the committed guide instead of regenerating one
+        # from scratch. The stub is kept out of the branch by the repo exclude
+        # written above — no commit is attempted.
+        try:
+            harness = resolve_harness(phase, repo_cfg, cfg)
+            backend = harness.get("backend", "claude_code")
+            if backend == "claude_code":
+                claude_md.write_text("@AGENTS.md\n")
+                dbg.debug(
+                    "AGENTS.md present, claude_code backend — wrote @AGENTS.md import stub to %s",
+                    claude_md,
+                )
+            else:
+                dbg.debug(
+                    "AGENTS.md present, backend=%s reads it natively — skipping init session",
+                    backend,
+                )
+        except Exception as e:
+            # Non-fatal: fall through to the init session below so the
+            # dispatch still gets a project guide.
+            dbg.warning("AGENTS.md import-stub path failed (non-fatal), running init session: %s", e)
+        else:
+            return
 
     try:
         if progress_callback:

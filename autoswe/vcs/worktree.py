@@ -89,8 +89,10 @@ def _run(args: list, cwd: Path | None = None, check: bool = True) -> subprocess.
 # CLAUDE.md out of the per-issue branch:
 #   - __pycache__ / *.pyc / .pytest_cache: never staged by `git add -A`, so
 #     autoSWE and the agent's own commits both skip them.
-#   - CLAUDE.md: the initializer (autoswe.harness.initializer) generates it for
-#     the coding agent's benefit but must NOT commit it to the feature branch.
+#   - CLAUDE.md: the initializer (autoswe.harness.initializer) generates it —
+#     or, when the repo already commits an AGENTS.md and the backend is
+#     claude_code, writes a one-line `@AGENTS.md` import stub — for the
+#     coding agent's benefit but must NOT commit it to the feature branch.
 #     Git-ignoring it (vs. merely leaving it untracked) is what lets it survive
 #     the review phase's `git clean -fd` backstop (ensure_worktree_unchanged)
 #     without re-dirtying the branch every cycle (finding C2).
@@ -817,9 +819,11 @@ def commit_and_push(wt: Path, owner: str, repo: str, issue_num: int, msg: str, b
     # Stage everything EXCEPT build artifacts. The shared repo-local exclude
     # (see _ensure_repo_exclude) already keeps these out for worktrees built after
     # this change; the pathspec is defense-in-depth so a /fix commit is clean even
-    # on a worktree whose main clone predates that write. CLAUDE.md is NOT excluded
-    # here — it is git-ignored via the repo exclude (not a stage-exclusion) so it
-    # survives the review's `git clean -fd` backstop without being committed.
+    # on a worktree whose main clone predates that write. CLAUDE.md (whether
+    # generated from scratch or written as an `@AGENTS.md` import stub by the
+    # AGENTS.md detection path) is NOT excluded here — it is git-ignored via the
+    # repo exclude (not a stage-exclusion) so it survives the review's
+    # `git clean -fd` backstop without being committed.
     _run([
         "git", "-C", str(wt), "add", "-A",
         ":(exclude)**/__pycache__/", ":(exclude)**/*.pyc", ":(exclude)**/.pytest_cache/",
