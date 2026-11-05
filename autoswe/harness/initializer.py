@@ -2,13 +2,17 @@
 
 Before a plan/fix/review dispatch, this module checks whether the target
 worktree has a project guide: ``CLAUDE.md`` **or** ``AGENTS.md``.  A
-committed ``AGENTS.md`` is treated as a valid existing guide — backends
-that read it natively (pi, Codex) skip the init session entirely, and
-for ``claude_code`` (which reads ``CLAUDE.md`` only) a one-line
-``@AGENTS.md`` import stub is written instead of a from-scratch
-generation.  When neither file exists, a short, backend-agnostic coding
-session analyzes the repo and writes a CLAUDE.md, so the coding agent
-has a project guide for the session.
+committed ``AGENTS.md`` is treated as a valid existing guide — for
+``claude_code`` (which reads ``CLAUDE.md`` only) a one-line ``@AGENTS.md``
+import stub is written instead of a from-scratch generation, and for all
+other backends the init session is skipped entirely: pi reads AGENTS.md
+natively (``AGENTS.override.md > AGENTS.md > CLAUDE.md``), and Codex gets
+no project guide from autoSWE at all (its rules are disabled via
+``--ignore-rules``, see ``docs/autoswe/harnesses.md`` — a generated
+CLAUDE.md would be unreadable to that session anyway).  When neither file
+exists, a short, backend-agnostic coding session analyzes the repo and
+writes a CLAUDE.md, so the coding agent has a project guide for the
+session.
 
 The file is **git-excluded, not committed**: ``autoswe.vcs.worktree``
 writes ``CLAUDE.md`` into the shared repo-local git exclude (finding C2),
@@ -47,12 +51,16 @@ def ensure_claude_md(
     phase: str,
     progress_callback: Callable[[str], None] | None = None,
 ) -> None:
-    """Generate CLAUDE.md if missing, then commit & push to the issue branch.
+    """Generate CLAUDE.md if missing (or write the ``@AGENTS.md`` import stub),
+    then commit & push to the issue branch.
+
+    The import-stub path writes a one-line CLAUDE.md that is deliberately
+    NOT committed — it is kept out of the branch by the repo exclude.
 
     A committed ``AGENTS.md`` counts as an existing project guide: for
-    backends that read it natively the init session is skipped entirely,
-    and for ``claude_code`` a one-line ``@AGENTS.md`` import stub is
-    written instead (kept out of the branch by the repo exclude).
+    non-``claude_code`` backends the init session is skipped entirely, and
+    for ``claude_code`` the one-line ``@AGENTS.md`` import stub is written
+    instead of a from-scratch generation.
 
     Args:
         task: Handler task dict (queue entry shape).
@@ -89,14 +97,19 @@ def ensure_claude_md(
     if claude_md.exists():
         return  # Already present — nothing to do
 
+    stub_failed = False
     agents_md = wt / "AGENTS.md"
     if agents_md.exists():
-        # The repo already ships a project guide. Backends that read AGENTS.md
-        # natively (pi: AGENTS.override.md > AGENTS.md > CLAUDE.md; Codex) need
-        # nothing from us; claude_code reads CLAUDE.md only, so give it a
-        # one-line import of the committed guide instead of regenerating one
-        # from scratch. The stub is kept out of the branch by the repo exclude
-        # written above — no commit is attempted.
+        # The repo already ships a project guide. pi reads AGENTS.md natively
+        # (AGENTS.override.md > AGENTS.md > CLAUDE.md); Codex gets no project
+        # guide from autoSWE either — its rules are intentionally disabled via
+        # --ignore-rules (see docs/autoswe/harnesses.md) — so a generated
+        # CLAUDE.md would be unreadable to that session anyway. Skipping the
+        # init session avoids wasted work writing a file the backend will never
+        # read. claude_code reads CLAUDE.md only, so give it a one-line import
+        # of the committed guide instead of regenerating one from scratch.
+        # The stub is kept out of the branch by the repo exclude written
+        # above — no commit is attempted.
         try:
             harness = resolve_harness(phase, repo_cfg, cfg)
             backend = harness.get("backend", "claude_code")
@@ -108,19 +121,23 @@ def ensure_claude_md(
                 )
             else:
                 dbg.debug(
-                    "AGENTS.md present, backend=%s reads it natively — skipping init session",
+                    "AGENTS.md present, backend=%s needs no CLAUDE.md from autoSWE — skipping init session",
                     backend,
                 )
         except Exception as e:
             # Non-fatal: fall through to the init session below so the
             # dispatch still gets a project guide.
+            stub_failed = True
             dbg.warning("AGENTS.md import-stub path failed (non-fatal), running init session: %s", e)
         else:
             return
 
     try:
         if progress_callback:
-            progress_callback("No CLAUDE.md found — generating project guide...")
+            if stub_failed:
+                progress_callback("No CLAUDE.md and the AGENTS.md import stub failed — generating project guide...")
+            else:
+                progress_callback("No CLAUDE.md found — generating project guide...")
 
         prompt = load_init_prompt(repo_cfg)
 

@@ -115,8 +115,17 @@ def test_claude_md_absent_runs_session_and_commits(tmp_path, _sample_task, _allo
     assert args[4] == "Add CLAUDE.md (autoswe init)"
 
 
-def test_agents_md_only_native_backend_no_init(tmp_path, _sample_task):
-    """AGENTS.md present, backend reads it natively (pi) → no init session, no CLAUDE.md."""
+@pytest.mark.parametrize("backend", ["pi", "codex"])
+def test_agents_md_only_non_claude_backend_no_init(tmp_path, _sample_task, _allow_init_session, backend):
+    """AGENTS.md present + non-claude_code backend → no init session, no CLAUDE.md.
+
+    pi reads AGENTS.md natively; Codex gets no project guide from autoSWE at all
+    (rules disabled via --ignore-rules) — either way the init session is skipped.
+    The _allow_init_session fixture is required: conftest sets
+    AUTOSWE_SKIP_INIT_SESSION=1 for the whole suite, which would otherwise make
+    this test pass via the env early-return without ever reaching the AGENTS.md
+    branch.
+    """
     from autoswe.harness.initializer import ensure_claude_md
 
     wt = tmp_path / "wt"
@@ -130,14 +139,17 @@ def test_agents_md_only_native_backend_no_init(tmp_path, _sample_task):
     with patch("autoswe.harness.initializer.runner") as mock_runner, \
          patch("autoswe.harness.initializer.resolve_harness") as mock_resolve, \
          patch("autoswe.harness.initializer.commit_and_push") as mock_commit:
-        mock_resolve.return_value = {"backend": "pi", "model": "test-model"}
+        mock_resolve.return_value = {"backend": backend, "model": "test-model"}
 
         ensure_claude_md(
             _sample_task, wt, repo_cfg, cfg, phase="plan",
             progress_callback=lambda msg: progress_calls.append(msg),
         )
 
-    # No init session, no commit, no CLAUDE.md written
+    # The AGENTS.md branch ran (harness resolved exactly once) but no init
+    # session, no commit, and no CLAUDE.md written
+    assert mock_resolve.called
+    assert mock_resolve.call_count == 1
     assert not mock_runner.run.called
     assert not mock_commit.called
     assert not (wt / "CLAUDE.md").exists()
@@ -172,7 +184,10 @@ def test_agents_md_only_claude_code_writes_import_stub(tmp_path, _sample_task, _
 
 
 def test_agents_md_stub_path_fails_falls_back_to_init(tmp_path, _sample_task, _allow_init_session):
-    """If the AGENTS.md import-stub path raises, the init session still runs (non-fatal)."""
+    """If the AGENTS.md import-stub path raises, the init session still runs (non-fatal).
+
+    The user-facing progress message carries the AGENTS.md context.
+    """
     from autoswe.harness.backends.base import RunResult
     from autoswe.harness.initializer import ensure_claude_md
 
@@ -182,6 +197,7 @@ def test_agents_md_stub_path_fails_falls_back_to_init(tmp_path, _sample_task, _a
 
     cfg = _make_cfg()
     repo_cfg = {"provider": "github"}
+    progress_calls: list[str] = []
 
     fake_result = RunResult(
         text="Wrote CLAUDE.md",
@@ -200,12 +216,15 @@ def test_agents_md_stub_path_fails_falls_back_to_init(tmp_path, _sample_task, _a
 
         ensure_claude_md(
             _sample_task, wt, repo_cfg, cfg, phase="plan",
-            progress_callback=lambda msg: None,
+            progress_callback=lambda msg: progress_calls.append(msg),
         )
 
     # Fallback init session ran and committed the generated CLAUDE.md
     assert mock_runner.run.called
     assert mock_commit.called
+    assert progress_calls == [
+        "No CLAUDE.md and the AGENTS.md import stub failed — generating project guide..."
+    ]
 
 
 def test_claude_md_session_raises_is_non_fatal(tmp_path, _sample_task, _allow_init_session):
