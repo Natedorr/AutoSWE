@@ -42,6 +42,32 @@ if TYPE_CHECKING:
 dbg = get_debug_logger()
 
 
+def _agents_md_tracked(wt: Path) -> bool:
+    """Return True if ``AGENTS.md`` is tracked in the worktree's git index.
+
+    The init flow only treats a *committed* AGENTS.md as an existing project
+    guide — an untracked one (e.g. written mid-run by an agent deviating from
+    the init prompt's "write CLAUDE.md") must not suppress init or seed the
+    ``@AGENTS.md`` stub. ``git ls-files --error-unmatch`` returns rc 0 when
+    tracked and rc 1 when the path is not in the index; any other result
+    (malformed worktree, missing git, ...) falls back to plain file existence
+    so a git hiccup can never wedge the init flow (non-fatal by design).
+    """
+    from autoswe.vcs.worktree import _run
+
+    try:
+        res = _run(
+            ["git", "-C", str(wt), "ls-files", "--error-unmatch", "AGENTS.md"],
+            check=False,
+        )
+    except Exception:
+        # git missing / unrunnable — fall back to plain file existence
+        return True
+    if res.returncode in (0, 1):
+        return res.returncode == 0
+    return True  # caller guarantees the file exists; git status unknown
+
+
 def ensure_claude_md(
     task: dict,
     wt: Path,
@@ -57,10 +83,11 @@ def ensure_claude_md(
     The import-stub path writes a one-line CLAUDE.md that is deliberately
     NOT committed — it is kept out of the branch by the repo exclude.
 
-    A committed ``AGENTS.md`` counts as an existing project guide: for
-    non-``claude_code`` backends the init session is skipped entirely, and
-    for ``claude_code`` the one-line ``@AGENTS.md`` import stub is written
-    instead of a from-scratch generation.
+    Only a *tracked* (committed) ``AGENTS.md`` counts as an existing project
+    guide: for non-``claude_code`` backends the init session is skipped
+    entirely, and for ``claude_code`` the one-line ``@AGENTS.md`` import stub
+    is written instead of a from-scratch generation. An untracked AGENTS.md
+    falls through to the normal init path.
 
     Args:
         task: Handler task dict (queue entry shape).
@@ -99,7 +126,9 @@ def ensure_claude_md(
 
     stub_failed = False
     agents_md = wt / "AGENTS.md"
-    if agents_md.exists():
+    # Only a committed (git-tracked) AGENTS.md counts as an existing project
+    # guide — an untracked one must not suppress init or seed the stub.
+    if agents_md.exists() and _agents_md_tracked(wt):
         # The repo already ships a project guide. pi reads AGENTS.md natively
         # (AGENTS.override.md > AGENTS.md > CLAUDE.md); Codex gets no project
         # guide from autoSWE either — its rules are intentionally disabled via

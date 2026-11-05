@@ -156,6 +156,91 @@ def test_agents_md_only_non_claude_backend_no_init(tmp_path, _sample_task, _allo
     assert progress_calls == []
 
 
+def test_agents_md_untracked_runs_init_session(tmp_path, _sample_task, _allow_init_session):
+    """AGENTS.md present but UNTRACKED in a real git worktree → init session runs.
+
+    No native-skip and no claude_code stub: only a committed AGENTS.md counts
+    as an existing project guide.
+    """
+    import subprocess
+
+    from autoswe.harness.backends.base import RunResult
+    from autoswe.harness.initializer import ensure_claude_md
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "-C", str(wt), "init", "-b", "main"], check=True, capture_output=True)
+    (wt / "AGENTS.md").write_text("untracked agent-generated guide")
+
+    cfg = _make_cfg()
+    repo_cfg = {"provider": "github"}
+
+    fake_result = RunResult(
+        text="Wrote CLAUDE.md",
+        session_id="init-session",
+        subtype="success",
+    )
+
+    def _fake_run_and_write(*args, **kwargs):
+        (wt / "CLAUDE.md").write_text("generated content")
+        return fake_result
+
+    with patch("autoswe.harness.initializer.runner") as mock_runner, \
+         patch("autoswe.harness.initializer.resolve_harness") as mock_resolve, \
+         patch("autoswe.harness.initializer.commit_and_push") as mock_commit:
+        mock_resolve.return_value = {"backend": "pi", "model": "test-model"}
+        mock_runner.run.side_effect = _fake_run_and_write
+
+        ensure_claude_md(
+            _sample_task, wt, repo_cfg, cfg, phase="plan",
+            progress_callback=lambda msg: None,
+        )
+
+    # Init session ran and committed the generated (non-stub) CLAUDE.md
+    assert mock_runner.run.called
+    assert mock_commit.called
+    assert (wt / "CLAUDE.md").read_text() == "generated content"
+
+
+def test_agents_md_tracked_in_real_git_skips_init(tmp_path, _sample_task, _allow_init_session):
+    """AGENTS.md committed in a real git worktree → init session skipped (rc==0 path)."""
+    import subprocess
+
+    from autoswe.harness.initializer import ensure_claude_md
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    subprocess.run(["git", "-C", str(wt), "init", "-b", "main"], check=True, capture_output=True)
+    (wt / "AGENTS.md").write_text("committed project guide")
+    subprocess.run(
+        ["git", "-C", str(wt), "-c", "user.name=t", "-c", "user.email=t@t", "add", "AGENTS.md"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(wt), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "Add AGENTS.md"],
+        check=True, capture_output=True,
+    )
+
+    cfg = _make_cfg()
+    repo_cfg = {"provider": "github"}
+
+    with patch("autoswe.harness.initializer.runner") as mock_runner, \
+         patch("autoswe.harness.initializer.resolve_harness") as mock_resolve, \
+         patch("autoswe.harness.initializer.commit_and_push") as mock_commit:
+        mock_resolve.return_value = {"backend": "pi", "model": "test-model"}
+
+        ensure_claude_md(
+            _sample_task, wt, repo_cfg, cfg, phase="plan",
+            progress_callback=lambda msg: None,
+        )
+
+    assert mock_resolve.called
+    assert mock_resolve.call_count == 1
+    assert not mock_runner.run.called
+    assert not mock_commit.called
+    assert not (wt / "CLAUDE.md").exists()
+
+
 def test_agents_md_only_claude_code_writes_import_stub(tmp_path, _sample_task, _allow_init_session):
     """AGENTS.md present + claude_code backend → one-line @AGENTS.md import stub, no init session."""
     from autoswe.harness.initializer import ensure_claude_md
