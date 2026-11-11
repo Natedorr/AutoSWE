@@ -270,12 +270,12 @@ def test_open_pr_uses_correct_branch_and_base(mock_gh_post_comment):
     assert call_kwargs[1]["base"] == "develop"
 
 
-def test_open_pr_uses_base_branch_not_plan_branch(mock_gh_post_comment):
-    """PR target is the configured base_branch even when plan_branch is set.
+def test_open_pr_uses_plan_branch_as_target(mock_gh_post_comment):
+    """PR target is the reference branch the work was cut from (issue #308).
 
-    plan_branch is the branch the work was forked from (/plan --branch);
-    the PR must still land in the repo's configured base, so /plan --branch
-    develop never routes a PR into develop (issue #196).
+    plan_branch is the branch pinned by /plan --branch; the PR must merge
+    back into that reference branch — so /plan --branch develop routes the
+    PR into develop, not the configured base (supersedes issue #196).
     """
     task = make_task()
     task["base_branch"] = "main"
@@ -291,7 +291,7 @@ def test_open_pr_uses_base_branch_not_plan_branch(mock_gh_post_comment):
         open_pr(task, {"GITHUB_TOKEN": "tok"})
 
     call_kwargs = mock_vcs.open_pull_request.call_args
-    assert call_kwargs[1]["base"] == "main"
+    assert call_kwargs[1]["base"] == "develop"
     # The head is still the autoswe work branch (cut from plan_branch).
     assert call_kwargs[1]["branch"] == "autoswe/issue-1"
 
@@ -351,6 +351,28 @@ def test_open_pr_base_missing_falls_back_to_repo_default(mock_gh_post_comment, m
     # The fallback is announced on the issue, not just in the log.
     comment_body = mock_get_tracker.return_value.post_comment.call_args[0][1]
     assert "base fell back to repo default master" in comment_body
+
+
+def test_open_pr_plan_branch_missing_falls_back_to_repo_default(mock_gh_post_comment, monkeypatch, tmp_path):
+    """Pinned plan_branch missing on origin → #260 guard still protects the
+    PR target (falls back to the repo's actual default, issue #308)."""
+    task = make_task()
+    task["base_branch"] = "main"
+    task["plan_branch"] = "develop"  # does not exist on origin
+    _stub_wt_guard(monkeypatch, tmp_path, wt_exists=True,
+                   branch_exists=False, default="master")
+
+    with patch("autoswe.vcs.ship.get_vcs") as mock_get_vcs, \
+         patch("autoswe.vcs.ship.get_tracker") as mock_get_tracker:
+        mock_vcs = _mock_vcs()
+        mock_get_vcs.return_value = mock_vcs
+        mock_get_tracker.return_value = _mock_tracker()
+
+        from autoswe.vcs.ship import open_pr
+        result = open_pr(task, {"GITHUB_TOKEN": "tok"})
+
+    assert result.startswith("DONE: PR")
+    assert mock_vcs.open_pull_request.call_args[1]["base"] == "master"
 
 
 def test_open_pr_base_exists_keeps_configured_base(mock_gh_post_comment, monkeypatch, tmp_path):
