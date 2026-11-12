@@ -23,7 +23,7 @@ Start at [`../README.md`](../README.md) for how these are driven.
 | [E2E-12](E2E-12.md) | failure, `/retry`, and the attempt guard | scoped, run alone |
 | [E2E-13](E2E-13.md) | `/skip`, and inert plain text | |
 | [E2E-14](E2E-14.md) | `/abort` and restart | |
-| [E2E-15](E2E-15.md) | `--branch`, and the PR base | |
+| [E2E-15](E2E-15.md) | `--branch`, and the PR targeting the pinned reference branch | |
 | [E2E-16](E2E-16.md) | `/pr` blocked by pending CI | timing-sensitive |
 | [E2E-17](E2E-17.md) | command parsing and idempotence | |
 | [E2E-17b](E2E-17b.md) | the author allowlist | scoped, run alone |

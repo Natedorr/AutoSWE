@@ -949,6 +949,54 @@ TRANSITIONS: list[dict[str, Any]] = [
             "comment_contains": ["Completed with command", "/pr"],
         },
     },
+    # ---- PR targets the pinned reference branch (issue #308) ----
+    # /plan --branch develop pins plan_branch; the work lives on
+    # autoswe/issue-42 cut from develop, so /pr must target develop, not the
+    # configured base (supersedes the issue #196 rule). The PR-base value
+    # itself is asserted in test_ship.py / test_emit.py; this row covers the
+    # full dispatch flow with a pinned plan_branch on both providers.
+    {
+        "name": "pr_targets_pinned_plan_branch",
+        "description": "Fixed task with plan_branch pinned; /pr → PR opened "
+                       "targeting the reference branch, status shipped (#308)",
+        "start": {
+            "issue": {"body": "Fix.\n\n/fix"},
+            "labels": ["autoswe:fixed"],
+            "comments": [
+                {
+                    "body": "Completed with command `/fix` — DONE_SUMMARY\n\n<!-- autoswe-bot -->",
+                    "created_at": "2026-01-01T01:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+                {
+                    "body": "/pr",
+                    "created_at": "2026-01-01T02:00:00Z",
+                    "author_association": "OWNER",
+                    "user": {"login": "owner", "id": 1, "type": "User"},
+                },
+            ],
+            "queue_task": {
+                "id": "gh:owner_repo_42",
+                "owner": "owner", "repo": "repo", "issue_number": 42,
+                "title": "Test issue", "body": "Fix.",
+                "autoswe_status": "fixed",
+                "plan_branch": "develop",
+                "base_branch": "main",
+                "attempt_count": 1,
+                "first_dispatched_at": None,
+                "session_id": "s-fix-prev",
+                "pr_number": None,
+                "provider": "github",
+            },
+        },
+        "expect": {
+            "label_after": "autoswe:shipped",
+            "autoswe_status": "shipped",
+            "pr_number": 1,
+            "comment_contains": ["Completed with command", "/pr"],
+        },
+    },
     # ---- PR ship clears a lingering rereview_after_fix (issue #195) ----
     # A /fix dispatched from a review verdict set rereview_after_fix and left
     # the task at "fixed". The user posted /pr before the auto re-review fired,

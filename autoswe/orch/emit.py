@@ -575,7 +575,11 @@ def emit(
         # posted /pr in the meantime. pr_head/pr_base are recomputed exactly
         # as the original auto-create-PR-after-fix path did.
         pr_head = _resolve_branch(task.owner, task.repo, task.issue_number, None, task.provider)
-        pr_base = task.base_branch
+        # PR target = the reference branch the work was cut from: plan_branch
+        # when /plan --branch <b> pinned it, else the configured base_branch
+        # (issue #308, supersedes #196). Same rule as the original
+        # auto-create-PR-after-fix path below.
+        pr_base = task.plan_branch or task.base_branch
         body_parts = [f"Fixes #{task.issue_number}"]
         issue_body = task.body or ""
         fix_summary = task.fix_summary or ""
@@ -878,9 +882,11 @@ def emit(
         # replayed /pr (effective_kind ship_pr) must NOT also fire an auto-PR.
         if effective_kind in ("fix", "retry") and cfg.get("AUTO_CREATE_PR") and task.pr_number is None and not rereview_pending:
             pr_head = _resolve_branch(task.owner, task.repo, task.issue_number, None, task.provider)
-            # PR target = the repo's configured base_branch, never plan_branch.
-            # plan_branch is the branch the work was forked from (issue #196).
-            pr_base = task.base_branch
+            # PR target = the reference branch the work was cut from: plan_branch
+            # when /plan --branch <b> pinned it, else the configured base_branch
+            # (issue #308, supersedes #196 — the PR merges back into the
+            # reference branch, keeping the branching model clean).
+            pr_base = task.plan_branch or task.base_branch
             # Build PR body from task data for context
             body_parts = [f"Fixes #{task.issue_number}"]
             issue_body = task.body or ""

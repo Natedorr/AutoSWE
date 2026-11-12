@@ -89,8 +89,8 @@ Evidence:
    derive the branch from the same `vcs.branch_name(issue_num)` — the
    "branch convention owned by the provider (single source: F-05)" invariant
    holds, and the `ship.open_pr`/`preflight_pr` agreement is explicitly
-   documented (ship.py docstring, PR target = `base_branch`, never
-   `plan_branch`, issue #196).
+   documented (ship.py docstring: the PR target is the reference branch —
+   `plan_branch` when pinned, else `base_branch`, issue #308).
 3. **Normalized boundary types.** `NormalizedIssue`/`NormalizedComment` with
    `raw_author_login` + `author_login` split, `normalize_comment_body` hook for
    provider-specific body handling (GitHub: identity; Azure: HTML decode),

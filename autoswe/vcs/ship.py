@@ -100,22 +100,22 @@ def open_pr(
     On success, caches ``pr_number``/``pr_url`` on the ``task`` dict so the
     caller can persist them on the queue entry (issue #193).
 
-    *target_branch* is the /catchup downstream: the PR lands there instead of
-    the configured base. A catch-up skips the preflight gate (its branch sync
+    *target_branch* is the /catchup downstream: the PR lands there instead
+    of the task's reference branch (plan_branch, else base_branch). A catch-up skips the preflight gate (its branch sync
     *is* the work, and a red CI on the downstream must not block it) and the
     #260 base fallback, and uses a catch-up title/body with no closing keyword.
     """
     owner, repo, issue_num = task["owner"], task["repo"], task["issue_number"]
     token = task["_token"]
-    # The PR *target* is the repo's configured base_branch — never plan_branch.
-    # plan_branch is the branch this task's work was forked from (a /plan
-    # --branch <b> pins it); the fix lives on the autoswe/issue-N work branch
-    # cut from plan_branch and must land in the configured default, or
-    # /plan --branch develop would route the PR into develop instead of main
-    # (issue #196). The preflight sync in pr_gate.preflight_pr still merges
-    # origin/plan_branch (the fork point) — that is a different concern from
-    # where the PR lands.
-    base_branch = task.get("base_branch", "main")
+    # The PR *target* is the reference branch this task's work was cut from:
+    # plan_branch when a /plan --branch <b> pinned it, else the repo's
+    # configured base_branch. The workstream is open issue → pick a reference
+    # branch → work on the autoswe/issue-N branch cut from it → merge back
+    # into that same reference branch (issue #308, which supersedes the
+    # issue #196 rule that always targeted base_branch). The preflight sync
+    # in pr_gate.preflight_pr merges origin/plan_branch, so the gate's CI
+    # state and the PR target now agree on the same branch.
+    base_branch = task.get("plan_branch") or task.get("base_branch", "main")
     if target_branch:
         base_branch = target_branch
     title = task.get("title", f"Fix issue #{issue_num}")

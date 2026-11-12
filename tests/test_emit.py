@@ -1959,11 +1959,10 @@ def test_retry_fix_persists_fix_summary():
 
 
 def test_auto_create_pr_uses_plan_branch():
-    """Auto-created PRs must target the repo's base_branch (issue #196).
-
-    plan_branch is where the work was forked from; it must NOT leak into the
-    PR target. A task planned on 'codex' still ships its PR into base_branch
-    ('main') so the auto-created PR lands where the repo policy says."""
+    """Auto-created PRs must target the reference branch the work was cut
+    from (issue #308, supersedes #196). plan_branch is pinned by
+    /plan --branch; the auto-created PR merges back into that reference
+    branch. A task planned on 'codex' ships its PR into 'codex'."""
     from autoswe.orch.types import ApiState, TaskState, World
     from autoswe.providers.base import NormalizedIssue
 
@@ -1996,8 +1995,9 @@ def test_auto_create_pr_uses_plan_branch():
     pr_effects = [e for e in effects if e.kind == "create_pr"]
     assert len(pr_effects) == 1, "AUTO_CREATE_PR must emit create_pr effect"
     pr_effect = pr_effects[0]
-    assert pr_effect.pr_base == "main", (
-        "auto-create PR must target base_branch (main), not plan_branch (codex)"
+    assert pr_effect.pr_base == "codex", (
+        "auto-create PR must target plan_branch (codex) when pinned, "
+        "falling back to base_branch (main) only when no plan_branch"
     )
     assert pr_effect.pr_head == "autoswe/issue-43", (
         "auto-create PR head should be the autoswe/issue-N branch"
@@ -2142,10 +2142,50 @@ def test_plan_branch_persisted_in_queue_patch():
     )
 
 
-def test_plan_branch_not_used_for_auto_create_pr_base():
+def test_auto_create_pr_falls_back_to_base_branch_without_plan_branch():
+    """No pinned plan_branch → auto-create PR targets the configured
+    base_branch (issue #308 fallback half of the rule)."""
+    from autoswe.orch.types import ApiState, TaskState, World
+    from autoswe.providers.base import NormalizedIssue
+
+    issue = NormalizedIssue(
+        number=44, title="Bug", body="Issue body",
+        owner="o", repo="r", state="open",
+    )
+    api = ApiState(issue=issue, comments=())
+    task = TaskState(
+        slug="gh:o_r_44", owner="o", repo="r", issue_number=44,
+        title="Bug", body="Issue body",
+        status="fixing", plan_branch=None, base_branch="main",
+        attempt_count=1, first_dispatched_at=None,
+        last_dispatched_command="/fix", last_dispatched_command_id=1,
+        last_consumed_reply_id=1, session_id="s-fix",
+        pr_number=None, guard_blocked=False, gh_closed=False,
+        pending_command=None, pending_guidance=None, pending_user_reply=None,
+    )
+    cfg = _default_cfg()
+    cfg["AUTO_CREATE_PR"] = True
+    world = World(api=api, task=task, cfg=cfg, repo_cfg={"pat": "tok"})
+
+    action = Action(kind="fix", slug="gh:o_r_44", triggering_comment_id=2)
+    result = DispatchResult(
+        done_content="DONE_SUMMARY\tFixed the bug\tabc123",
+        cost_usd=1.0, duration_seconds=60, session_id="s-fix",
+    )
+
+    effects = emit(action, result, world)
+    pr_effects = [e for e in effects if e.kind == "create_pr"]
+    assert len(pr_effects) == 1, f"Expected create_pr effect, got: {[e.kind for e in effects]}"
+    assert pr_effects[0].pr_base == "main", (
+        f"create_pr must fall back to base_branch when no plan_branch; "
+        f"got pr_base={pr_effects[0].pr_base!r}"
+    )
+
+
+def test_auto_create_pr_uses_plan_branch_or_base_branch_fallback():
     """When AUTO_CREATE_PR is enabled and fix completes with plan_branch set,
-    the create_pr effect must target base_branch — plan_branch is the fork
-    point, not the PR target (issue #196)."""
+    the create_pr effect must target plan_branch — the PR merges back into
+    the reference branch the work was cut from (issue #308, supersedes #196)."""
     from autoswe.orch.types import ApiState, TaskState, World
     from autoswe.providers.base import NormalizedIssue
 
@@ -2182,8 +2222,9 @@ def test_plan_branch_not_used_for_auto_create_pr_base():
     pr_effects = [e for e in effects if e.kind == "create_pr"]
     assert len(pr_effects) == 1, f"Expected create_pr effect, got: {[e.kind for e in effects]}"
     pr_effect = pr_effects[0]
-    assert pr_effect.pr_base == "main", (
-        f"create_pr must use base_branch (main) as pr_base, not plan_branch. "
+    assert pr_effect.pr_base == "develop", (
+        f"create_pr must use plan_branch (develop) as pr_base when pinned, "
+        f"falling back to base_branch only when no plan_branch. "
         f"Got pr_base={pr_effect.pr_base!r}"
     )
 
